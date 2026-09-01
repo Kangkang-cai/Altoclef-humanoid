@@ -393,9 +393,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 for (int dx = -CAVE_SCAN_RADIUS; dx <= CAVE_SCAN_RADIUS; dx++) {
                     BlockPos check = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
                     net.minecraft.block.Block b = mod.getWorld().getBlockState(check).getBlock();
+                    // (2026-09-01 地表误判矿洞修复, 用户"陆地表面怎么会探索发现的矿洞")
                     // 天然洞空气: cave_air (普通洞穴) 或 普通 air 且身处开阔大洞(繁茂洞穴/大岩洞)。
+                    // 原判定 (b==AIR && inOpenCave) 把地表开阔地误判成洞: 地表连通空气
+                    // 无限大 → inOpenCave 恒真 → 地表空气全算"洞空气" → 站在地表挖矿
+                    // 第一步就触发矿洞探索, 还被 BiasedExplore 拉到海边 (y=63, 用户实测)。
+                    // 洞的本质是【被岩壁包围的有顶空腔】: 普通 air 分支额外要求上方有
+                    // 实心覆盖 — 地表开阔地露天(上方是天空)不算洞; 繁茂洞穴空气上方是
+                    // 岩石顶仍识别。树冠(树叶/原木)不算岩顶, 避免砍树场景误判。
                     boolean isCaveish = (b == Blocks.CAVE_AIR)
-                            || (b == Blocks.AIR && inOpenCave);
+                            || (b == Blocks.AIR && inOpenCave && hasOverheadCover(mod, check));
                     if (isCaveish) {
                         // 只有该洞空气与玩家当前开放空间连通(已挖穿/从洞口可达)才算"来了矿洞"。
                         if (!reachableAir.contains(check)) continue;
@@ -425,6 +432,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             caveAirCount, airCount, best != null));
         }
         return Optional.ofNullable(best);
+    }
+
+    // (2026-09-01 地表误判矿洞修复) 判定一块空气上方是否有"岩顶"覆盖。
+    // 向上扫 CAVE_COVER_SCAN_UP 格: 遇到实心方块 → 有顶(true); 全是空气/
+    // 流体/树冠(树叶/原木) → 露天(false)。树冠不算岩顶, 避免砍树区域误判。
+    // 未加载列保守视为有顶(不冒险把已见区域当洞外的天)。繁茂洞穴顶通常在
+    // 玩家上方几格到几十格内, 24 格上限足够覆盖, 也避免地表向上扫 60 格。
+    private static final int CAVE_COVER_SCAN_UP = 24;
+
+    private boolean hasOverheadCover(AltoClef mod, BlockPos pos) {
+        BlockPos up = pos;
+        for (int i = 0; i < CAVE_COVER_SCAN_UP; i++) {
+            up = up.up();
+            if (!mod.getChunkTracker().isChunkLoaded(up)) return true;
+            net.minecraft.block.Block b = mod.getWorld().getBlockState(up).getBlock();
+            if (b == Blocks.AIR || b == Blocks.CAVE_AIR) continue;
+            if (b instanceof net.minecraft.block.LeavesBlock
+                    || b instanceof net.minecraft.block.PillarBlock
+                    || b instanceof net.minecraft.block.AzaleaBlock) continue; // 树冠/树干不算岩顶
+            if (!b.getDefaultState().getFluidState().isEmpty()) continue; // 流体不算
+            return true; // 实心覆盖
+        }
+        return false;
     }
 
     /**
