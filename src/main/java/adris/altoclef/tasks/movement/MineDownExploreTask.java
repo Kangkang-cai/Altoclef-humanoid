@@ -376,13 +376,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
         private Optional<BlockPos> findNearbyCave(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
-        // (2026-09-01 露天不检测洞, 用户"露天地面挖楼梯仍触发矿洞") 上一轮只给
-        // 候选空气块加"有顶覆盖"判定不够: 露天场景下玩家能看到天空, 但玩家周围
-        // ±8 格内的候选空气块(如正在挖的楼梯前端)上方 24 格可能被山坡/悬崖/
-        // 树冠上方的局部实心遮挡 → 误判"有顶" → 仍算洞空气触发探索。人类站在
-        // 露天开阔地不会"感知到矿洞" — 改为以玩家为闸门: 玩家头顶无实心覆盖
-        // (露天) → 整个洞检测关闭。真正的洞(普通洞穴/繁茂洞穴/挖穿进洞)玩家
-        // 头顶有岩顶 → 不露天 → 正常检测。树冠不算顶(树下仍算露天)。
+        // (2026-09-01 矿洞深度感知, 用户"刚挖进去头上有方块就又检测到外面是矿洞")
+        // 露天闸门不够: 玩家刚往下挖几格头顶就有方块(不露天), 但玩家仍在浅层,
+        // 旁边/上方就是地表空气 → 仍误判"发现矿洞"。人类刚挖进地下时知道自己还
+        // 在浅层, 不会"发现矿洞" — 洞检测必须要求玩家已挖到真正的地下矿洞层:
+        // 玩家 y 低于 CAVE_EXPLORE_MIN_DEPTH_Y 才允许检测。地表/浅层(y 高)即使
+        // 头顶有方块(挖开的楼梯)也不检测。
+        if (center.getY() > CAVE_EXPLORE_MIN_DEPTH_Y) {
+            return Optional.empty();
+        }
+        // (2026-09-01 露天不检测洞, 二次保险) 玩家头顶无实心覆盖(露天) → 关闭检测。
+        // 深度闸门放行后(已在地下)本判据几乎恒真, 但保留防"挖穿到地表天窗"等
+        // 罕见场景。树冠不算顶(树下仍算露天)。
         if (!hasOverheadCover(mod, center)) {
             return Optional.empty();
         }
@@ -443,6 +448,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
         return Optional.ofNullable(best);
     }
+
+    // (2026-09-01 矿洞深度感知) 只有玩家 y 低于此值(已挖到地下矿洞层)才允许
+    // 洞检测。地表/浅层(y 高)即使头顶有方块(挖开的楼梯)也不算"发现矿洞"。
+    // 海平面 63, 地表 70-80; 主流矿洞/洞穴系统在 y<45 以下较丰富, 取 45。
+    private static final int CAVE_EXPLORE_MIN_DEPTH_Y = 45;
 
     // (2026-09-01 地表误判矿洞修复) 判定一块空气上方是否有"岩顶"覆盖。
     // 向上扫 CAVE_COVER_SCAN_UP 格: 遇到实心方块 → 有顶(true); 全是空气/
