@@ -119,6 +119,38 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         return _collectingPickaxeForThisResource;
     }
 
+    // (2026-09-01 用户"肉已进包仍捡 + Wander for Infinity" 卡死修复)
+    // 父类 AbstractDoToClosestObjectTask 在【找不到匹配掉落物】(getClosestTo 返回空,
+    // 常见于掉落物已被拾取/despawn) 时会调用 getWanderTask() 兜底。默认是无穷
+    // TimeoutWanderTask(INFINITY) — isFinished 恒 false → 任务永不结束 → CollectFood
+    // 的 _currentResourceTask 粘住它 → 永久卡在 "Wander for Infinity" (肉已在包)。
+    // 改成有限的 20 格游荡: 游荡完 isFinished=true → 任务自然结束 → 父任务放手。
+    // 必须返回【持久复用】的 _wanderTask 字段, 不能每次 new —— 否则 onTick 每次
+    // getWanderTask 都新建一个, _origin 在 onStart(每次注册时) 重置, 永远游不够 20 格。
+    @Override
+    protected Task getWanderTask(AltoClef mod) {
+        return _wanderTask;
+    }
+
+    // (2026-09-01 根因第二层: "肉已进包仍卡拾取/无限游荡") 任务系统的子任务
+    // 不会被 isFinished 自动终止 (Task.tickInternal 无 isFinished 检查,
+    // 终止权在父任务)。而本任务从未覆写 isFinished → 基类默认恒 false →
+    // 粘性持有者 (CollectFoodTask._foodDropPickupTask / CollectWoolTask /
+    // CollectCropTask._collectSeedTask / ResourceTask L170) 判
+    // "isActive && !isFinished" 恒真, 永不放手 → 游荡子任务即使走完 20 格
+    // 也无人停止, bot 无限游荡 (17:05:03-17:05:28 日志 25 秒零任务切换实锤)。
+    // 语义: 正在追的掉落物仍有效, 或附近还能找到匹配掉落物 → 未完成;
+    // 没有任何可追目标(已被拾取/despawn/全部拉黑) → 完成, 持有者放手。
+    // 注: _currentDrop 优先判定 — tracker 感知记忆(20s)过期后 getClosestTo
+    // 会漏掉远处仍在追的实体, 不能因此误判完成。
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        if (_currentDrop != null && isValid(mod, _currentDrop)) {
+            return false;
+        }
+        return getClosestTo(mod, getOriginPos(mod)).isEmpty();
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
 
