@@ -60,7 +60,9 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         // Crafting book REQUIRES that all materials be in the inventory. Materials CANNOT be in the cursor
         if (Arrays.stream(_target.getRecipe().getSlots()).anyMatch(target -> target.matches(cursor.getItem()))) {
             setDebugState("CURSOR HAS MATERIAL! Moving out.");
-            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false).or(() -> StorageHelper.getGarbageSlot(mod));
+            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`: 背包满时
+            // 点垃圾槽只交换不扔 → 走下方"放进合成格"真正腾光标。
+            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
             if (toMoveTo.isPresent()) {
                 return new ClickSlotTask(toMoveTo.get());
             } else {

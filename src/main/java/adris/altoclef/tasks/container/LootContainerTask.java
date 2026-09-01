@@ -89,7 +89,13 @@ public class LootContainerTask extends Task {
         if (!cursor.isEmpty()) {
             // 光标已拿到物品 → 放回背包, 并清空"待确认拿起"(拿起已完成)。
             _pendingPickup = null;
-            Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false).or(() -> StorageHelper.getGarbageSlot(mod));
+            // (2026-09-01 用户"背包满开箱卡住, 一直和一个物品交换") 旧逻辑
+            // `.or(getGarbageSlot)` 在背包无空位时回退到【点垃圾槽】— 点击只做
+            // 交换(光标物品↔垃圾槽物品), 垃圾槽被腾空后光标变成垃圾, 下一 tick
+            // 又找不到可放处 → 再点同一垃圾槽换回 → 无限交换, 从不真正扔掉
+            // (日志 TaskPingPong 实锤)。删掉该回退: 无空位一律走
+            // EnsureFreeInventorySlotTask, 它会把垃圾/大堆建材真正扔出腾位。
+            Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
             if (toFit.isPresent()) {
                 setDebugState("Putting cursor in inventory");
                 return new ClickSlotTask(toFit.get());

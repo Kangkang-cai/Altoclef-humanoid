@@ -186,7 +186,9 @@ public abstract class DoStuffInContainerTask extends Task {
 
         if (!StorageHelper.getItemStackInCursorSlot().isEmpty()) {
             setDebugState("Clearing cursor slot (otherwise this causes BIG problems)");
-            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(StorageHelper.getItemStackInCursorSlot(), false).or(() -> StorageHelper.getGarbageSlot(mod));
+            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)` —
+            // 背包满时点垃圾槽只交换不扔, 光标杂物永远腾不掉 → 走 EnsureFree 真正扔出。
+            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(StorageHelper.getItemStackInCursorSlot(), false);
             if (toMoveTo.isEmpty()) {
                 return new EnsureFreeInventorySlotTask();
             } else {

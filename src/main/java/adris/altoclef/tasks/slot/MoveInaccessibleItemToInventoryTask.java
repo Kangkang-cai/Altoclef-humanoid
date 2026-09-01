@@ -48,7 +48,9 @@ public class MoveInaccessibleItemToInventoryTask extends Task {
 
             Slot toMove = slotToMove.get();
             ItemStack stack = StorageHelper.getItemStackInSlot(toMove);
-            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(stack, false).or(() -> StorageHelper.getGarbageSlot(mod));
+            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`: 背包满时
+            // 点垃圾槽只交换不扔 → 走下方 EnsureFree 真正腾位。
+            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(stack, false);
             if (toMoveTo.isPresent()) {
                 setDebugState("Moving slot " + toMove + " to inventory");
                 // Pick up & move

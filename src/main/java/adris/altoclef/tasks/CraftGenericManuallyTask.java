@@ -106,11 +106,13 @@ public class CraftGenericManuallyTask extends Task implements ITaskUsesCraftingG
         // Ensure our cursor is empty/can receive our item
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         if (!ItemHelper.canStackTogether(StorageHelper.getItemStackInSlot(outputSlot), cursor)) {
-            Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false).or(() -> StorageHelper.getGarbageSlot(mod));
+            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`: 背包满时
+            // 点垃圾槽只交换不扔 → 直接扔光标杂物腾光标。
+            Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
             if (toFit.isPresent()) {
                 return new ClickSlotTask(toFit.get());
             } else {
-                // Eh screw it
+                // Eh screw it — 背包满放不下 → 扔光标杂物
                 return new ThrowCursorTask();
             }
         }

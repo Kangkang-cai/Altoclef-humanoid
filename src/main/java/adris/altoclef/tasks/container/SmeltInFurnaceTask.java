@@ -334,11 +334,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 // Ensure our cursor is empty/can receive our item
                 ItemStack outCursor = StorageHelper.getItemStackInCursorSlot();
                 if (!ItemHelper.canStackTogether(output, outCursor)) {
-                    Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(outCursor, false).or(() -> StorageHelper.getGarbageSlot(mod));
+                    // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`
+                    // 回退 — 背包满时点垃圾槽只交换不扔, 光标垃圾永远腾不掉, 收输出
+                    // 与点垃圾槽无限互换。无空位时直接扔光标(非材料/燃料的杂物), 腾出
+                    // 光标收输出。
+                    Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(outCursor, false);
                     if (toFit.isPresent()) {
                         return new ClickSlotTask(toFit.get());
                     } else {
-                        // Eh screw it
+                        // Eh screw it — 背包满放不下 → 扔光标杂物腾光标
                         return new ThrowCursorTask();
                     }
                 }
