@@ -135,6 +135,45 @@ public boolean isFinished(AltoClef mod) {
 
 - 预期表现：拾取任务在目标消失后 1 tick 内被父任务释放（任务日志出现 pickup STOP + 后续任务 SUB），不再出现"拾取任务 + 游荡"长时间静默；`Collect 120 food` 正常推进
 
+- **用户实测确认**：修复生效，拾取卡死问题解决
+
+***
+
+## 三B、防透视回归修复：主线挖矿恢复 FOV+LOS 双门控
+
+### 3B.1 现象（用户实测）
+
+bot 挖铁矿时**透视**——锁定并直挖被岩石完全包裹、根本看不见的矿。
+
+### 3B.2 根因：上一轮性能修复误关了防透视闸门
+
+BlockTracker 缓存本身是**全 chunk 扫描数据（天然透视）**，防透视完全靠选择时的 FOV+LOS 门控。上一轮"500ms 卡顿"性能修复在 [MineAndCollectTask.java](file:///d:/Project/life01/altoclef/src/main/java/adris/altoclef/tasks/resources/MineAndCollectTask.java) 两个调用点把 LOS 关掉了：
+
+1. **主线远场** `pickNearestCacheOre(..., requireLos=false)`：被岩石完全包住的矿也通过 → 直挖（透视实锤点）
+2. **worldOre 兜底扫描**：匹配块跳过 LOS → 隧道正前方 8 格内埋在墙里的矿被锁定
+
+### 3B.3 修复：恢复双门控 + 三重性能护栏（防卡顿回归）
+
+主线远场分支（useMemory=false）恢复 **FOV + LOS（含 isBuriedOre 包裹判定）**，同时不再靠"关 LOS"省性能，改用护栏：
+
+1. **廉价过滤先行**：距离/FOV/canBreak/黑名单/液体/500ms 重校验先筛，只对幸存候选跑 LOS
+2. **按距离升序 + 失败缓存**：LOS 逐个按近→远执行，失败结果缓存 500ms 不重射，命中首个成功即返回（最近可感知矿）
+3. **每次调用射线上限 16 条**：超限本 tick 返回空，下一 tick 从失败缓存断点续查
+
+worldOre 兜底同样补上 `isBlockPerceivable`（LOS 只对匹配块执行，代价可忽略）。
+
+**为什么不会卡住主线**：被包裹矿不再被锁定 → 无可见矿时走 MineDownExplore 挖隧道 → 挖开岩层矿自然暴露 → 3x3x3 近场链挖只需一处暴露就能吃掉整条矿脉。这正是"人类挖矿"的既定设计。
+
+同时删除无调用方的 5 参兼容重载与 `isMineablePerceivable`（唯一调用点被重构取代），近场记忆分支加距离前置过滤（纯性能，判定语义不变）。
+
+### 3B.4 验证结果
+
+- `BUILD SUCCESSFUL`（4s，--no-build-cache --rerun-tasks）
+
+- jar `altoclef-0.4.0.jar`（17:55:51，3.68MB）已覆盖游戏目录和暂存副本
+
+- 预期表现：bot 只锁定看得见（FOV 内且视线无遮挡、非完全包裹）的矿；看不见矿时挖隧道探索而非直挖；无 500ms 卡顿回归
+
 ***
 
 ## 四、附：本会话早前处理的其他修复（保留确认）

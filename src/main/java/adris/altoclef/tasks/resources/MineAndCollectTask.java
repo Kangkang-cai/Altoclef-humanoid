@@ -638,7 +638,12 @@ public class MineAndCollectTask extends ResourceTask {
             // 床直接锁到并走过去拆进背包(真正"持有床")。木头/工作台回归原 24+FOV 逻辑,
             // 不受此放宽影响 — 避免把"舍近求远"的锁远树连锁到砍木(用户拦截)。
             int cacheRange = bedTarget ? 96 : 24;
-            Optional<BlockPos> closestBlock = pickNearestCacheOre(mod, pos, cacheRange, requireFov, false, /*requireLos*/ false);
+            // (2026-09-01 防透视回归修复) 主线远场恢复 LOS 门控 (用户原则: 主线
+            // 发现矿需 FOV+LOS)。上一轮性能修复在这里传了 requireLos=false —
+            // BlockTracker 缓存是全 chunk 扫描数据(天然透视), LOS 一关, 被岩石
+            // 完全包住的矿也被锁定直挖 (用户实测挖铁矿透视)。性能由
+            // pickNearestCacheOre 内部三重护栏保障, 不再靠关 LOS。
+            Optional<BlockPos> closestBlock = pickNearestCacheOre(mod, pos, cacheRange, requireFov, false);
             if (closestBlock.isEmpty()) {
                 closestBlock = pickNearestWorldOre(mod, pos, bedTarget ? 48 : 24, requireFov);
             }
@@ -663,7 +668,7 @@ public class MineAndCollectTask extends ResourceTask {
             //    优先挖完本处(不捡掉落, 掉落留给挖完后统一捡);
             //   ② 短范围内矿挖完了 → 捡掉落物;
             //   ③ 掉落也捡完 → 才去下一处(更远)矿。
-            Optional<BlockPos> nearbyMine = pickNearestCacheOre(mod, pos, MINE_EVERYTHING_RANGE, false, true, /*requireLos*/ false);
+            Optional<BlockPos> nearbyMine = pickNearestCacheOre(mod, pos, MINE_EVERYTHING_RANGE, false, true);
             if (isCollectDropsImmediately()) {
                 // (2026-08-27 床边挖边捡, 用户) 上面"挖完本处再统一捡"的
                 // 优先级是给挖矿的 (矿脉落地物先放着, 挖完一块还有下一块)。
@@ -701,79 +706,84 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         /**
-         * (2026-08-28 统一感知判定) 一块目标矿是否可挖且可按需感知:
-         * 可选 LOS+防包裹 (requireLos, 世界盲扫兜底用, 不透视没看见的矿),
-         * 可选 FOV (普通发现必须面朝; 扫尾/近场放宽以便清眼前矿脉)。
-         * 主线挖矿 (缓存里的矿脉) 传 requireLos=false —— 矿脉埋在岩体里,
-         * bot 要靠 BlockTracker 缓存的矿脉坐标挖隧道过去, 不能要求 LOS
-         * 全部通过 (否则所有钻石都"不可感知", 主线挖不了矿, 会卡住待着)。
-         */
-        private boolean isMineablePerceivable(AltoClef mod, BlockPos p, boolean requireFov, boolean requireLos) {
-            if (_blacklist.contains(p)) return false;
-            if (requireLos && !VisibilityHelper.isBlockPerceivable(mod, p)) return false;
-            if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) return false;
-            if (!WorldHelper.canBreak(mod, p)) return false;
-            if (WorldHelper.isAdjacentToLiquid(mod, p)) return false;
-            if (mod.getChunkTracker().isChunkLoaded(p)) {
-                Block actual = mod.getWorld().getBlockState(p).getBlock();
-                for (Block target : _blocks) {
-                    if (actual == target) return true;
-                }
-                return false;
-            }
-            return true;
-        }
-
-        /**
          * (2026-08-28 统一选择器·缓存) 从 BlockTracker 缓存取 maxRange 内最近的可挖
-         * 感知矿。useMemory=true 时带"近矿记忆"(5s 内真正感知过, 中心点 LOS 抖动的
-         * 只露一面矿), 用于近场/眼前矿脉; useMemory=false 用于远处发现。
-         * 收敛取代旧 getNearestKnownOre / getNearestTracking / getNearestMineInRange。
-         */
-        /**
-         * (2026-08-28 统一选择器·缓存) 从 BlockTracker 缓存取 maxRange 内最近的可挖
-         * 感知矿。useMemory=true 时带"近矿记忆"(5s 内真正感知过, 中心点 LOS 抖动的
-         * 只露一面矿), 用于近场/眼前矿脉; useMemory=false 用于远处发现。
+         * 感知矿。收敛取代旧 getNearestKnownOre / getNearestTracking / getNearestMineInRange。
          *
-         * (2026-09-01 性能根因修复: 每 tick getClosestTo 500ms+)
-         * 之前每一次 getClosestTo 调 2 次 pickNearestCacheOre (远场 + 近场),
-         * useMemory=false 分支把 requireLos 硬编码为 true -> 每块缓存坐标都跑一条
-         * VisibilityHelper.isBlockPerceivable LOS 射线; 此外对所有已加载 chunk 的
-         * 坐标又无条件 getBlockState 二次校验 (BlockTracker 缓存本就以追踪到的块
-         * 为准, 二次校验纯属浪费)。两处叠加对大量级缓存坐标造成每 tick 数百 ms
-         * 卡顿, 3 秒节流只管 worldOre, cacheOre 完全没防护 (slowtick.log 实锤)。
+         * (2026-09-01 防透视回归修复 + 性能护栏) 用户实测挖铁矿透视: 上一轮性能修复
+         * 把主线远场 requireLos 传了 false — BlockTracker 缓存本身是全 chunk 扫描
+         * 数据 (天然透视), LOS 是唯一防透视闸门, 一关就被岩石完全包住的矿也会被
+         * 锁定直挖。恢复主线 FOV+LOS 双门控 (用户原则: 主线发现矿需 FOV 和 LOS),
+         * 同时用三重护栏防上一轮的 500ms/tick 卡顿回归:
+         *   ① 廉价过滤先行 (距离/FOV/canBreak/黑名单/液体/500ms 重校验), 只对幸存
+         *      候选跑 LOS, 且按距离升序 — 命中首个成功即返回 (最近可感知矿);
+         *   ② LOS 失败结果缓存 500ms (LOS_FAIL_CACHE_MS), 短期内不重射同一块;
+         *   ③ 每次调用 LOS 射线上限 MAX_LOS_RAYCASTS_PER_CALL 条, 超限本 tick
+         *      返回空, 失败缓存让下一 tick 从断点续查。
+         * 被岩石包裹的矿由 isBlockPerceivable 内部 isBuriedOre 拒绝 — 不再"直挖
+         * 看不见的矿", 而是走 MineDownExplore 挖隧道, 挖开岩层自然暴露后续挖
+         * (3x3x3 近场链挖只需一处暴露就能吃掉整条矿脉, 不会因 LOS 卡住主线)。
          *
-         * 修复:
-         *   (1) useMemory=false 分支按【传入 requireLos】决定是否跑 LOS, 不再硬
-         *       编码 true。主线远场发现 (L587 调用: useMemory=false, requireLos=false)
-         *       不跑 LOS — 远场矿是 BlockTracker 缓存记录, 需要挖隧道过去, LOS 全
-         *       部遮挡会让所有矿脉被判空 (原设计 L652-655 注释已明确 requireLos=false
-         *       才是正确语义)。
-         *   (2) 已加载 chunk 的 getBlockState 二次校验添加 500ms 节流: 缓存坐标在
-         *       500ms 窗口内信任 BlockTracker 结果, 不再重复读 world; 超过才执行一
-         *       次真实读, 以防方块被别的玩家/实体改掉。
+         * useMemory=true (近场 16 格扫尾): 带"近矿记忆"(5s 内真正感知过, 中心点
+         * LOS 抖动的只露一面矿), 感知逻辑与主线一致 (LOS 必过), 仅多 5s 记忆宽限。
          */
         private static final long CACHE_BLOCK_REVALIDATE_MS = 500;
         private long _lastCacheRevalidateMs = 0;
-        private Optional<BlockPos> pickNearestCacheOre(AltoClef mod, Vec3d fromPos, double maxRange, boolean requireFov, boolean useMemory, boolean requireLos) {
+        // (2026-09-01 LOS 护栏) 见上方法注释: 失败缓存 TTL / 每次射线上限 / 缓存体积上限。
+        private static final long LOS_FAIL_CACHE_MS = 500;
+        private static final int MAX_LOS_RAYCASTS_PER_CALL = 16;
+        private static final int LOS_FAIL_CACHE_MAX_SIZE = 256;
+        private final java.util.Map<BlockPos, Long> _losFailCache = new java.util.HashMap<>();
+
+        private Optional<BlockPos> pickNearestCacheOre(AltoClef mod, Vec3d fromPos, double maxRange, boolean requireFov, boolean useMemory) {
             List<BlockPos> known = mod.getBlockTracker().getKnownLocations(_blocks);
-            BlockPos best = null;
-            double bestDistSq = Double.POSITIVE_INFINITY;
+            if (known.isEmpty()) return Optional.empty();
             double maxSq = maxRange * maxRange;
             long nowTick = WorldHelper.getTicks();
             long nowMs = System.currentTimeMillis();
             boolean needRevalidate = (nowMs - _lastCacheRevalidateMs >= CACHE_BLOCK_REVALIDATE_MS);
             if (needRevalidate) _lastCacheRevalidateMs = nowMs;
-            for (BlockPos p : known) {
-                if (useMemory) {
+
+            // ---- 近场记忆分支: 感知(LOS) + 5s 记忆宽限, 判定语义与原实现一致 ----
+            if (useMemory) {
+                BlockPos best = null;
+                double bestDistSq = Double.POSITIVE_INFINITY;
+                for (BlockPos p : known) {
+                    // 范围外的块不可能被本次调用选中, 先过滤再跑 LOS 射线 (纯性能
+                    // 优化, 不改判定: 幸存块的全部检查与原实现相同)。
+                    if (p.getSquaredDistance(fromPos) >= maxSq) continue;
                     boolean perceivable = VisibilityHelper.isBlockPerceivable(mod, p);
                     if (perceivable) _recentlySeen.put(p, nowTick);
                     boolean remembered = !perceivable && _recentlySeen.containsKey(p)
                             && (nowTick - _recentlySeen.get(p)) < RECENTLY_SEEN_TICKS;
                     if (!perceivable && !remembered) continue;
-                } else if (!isMineablePerceivable(mod, p, requireFov, requireLos)) {
-                    continue;
+                    if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
+                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                    if (needRevalidate && mod.getChunkTracker().isChunkLoaded(p)) {
+                        Block actual = mod.getWorld().getBlockState(p).getBlock();
+                        boolean matches = false;
+                        for (Block target : _blocks) {
+                            if (actual == target) { matches = true; break; }
+                        }
+                        if (!matches) continue;
+                    }
+                    double dSq = p.getSquaredDistance(fromPos);
+                    if (dSq < bestDistSq) {
+                        bestDistSq = dSq;
+                        best = p;
+                    }
                 }
+                if (_recentlySeen.size() > RECENTLY_SEEN_MAX_SIZE) {
+                    _recentlySeen.entrySet().removeIf(e -> (nowTick - e.getValue()) >= RECENTLY_SEEN_TICKS);
+                }
+                return Optional.ofNullable(best);
+            }
+
+            // ---- 主线远场分支: FOV + LOS 双门控 (防透视), 三重性能护栏 ----
+            List<BlockPos> candidates = new ArrayList<>();
+            for (BlockPos p : known) {
+                if (_blacklist.contains(p)) continue;
+                if (p.getSquaredDistance(fromPos) >= maxSq) continue;
                 if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                 if (!WorldHelper.canBreak(mod, p)) continue;
                 if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
@@ -785,22 +795,25 @@ public class MineAndCollectTask extends ResourceTask {
                     }
                     if (!matches) continue;
                 }
-                double dSq = p.getSquaredDistance(fromPos);
-                if (dSq >= maxSq) continue;
-                if (dSq < bestDistSq) {
-                    bestDistSq = dSq;
-                    best = p;
+                candidates.add(p);
+            }
+            if (candidates.isEmpty()) return Optional.empty();
+            // 按距离升序逐个过 LOS (含 isBuriedOre 包裹判定), 首个成功即最近可感知矿。
+            candidates.sort(Comparator.comparingDouble(p -> p.getSquaredDistance(fromPos)));
+            int raycasts = 0;
+            for (BlockPos p : candidates) {
+                Long failMs = _losFailCache.get(p);
+                if (failMs != null && nowMs - failMs < LOS_FAIL_CACHE_MS) continue;
+                if (++raycasts > MAX_LOS_RAYCASTS_PER_CALL) break;
+                if (VisibilityHelper.isBlockPerceivable(mod, p)) {
+                    return Optional.of(p);
                 }
+                _losFailCache.put(p, nowMs);
             }
-            if (_recentlySeen.size() > RECENTLY_SEEN_MAX_SIZE) {
-                _recentlySeen.entrySet().removeIf(e -> (nowTick - e.getValue()) >= RECENTLY_SEEN_TICKS);
+            if (_losFailCache.size() > LOS_FAIL_CACHE_MAX_SIZE) {
+                _losFailCache.entrySet().removeIf(e -> nowMs - e.getValue() >= LOS_FAIL_CACHE_MS);
             }
-            return Optional.ofNullable(best);
-        }
-        // 兼容签名 (默认 useMemory=false 调用传 requireLos=false; useMemory=true 调
-        // 用内部自己管感知, 外层 requireLos=false 被 useMemory 分支短路)。
-        private Optional<BlockPos> pickNearestCacheOre(AltoClef mod, Vec3d fromPos, double maxRange, boolean requireFov, boolean useMemory) {
-            return pickNearestCacheOre(mod, fromPos, maxRange, requireFov, useMemory, /*requireLos*/ false);
+            return Optional.empty();
         }
         /**
          * (2026-08-28 统一选择器·世界兜底) 缓存未就绪/找不到时扫世界定位, 覆盖缓存
@@ -832,10 +845,11 @@ public class MineAndCollectTask extends ResourceTask {
                             if (actual == target) { match = true; break; }
                         }
                         if (!match) continue;
-                        // (2026-09-01 性能) 近场(≤8格)兜底扫描跳过 LOS 射线 — 近场本就在
-                        // 视线内, 且真正"贴脸可挖的矿"由 getNearField(3x3x3) 负责, 这里
-                        // 只需确认方块类型匹配即可。省掉每条块的 VisibilityHelper 射线
-                        // (否则 4913 格 × 每格一条 LOS 仍会拖慢 tick)。
+                        // (2026-09-01 防透视回归) 匹配块必须过 LOS+防包裹感知 — 上一轮
+                        // 性能修复跳过 LOS 后, 隧道正前方 8 格内埋在墙里的矿也被直接
+                        // 锁定 (透视)。LOS 只对匹配块执行 (非匹配块上面已 continue),
+                        // 匹配块数量极少, 代价可忽略。
+                        if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue;
                         if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                         if (!WorldHelper.canBreak(mod, p)) continue;
                         double dSq = p.getSquaredDistance(fromPos);
