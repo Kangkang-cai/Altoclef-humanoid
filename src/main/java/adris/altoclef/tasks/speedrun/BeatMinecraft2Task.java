@@ -45,6 +45,9 @@ import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.Slot;
+import net.minecraft.inventory.CraftingInventory;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
 import net.minecraft.util.math.BlockPos;
@@ -1404,20 +1407,30 @@ public class BeatMinecraft2Task extends Task {
                 // 肉就被连炉拖走 (用户 12:42 日志)。食物链仍排在 mining 之前。
                 int strongFoodUnits = mod.getModSettings().getFoodUnitsToCollect();
                 if (strongFoodUnits <= 0) strongFoodUnits = _config.foodUnits; // settings 未配时兜底强门槛
-                if (StorageHelper.calculateInventoryFoodScore(mod) < strongFoodUnits) {
+                double foodScore = StorageHelper.calculateInventoryFoodScore(mod);
+                if (foodScore < strongFoodUnits) {
                     if (isUndergroundDebounced(mod) || isInPit(mod)) {
-                        setDebugState("Returning to surface to collect food.");
-                        return new GoToSurfaceTask();
+                        // (2026-09-01 用户"食物没到 10 units 不该回表面") 地下时只有
+                        // 食物跌破危险线(minFoodUnits=10)才回地表收集; 食物在
+                        // 10~strongFoodUnits 之间就地继续挖矿/熔炼, 不回表面 —
+                        // 否则 120 目标让 bot 在食物还很多时频繁回地表, 打断下矿。
+                        if (foodScore <= _config.minFoodUnits) {
+                            setDebugState("Returning to surface to collect food (critical low).");
+                            return new GoToSurfaceTask();
+                        }
+                        // 食物尚可(>minFoodUnits): 跳过食物门, 继续下矿/熔炼等后续分支。
+                    } else {
+                        // 地表: 下矿前的强门槛, 收集到 strongFoodUnits 再放行。
+                        _foodTask = new CollectFoodTask(strongFoodUnits);
+                        diagIronPhase(mod, "collect food (strong gate)",
+                                "foodScore=" + foodScore
+                                        + " strongFoodUnits=" + strongFoodUnits
+                                        + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
+                        Debug.logToFile("altoclef_diag.log",
+                                "[MAIN-FIX]\t[FoodGate]\tstrong-gate food=" + foodScore
+                                        + "/" + strongFoodUnits + " -> CollectFoodTask before mining/smelting");
+                        return _foodTask;
                     }
-                    _foodTask = new CollectFoodTask(strongFoodUnits);
-                    diagIronPhase(mod, "collect food (strong gate)",
-                            "foodScore=" + StorageHelper.calculateInventoryFoodScore(mod)
-                                    + " strongFoodUnits=" + strongFoodUnits
-                                    + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
-                    Debug.logToFile("altoclef_diag.log",
-                            "[MAIN-FIX]\t[FoodGate]\tstrong-gate food=" + StorageHelper.calculateInventoryFoodScore(mod)
-                                    + "/" + strongFoodUnits + " -> CollectFoodTask before mining/smelting");
-                    return _foodTask;
                 }
 
                 // THEN start with iron
@@ -1840,10 +1853,12 @@ public class BeatMinecraft2Task extends Task {
         boolean effectivelyDeep = WorldHelper.isDeepUnderground(mod) && !inWater;
 
         // 路1: 地下或水上 → 睡觉与收床都跳过。
+        // (2026-09-01 修"Underground ↔ Getting gear" 0.2s 横跳噪音) 本分支返回 null,
+        // onTick 随后必然继续派发真实子任务(装备/挖矿/地牢)并设置自己的 debug 状态 —
+        // 这里 setDebugState 同一 tick 内就被覆盖, 只剩 diag-flow 两条变化行刷屏,
+        // 掩盖真实任务横跳。返回 null 的分支一律不设状态, 地下信息由 diag 快照的
+        // deep= 字段保留。
         if (effectivelyDeep || belowSeaLevel || inWater || ridingVehicle) {
-            setDebugState(inWater || ridingVehicle
-                    ? "On water/boat: not sleeping."
-                    : "Underground: working through the night.");
             return null;
         }
 
@@ -1906,7 +1921,8 @@ public class BeatMinecraft2Task extends Task {
                     setDebugState("Night bed opportunity nearby (sheep/wool/bed), grabbing");
                     return acquireBedTask(mod);
                 }
-                setDebugState("Giving up on night bed for tonight, working through.");
+                // (2026-09-01 同类噪音修复) 返回 null 的分支不设状态 — onTick 会继续
+                // 派发真实任务并覆盖, 放弃窗口内每 tick 都刷屏, 掩盖真实横跳。
                 return null;
             }
             if (!_nightBedFindInProgress) {
@@ -1919,9 +1935,9 @@ public class BeatMinecraft2Task extends Task {
                     setDebugState("Still night bed opportunity (bed/sheep/wool nearby), continuing");
                 } else {
                     // 区块内确无床/羊/近羊毛: 真放弃, 去挖矿/收食物熬过夜。
+                    // (2026-09-01 同类噪音修复) 返回 null 的分支不设状态, 理由同上。
                     _nightBedFindInProgress = false;
                     _nightBedGivenUp = true;
-                    setDebugState("No bed/sheep after 30s — giving up night bed for tonight.");
                     return null;
                 }
             }
@@ -1961,6 +1977,12 @@ public class BeatMinecraft2Task extends Task {
      * (2026-08-23 原木统计修正) 直接扫描玩家背包 (main 36 + offhand) 统计原木
      * 数量, 不依赖 ItemStorageTracker 缓存 (用户实测缓存统计为 0 导致
      * Restocking 误触发)。覆盖 ItemHelper.LOG 全部原木种类。
+     *
+     * (2026-09-01 光标/合成格口径补全, 根因: t=1491 合成木板任务把整组 29 根
+     * 原木搬上光标/2x2 合成格, 本函数主背包读到 0 → 木头门控误判缺木 →
+     * "Returning to surface to collect wood" 掐断合成链。与"材料进合成格不算
+     * 缺失"的统一真实计数口径对齐: 光标 + 合成格(2x2/工作台3x3)里的原木同样
+     * 是我们持有的原木, 不因搬运瞬间消失。)
      */
     private int countLogsInPlayerInventory(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return 0;
@@ -1973,6 +1995,23 @@ public class BeatMinecraft2Task extends Task {
         ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
         if (offhand != null && !offhand.isEmpty() && ArrayUtils.contains(ItemHelper.LOG, offhand.getItem())) {
             count += offhand.getCount();
+        }
+        // 光标: 合成任务搬材料的一瞬间整组原木挂在光标上, 主背包瞬时读 0。
+        ScreenHandler handler = mod.getPlayer().currentScreenHandler;
+        if (handler != null) {
+            ItemStack cursor = handler.getCursorStack();
+            if (cursor != null && !cursor.isEmpty() && ArrayUtils.contains(ItemHelper.LOG, cursor.getItem())) {
+                count += cursor.getCount();
+            }
+            // 合成格: 已放进 2x2(背包界面/无界面) 或 3x3(工作台界面) 等待合成的原木也算持有。
+            for (Slot slot : handler.slots) {
+                if (slot.inventory instanceof CraftingInventory) {
+                    ItemStack stack = slot.getStack();
+                    if (stack != null && !stack.isEmpty() && ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) {
+                        count += stack.getCount();
+                    }
+                }
+            }
         }
         return count;
     }

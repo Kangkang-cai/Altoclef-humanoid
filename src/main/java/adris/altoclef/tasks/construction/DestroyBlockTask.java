@@ -35,6 +35,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // For vines and stuff
     private boolean _wasClose = false;
 
+    // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
+    // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
+    // 记录进 MineDownExploreTask 的持久化自挖记忆, 供矿洞检测区分天然空气。
+    private boolean _wasSolidAtStart = false;
+    private boolean _selfDugRecorded = false;
+
     public DestroyBlockTask(BlockPos pos) {
         _pos = pos;
     }
@@ -44,6 +50,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _tryToMineTimer.forceElapse();
         _wanderTask.resetWander();
         StorageHelper.closeScreen();
+        _wasSolidAtStart = WorldHelper.isSolid(mod, _pos);
+        _selfDugRecorded = false;
 
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
@@ -131,7 +139,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return WorldHelper.isAir(mod, _pos);//;
+        boolean air = WorldHelper.isAir(mod, _pos);
+        // (2026-09-01 自挖中央记录) 开始时实心、现在变空气 ⇒ 这格空气是我们挖出来的,
+        // 记入持久化自挖记忆(幂等)。矿洞检测据此排除自挖隧道, 不再误判"自己的洞"。
+        if (air && _wasSolidAtStart && !_selfDugRecorded) {
+            _selfDugRecorded = true;
+            adris.altoclef.tasks.movement.MineDownExploreTask.recordBrokenBlock(mod, _pos);
+        }
+        return air;//;
     }
 
     @Override

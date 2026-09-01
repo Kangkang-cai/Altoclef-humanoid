@@ -402,8 +402,17 @@ public class SmeltInFurnaceTask extends ResourceTask {
                         }
                     }
                     if (bestStack != null) {
+                        // (2026-09-01 用户"多余燃料留在炉里被弃") 旧逻辑把 bestStack
+                        // 整组 (如整叠煤=8×N 次烧炼) 全搬进燃料槽, 烧完目标还剩一堆
+                        // 燃料残留在炉里, 收炉时被遗弃/丢失。改为只搬"满足当前 needs
+                        // 所需的最少个数" — needs 单位是烧炼次数, perItem 是单件能烧
+                        // 几次。ceil 取整(不足 1 件按 1 件), 上限不超背包实际持有。
+                        double perItem = ItemHelper.getFuelAmount(bestStack.getItem());
+                        int countToMove = perItem > 0
+                                ? Math.min(bestStack.getCount(), Math.max(1, (int) Math.ceil(needs / perItem)))
+                                : bestStack.getCount();
                         setDebugState("Filling fuel");
-                        return new MoveItemToSlotFromInventoryTask(new ItemTarget(bestStack.getItem(), bestStack.getCount()), FurnaceSlot.INPUT_SLOT_FUEL);
+                        return new MoveItemToSlotFromInventoryTask(new ItemTarget(bestStack.getItem(), countToMove), FurnaceSlot.INPUT_SLOT_FUEL);
                     }
                 }
             }

@@ -1207,6 +1207,11 @@ public class MineAndCollectTask extends ResourceTask {
                     _progressChecker.reset();
                 }
                 _miningPos = newPos;
+                // (2026-09-01 用户"挖到矿就重置矿洞探索超时") 在追/挖矿石
+                // (包括矿洞探索途中) 时重置探索看门狗: 有产出的探索不被超时掐断。
+                if (_explorationTask instanceof MineDownExploreTask explore) {
+                    explore.markOreMined();
+                }
                 return new DestroyBlockTask(_miningPos);
             }
             if (obj instanceof ItemEntity itemEntity) {

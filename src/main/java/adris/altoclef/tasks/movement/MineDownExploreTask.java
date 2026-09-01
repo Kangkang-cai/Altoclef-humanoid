@@ -16,7 +16,6 @@ import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -42,8 +41,9 @@ import java.util.Set;
  * this is what a human does at mining depth: ores don't come to you, you dig
  * corridors and watch the walls.
  *
- * Cave detection reads CAVE_AIR around the player as an approximation of a
- * human perceiving "a dark open space ahead".
+ * Cave detection (2026-09-01 最终方案): 深度闸门(y≤45) + 露天闸门(头顶有岩顶)
+ * + 连通空气 BFS(防透视) + 【天然空气统计】(排除自挖块、y≤55, 数量≥24 且
+ * X/Z/Y 三维跨度达标 — 多条自挖隧道缝合也绝不会误判) → ExploreCaveTask 进洞。
  */
 public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
@@ -61,6 +61,26 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int CAVE_OPEN_SPAN_X = 4;
     private static final int CAVE_OPEN_SPAN_Z = 4;
     private static final int CAVE_OPEN_SPAN_Y = 3;
+    // (2026-09-01 自挖块排除, 用户"又错误探测到矿洞", 现场确认=全是自挖通道)
+    // 三维跨度只挡得住【单条】自挖隧道; 多条隧道(多次任务实例/换向重挖)交叉缝合后
+    // 连通空气 X/Z/Y 跨度全部达标(实测 20:42: X=7,Z=9,Y=7) → 仍误判。
+    // 本修复: 开阔度只统计【天然空气】= 连通空气中排除自挖记录、
+    // 且 y 不高于 CAVE_NATURAL_AIR_MAX_Y(用户: 只认 y≤45 的空气, 与深度闸门对齐,
+    // 防自挖楼梯上半段/浅层洞口被计入)。
+    // 自挖网络里天然空气≈0 → 永不误判; 挖穿进真洞时洞内天然空气连通 → 正常触发。
+    private static final int CAVE_NATURAL_AIR_MAX_Y = 45;
+    // 天然空气的最少数量: 配合三维跨度, 过滤"恰好一条天然窄缝穿过扫描区"的小概率情形。
+    private static final int MIN_NATURAL_CAVE_AIR = 24;
+    // 自挖位置记录上限(每维度, 容量封顶, 超限逐出最旧并重写文件), 防内存/文件无限增长。
+    private static final int MAX_SELF_DUG_MEMORY = 8192;
+    // (2026-09-01 跨会话持久化, 用户"一到y=45就触发") 静态集合随 JVM 重启清零 →
+    // 上一局挖的旧隧道在新会话里全被当"天然空气"。自挖记忆持久化到游戏目录
+    // altoclef_selfdug.log(每行 "维度 x y z"), 启动后首次访问时加载。记录入口在
+    // DestroyBlockTask(中央: 所有任务真实挖开的方块都记, 含主线 MineAndCollect 挖矿)。
+    private static final String SELF_DUG_FILE = "altoclef_selfdug.log";
+    private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _selfDugByDim
+            = new java.util.HashMap<>();
+    private static boolean _selfDugLoaded = false;
     // Check for caves every N steps.
     private static final int CAVE_SCAN_EVERY_STEPS = 3;
     // Horizontal direction of the staircase (dig east as we descend).
@@ -75,7 +95,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // sinking around y=-24 and branch-mine flat from there.
     private static final int TUNNEL_MIN_Y = -24;
     // How long we may spend exploring a cave before resuming the dig.
-    private static final double CAVE_EXPLORE_TIMEOUT = 25;
+    // (2026-09-01 用户"矿洞探索超时太短") 25s 对大洞穴偏短: 纯走路就能
+    // 掐断一次探索。提到 90s; 且挖到矿会重置计时 (markOreMined), 有产出的
+    // 探索不会被超时打断, 只有"长时间没挖到矿的干逛"才会被限时。
+    private static final double CAVE_EXPLORE_TIMEOUT = 90;
 
     // How deep we're willing to dig for this run (differs by target ore).
     private final int _targetY;
@@ -105,6 +128,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     public MineDownExploreTask(int targetY) {
         _targetY = targetY;
+    }
+
+    /**
+     * (2026-09-01 用户"一旦挖到矿就应该重置矿洞探索超时") 矿洞探索期间挖到矿
+     * = 有产出, 看门狗不应把活跃的探索掐断。由 MineOrCollectTask 每次开始追
+     * 矿石时调用, 重置探索计时 — 边挖矿边探索的会话不会被超时打断, 只有
+     * "长时间没挖到矿的干逛"才被限时。
+     */
+    public void markOreMined() {
+        _caveExploreTimer.reset();
     }
 
     @Override
@@ -168,7 +201,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     BlockPos anchor = cave.get();
                     Debug.logMessage("Found cave at shaft bottom at " + anchor.toShortString() + ", exploring it.");
                     _caveExploreTimer.reset();
-                    _subTask = new BiasedExploreTask(() -> scanCaveAirs(mod));
+                    // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
+                    // (其落点被强制抬到 48 格外地表, 从未真正走进洞里)。
+                    _subTask = new ExploreCaveTask();
                     return _subTask;
                 }
             }
@@ -191,11 +226,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 Debug.logToFile("altoclef_diag.log",
                         "[MineDown-Cave] found cave while digging at " + anchor.toShortString() + ", exploring it first.");
                 _caveExploreTimer.reset();
-                // DYNAMIC bias supplier: every time the explore task refreshes
-                // its bias it RE-SCANS the cave air around the bot, so the
-                // exploration follows the cave network deeper instead of
-                // stopping at the mouth after one anchor.
-                _subTask = new BiasedExploreTask(() -> scanCaveAirs(mod));
+                // (2026-09-01 真正进洞) 专用洞内导航任务: 直奔最远天然洞空气,
+                // 到达后重扫跟深(见 ExploreCaveTask), 25s 看门狗兜底不影响挖矿主线。
+                _subTask = new ExploreCaveTask();
                 return _subTask;
             }
         }
@@ -284,6 +317,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     private void enqueueNextStep() {
         // Each step: the block forward(-down for stairs) + the block above it (headroom).
+        // (自挖记录不在此做: 入队≠挖开, 废弃队列会误标真洞空气。真实挖开由
+        //  DestroyBlockTask.isFinished 中央记录, 见 recordBrokenBlock。)
         int k = _step;
         BlockPos ground;
         if (_tunnelMode) {
@@ -343,6 +378,119 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (中央记录入口, 由 DestroyBlockTask 调用) 记录一个本 mod【真实挖开】的方块位置:
+     * 任务开始时是实心、结束时变空气 ⇒ 这格空气是我们造的, 不是天然洞空气。
+     * 同时追加持久化文件, 跨游戏重启(新会话)后旧隧道仍被认得, 不再被当天然洞。
+     */
+    public static void recordBrokenBlock(AltoClef mod, BlockPos pos) {
+        if (mod.getWorld() == null || pos == null) return;
+        ensureSelfDugLoaded();
+        String dim = selfDugDimKey(mod);
+        java.util.LinkedHashSet<BlockPos> set = _selfDugByDim.computeIfAbsent(dim, k -> new java.util.LinkedHashSet<>());
+        if (!set.add(pos.toImmutable())) return; // 已记录
+        appendSelfDugLine(dim, pos);
+        if (set.size() > MAX_SELF_DUG_MEMORY) {
+            // 容量封顶: 逐出最旧并整体重写文件(罕见操作)。
+            java.util.Iterator<BlockPos> it = set.iterator();
+            if (it.hasNext()) {
+                it.next();
+                it.remove();
+            }
+            rewriteSelfDugFile();
+        }
+    }
+
+    /**
+     * 该位置是否为本 mod 自己挖出来的空气(查当前维度的持久化记忆)。
+     */
+    static boolean isSelfDugAir(AltoClef mod, BlockPos pos) {
+        if (mod.getWorld() == null) return false;
+        ensureSelfDugLoaded();
+        java.util.Set<BlockPos> set = _selfDugByDim.get(selfDugDimKey(mod));
+        return set != null && set.contains(pos);
+    }
+
+    private static String selfDugDimKey(AltoClef mod) {
+        return mod.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    private static java.nio.file.Path selfDugFile() {
+        // 必须用 runDirectory(游戏目录 D:\minecraft\.minecraft), 相对 CWD 会找不到文件。
+        return MinecraftClient.getInstance().runDirectory.toPath().resolve(SELF_DUG_FILE);
+    }
+
+    private static void ensureSelfDugLoaded() {
+        if (_selfDugLoaded) return;
+        _selfDugLoaded = true;
+        try {
+            java.nio.file.Path f = selfDugFile();
+            if (!java.nio.file.Files.exists(f)) return;
+            for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                String[] parts = line.trim().split(" ");
+                if (parts.length != 4) continue;
+                try {
+                    BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+                    _selfDugByDim.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>()).add(p);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            Debug.logMessage("[SelfDug] loaded " + _selfDugByDim.values().stream().mapToInt(Set::size).sum()
+                    + " self-dug positions from " + SELF_DUG_FILE);
+        } catch (Exception e) {
+            Debug.logMessage("[SelfDug] failed to load " + SELF_DUG_FILE + ": " + e.getMessage());
+        }
+    }
+
+    private static void appendSelfDugLine(String dim, BlockPos pos) {
+        try {
+            java.nio.file.Files.write(selfDugFile(),
+                    (dim + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception e) {
+            // 记录失败不阻断挖掘, 只是跨会话记忆缺一格。
+            Debug.logMessage("[SelfDug] failed to append: " + e.getMessage());
+        }
+    }
+
+    private static void rewriteSelfDugFile() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (java.util.Map.Entry<String, java.util.LinkedHashSet<BlockPos>> e : _selfDugByDim.entrySet()) {
+                for (BlockPos p : e.getValue()) {
+                    sb.append(e.getKey()).append(' ').append(p.getX()).append(' ')
+                            .append(p.getY()).append(' ').append(p.getZ()).append('\n');
+                }
+            }
+            java.nio.file.Files.write(selfDugFile(), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            Debug.logMessage("[SelfDug] failed to rewrite: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 玩家当前连通空间里【最远的天然空气】(排除自挖位置、y≤CAVE_NATURAL_AIR_MAX_Y、
+     * 排除调用方已失败的点)。ExploreCaveTask 用它作洞内导航目标: 每次到达后重扫,
+     * 目标随玩家推进不断指向洞穴更深处。无天然空气 → null(洞已探索完/根本没有洞)。
+     */
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, Set<BlockPos> exclude) {
+        Set<BlockPos> reachable = collectConnectedAir(mod, center);
+        BlockPos best = null;
+        double bestDistSq = Double.NEGATIVE_INFINITY;
+        for (BlockPos p : reachable) {
+            if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
+            if (isSelfDugAir(mod, p)) continue;
+            if (exclude != null && exclude.contains(p)) continue;
+            double d = p.getSquaredDistance(center);
+            if (d > bestDistSq) {
+                bestDistSq = d;
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    /**
      * Look around the player for an open cave space (CAVE_AIR), preferring
      * positions below/at eye level since that's where we're digging toward.
      * Returns the FARTHEST qualifying cave air from the player so the
@@ -352,7 +500,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
          * (2026-08-31) BFS 收集玩家当前所在开放空间的全部空气块(普通 air + cave_air),
          * 半径 ±CAVE_SCAN_RADIUS、容量封顶, 供 findNearbyCave 判断洞空气是否「已挖开/可达」。
          */
-        private Set<BlockPos> collectConnectedAir(AltoClef mod, BlockPos start) {
+        static Set<BlockPos> collectConnectedAir(AltoClef mod, BlockPos start) {
             Set<BlockPos> visited = new HashSet<>();
             Deque<BlockPos> queue = new ArrayDeque<>();
             queue.add(start);
@@ -419,48 +567,47 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 不触发探索, 继续挖穿; 一旦挖开/从洞口进入, 洞空气进入连通集 → 才触发 BiasedExplore
         // 进洞。杜绝"挖一半被墙后预知触发的探索抢走挖矿、绕远路"。
         Set<BlockPos> reachableAir = collectConnectedAir(mod, center);
-        // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 原判定用
-        // "连通空气数≥40" — 自挖长楼梯/隧道挖几十格连通空气轻松超过 40 →
-        // 自己的洞被误判成矿洞。天然洞与自挖通道的本质区别是【空间形状】:
-        // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长
-        // 通道。这里作为【核心闸门】: 连通空气集合的 X/Z/Y 跨度都达到阈值才
-        // 算开阔天然洞 — 完全绕开 cave_air vs 繁茂洞穴(普通 air)的矛盾, 不
-        // 依赖空气类型。深度闸门(y≤45)已排除地表; 玩家在洞里时上面的地面空气
-        // 与玩家不连通(BFS 只统计连通集), 不会被算入 — 不会把"上面的地面空气
-        // 当矿洞"。
-        // (2026-09-01 去冗余) 闸门通过后, 玩家处于开阔天然空间, 连通空气即
-        // "洞空气"(无论 cave_air 还是普通 air, 繁茂洞穴自然覆盖) — 不再需要
-        // 逐块区分 CAVE_AIR/普通 air, 也不再对每个候选空气块重复"有顶"判定
-        // (露天闸门已保证玩家头顶有顶, 与 findNearbyCave 上层两闸门不重复)。
-        if (!isOpenCaveSpace(reachableAir)) {
+        // (2026-09-01 自挖块排除, 核心闸门) 连通空气里只认【天然空气】:
+        // 排除本 mod 静态记录的自挖位置(多条自挖隧道缝合的跨度再大也不算),
+        // 排除 y>CAVE_NATURAL_AIR_MAX_Y 的高处空气(防自挖楼梯连到地表被计入)。
+        // 自挖网络天然空气≈0 → 数量闸门直接拦下; 挖穿进真洞 → 洞内天然空气
+        // 经自挖口连通进集合, 数量+三维跨度均达标 → 正常触发。
+        Set<BlockPos> naturalAir = new HashSet<>();
+        for (BlockPos p : reachableAir) {
+            if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
+            if (isSelfDugAir(mod, p)) continue;
+            naturalAir.add(p);
+        }
+        if (naturalAir.size() < MIN_NATURAL_CAVE_AIR) {
+            return Optional.empty();
+        }
+        // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 天然洞与
+        // 通道的本质区别是【空间形状】: 天然洞在 X/Z/Y 三维都开阔。跨度判定
+        // 现在只统计天然空气 — 自挖楼梯/隧道即使连通集合庞大, 天然空气侧
+        // 约束为零。不依赖空气类型(cave_air vs 普通 air), 繁茂洞穴自然覆盖。
+        if (!isOpenCaveSpace(naturalAir)) {
             return Optional.empty();
         }
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
-        for (int y = center.getY() - CAVE_SCAN_RADIUS; y <= center.getY() + 1; y++) {
-            for (int dz = -CAVE_SCAN_RADIUS; dz <= CAVE_SCAN_RADIUS; dz++) {
-                for (int dx = -CAVE_SCAN_RADIUS; dx <= CAVE_SCAN_RADIUS; dx++) {
-                    BlockPos check = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
-                    // 只认与玩家连通的空间 (防透视: 墙后未挖开的洞空气不连通, 不触发)
-                    if (!reachableAir.contains(check)) continue;
-                    // Require a couple of adjacent air blocks so a single hole doesn't count as a cave.
-                    if (!hasCaveNeighbors(mod, check, 2)) continue;
-                    double distSq = check.getSquaredDistance(center);
-                    if (distSq > bestDistSq) {
-                        bestDistSq = distSq;
-                        best = check;
-                    }
-                }
+        for (BlockPos check : naturalAir) {
+            // 只认与玩家连通的空间(reachableAir 已保证, 防透视: 墙后未挖开的洞空气不连通, 不触发)。
+            // Require a couple of adjacent air blocks so a single hole doesn't count as a cave.
+            if (!hasCaveNeighbors(mod, check, 2)) continue;
+            double distSq = check.getSquaredDistance(center);
+            if (distSq > bestDistSq) {
+                bestDistSq = distSq;
+                best = check;
             }
         }
-        // (2026-08-30 诊断) 打印"是否判定为矿洞"及连通空气规模, 便于区分
+        // (2026-08-30 诊断) 打印"是否判定为矿洞"及连通/天然空气规模, 便于区分
         // "没扫到开阔洞" vs "扫到了但没切探索"。
         if (MinecraftClient.getInstance().world != null
                 && MinecraftClient.getInstance().world.getTime() % 200L == 0L) {
             Debug.logToFile("altoclef_diag.log",
-                    String.format("[MineDown-CaveScan] center=(%d,%d,%d) R=%d connectedAir=%d hasCave=%s",
+                    String.format("[MineDown-CaveScan] center=(%d,%d,%d) R=%d connectedAir=%d naturalAir=%d hasCave=%s",
                             center.getX(), center.getY(), center.getZ(), CAVE_SCAN_RADIUS,
-                            reachableAir.size(), best != null));
+                            reachableAir.size(), naturalAir.size(), best != null));
         }
         return Optional.ofNullable(best);
     }
@@ -491,39 +638,6 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             return true; // 实心覆盖
         }
         return false;
-    }
-
-    /**
-     * All cave-air positions around the player (capped), used as the DYNAMIC
-     * bias of the cave exploration task. As the bot walks into the cave the
-     * scan follows it, so the bias keeps pointing deeper into the network.
-     *
-     * (2026-09-01 防透视导航 + 去冗余, 用户"一定不要透视到矿洞, 要人类看到")
-     * 洞空气定义与 findNearbyCave 统一: 【与玩家开放空间连通】的空气块
-     * (collectConnectedAir BFS), 不限于 CAVE_AIR — 繁茂洞穴(普通 air)同样
-     * 获得探索偏置, 否则繁茂洞穴触发探索后 bias 退化。只偏置已连通/可达的
-     * 洞空气: 墙后未挖开的洞空气不产生偏置 → baritone 不会朝看不见的洞走,
-     * 不透视、不穿墙。扫描半径与 collectConnectedAir 一致(±CAVE_SCAN_RADIUS)。
-     */
-    private List<BlockPos> scanCaveAirs(AltoClef mod) {
-        BlockPos center = mod.getPlayer().getBlockPos();
-        Set<BlockPos> connected = collectConnectedAir(mod, center);
-        List<BlockPos> result = new ArrayList<>();
-        for (int y = center.getY() - CAVE_SCAN_RADIUS; y <= center.getY() + 2 && result.size() < 12; y++) {
-            for (int dz = -CAVE_SCAN_RADIUS; dz <= CAVE_SCAN_RADIUS && result.size() < 12; dz++) {
-                for (int dx = -CAVE_SCAN_RADIUS; dx <= CAVE_SCAN_RADIUS && result.size() < 12; dx++) {
-                    BlockPos check = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
-                    if (!connected.contains(check)) continue; // 只偏置已连通的洞空气(防透视)
-                    result.add(check);
-                }
-            }
-        }
-        if (result.isEmpty()) {
-            // No (more) reachable cave air around — fall back to the original anchor so
-            // the explore task still has something to walk toward.
-            return Collections.singletonList(center);
-        }
-        return result;
     }
 
     private boolean hasCaveNeighbors(AltoClef mod, BlockPos pos, int required) {
