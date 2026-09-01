@@ -55,9 +55,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 8 (was 5): diag logs showed the bot mining straight past caves whose
     // mouths were 6-7 blocks away — a human would notice and walk in.
     private static final int CAVE_SCAN_RADIUS = 8;
-    // (2026-08-31 特殊矿洞识别, 用户"繁茂洞穴等特殊矿洞(草/花)空气是普通 air, 不触发探索")
-    // 玩家连通开放空间的空气数 ≥ 该值 → 判定身处"开阔天然洞"而非自挖窄隧道, 触发矿洞探索。
-    private static final int CAVE_AREA_THRESHOLD = 40;
+    // (2026-09-01 三维开阔度判定, 取代旧 CAVE_AREA_THRESHOLD=40 空气计数)
+    // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长通道。
+    // 连通空气集合的 X/Z/Y 跨度分别达到下面阈值才算"开阔天然洞", 触发矿洞探索。
+    private static final int CAVE_OPEN_SPAN_X = 4;
+    private static final int CAVE_OPEN_SPAN_Z = 4;
+    private static final int CAVE_OPEN_SPAN_Y = 3;
     // Check for caves every N steps.
     private static final int CAVE_SCAN_EVERY_STEPS = 3;
     // Horizontal direction of the staircase (dig east as we descend).
@@ -374,6 +377,26 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             return visited;
         }
 
+        // (2026-09-01 三维开阔度) 连通空气集合的 X/Z/Y 跨度是否都达到阈值。
+        // 自挖楼梯(1-2格宽、2格高)至少一个方向跨度不足 → false, 不会把自己
+        // 挖的通道当成天然洞。天然洞/繁茂洞穴 X/Z/Y 都开阔 → true。
+        private boolean isOpenCaveSpace(Set<BlockPos> airs) {
+            int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
+            int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
+            int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
+            for (BlockPos p : airs) {
+                minX = Math.min(minX, p.getX());
+                maxX = Math.max(maxX, p.getX());
+                minY = Math.min(minY, p.getY());
+                maxY = Math.max(maxY, p.getY());
+                minZ = Math.min(minZ, p.getZ());
+                maxZ = Math.max(maxZ, p.getZ());
+            }
+            return maxX - minX >= CAVE_OPEN_SPAN_X
+                    && maxZ - minZ >= CAVE_OPEN_SPAN_Z
+                    && maxY - minY >= CAVE_OPEN_SPAN_Y;
+        }
+
         private Optional<BlockPos> findNearbyCave(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
         // (2026-09-01 矿洞深度感知, 用户"刚挖进去头上有方块就又检测到外面是矿洞")
@@ -396,55 +419,48 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 不触发探索, 继续挖穿; 一旦挖开/从洞口进入, 洞空气进入连通集 → 才触发 BiasedExplore
         // 进洞。杜绝"挖一半被墙后预知触发的探索抢走挖矿、绕远路"。
         Set<BlockPos> reachableAir = collectConnectedAir(mod, center);
-        // (2026-08-31) 玩家连通开放空间够大(≥CAVE_AREA_THRESHOLD) = 在天然洞/繁茂洞穴里,
-        // 此时应触发矿洞探索; 自挖窄隧道连通空气少(<阈值)不触发。是否"大洞"用顶层判断 ↑。
-        boolean inOpenCave = reachableAir.size() >= CAVE_AREA_THRESHOLD;
+        // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 原判定用
+        // "连通空气数≥40" — 自挖长楼梯/隧道挖几十格连通空气轻松超过 40 →
+        // 自己的洞被误判成矿洞。天然洞与自挖通道的本质区别是【空间形状】:
+        // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长
+        // 通道。这里作为【核心闸门】: 连通空气集合的 X/Z/Y 跨度都达到阈值才
+        // 算开阔天然洞 — 完全绕开 cave_air vs 繁茂洞穴(普通 air)的矛盾, 不
+        // 依赖空气类型。深度闸门(y≤45)已排除地表; 玩家在洞里时上面的地面空气
+        // 与玩家不连通(BFS 只统计连通集), 不会被算入 — 不会把"上面的地面空气
+        // 当矿洞"。
+        // (2026-09-01 去冗余) 闸门通过后, 玩家处于开阔天然空间, 连通空气即
+        // "洞空气"(无论 cave_air 还是普通 air, 繁茂洞穴自然覆盖) — 不再需要
+        // 逐块区分 CAVE_AIR/普通 air, 也不再对每个候选空气块重复"有顶"判定
+        // (露天闸门已保证玩家头顶有顶, 与 findNearbyCave 上层两闸门不重复)。
+        if (!isOpenCaveSpace(reachableAir)) {
+            return Optional.empty();
+        }
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
-        int caveAirCount = 0;
-        int airCount = 0;
         for (int y = center.getY() - CAVE_SCAN_RADIUS; y <= center.getY() + 1; y++) {
             for (int dz = -CAVE_SCAN_RADIUS; dz <= CAVE_SCAN_RADIUS; dz++) {
                 for (int dx = -CAVE_SCAN_RADIUS; dx <= CAVE_SCAN_RADIUS; dx++) {
                     BlockPos check = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
-                    net.minecraft.block.Block b = mod.getWorld().getBlockState(check).getBlock();
-                    // (2026-09-01 地表误判矿洞修复, 用户"陆地表面怎么会探索发现的矿洞")
-                    // 天然洞空气: cave_air (普通洞穴) 或 普通 air 且身处开阔大洞(繁茂洞穴/大岩洞)。
-                    // 原判定 (b==AIR && inOpenCave) 把地表开阔地误判成洞: 地表连通空气
-                    // 无限大 → inOpenCave 恒真 → 地表空气全算"洞空气" → 站在地表挖矿
-                    // 第一步就触发矿洞探索, 还被 BiasedExplore 拉到海边 (y=63, 用户实测)。
-                    // 洞的本质是【被岩壁包围的有顶空腔】: 普通 air 分支额外要求上方有
-                    // 实心覆盖 — 地表开阔地露天(上方是天空)不算洞; 繁茂洞穴空气上方是
-                    // 岩石顶仍识别。树冠(树叶/原木)不算岩顶, 避免砍树场景误判。
-                    boolean isCaveish = (b == Blocks.CAVE_AIR)
-                            || (b == Blocks.AIR && inOpenCave && hasOverheadCover(mod, check));
-                    if (isCaveish) {
-                        // 只有该洞空气与玩家当前开放空间连通(已挖穿/从洞口可达)才算"来了矿洞"。
-                        if (!reachableAir.contains(check)) continue;
-                        caveAirCount++;
-                        // Require a couple of adjacent air blocks so a single hole doesn't count as a cave.
-                        if (hasCaveNeighbors(mod, check, 2)) {
-                            double distSq = check.getSquaredDistance(center);
-                            if (distSq > bestDistSq) {
-                                bestDistSq = distSq;
-                                best = check;
-                            }
-                        }
-                    } else if (b == Blocks.AIR) {
-                        airCount++;
+                    // 只认与玩家连通的空间 (防透视: 墙后未挖开的洞空气不连通, 不触发)
+                    if (!reachableAir.contains(check)) continue;
+                    // Require a couple of adjacent air blocks so a single hole doesn't count as a cave.
+                    if (!hasCaveNeighbors(mod, check, 2)) continue;
+                    double distSq = check.getSquaredDistance(center);
+                    if (distSq > bestDistSq) {
+                        bestDistSq = distSq;
+                        best = check;
                     }
                 }
             }
         }
-        // (2026-08-30 诊断) 用户实测"站在特别大空旷的天然矿洞中间却一点反应没有"。
-        // 打印扫描区 CAVE_AIR / 普通 AIR 计数, 区分到底是"周围没有 cave_air(只认
-        // cave_air 认不出普通 air 构成的天然空间)"还是"扫到了 cave_air 但没切洞穴探索"。
+        // (2026-08-30 诊断) 打印"是否判定为矿洞"及连通空气规模, 便于区分
+        // "没扫到开阔洞" vs "扫到了但没切探索"。
         if (MinecraftClient.getInstance().world != null
                 && MinecraftClient.getInstance().world.getTime() % 200L == 0L) {
             Debug.logToFile("altoclef_diag.log",
-                    String.format("[MineDown-CaveScan] center=(%d,%d,%d) R=%d caveAir=%d air=%d hasCave=%s",
+                    String.format("[MineDown-CaveScan] center=(%d,%d,%d) R=%d connectedAir=%d hasCave=%s",
                             center.getX(), center.getY(), center.getZ(), CAVE_SCAN_RADIUS,
-                            caveAirCount, airCount, best != null));
+                            reachableAir.size(), best != null));
         }
         return Optional.ofNullable(best);
     }
@@ -481,23 +497,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * All cave-air positions around the player (capped), used as the DYNAMIC
      * bias of the cave exploration task. As the bot walks into the cave the
      * scan follows it, so the bias keeps pointing deeper into the network.
+     *
+     * (2026-09-01 防透视导航 + 去冗余, 用户"一定不要透视到矿洞, 要人类看到")
+     * 洞空气定义与 findNearbyCave 统一: 【与玩家开放空间连通】的空气块
+     * (collectConnectedAir BFS), 不限于 CAVE_AIR — 繁茂洞穴(普通 air)同样
+     * 获得探索偏置, 否则繁茂洞穴触发探索后 bias 退化。只偏置已连通/可达的
+     * 洞空气: 墙后未挖开的洞空气不产生偏置 → baritone 不会朝看不见的洞走,
+     * 不透视、不穿墙。扫描半径与 collectConnectedAir 一致(±CAVE_SCAN_RADIUS)。
      */
     private List<BlockPos> scanCaveAirs(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
+        Set<BlockPos> connected = collectConnectedAir(mod, center);
         List<BlockPos> result = new ArrayList<>();
-        int r = CAVE_SCAN_RADIUS + 4;
         for (int y = center.getY() - CAVE_SCAN_RADIUS; y <= center.getY() + 2 && result.size() < 12; y++) {
-            for (int dz = -r; dz <= r && result.size() < 12; dz++) {
-                for (int dx = -r; dx <= r && result.size() < 12; dx++) {
+            for (int dz = -CAVE_SCAN_RADIUS; dz <= CAVE_SCAN_RADIUS && result.size() < 12; dz++) {
+                for (int dx = -CAVE_SCAN_RADIUS; dx <= CAVE_SCAN_RADIUS && result.size() < 12; dx++) {
                     BlockPos check = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
-                    if (mod.getWorld().getBlockState(check).getBlock() == Blocks.CAVE_AIR) {
-                        result.add(check);
-                    }
+                    if (!connected.contains(check)) continue; // 只偏置已连通的洞空气(防透视)
+                    result.add(check);
                 }
             }
         }
         if (result.isEmpty()) {
-            // No (more) cave air around — fall back to the original anchor so
+            // No (more) reachable cave air around — fall back to the original anchor so
             // the explore task still has something to walk toward.
             return Collections.singletonList(center);
         }

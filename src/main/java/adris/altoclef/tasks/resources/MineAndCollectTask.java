@@ -310,8 +310,15 @@ public class MineAndCollectTask extends ResourceTask {
     private boolean hasNearbyMineableTarget(AltoClef mod) {
         // (2026-08-28 贪心=纯贴身) 贪心只看紧贴矿, 不把缓存里远处/被包住的矿
         // 当成"还有活"——否则会把贪心任务一直挂住又不让 getClosestTo 去挖。
+        // (2026-09-01 贪心掉落物, 用户"贪心挖矿后不把所有掉落物捡起来") 原实现
+        // 只看近场矿: 挖完紧贴矿后 hasNearFieldTarget=false → isFinished=true →
+        // 上层直接把 MineAndCollectTask 切走, 地上掉落物没捡完。补上"tracker
+        // 感知范围内还有目标掉落物" → 挖完一处必须捡完掉落物才算完成 (getClosestTo
+        // 里无紧贴矿时正是返回 closestDrop 去捡, 二者一致)。tracker 感知范围有限
+        // (可见 32 格 + 5s 记忆), 不会拖住任务去超远捡。
         if (_greedy) {
-            return _subtask.hasNearFieldTarget(mod);
+            return _subtask.hasNearFieldTarget(mod)
+                    || mod.getEntityTracker().itemDropped(_itemTargets);
         }
         List<BlockPos> known = mod.getBlockTracker().getKnownLocations(_blocksToMine);
         if (known.isEmpty()) return false;
