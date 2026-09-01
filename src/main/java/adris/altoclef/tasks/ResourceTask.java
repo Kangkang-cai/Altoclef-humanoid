@@ -41,6 +41,20 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
     private final PickupDroppedItemTask _pickupTask;
     private ContainerCache _currentContainer;
     private final EnsureFreePlayerCraftingGridTask _ensureFreeCraftingGridTask = new EnsureFreePlayerCraftingGridTask();
+    // (2026-08-22 掉落物横跳修复) 捡掉落冷却: 挖矿/收集中挖掉一个方块,
+    // 掉落物立即出现 → 若马上切去捡, 形成"挖一个→捡一个→挖一个"横跳
+    // (用户实测: 挖瓜/矿/木头时一撸掉就切到捡掉落物子任务)。捡过掉落物
+    // 后 0.5 秒内不因掉落物切换任务 — 4 格内掉落物会自然吸/短距离即捡,
+    // 无需切换; 冷却结束后统一捡远处累积的掉落物。
+    // (2026-08-22 rev2) 原 2 秒冷却 + 2 格豁免过严: 挖铁时铁掉落物喷出
+    // 豁免范围, 2 秒内不捡 → bot 挖隧道移动后掉落物丢失 → 背包 raw_iron
+    // 永远到不了 32, 贪心"挖不完" (用户实测 19:19)。放宽到 0.5 秒 + 4 格。
+    private long _lastDropPickupMs = 0;
+    // (2026-08-31 挖矿/捡掉落横跳缓解) 原 500ms + 4格豁免仍挡不住"每挖一块立刻切去捡":
+    // 采石/砍木挖掉一块掉落物就在脚边, 冷却过期后就又触发切换, 采集节奏被打断
+    // (日志 18:20:50-21:20 挖圆石被 Pickup Dropped 反复打断 20 余次)。拉长到 1.5s,
+    // 相邻掉落物会在冷却内被玩家自然吸走/就近拾取, 采集进程更连贯。
+    private static final long DROP_PICKUP_COOLDOWN_MS = 1500;
     // Extra resource parameters
     private Block[] _mineIfPresent = null;
     private boolean _forceDimension = false;
@@ -62,7 +76,12 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return StorageHelper.itemTargetsMetInventoryNoCursor(mod, _itemTargets);
+        // (2026-08-31 终局判定统一真实持有) 原 itemTargetsMetInventoryNoCursor 走
+        // 缓存 getItemCountInventoryOnly, 已收集进背包的物品(刚拾取的鸡肉/木棍)被
+        // 缓存滞后判成"不足" → 任务永不退出一直重复找/捡 (用户实测: 鸡已死、鸡肉
+        // 在主背包, 仍卡在 Collect items from chicken)。改用统一真实持有判定, 一个
+        // 都别漏, 避免"已持有却判不足"。POSSESS 语义 = 必须真背在背包里才算拥有。
+        return Arrays.stream(_itemTargets).allMatch(target -> StorageHelper.itemTargetOwned(mod, StorageHelper.Ownership.POSSESS, target));
     }
 
     @Override
@@ -98,14 +117,36 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
         if (StorageHelper.itemTargetsMetInventory(mod, _itemTargets) && Arrays.stream(_itemTargets).anyMatch(target -> target.matches(StorageHelper.getItemStackInCursorSlot().getItem()))) {
             Optional<Slot> toMove = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(StorageHelper.getItemStackInCursorSlot(), true).or(() -> StorageHelper.getGarbageSlot(mod));
             if (toMove.isEmpty()) {
+                // (2026-08-22 收铁卡死修复) 光标目标物品放不回背包（背包满/
+                // 无可用堆叠位）时，原实现 return null 永久挂死（用户实测：
+                // 烧完铁铁锭滞留光标 + 背包快满，卡熔炉界面 3 分 44 秒）。
+                // 若界面打开，关屏让 MC 自动把光标物品弹回物品栏（放不下则
+                // 掉落），解除光标占位死锁；否则只能等后续腾出空间。
                 setDebugState("STUCK! No slot can fit our item.");
+                if (StorageHelper.isFurnaceOpen() || StorageHelper.isBigCraftingOpen() || StorageHelper.isPlayerInventoryOpen()) {
+                    StorageHelper.closeScreen();
+                }
                 return null;
             }
             setDebugState("Moving from cursor");
             return new ClickSlotTask(toMove.get());
         }
 
-        if (!shouldAvoidPickingUp(mod)) {
+        // (2026-08-31 合成拾取收敛) 正在用合成格(如 Craft 2x2 planks)时不切捡掉落:
+        // 合成子任务自身(CraftInInventoryTask)已 shouldAvoidPickingUp=true, 这里再
+        // 补上父类帧 — 否则父 ResourceTask 在合成进行中仍每 tick 因地面有同类掉落
+        // 就切 PickupDropped, 形成 <Pickup Dropped> -> <Craft 2x2 planks> -> <Pickup>
+        // 反复抢占 (用户 13:00 日志实锤挖木料时合成打断)。
+        boolean craftingGridActive = thisOrChildSatisfies(task -> task instanceof ITaskUsesCraftingGrid);
+        // (2026-09-01 挖石边挖边捡横跳修复, 用户"撸完再拾取") 当子任务是挖矿
+        // 收集(MineAndCollectTask)且仍在挖未达成目标时, 父类不再因地面有同类掉落
+        // 就切去捡 — 挖满目标后由 MineAndCollect 自身的掉落兜底统一收, 避免
+        // <Mine And Collect cobblestone> <-> <Pickup Dropped Items cobblestone>
+        // 每 1~2 秒互抢、挖一块就去捡(用户实测挖石头需 8 个被反复打断,
+        // altoclef_tasks log t=246/286/395/435 实锤)。木头/床是立即捡(自身就优先
+        // 捡), 不受此抑制; 圆石/石头等非"紧贴必捡"目标挖满后一次还原。
+        boolean mineAndCollectActive = thisOrChildSatisfies(task -> task instanceof MineAndCollectTask);
+        if (!shouldAvoidPickingUp(mod) && !craftingGridActive && !mineAndCollectActive && shouldPickupDrops(mod)) {
             // Check if items are on the floor. If so, pick em up.
             if (mod.getEntityTracker().itemDropped(_itemTargets)) {
 
@@ -114,6 +155,7 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
                     if (_pickupTask.isCollectingPickaxeForThis()) {
                         setDebugState("Picking up (pickaxe first!)");
                         // Our pickup task is the one collecting the pickaxe, keep it going.
+                        _lastDropPickupMs = System.currentTimeMillis();
                         return _pickupTask;
                     }
                     // Only get items that are CLOSE to us.
@@ -127,6 +169,7 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
                 Optional<ItemEntity> closest = mod.getEntityTracker().getClosestItemDrop(mod.getPlayer().getPos(), _itemTargets);
                 if (range < 0 || (closest.isPresent() && closest.get().isInRange(mod.getPlayer(), range)) || (_pickupTask.isActive() && !_pickupTask.isFinished(mod))) {
                     setDebugState("Picking up");
+                    _lastDropPickupMs = System.currentTimeMillis();
                     return _pickupTask;
                 }
             }
@@ -229,6 +272,17 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
             return WorldHelper.getCurrentDimension() != _targetDimension;
         }
         return false;
+    }
+
+    /**
+     * (2026-08-22 掉落物横跳修复) 是否应切到"捡掉落物"子任务。
+     * 冷却期 (刚捡过掉落物 2 秒内) 不切换 — 近处 (2 格内) 掉落物会自然吸,
+     * 无需切换任务; 否则挖矿时"挖一个→捡一个→挖一个"横跳。
+     */
+    private boolean shouldPickupDrops(AltoClef mod) {
+        if (System.currentTimeMillis() - _lastDropPickupMs >= DROP_PICKUP_COOLDOWN_MS) return true;
+        Optional<ItemEntity> close = mod.getEntityTracker().getClosestItemDrop(mod.getPlayer().getPos(), _itemTargets);
+        return close.isPresent() && close.get().isInRange(mod.getPlayer(), 2);
     }
 
     protected Task getToCorrectDimensionTask(AltoClef mod) {

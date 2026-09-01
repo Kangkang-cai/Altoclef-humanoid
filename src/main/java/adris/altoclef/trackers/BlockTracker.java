@@ -9,6 +9,7 @@ import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.ConfigHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.StlHelper;
 import baritone.Baritone;
@@ -55,8 +56,29 @@ public class BlockTracker extends Tracker {
 
     private final TimerGame _forceElapseTimer = new TimerGame(_config.scanIntervalWhenNewBlocksFound);
 
+    // (2026-08-23 双区扫描) 近区+远区采样扫描 (用户性能设计 2026-08-23):
+    // - 近区: 5Hz 高频, 小范围 (可视范围 + 薄薄看不见区域一点)。
+    //   Y 只扫 ±NEARBY_SCAN_Y_RANGE (薄层) — 玩家眼前/脚下的矿立即感知,
+    //   看不见的地下矿不需要高频 (等挖过去远区低频发现)。单次开销小。
+    // - 远区: 低频 (FAR_SCAN_INTERVAL 秒一次), 范围广 (radius 128),
+    //   Y 全覆盖 0~255 — 覆盖不缩水, 频率低所以总开销小。
+    // 单次: 近区 16²×17 ≈ 4.4k 次 × 5Hz ≈ 2.2万/秒; 远区 128²/16×255≈26万?
+    //   不, 远区 128²/(4²)×(255/2)≈26万? 实际 (256/4)²=4096 × 128层=52万 太大,
+    //   所以远区 step=4 且 Y step=2 (64 层): (256/4)²×64 ≈ 26 万 / 8s ≈ 3.3万/秒。
+    //   合计 ~5.5 万/秒, 较原 27 万/秒降 5 倍, 且近区高频覆盖可视 + 远区广覆盖。
+    private static final double NEARBY_SCAN_INTERVAL = 0.2;   // 5Hz
+    private static final int NEARBY_SCAN_RADIUS = 16;          // 可视范围 + 一点
+    private static final int NEARBY_SCAN_Y_RANGE = 8;          // 薄层: 玩家 ±8 层
+    private static final double FAR_SCAN_INTERVAL = 8.0;       // 低频
+    private static final int FAR_SCAN_RADIUS = 128;            // 广范围
+    private static final int FAR_SCAN_STEP = 4;                // 稀疏采样 (4块扫1)
+    private final TimerGame _nearbyTimer = new TimerGame(NEARBY_SCAN_INTERVAL);
+    private final TimerGame _farTimer = new TimerGame(FAR_SCAN_INTERVAL);
+
     // A scan can last no more than 15 seconds
     private final TimerGame _asyncForceResetScanFlag = new TimerGame(15);
+    // (2026-08-23) 旧远区子块轮换字段已移除 (用户新设计: 远区直接低频广覆盖,
+    // 不再分块)。
 
     private final Map<Block, Integer> _trackingBlocks = new HashMap<>();
 
@@ -83,8 +105,101 @@ public class BlockTracker extends Tracker {
 
     @Override
     protected void updateState() {
+        // (2026-08-23 双区扫描) 近区 5Hz 高频小范围 + 远区低频广范围 (用户设计)。
+        if (_nearbyTimer.elapsed()) {
+            _nearbyTimer.reset();
+            if (_config.scanAsynchronously) {
+                Baritone.getExecutor().execute(() -> rescanNearby());
+            } else {
+                rescanNearby();
+            }
+        }
+        if (_farTimer.elapsed()) {
+            _farTimer.reset();
+            if (_config.scanAsynchronously) {
+                Baritone.getExecutor().execute(() -> rescanFar());
+            } else {
+                rescanFar();
+            }
+        }
         if (shouldUpdate()) {
             update();
+        }
+    }
+
+    /**
+     * (2026-08-23) 近区扫描: 5Hz, 半径 16, Y 玩家 ±8 层 (薄层)。
+     * 只覆盖可视范围 + 一点看不见区域 — 眼前的矿/水/岩浆即时感知,
+     * 看不见的地下矿不需高频 (远区低频广覆盖负责)。
+     */
+    private void rescanNearby() {
+        if (!AltoClef.inGame()) return;
+        Block[] blocksToScan;
+        synchronized (_trackingBlocks) {
+            blocksToScan = _trackingBlocks.keySet().toArray(new Block[0]);
+        }
+        if (blocksToScan.length == 0) return;
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null) return;
+        BlockPos playerPos = _mod.getPlayer().getBlockPos();
+        if (playerPos == null) return;
+
+        int minY = Math.max(playerPos.getY() - NEARBY_SCAN_Y_RANGE, 0);
+        int maxY = Math.min(playerPos.getY() + NEARBY_SCAN_Y_RANGE, 255);
+        scanRegionBySampling(world, blocksToScan, playerPos, NEARBY_SCAN_RADIUS, 1, minY, maxY);
+    }
+
+    /**
+     * (2026-08-23) 远区扫描: 低频 (8s), 半径 128, Y 全覆盖 0~255 (广范围)。
+     * step=4 稀疏采样 ("4 块扫 1")。覆盖不缩水, 频率低所以总开销小。
+     */
+    private void rescanFar() {
+        if (!AltoClef.inGame()) return;
+        Block[] blocksToScan;
+        synchronized (_trackingBlocks) {
+            blocksToScan = _trackingBlocks.keySet().toArray(new Block[0]);
+        }
+        if (blocksToScan.length == 0) return;
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null) return;
+        BlockPos playerPos = _mod.getPlayer().getBlockPos();
+        if (playerPos == null) return;
+
+        scanRegionBySampling(world, blocksToScan, playerPos, FAR_SCAN_RADIUS, FAR_SCAN_STEP, 0, 255);
+    }
+
+    private void scanRegionBySampling(ClientWorld world, Block[] blocks, BlockPos center, int radius, int step, int minY, int maxY) {
+        scanRegionBySamplingZRange(world, blocks, center, radius, step, minY, maxY,
+                center.getZ() - radius, center.getZ() + radius);
+    }
+
+    private void scanRegionBySamplingZRange(ClientWorld world, Block[] blocks, BlockPos center, int radius, int step, int minY, int maxY, int zStart, int zEnd) {
+        if (blocks.length == 0) return;
+        Set<Block> targetSet = new HashSet<>();
+        Collections.addAll(targetSet, blocks);
+
+        minY = Math.max(minY, 0);
+        maxY = Math.min(maxY, 255);
+        int yStep = Math.max(1, step / 2); // 竖直方向更稀疏也能覆盖到，因为资源多在地表/地下分层
+
+        for (int x = center.getX() - radius; x <= center.getX() + radius; x += step) {
+            for (int z = zStart; z <= zEnd; z += step) {
+                for (int y = minY; y <= maxY; y += yStep) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (!_mod.getChunkTracker().isChunkLoaded(pos)) continue;
+                    Block b;
+                    try {
+                        b = world.getBlockState(pos).getBlock();
+                    } catch (Exception e) {
+                        continue;
+                    }
+                    if (targetSet.contains(b)) {
+                        synchronized (_scanMutex) {
+                            currentCache().addBlock(b, pos);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -178,7 +293,13 @@ public class BlockTracker extends Tracker {
     public boolean anyFound(Block... blocks) {
         updateState();
         synchronized (_scanMutex) {
-            return currentCache().anyFound(blocks);
+            if (_mod.getModSettings().isCheatScan()) return currentCache().anyFound(blocks);
+            for (BlockPos pos : currentCache().getKnownLocations(blocks)) {
+                if (VisibilityHelper.isBlockPerceivable(_mod, pos)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -190,7 +311,13 @@ public class BlockTracker extends Tracker {
     public boolean anyFound(Predicate<BlockPos> isValidTest, Block... blocks) {
         updateState();
         synchronized (_scanMutex) {
-            return currentCache().anyFound(isValidTest, blocks);
+            if (_mod.getModSettings().isCheatScan()) return currentCache().anyFound(isValidTest, blocks);
+            for (BlockPos pos : currentCache().getKnownLocations(blocks)) {
+                if (VisibilityHelper.isBlockPerceivable(_mod, pos) && isValidTest.test(pos)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -275,6 +402,7 @@ public class BlockTracker extends Tracker {
                         }
                     }
                     if (!valid) continue;
+                    if (!_mod.getModSettings().isCheatScan() && !VisibilityHelper.isBlockPerceivable(_mod, check)) continue;
                     if (check.isWithinDistance(pos, range)) {
                         double sq = check.getSquaredDistance(pos);
                         if (sq < closestDistance) {
@@ -560,6 +688,7 @@ public class BlockTracker extends Tracker {
                     continue;
                 }
                 if (!isValid.test(pos)) continue;
+                if (!mod.getModSettings().isCheatScan() && !VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
 
                 double score = BaritoneHelper.calculateGenericHeuristic(position, WorldHelper.toVec3d(pos));
 
@@ -666,8 +795,8 @@ public class BlockTracker extends Tracker {
     }
 
     static class BlockTrackerConfig {
-        public double scanInterval = 7;
-        public double scanIntervalWhenNewBlocksFound = 2;
+        public double scanInterval = 5;  // 远区全量兜底扫描间隔（baritone searchWorld）
+        public double scanIntervalWhenNewBlocksFound = 1;
         public boolean scanAsynchronously = true;
         public int maxTotalCacheSize = 10000;
         public int maxCacheSizePerBlockType = 100;

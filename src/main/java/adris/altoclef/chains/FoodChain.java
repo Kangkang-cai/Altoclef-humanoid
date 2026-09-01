@@ -8,6 +8,7 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.ConfigHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import baritone.api.utils.input.Input;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -73,6 +74,14 @@ public class FoodChain extends SingleTaskChain {
             return Float.NEGATIVE_INFINITY;
         }
 
+        // (2026-08-30 战斗中举盾不吃东西, 用户) 正在打斗(尤其举盾 vs 骷髅/苦力怕)
+        // 时别自动吃—— 吃东西和举盾都是右键, 会互相抢 (会是顶走去吃 → 盾放下不
+        // 格挡 → 挨射), 且战斗中进食等于站桩挨打。让战斗优先, 战斗结束再吃。
+        if (mod.getMobDefenseChain().isInCombat()) {
+            stopEat(mod);
+            return Float.NEGATIVE_INFINITY;
+        }
+
         Pair<Integer, Optional<Item>> calculation = calculateFood(mod);
         _cachedFoodScore = calculation.getLeft();
         _cachedPerfectFood = calculation.getRight();
@@ -101,12 +110,23 @@ public class FoodChain extends SingleTaskChain {
 
         Settings settings = mod.getModSettings();
 
+        // IMPORTANT: the "should we collect food" decision MUST use the same
+        // score function as CollectFoodTask.isFinished (which calls
+        // StorageHelper.calculateInventoryFoodScore). The old code compared
+        // _cachedFoodScore from calculateFood(), which EXCLUDES protected
+        // stacks and spider eyes. A backpack full of protected food (bread /
+        // golden apples — items CollectFoodTask itself marks protected!)
+        // scored 0 here but >= threshold in isFinished: the chain preempted
+        // (55 > user task 50), the task finished instantly without ticking,
+        // ownership bounced back, and the bot ping-ponged between "sleep in
+        // bed" and "collect food" every tick while doing nothing.
+        int inventoryFoodScore = StorageHelper.calculateInventoryFoodScore(mod);
         if (_needsFood || _cachedFoodScore < settings.getMinimumFoodAllowed()) {
-            _needsFood = _cachedFoodScore < settings.getFoodUnitsToCollect();
+            _needsFood = inventoryFoodScore < settings.getFoodUnitsToCollect();
 
             // Only collect if we don't have enough food.
             // If the user inputs invalid settings, the bot would get stuck here.
-            if (_cachedFoodScore < settings.getFoodUnitsToCollect()) {
+            if (inventoryFoodScore < settings.getFoodUnitsToCollect()) {
                 setTask(new CollectFoodTask(settings.getFoodUnitsToCollect()));
                 return 55f;
             }
@@ -126,6 +146,21 @@ public class FoodChain extends SingleTaskChain {
         //Debug.logInternal("EATING " + toUse.getTranslationKey() + " : " + test);
         _isTryingToEat = true;
         _requestFillup = true;
+        // (2026-08-23 吃不上饭修复) 副手持盾时右键被盾抢走 (MC 机制: 副手
+        // 盾牌优先于主手使用 → 举盾不吃食物), 打架时 bot 副手常持盾, 想
+        // 吃东西一直卡着 (用户反馈)。先把副手盾换到背包空槽, 空出副手再
+        // 装备食物 + 右键进食。
+        if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) {
+            adris.altoclef.util.slots.Slot emptySlot = mod.getItemStorage()
+                    .getSlotsWithItemPlayerInventory(true, Items.AIR).stream()
+                    .filter(s -> !adris.altoclef.util.slots.Slot.isCursor(s))
+                    .findFirst().orElse(null);
+            if (emptySlot != null) {
+                mod.getSlotHandler().clickSlot(emptySlot,
+                        adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT.getInventorySlot(),
+                        net.minecraft.screen.slot.SlotActionType.SWAP);
+            }
+        }
         mod.getSlotHandler().forceEquipItem(new Item[]{food}, true); //"true" because it's food
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         mod.getExtraBaritoneSettings().setInteractionPaused(true);
@@ -237,7 +272,10 @@ public class FoodChain extends SingleTaskChain {
                 float saturationWasted = food.getSaturationModifier() - gainedSaturation;
                 float hungerWasted = food.getHunger() - gainedHunger;
 
-                boolean prioritizeSaturation = health < _config.prioritizeSaturationWhenBelowHealth;
+                // (2026-08-30 优先高恢复, 用户) 始终以"恢复度(饱食)"为主排序,
+                // 优先选恢复量最高的食物, 不再因"溢出浪费"惩罚而一直去选完美贴合
+                // 的小食物而不用高恢复的大餐。腐肉惩罚仍保留 (score 里扣)。
+                boolean prioritizeSaturation = true;
                 float saturationGoodScore = prioritizeSaturation ? gainedSaturation * _config.foodPickPrioritizeSaturationSaturationMultiplier : gainedSaturation;
                 float saturationLossPenalty = prioritizeSaturation ? 0 : saturationWasted * _config.foodPickSaturationWastePenaltyMultiplier;
                 float hungerLossPenalty = hungerWasted * _config.foodPickHungerWastePenaltyMultiplier;

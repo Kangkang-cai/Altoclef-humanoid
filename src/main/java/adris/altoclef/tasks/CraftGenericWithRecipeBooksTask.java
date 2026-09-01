@@ -12,10 +12,9 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.CraftingTableSlot;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
-import net.minecraft.item.ItemStack;
-
 import java.util.Arrays;
 import java.util.Optional;
+import net.minecraft.item.ItemStack;
 
 public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCraftingGrid {
 
@@ -46,7 +45,10 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
 
         Slot outputSlot = bigCrafting ? CraftingTableSlot.OUTPUT_SLOT : PlayerSlot.CRAFT_OUTPUT_SLOT;
         ItemStack output = StorageHelper.getItemStackInSlot(outputSlot);
-        if (_target.getOutputItem() == output.getItem() && mod.getItemStorage().getItemCount(_target.getOutputItem()) < _target.getTargetCount()) {
+        // (2026-08-31 反复"Getting output"修复) 输出槽【非空且匹配】才收成品 —— 与
+        // containerSubTask/ReceiveCraftingOutput 一致, 避免空输出槽被短暂判成"有成品"
+        // → 反复派发 ReceiveCraftingOutput(内部读到空 return) 造成 4-5 次反复。
+        if (!output.isEmpty() && _target.getOutputItem() == output.getItem() && mod.getItemStorage().getItemCount(_target.getOutputItem()) < _target.getTargetCount()) {
             setDebugState("Getting output");
             return new ReceiveCraftingOutputSlotTask(outputSlot, _target.getTargetCount());
         }  // TODO Migrate this back to Craft In Inventory

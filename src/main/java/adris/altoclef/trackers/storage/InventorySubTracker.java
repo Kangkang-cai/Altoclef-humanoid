@@ -32,6 +32,14 @@ public class InventorySubTracker extends Tracker {
     private final HashMap<Item, Integer> _itemCountsContainer = new HashMap<>();
 
     private ScreenHandler _prevScreenHandler;
+    // (2026-08-25 通用缓存修复) 上次强制刷新时间戳 (ms) + 间隔。
+    // 根因 (用户实测"中途开始游戏背包有物品却判没有"): Tracker.ensureUpdated
+    // 只在 isDirty() 时刷新; 若首次刷新发生在玩家未进世界时 (player/handler
+    // 为 null 直接 return), 缓存是空的且 _dirty 已被置 false → 之后不依赖
+    // slot 动作就永不刷新 → getItemCount 永久返回 0。改为每 500ms 强制全量
+    // 重建一次缓存, 从根上解决"缓存与实际不一致"。
+    private long _lastForcedRefreshTime = 0;
+    private static final long FORCE_REFRESH_INTERVAL_MS = 500;
 
     public InventorySubTracker(TrackerManager manager) {
         super(manager);
@@ -206,7 +214,20 @@ public class InventorySubTracker extends Tracker {
     @Override
     protected boolean isDirty() {
         ScreenHandler handler = MinecraftClient.getInstance().player != null? MinecraftClient.getInstance().player.currentScreenHandler : null;
-        return super.isDirty() || handler != _prevScreenHandler;
+        if (super.isDirty() || handler != _prevScreenHandler) {
+            return true;
+        }
+        // (2026-08-25 通用缓存修复) 除 slot 动作/handler 切换外, 每 500ms 强制
+        // 标记为脏 → 基类 ensureUpdated 会全量重建缓存。根因: 首次刷新若发生在
+        // 玩家未进世界时 (player/handler 为 null 直接 return), 缓存空且 dirty
+        // 已清 → 之后不依赖 slot 动作就永不刷新, getItemCount 永久返回 0
+        // (用户实测"中途开始背包有物品却判没有")。
+        long now = System.currentTimeMillis();
+        if (now - _lastForcedRefreshTime > FORCE_REFRESH_INTERVAL_MS) {
+            _lastForcedRefreshTime = now;
+            return true;
+        }
+        return false;
     }
 
     private static boolean shouldIgnoreSlotForContainer(Slot slot) {

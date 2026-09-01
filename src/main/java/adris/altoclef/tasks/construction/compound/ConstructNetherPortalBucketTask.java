@@ -116,8 +116,11 @@ public class ConstructNetherPortalBucketTask extends Task {
             mod.getSlotHandler().refreshInventory();
         }
 
-        //If too far, reset.
-        if (_portalOrigin != null && !_portalOrigin.isWithinDistance(mod.getPlayer().getPos(), 2000)) {
+        //If too far, reset. (2026-08-23) 2000 → 100: 旧逻辑在玩家离开原点
+        // 2000 格才重置, 导致 bot 在远处 (如收集岩浆处) 装完岩浆后跑回旧原点
+        // 建造 — 传送门与刚收集的岩浆位置脱节 (实测: 岩浆 722,64,414 但原点
+        // 在 317,34,84, 相距 400+ 格)。改成 100 格, bot 远离原点后重新就近选点。
+        if (_portalOrigin != null && !_portalOrigin.isWithinDistance(mod.getPlayer().getPos(), 100)) {
             _portalOrigin = null;
             _currentDestroyTarget = null;
         }
@@ -181,7 +184,10 @@ public class ConstructNetherPortalBucketTask extends Task {
                 BlockPos lavaPos = findLavaLake(mod, mod.getPlayer().getBlockPos());
                 if (lavaPos != null) {
                     // We have a lava lake, set our portal origin!
-                    BlockPos foundPortalRegion = getPortalableRegion(mod, lavaPos, mod.getPlayer().getBlockPos(), new Vec3i(-1, 0, 0), PORTALABLE_REGION_SIZE, 20);
+                    // (2026-08-23) timeoutRange 20 → 8: 就近原则, 传送门应在岩浆
+                    // 旁 5-6 格, 不在岩浆上 (用户设计)。20 会外推到很远的可放置点,
+                    // 让传送门远离刚收集的岩浆。
+                    BlockPos foundPortalRegion = getPortalableRegion(mod, lavaPos, mod.getPlayer().getBlockPos(), new Vec3i(-1, 0, 0), PORTALABLE_REGION_SIZE, 8);
                     if (foundPortalRegion == null) {
                         Debug.logWarning("Failed to find portalable region nearby. Consider increasing the search timeout range");
                     } else {
@@ -260,22 +266,25 @@ public class ConstructNetherPortalBucketTask extends Task {
     }
 
     private BlockPos findLavaLake(AltoClef mod, BlockPos playerPos) {
-        HashSet<BlockPos> alreadyExplored = new HashSet<>();
-
         double nearestSqDistance = Double.POSITIVE_INFINITY;
         BlockPos nearestLake = null;
+        // 限制搜索距离，避免导航到过远的地方（2026-08-23）
+        double MAX_SEARCH_DISTANCE = 100; // 最多搜索100格内的岩浆
+        double maxSearchSqDistance = MAX_SEARCH_DISTANCE * MAX_SEARCH_DISTANCE;
+
         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.LAVA)) {
-            if (alreadyExplored.contains(pos)) continue;
             double sqDist = playerPos.getSquaredDistance(pos);
+            // 跳过过远的岩浆位置
+            if (sqDist > maxSearchSqDistance) {
+                Debug.logMessage("Skipping lava at " + pos + " (distance=" + Math.sqrt(sqDist) + " > " + MAX_SEARCH_DISTANCE + ")");
+                continue;
+            }
             if (sqDist < nearestSqDistance) {
-                int depth = getNumberOfBlocksAdjacent(alreadyExplored, pos);
-                if (depth != 0) {
-                    Debug.logMessage("Found with depth " + depth);
-                    if (depth >= 12) {
-                        nearestSqDistance = sqDist;
-                        nearestLake = pos;
-                    }
-                }
+                // (2026-08-23 不要求深度) 用户设计: 去掉深度要求, 只要有岩浆
+                // 就选为传送门锚点 (CAST_FRAME 造墙机制支持单格岩浆源, 不依赖
+                // 湖的深浅)。旧逻辑 depth>=12 再降到 >=4 都误伤过, 直接取消。
+                nearestSqDistance = sqDist;
+                nearestLake = pos;
             }
         }
 
@@ -349,10 +358,14 @@ public class ConstructNetherPortalBucketTask extends Task {
                         }
                     }
                 }
-                // Check for solid ground at least somewhere
-                if (!solidFound) {
-                    break;
-                }
+                // (2026-08-23 无支撑也能建) 旧逻辑要求 box 内至少有 1 个实心
+                // 方块 (solidFound) 才接受该位置, 否则放弃整个方向 → 平坦岩浆湖
+                // 周围找不到"有地面"的位置时, getPortalableRegion 返回 null →
+                // 一直 wander 找不到传送门结构。PlaceObsidianBucketTask 的
+                // CAST_FRAME 会自己造支撑 (下/前后/左右/右上 6 个方向放方块围住
+                // 岩浆), 所以即使地面是纯岩浆/悬空, 也能造出支撑铸造黑曜石。
+                // 不再因 solidFound=false 放弃 — 优先有支撑的位置, 无支撑也接受。
+                // if (!solidFound) { break; }
 
                 if (found) {
                     BlockPos foundBoxCorner = lava.add(offset).add(sizeOffset);

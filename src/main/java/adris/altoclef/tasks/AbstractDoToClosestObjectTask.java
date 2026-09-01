@@ -1,6 +1,7 @@
 package adris.altoclef.tasks;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -68,7 +69,18 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
         }
 
         // Get closest object
+        // [SlowTickDebug] getClosestTo runs EVERY tick while this task is active. If
+        // the bot "stands still computing", this is a top suspect: it can iterate
+        // every cached block position and do a raycast each time.
+        final long MS = 1000_000L;
+        long tClosest = System.nanoTime();
         Optional<T> checkNewClosest = getClosestTo(mod, getOriginPos(mod));
+        long closestMs = (System.nanoTime() - tClosest) / MS;
+        if (closestMs > 300) {
+            String m = "[SlowTickDebug] getClosestTo took " + closestMs + "ms (this task: " + toDebugString() + ")";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_slowtick.log", m);
+        }
 
         // Receive closest object and position
         if (checkNewClosest.isPresent() && !checkNewClosest.get().equals(_currentlyPursuing)) {
@@ -84,14 +96,22 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
                     double closestDistanceSqr = getPos(mod, _currentlyPursuing).squaredDistanceTo(mod.getPlayer().getPos());
                     int lastTick = WorldHelper.getTicks();
 
-                    if (!_heuristicMap.containsKey(_currentlyPursuing)) {
-                        _heuristicMap.put(_currentlyPursuing, new CachedHeuristic());
-                    }
-                    CachedHeuristic h = _heuristicMap.get(_currentlyPursuing);
+                    CachedHeuristic h = _heuristicMap.computeIfAbsent(_currentlyPursuing, k -> new CachedHeuristic());
+                    // (2026-08-25 接近中不切换, 用户指定) 正在接近当前目标
+                    // (当前距离 < 历史最近距离) 时, 即使发现更近的新目标也不
+                    // 切换 — 否则挖干草块/小麦等走到一半就换目标, 来回横跳
+                    // (用户实测: "距离比较远走到一半就换目标, 距离目标越来越
+                    // 近时不应随意切换")。只有没在接近 (远离/停滞, 可能不可达)
+                    // 才评估切换到更优目标, 保留原兜底。
+                    double prevClosestSqr = h.getClosestDistanceSqr();
+                    boolean closingIn = closestDistanceSqr < prevClosestSqr;
                     h.updateHeuristic(currentHeuristic);
                     h.updateDistance(closestDistanceSqr);
                     h.setTickAttempted(lastTick);
-                    if (_heuristicMap.containsKey(newClosest)) {
+                    if (closingIn) {
+                        // 正在接近当前目标: 保持不动, 不因新目标打断
+                        setDebugState("Closing in on target, keeping pursuit");
+                    } else if (_heuristicMap.containsKey(newClosest)) {
                         // Our new object has a past potential heuristic calculated, if it's better try it out.
                         CachedHeuristic maybeReAttempt = _heuristicMap.get(newClosest);
                         double maybeClosestDistance = getPos(mod, newClosest).squaredDistanceTo(mod.getPlayer().getPos());
@@ -105,9 +125,21 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
                             maybeReAttempt.updateDistance(maybeClosestDistance);
                         }
                     } else {
-                        setDebugState("Trying out NEW pursuit");
-                        // Our new object does not have a heuristic, TRY IT OUT!
-                        _currentlyPursuing = newClosest;
+                        // (2026-08-27 修复: pursuit 粘住) 旧代码无条件 "Trying out
+                        // NEW pursuit" 切到新目标 — 放末影之眼时多个等价框架距离
+                        // 不动 → 每 tick 切目标 → 交互 (InteractWithBlockTask) 每次
+                        // 1 tick 就被换掉, 点击永远完不成 ("Waiting for click" +
+                        // requestBlockUnreachable → 换下一个 → 死循环, 日志实锤
+                        // 6x/5s)。当前 pursuit 仍有效就不随便换, 盯住直到它失效/
+                        // 被填/不可达 (isValid 兜底, 上方行 65 重置为 null)。
+                        if (isValid(mod, _currentlyPursuing)) {
+                            setDebugState("Sticking with current pursuit");
+                            // 保持 _currentlyPursuing 不变
+                        } else {
+                            setDebugState("Trying out NEW pursuit");
+                            // Our new object does not have a heuristic, TRY IT OUT!
+                            _currentlyPursuing = newClosest;
+                        }
                     }
                 } else {
                     setDebugState("Waiting for move task to kick in...");

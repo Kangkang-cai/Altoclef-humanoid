@@ -68,13 +68,6 @@ public class InputControls {
         return inputToKeyBinding(input).isPressed();
     }
 
-    public void forceLook(float yaw, float pitch) {
-        if (MinecraftClient.getInstance().player != null) {
-            MinecraftClient.getInstance().player.setYaw(yaw);
-            MinecraftClient.getInstance().player.setPitch(pitch);
-        }
-    }
-
     // Before the user calls input commands for the frame
     public void onTickPre() {
         while (!_toUnpress.isEmpty()) {

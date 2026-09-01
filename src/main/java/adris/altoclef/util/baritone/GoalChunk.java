@@ -12,6 +12,10 @@ public class GoalChunk implements Goal {
         _pos = pos;
     }
 
+    public ChunkPos getChunkPos() {
+        return _pos;
+    }
+
     @Override
     public boolean isInGoal(int x, int y, int z) {
         return _pos.getStartX() <= x && x <= _pos.getEndX() &&

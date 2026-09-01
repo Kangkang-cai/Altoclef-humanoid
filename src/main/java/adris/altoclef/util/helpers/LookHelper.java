@@ -90,13 +90,55 @@ public interface LookHelper {
 
     static boolean cleanLineOfSight(Entity entity, BlockPos block, double maxRange) {
         Vec3d center = WorldHelper.toVec3d(block);
-        BlockHitResult hit = raycast(entity, getCameraPos(entity), center, maxRange);
-        if (hit == null) return true;
-        return switch (hit.getType()) {
-            case MISS -> true;
-            case BLOCK -> hit.getBlockPos().equals(block);
-            case ENTITY -> false;
-        };
+        // (2026-08-23 流体 LOS 修复) 目标方块是流体 (水/岩浆) 时, 若仍用
+        // FluidHandling.NONE, 射线会直接穿过流体命中背后的实心方块 (岩浆湖
+        // 底/岩壁), hit 方块 ≠ 目标 → 永远判"不可见" (用户实测: 左前方一条
+        // 缝看到岩浆湖却感知不到, 一直 wander 找岩浆)。流体用 SOURCE_ONLY,
+        // 射线会命中流体源方块本身, LOS 判定正确。
+        boolean isFluid = !entity.world.getBlockState(block).getFluidState().isEmpty();
+        RaycastContext.FluidHandling handling = isFluid ? RaycastContext.FluidHandling.SOURCE_ONLY : RaycastContext.FluidHandling.NONE;
+
+        // (2026-08-23 6 面 LOS 判定) 用户实测: 平坦的岩浆湖只能看到很扁平的
+        // 表面, 以方块中心为目标的射线会被湖边缘/岩壁挡住 → 判"不可见";
+        // 强行搭高正对湖中心才看到。方块的中心被挡, 不代表它的表面不可见。
+        // 中心判定失败时, 再对 6 个面的中心点各射一条射线, 任一命中目标方块
+        // 本身即视为可见。中心通过 (绝大多数正常视野) 时快速短路返回。
+        Vec3d start = getCameraPos(entity);
+
+        // ① 中心点判定
+        BlockHitResult centerHit = raycast(entity, start, center, maxRange, handling);
+        if (centerHit != null && centerHit.getType() == HitResult.Type.BLOCK && centerHit.getBlockPos().equals(block)) {
+            return true;
+        }
+        // MISS (射线到中心没碰到任何东西) 保持原语义: 视为可见
+        if (centerHit == null || centerHit.getType() == HitResult.Type.MISS) {
+            return true;
+        }
+
+        // ② 6 个面判定 (2026-08-23): 中心被其他方块挡住 (BLOCK hit ≠ 目标) 时,
+        // 任一可见面即可见 — 解决平坦岩浆湖/扁平方块侧面可见但中心被挡的问题。
+        for (Direction dir : Direction.values()) {
+            Vec3d faceCenter = center.add(
+                    dir.getOffsetX() * 0.5,
+                    dir.getOffsetY() * 0.5,
+                    dir.getOffsetZ() * 0.5);
+            BlockHitResult faceHit = raycast(entity, start, faceCenter, maxRange, handling);
+            if (faceHit != null && faceHit.getType() == HitResult.Type.BLOCK && faceHit.getBlockPos().equals(block)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-08-23) 带流体处理方式的 raycast, 供 LOS 面判定复用。
+     */
+    static BlockHitResult raycast(Entity entity, Vec3d start, Vec3d end, double maxRange, RaycastContext.FluidHandling fluidHandling) {
+        Vec3d delta = end.subtract(start);
+        if (delta.lengthSquared() > maxRange * maxRange) {
+            end = start.add(delta.normalize().multiply(maxRange));
+        }
+        return entity.world.raycast(new RaycastContext(start, end, RaycastContext.ShapeType.COLLIDER, fluidHandling, entity));
     }
 
     static Vec3d toVec3d(Rotation rotation) {
@@ -198,9 +240,9 @@ public interface LookHelper {
     }
 
     static void lookAt(AltoClef mod, Rotation rotation) {
+        // Let baritone handle the rotation smoothly (with max speed limits) instead of
+        // instantly snapping the camera, which looks/behaves unnaturally.
         mod.getClientBaritone().getLookBehavior().updateTarget(rotation, true);
-        mod.getPlayer().setYaw(rotation.getYaw());
-        mod.getPlayer().setPitch(rotation.getPitch());
     }
     static void lookAt(AltoClef mod, Vec3d toLook) {
         Rotation targetRotation = getLookRotation(mod, toLook);

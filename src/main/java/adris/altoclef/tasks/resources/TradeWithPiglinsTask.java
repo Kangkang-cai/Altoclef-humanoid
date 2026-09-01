@@ -5,17 +5,22 @@ import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.AbstractDoToEntityTask;
+import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasks.resources.TradeWithPiglinsTask.PerformTradeWithPiglin;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.EntityHelper;
+import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HoglinEntity;
 import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 
@@ -32,6 +37,11 @@ public class TradeWithPiglinsTask extends ResourceTask {
     private final int _goldBuffer;
     private final Task _tradeTask = new PerformTradeWithPiglin();
     private Task _goldTask = null;
+    // (2026-08-24 交易预算判定) 是否已开始交易。未开始交易时先确保金锭达到
+    // _goldBuffer (熔炼生金矿等); 一旦开始交易, 金锭会随每次丢出而消耗,
+    // 只要还剩金锭就继续交易, 不因少于预算而中途回去收集 (否则交易中少 1
+    // 锭就回 CollectGoldIngotTask 合成 → 打开工作台 → 卡死, 用户实测)。
+    private boolean _startedTrading = false;
 
     public TradeWithPiglinsTask(int goldBuffer, ItemTarget[] itemTargets) {
         super(itemTargets);
@@ -55,7 +65,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-
+        _startedTrading = false;
     }
 
     @Override
@@ -65,10 +75,29 @@ public class TradeWithPiglinsTask extends ResourceTask {
             setDebugState("Collecting gold");
             return _goldTask;
         }
-        if (!mod.getItemStorage().hasItem(Items.GOLD_INGOT)) {
-            if (_goldTask == null) _goldTask = TaskCatalogue.getItemTask(Items.GOLD_INGOT, _goldBuffer);
+        // (2026-08-24 修复) 只有"有金锭"就交易太宽松: 用户实测背包 23 锭 +
+        // 16 生金矿 = 39 ≥ 32, 却"没把生金矿熔炼, 直接去交易"。原因: 熔炼
+        // 子任务 (SmeltInFurnaceTask) 在收集燃料/合成木板时被围蔽、清光标等
+        // 打断 → 回到这里 hasItem(GOLD_INGOT) 恒真 → 跳过收集 → 直接交易,
+        // 背包里的 raw_gold 永远不熔炼。必须等金锭数量达到交易预算
+        // _goldBuffer 才交易; 不足则继续 CollectGoldIngotTask (其下界分支
+        // 会优先熔炼背包已有的 raw_gold → 再合成金粒, 直到凑满 _goldBuffer)。
+        // (2026-08-24 真实背包兜底) 用 countItemInInventoryReal 扫真实背包,
+        // 不依赖 tracker 缓存 — 启动瞬间缓存可能陈旧 (用户实测按 esc 才刷新),
+        // 导致"有金锭却判定没有" → 一直挖金。
+        // (2026-08-24 交易预算再修) 只在"未开始交易且金锭 < _goldBuffer"或
+        // "金锭耗尽(=0)"时回去收集。一旦开始交易, 每次丢金锭都会消耗, 若
+        // 一低于预算就回 CollectGoldIngotTask 会频繁打断交易 (金锭 32→31 就
+        // 去合成 1 锭 → 打开工作台 → 卡死, 用户实测 12:21 日志)。
+        int goldIngots = StorageHelper.countItemInInventoryReal(mod, Items.GOLD_INGOT);
+        if (goldIngots == 0 || (!_startedTrading && goldIngots < _goldBuffer)) {
+            if (_goldTask == null || !_goldTask.isActive()) {
+                _goldTask = TaskCatalogue.getItemTask(Items.GOLD_INGOT, _goldBuffer);
+            }
+            setDebugState("Collecting gold (budget " + _goldBuffer + ")");
             return _goldTask;
         }
+        _startedTrading = true;
 
         // If we have no piglin nearby, explore until we find piglin.
         if (!mod.getEntityTracker().entityFound(PiglinEntity.class)) {
@@ -142,6 +171,34 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
         @Override
         protected Task onEntityInteract(AltoClef mod, Entity entity) {
+
+            // (2026-08-24 交易不生效修复) 切到交易时容器界面可能还开着 (熔炉
+            // 收金锭收尾), 界面开启时 interactEntity 右键被界面拦截 → 交易
+            // 不触发 → Approach 猪灵瞬间完成又反复 = 卡死循环 (用户实测
+            // 13:52)。交互前先确保所有界面关闭 (幂等, 无界面无操作)。
+            StorageHelper.closeScreen();
+
+            // (2026-08-23 捡猪灵掉物) 猪灵收走金锭后会把随机物品朝玩家方向丢
+            // 出来 (防火药水/末影珍珠等, 都是 ItemEntity)。用户实测: 猪灵丢了
+            // 瓶防火药水 bot 没捡 ("可能是没看到") — 交易前先捡最近的猪灵掉物。
+            // 优先防火药水 (POTION/SPLASH_POTION + FIRE_RESISTANCE 效果, 用
+            // NBT 感知判定, 排除水瓶), 其次末影珍珠。ItemTarget 只比 Item 类型,
+            // 所以先用 isFireResPotionStack 确认最近的掉落物值得捡, 命中才派
+            // PickupDroppedItemTask (满背包会自动腾位)。
+            Optional<Entity> drop = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
+                    e -> e instanceof ItemEntity ie && ie.isAlive() && ie.isInRange(mod.getPlayer(), 12),
+                    ItemEntity.class);
+            if (drop.isPresent() && drop.get() instanceof ItemEntity itemEntity) {
+                ItemStack dropStack = itemEntity.getStack();
+                if (ItemHelper.isFireResPotionStack(dropStack) || dropStack.getItem() == Items.ENDER_PEARL) {
+                    setDebugState("Picking up piglin barter drop");
+                    return new PickupDroppedItemTask(new ItemTarget[]{
+                            new ItemTarget(Items.POTION, 1),
+                            new ItemTarget(Items.SPLASH_POTION, 1),
+                            new ItemTarget(Items.ENDER_PEARL, 1)
+                    }, true);
+                }
+            }
 
             // If we didn't run this in a while, we can retry bartering.
             if (_intervalTimeout.elapsed()) {

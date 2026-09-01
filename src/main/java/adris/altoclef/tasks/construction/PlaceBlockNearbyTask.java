@@ -117,7 +117,11 @@ public class PlaceBlockNearbyTask extends Task {
         if (_tryPlace != null) {
             setDebugState("Trying to place at " + _tryPlace);
             _justPlaced = _tryPlace;
-            return new PlaceBlockTask(_tryPlace, _toPlace);
+            // (2026-08-31 放单方块不垫基) 禁止 PlaceBlockTask 自动收集垫基方块。
+            // 旧逻辑: 用默认构造(autoCollectStructureBlocks=true)放台子/熔炉等单体
+            // 方块, 手上没有泥土/圆石时就被拖去挖 32 块垫基方块才回来放, 放台子
+            // 卡死→回退挖泥土。放单方块理应直接落地, 不需要垫基。
+            return new PlaceBlockTask(_tryPlace, _toPlace, false, false);
         }
 
         // Look in random places to maybe get a random hit

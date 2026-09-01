@@ -442,7 +442,15 @@ public class TaskCatalogue {
             woodTasks("sign", woodItems -> woodItems.sign, (woodItems, count) -> new CollectSignTask(woodItems.sign, woodItems.prefix + "_planks", count));
             {
                 String c = "cobblestone";
-                shapedRecipe3x3("furnace", Items.FURNACE, 1, c, c, c, c, o, c, c, c, c).dontMineIfPresent();
+                // (2026-08-25 用户实测纠正) 黑石/深板岩圆石与圆石功能完全相同,
+                // 都可合成熔炉 (MC 1.16 下界更新黑石替代圆石, 1.17 洞穴更新深板岩
+                // 圆石同样适用)。之前 2026-08-24 只加了黑石、漏了深板岩圆石 →
+                // 背包有深板岩圆石却判"缺材料"→ 去挖圆石卡死 (用户实测 10:16
+                // 做熔炉: 光标残留 cobbled_deepslate, "does NOT have RECIPE
+                // MATERIALS" 死循环)。三者都接受。
+                ItemTarget cb = new ItemTarget(new Item[]{Items.COBBLESTONE, Items.BLACKSTONE, Items.COBBLED_DEEPSLATE});
+                shapedRecipe3x3Targets("furnace", Items.FURNACE, 1, cb, cb, cb, cb, ItemTarget.EMPTY, cb, cb, cb, cb)
+                        .dontMineIfPresent().anyDimension();
                 shapedRecipe3x3("dropper", Items.DROPPER, 1, c, c, c, c, o, c, c, "redstone", c);
                 shapedRecipe3x3("dispenser", Items.DISPENSER, 1, c, c, c, c, "bow", c, c, "redstone", c);
                 shapedRecipe3x3("brewing_stand", Items.BREWING_STAND, 1, o, o, o, o, "blaze_rod", o, c, c, c);
@@ -742,6 +750,16 @@ public class TaskCatalogue {
 
     private static CataloguedResource shapedRecipe3x3(String name, Item match, int outputCount, String s0, String s1, String s2, String s3, String s4, String s5, String s6, String s7, String s8) {
         CraftingRecipe recipe = CraftingRecipe.newShapedRecipe(name, new ItemTarget[]{t(s0), t(s1), t(s2), t(s3), t(s4), t(s5), t(s6), t(s7), t(s8)}, outputCount);
+        return put(name, new Item[]{match}, count -> new CraftInTableTask(new RecipeTarget(match, count, recipe)));
+    }
+
+    /**
+     * (2026-08-24 黑石替代圆石) 与 shapedRecipe3x3 相同, 但槽位直接接受
+     * ItemTarget, 用于"一个位置可放多种材料"的配方 (如熔炉: 圆石或黑石)。
+     * 熔炉注册时还会 .anyDimension(), 让下界也能就地合成熔炉。
+     */
+    private static CataloguedResource shapedRecipe3x3Targets(String name, Item match, int outputCount, ItemTarget s0, ItemTarget s1, ItemTarget s2, ItemTarget s3, ItemTarget s4, ItemTarget s5, ItemTarget s6, ItemTarget s7, ItemTarget s8) {
+        CraftingRecipe recipe = CraftingRecipe.newShapedRecipe(name, new ItemTarget[]{s0, s1, s2, s3, s4, s5, s6, s7, s8}, outputCount);
         return put(name, new Item[]{match}, count -> new CraftInTableTask(new RecipeTarget(match, count, recipe)));
     }
 

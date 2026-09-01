@@ -20,6 +20,7 @@ import adris.altoclef.ui.CommandStatusOverlay;
 import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
 import baritone.altoclef.AltoClefSettings;
 import baritone.api.BaritoneAPI;
@@ -30,6 +31,7 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import org.lwjgl.glfw.GLFW;
@@ -60,6 +62,11 @@ public class AltoClef implements ModInitializer {
     private FoodChain _foodChain;
     private MobDefenseChain _mobDefenseChain;
     private MLGBucketFallChain _mlgBucketChain;
+    // (2026-08-30 没镐别挖石头墙) 当前采矿等级缓存, 每 client tick 刷新。
+    // 供 Baritone 寻路的 avoidBlockBreak 谓词用 —— 寻路线程读它不该碰背包,
+    // 只在客户线程 (onClientTick) 更新, volatile 保证可见。避免谓词里再走
+    // plausibleToBreak (会回调本谓词 → 栈溢出崩溃, 上次实测)。
+    private volatile adris.altoclef.util.MiningRequirement _currentMiningReq = adris.altoclef.util.MiningRequirement.HAND;
     // Trackers
     private ItemStorageTracker _storageTracker;
     private ContainerSubTracker _containerSubTracker;
@@ -67,6 +74,9 @@ public class AltoClef implements ModInitializer {
     private BlockTracker _blockTracker;
     private SimpleChunkTracker _chunkTracker;
     private MiscBlockTracker _miscBlockTracker;
+    private SoundTracker _soundTracker;
+    private KnowledgeMemory _knowledgeMemory;
+    private WorldMemory _worldMemory;
     // Renderers
     private CommandStatusOverlay _commandStatusOverlay;
     // Settings
@@ -109,8 +119,10 @@ public class AltoClef implements ModInitializer {
         _mobDefenseChain = new MobDefenseChain(_taskRunner);
         new DeathMenuChain(_taskRunner);
         new PlayerInteractionFixChain(_taskRunner);
+        new SwingThroughChain(_taskRunner);
         _mlgBucketChain = new MLGBucketFallChain(_taskRunner);
         new WorldSurvivalChain(_taskRunner);
+        new DeathRecoveryChain(_taskRunner);
         _foodChain = new FoodChain(_taskRunner);
 
         // Trackers
@@ -119,6 +131,9 @@ public class AltoClef implements ModInitializer {
         _blockTracker = new BlockTracker(this, _trackerManager);
         _chunkTracker = new SimpleChunkTracker(this);
         _miscBlockTracker = new MiscBlockTracker(this);
+        _soundTracker = new SoundTracker();
+        _knowledgeMemory = new KnowledgeMemory(this);
+        _worldMemory = new WorldMemory(this);
 
         // Renderers
         _commandStatusOverlay = new CommandStatusOverlay();
@@ -146,7 +161,14 @@ public class AltoClef implements ModInitializer {
                 getCommandExecutor().executeWithPrefix(getModSettings().getIdleCommand());
             }
             // Don't break blocks or place blocks where we are explicitly protected.
-            getExtraBaritoneSettings().avoidBlockBreak(blockPos -> _settings.isPositionExplicitelyProtected(blockPos));
+            // (2026-08-30 没镐别挖石头墙, 用户) 床在屋里时 bot 不走门, 非要挖穿
+            // 石头墙, 但没镐挖不动 → 挖一半放弃又重挖卡死。让寻路在"当前采矿
+            // 等级 < 该方块所需等级"时避让 (没镐 → 石头/矿石都避开 → 改走门)。
+            // 用缓存的 _currentMiningReq + vanilla getMinimumRequirementForBlock,
+            // 绝不用 plausibleToBreak (它会回调本谓词 → 栈溢出崩溃, 上次实测)。
+            getExtraBaritoneSettings().avoidBlockBreak(blockPos ->
+                    _settings.isPositionExplicitelyProtected(blockPos)
+                            || WorldHelper.shouldAvoidUnminable(this, _currentMiningReq, blockPos));
             getExtraBaritoneSettings().avoidBlockPlace(blockPos -> _settings.isPositionExplicitelyProtected(blockPos));
         });
 
@@ -174,9 +196,26 @@ public class AltoClef implements ModInitializer {
         runEnqueuedPostInits();
     }
 
+    // [JankDebug] 整帧耗时检测 (2026-08-23): 记录本帧起始 nanoTime 与上一帧
+    // 间隔, 在帧尾测整体耗时。游戏画面规律性停顿几毫秒 = 主/渲染线程某帧
+    // 耗时过长或帧间隔抖动。单帧内某阶段 >500ms 已有 SlowTickDebug; 这里抓
+    // 更细的"整帧 + 帧间隔"规律性卡顿 (几 ms~几十 ms 级别)。
+    private long _lastFrameStartNano = 0;
+
     // Client tick
     private void onClientTick() {
         runEnqueuedPostInits();
+
+        // (2026-08-30 没镐别挖石头墙) 客户线程刷新"当前采矿等级"缓存, 供寻路
+        // 谓词用。仅 inGame 时刷新; 玩家空手/复活 (HAND) 会让寻路避开硬岩。
+        if (inGame()) {
+            _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
+        }
+
+        // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)
+        long frameStart = System.nanoTime();
+        long frameGapMs = (_lastFrameStartNano == 0) ? 0 : (frameStart - _lastFrameStartNano) / 1000_000L;
+        _lastFrameStartNano = frameStart;
 
         _inputControls.onTickPre();
 
@@ -193,15 +232,75 @@ public class AltoClef implements ModInitializer {
         _containerSubTracker.onServerTick();
         _miscBlockTracker.tick();
 
+        // [SlowTickDebug] measure how long each synchronous phase of the client
+        // tick takes. When the bot "stands still forever computing", one of these
+        // phases is what it's actually waiting on. We only log when a phase blows
+        // past the threshold (ms), so normal ticks stay silent.
+        final long MS = 1000_000L; // nanoseconds per millisecond
+
+        long t0 = System.nanoTime();
+        _knowledgeMemory.tick();
+        long knowMs = (System.nanoTime() - t0) / MS;
+        if (knowMs > 500) {
+            String m = "[SlowTickDebug] KnowledgeMemory.tick took " + knowMs + "ms";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_slowtick.log", m);
+        }
+
+        t0 = System.nanoTime();
+        try {
+            _worldMemory.tick();
+        } catch (Throwable t) {
+            // [BedDebug/diagnostic] if our WorldMemory scan throws mid-client-tick it
+            // runs BEFORE _trackerManager/_taskRunner.tick below, silently breaking the
+            // task state machine (e.g. sleep task losing its bed). Surfacing it proves
+            // or rules this out.
+            this.logWarning("WorldMemory.tick threw: " + t);
+            t.printStackTrace();
+        }
+        long worldMs = (System.nanoTime() - t0) / MS;
+        if (worldMs > 500) {
+            String m = "[SlowTickDebug] WorldMemory.tick took " + worldMs + "ms";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_slowtick.log", m);
+        }
+
         _trackerManager.tick();
         _blockTracker.preTickTask();
+        t0 = System.nanoTime();
         _taskRunner.tick();
+        long runMs = (System.nanoTime() - t0) / MS;
+        if (runMs > 500) {
+            String m = "[SlowTickDebug] TaskRunner.tick took " + runMs + "ms";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_slowtick.log", m);
+        }
         _blockTracker.postTickTask();
 
         _butler.tick();
         _messageSender.tick();
 
         _inputControls.onTickPost();
+
+        // [GamerButton] 每 tick 检查右上角"开始/停止速通"按钮的点击。
+        _commandStatusOverlay.onClientTick(this);
+
+        // [JankDebug] 帧尾: 整帧耗时 + 帧间隔 (卡顿检测, 2026-08-23)。
+        // 阈值刻意设低: 用户报告"画面停止不动几毫秒", 说明是规律性的小卡顿,
+        // 500ms 级别的 SlowTickDebug 抓不到。这里 帧耗时>60ms 或 帧间隔>100ms
+        // 都记到 altoclef_jank.log。日志带游戏 tick, 方便对照 tasks.log。
+        // 用墙钟而非 tick: 游戏 tick 间隔固定 50ms, 卡顿时 tick 数不变但墙钟
+        // 时间拉长 — 帧间隔最能反映"画面停住"。
+        // (2026-08-23 崩溃修复) 只在游戏内记录: 主菜单/世界加载时 getTicks 虽已
+        // 空安全, 但加载屏的帧耗时波动毫无诊断价值, 且曾导致 NPE 崩溃。
+        long frameMs = (System.nanoTime() - frameStart) / MS;
+        if (inGame() && (frameMs > 60 || frameGapMs > 100)) {
+            String m = "[JankDebug] frameMs=" + frameMs + " frameGapMs=" + frameGapMs
+                    + " tick=" + WorldHelper.getTicks()
+                    + " task=" + (_taskRunner.getCurrentTaskChain() == null ? "null"
+                        : _taskRunner.getCurrentTaskChain().getTasks().toString());
+            Debug.logToFile("altoclef_jank.log", m);
+        }
     }
 
     private void onClientRenderOverlay(MatrixStack matrixStack) {
@@ -221,6 +320,20 @@ public class AltoClef implements ModInitializer {
         getClientBaritoneSettings().mineScanDroppedItems.value = false;
         // Don't let baritone wait for drops, we handle that ourselves.
         getClientBaritoneSettings().mineDropLoiterDurationMSThanksLouca.value = 0L;
+
+        // Human-like movement: sprint when possible, parkour small gaps.
+        // NOTE: allowParkourPlace is kept OFF: baritone would place blocks under
+        // our feet to cross gaps, which can be dangerous (jumping into hazards).
+        getClientBaritoneSettings().allowSprint.value = true;
+        getClientBaritoneSettings().allowParkour.value = true;
+        getClientBaritoneSettings().allowParkourAscend.value = true;
+        getClientBaritoneSettings().sprintAscends.value = true;
+        getClientBaritoneSettings().allowParkourPlace.value = false;
+
+        // Let baritone turn our head to face the travel direction while pathing.
+        // (freeLook=true made the bot never turn, which also broke sprinting and
+        // made the visibility filter unable to see what's ahead.)
+        getClientBaritoneSettings().freeLook.value = false;
 
         // Really avoid mobs if we're in danger.
         getClientBaritoneSettings().mobAvoidanceCoefficient.value = 2.0;
@@ -263,6 +376,20 @@ public class AltoClef implements ModInitializer {
         return _taskRunner;
     }
 
+    // ==== Self-placed bed memory (2026-08-21 睡完收床) ====
+    // Bot 自己放下的床的位置 (由 PlaceBedAndSetSpawnTask 记录)。
+    // 用途: 睡觉结束/中断后白天把床收回带走 (下个晚上继续用),
+    // 且严格只收自己的床 — 绝不据此去拆别人的床 (用户原则)。
+    private BlockPos _lastSelfPlacedBed = null;
+
+    public BlockPos getLastSelfPlacedBed() {
+        return _lastSelfPlacedBed;
+    }
+
+    public void setLastSelfPlacedBed(BlockPos pos) {
+        _lastSelfPlacedBed = pos;
+    }
+
     /**
      * The user task chain (runs your command. Ex. Get Diamonds, Beat the Game)
      */
@@ -296,6 +423,21 @@ public class AltoClef implements ModInitializer {
      */
     public BlockTracker getBlockTracker() {
         return _blockTracker;
+    }
+
+    /**
+     * Remembers recently heard sounds (human-like hearing).
+     */
+    public SoundTracker getSoundTracker() {
+        return _soundTracker;
+    }
+
+    public KnowledgeMemory getKnowledgeMemory() {
+        return _knowledgeMemory;
+    }
+
+    public WorldMemory getWorldMemory() {
+        return _worldMemory;
     }
 
     ContainerSubTracker getContainerSubTracker() {

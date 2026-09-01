@@ -37,6 +37,15 @@ public class CollectSticksTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+        // (2026-08-31 木棍重复合成修复) 先查背包真实已有木棍是否达标, 达标就不再
+        // 无条件去合成。旧逻辑每 tick 无条件返回 CraftInInventoryTask(合木棍)——
+        // 即便背包已有十几根也照样重新合, 触发"放木板→拿回"振荡(日志反复5拍)。
+        // 用真实背包计数(getItemCountReal), 不走缓存, 避免刚收进背包的木棍被
+        // 缓存滞后判成"不足"。
+        if (mod.getItemStorage().getItemCountReal(Items.STICK) >= _targetCount) {
+            setDebugState("Already have enough sticks");
+            return null;
+        }
         Optional<BlockPos> nearestBush = mod.getBlockTracker().getNearestTracking(Blocks.DEAD_BUSH);
         // If there's a dead bush within range, go get it
         if (nearestBush.isPresent() && nearestBush.get().isWithinDistance(mod.getPlayer().getPos(), 20)) {

@@ -15,6 +15,7 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -60,10 +61,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
     @SuppressWarnings("ConstantConditions")
     @Override
     protected void onResourceStart(AltoClef mod) {
-        // Track fluids
+        // Track all water (source + flowing), not just sources
         mod.getBehaviour().push();
-        mod.getBehaviour().setRayTracingFluidHandling(RaycastContext.FluidHandling.SOURCE_ONLY);
-        mod.getBlockTracker().trackBlock(_toCollect);
+        mod.getBehaviour().setRayTracingFluidHandling(RaycastContext.FluidHandling.ANY);
+        mod.getBlockTracker().trackBlock(Blocks.WATER);
 
         // Avoid breaking / placing blocks at our liquid
         mod.getBehaviour().avoidBlockBreaking((pos) -> MinecraftClient.getInstance().world.getBlockState(pos).getBlock() == _toCollect);
@@ -98,7 +99,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
             Block standingInside = mod.getWorld().getBlockState(mod.getPlayer().getBlockPos()).getBlock();
             if (standingInside == _toCollect) {
                 setDebugState("Trying to collect (we are in it)");
-                mod.getInputControls().forceLook(0, 90);
+                LookHelper.lookAt(mod, new Rotation(0, 90));
                 //mod.getClientBaritone().getLookBehavior().updateTarget(new Rotation(0, 90), true);
                 //Debug.logMessage("Looking at " + _toCollect + ", picking up right away.");
                 _tryImmediatePickupTimer.reset();
@@ -143,8 +144,47 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 return false;
             }
 
+            // 2026-08-23: 对水，接受水源方块；对熔岩，只接受源
             return WorldHelper.isSourceBlock(mod, blockPos, false);
         };
+
+        // 2026-08-23: 诊断 - 检查 BlockTracker 是否感知到任何水
+        int totalWaterKnown = 0;
+        int sourceWaterKnown = 0;
+        int flowingWaterKnown = 0;
+        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.WATER)) {
+            totalWaterKnown++;
+            var state = MinecraftClient.getInstance().world.getBlockState(pos);
+            if (state.getFluidState().isStill()) {
+                sourceWaterKnown++;
+            } else {
+                flowingWaterKnown++;
+            }
+        }
+        Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s",
+                totalWaterKnown, sourceWaterKnown, flowingWaterKnown,
+                totalWaterKnown > 0 ? "checking..." : "NONE");
+
+        // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
+        if (!mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
+            setDebugState("No source found, tracing flowing water to source...");
+            // 找所有流动水位置
+            Predicate<BlockPos> isFlowingWater = blockPos -> {
+                if (_blacklist.contains(blockPos)) return false;
+                if (!WorldHelper.canReach(mod, blockPos)) return false;
+                assert MinecraftClient.getInstance().world != null;
+                var state = MinecraftClient.getInstance().world.getBlockState(blockPos);
+                return state.getBlock() == Blocks.WATER && !state.getFluidState().isStill();
+            };
+
+            if (mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)) {
+                // 找到流动水，追踪到源头
+                setDebugState("Found flowing water, tracing to source...");
+                return new TraceFlowingWaterToSourceTask(isFlowingWater);
+            } else {
+                Debug.logMessage("[Diag-water] No flowing water found in BlockTracker either");
+            }
+        }
 
         // Find nearest water and right click it
         if (mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect)) {

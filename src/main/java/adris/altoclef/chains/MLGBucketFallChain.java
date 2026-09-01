@@ -31,6 +31,12 @@ public class MLGBucketFallChain extends SingleTaskChain implements ITaskOverride
     }
 
     @Override
+    public boolean shouldTickEveryTick() {
+        // 反射链：坠落中放水桶的时机精确到 tick，不能降频。
+        return true;
+    }
+
+    @Override
     protected void onTaskFinish(AltoClef mod) {
         //_lastMLG = null;
     }

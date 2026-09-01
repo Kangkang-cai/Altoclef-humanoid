@@ -9,11 +9,14 @@ import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.SearchChunkForBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
+import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.hit.BlockHitResult;
@@ -93,6 +96,14 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
 
         if (toKill.isPresent() && toKill.get().isAlive()) {
+            // (2026-08-23 防火药水) 打烈焰人前喝防火药水 (用户设计: 打的时候
+            // 喝, 别提前喝 — 只在此处 (有烈焰人要打) 触发; 别一次多瓶 — 有
+            // FIRE_RESISTANCE 效果时不喝, 效果消失后才续杯)。
+            if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                    && ItemHelper.countFireResPotions(mod) > 0) {
+                setDebugState("Drinking fire resistance potion before fighting blaze");
+                return new DrinkFireResPotionTask();
+            }
             setDebugState("Killing blaze");
             return new KillEntitiesTask(entity -> !isHoveringAboveLavaOrTooHigh(mod, entity), BlazeEntity.class);
         }

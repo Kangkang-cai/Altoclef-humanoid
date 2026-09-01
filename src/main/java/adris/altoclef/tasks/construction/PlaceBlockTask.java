@@ -17,6 +17,8 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import org.apache.commons.lang3.ArrayUtils;
@@ -48,15 +50,53 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     }
 
     public PlaceBlockTask(BlockPos target, Block... toPlace) {
-        this(target, toPlace, false, false);
+        // (2026-08-26 用户要求: 没方块搭时自动去收集, 收集完再恢复任务) 旧默认
+        // autoCollectStructureBlocks=false → 材料收集逻辑不启用, bot 没方块时
+        // 空手跳跃手足无措。改为默认 true: 当 getMaterialCount < 1 (一块都没有)
+        // 时, 自动派发 getMaterialTask(32) 去收集泥土/圆石/深板岩原石/下界岩,
+        // 收集完 (count>=32) 再恢复本任务搭方块。
+        this(target, toPlace, false, true);
     }
 
     public static int getMaterialCount(AltoClef mod) {
-        return mod.getItemStorage().getItemCount(Items.DIRT, Items.COBBLESTONE, Items.NETHERRACK);
+        // (2026-08-23 统计修正) 旧逻辑依赖 ItemStorageTracker 缓存, 与
+        // Restocking 原木同款 bug: 背包实际有 dirt/cobblestone/netherrack 却
+        // 统计为 0 → PlaceBlockTask 误判"没有结构方块" → 反复触发收集 32 个
+        // 结构方块 (日志 15:19:52 "No structure items, collecting cobblestone
+        // + dirt as default") → 被高优先级任务抢占 → 建传送门卡死。直接扫玩家
+        // 背包 (main+offhand), 不依赖缓存刷新时机。
+        // (2026-08-23 深板岩原石) 用户实测背包有 47 个深板岩原石仍报"缺方块" —
+        // 结构方块候选只含 dirt/cobblestone/netherrack, 不含 cobbled_deepslate。
+        // 深板岩原石是深地下最常见的可放置方块, 必须计入。
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return 0;
+        int count = 0;
+        for (ItemStack stack : mod.getPlayer().getInventory().main) {
+            if (stack == null || stack.isEmpty()) continue;
+            Item item = stack.getItem();
+            if (isStructureMaterial(item)) {
+                count += stack.getCount();
+            }
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (offhand != null && !offhand.isEmpty()) {
+            if (isStructureMaterial(offhand.getItem())) {
+                count += offhand.getCount();
+            }
+        }
+        return count;
+    }
+
+    /** (2026-08-23) 可作为 CAST_FRAME 支撑的结构方块: 泥土/圆石/深板岩原石/下界岩。
+     *  (2026-08-26 讨论: 沙子/沙砾不能加入 — 重力方块水平搭路(悬空)时无支撑会
+     *  落下去, 桥搭不起来反而更危险。只能用于有下方支撑的填埋场景, 需单独机制。) */
+    private static boolean isStructureMaterial(Item item) {
+        return item == Items.DIRT || item == Items.COBBLESTONE
+                || item == Items.COBBLED_DEEPSLATE || item == Items.NETHERRACK;
     }
 
     public static Task getMaterialTask(int count) {
-        return TaskCatalogue.getSquashedItemTask(new ItemTarget(Items.DIRT, count), new ItemTarget(Items.COBBLESTONE, count), new ItemTarget(Items.NETHERRACK, count));
+        return TaskCatalogue.getSquashedItemTask(new ItemTarget(Items.DIRT, count), new ItemTarget(Items.COBBLESTONE, count),
+                new ItemTarget(Items.COBBLED_DEEPSLATE, count), new ItemTarget(Items.NETHERRACK, count));
     }
 
     @Override

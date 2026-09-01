@@ -93,6 +93,15 @@ public class UserTaskChain extends SingleTaskChain {
     @Override
     protected void onTaskFinish(AltoClef mod) {
         boolean shouldIdle = mod.getModSettings().shouldRunIdleCommandWhenNotActive();
+        {
+            // [Diag-chain] the user task chain just went inactive — from here on
+            // the bot idles ("no task running") until a new command is issued.
+            // shouldIdle=false additionally DISABLES the whole task runner.
+            String m = "[Diag-chain] UserTaskChain.onTaskFinish: shouldIdle=" + shouldIdle
+                    + (shouldIdle ? " (idle command will run)" : " (task runner will be DISABLED)");
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
         if (!shouldIdle) {
             // Stop.
             mod.getTaskRunner().disable();

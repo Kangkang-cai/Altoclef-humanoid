@@ -68,6 +68,24 @@ public class ItemStorageTracker extends Tracker {
         }).reduce(0, Integer::sum);
         return _inventory.getItemCount(true, false, items) + inConversionSlots;
     }
+
+    /**
+     * (2026-08-30 分而治之: 背包权威计数) 直接扫玩家真实背包 (主背包+护甲+
+     * 副手+光标, 不走 500ms 缓存层)。背景: {@link #getItemCount} 依赖
+     * InventorySubTracker 的缓存, 而缓存刻意排除护甲槽(5-8)/副手槽(45)/合成
+     * 输出 — 铁剑、盾牌这类常握在副手/主手的物品会被缓存算成"没有" → 递归
+     * 误判"缺什么其实有什么", 发散去做铁剑/熔炉/圆石 (用户实测)。判定关键
+     * 资源是否真的缺时, 一律以真实背包为准。此方法与 StorageHelper 的
+     * countItemInInventoryReal 等价, 作为 ItemStorage 的统一权威入口。
+     */
+    public int getItemCountReal(Item ...items) {
+        int count = 0;
+        for (Item item : items) {
+            count += StorageHelper.countItemInInventoryReal(_mod, item);
+        }
+        return count;
+    }
+
     public int getItemCount(ItemTarget ...targets) {
         return Arrays.stream(targets).mapToInt(target -> getItemCount(target.getMatches())).reduce(0, Integer::sum);
     }

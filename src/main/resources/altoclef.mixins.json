@@ -18,10 +18,12 @@
     "WorldBlockModifiedMixin"
   ],
   "client": [
+    "BuilderProcessMixin",
     "ChatInputMixin",
     "ChatReadMixin",
     "ClientBlockBreakMixin",
     "ClientOpenScreenMixin",
+    "ClientPlayNetworkHandlerMixin",
     "ClientTickMixin",
     "EntryMixin",
     "LoadChunkMixin",

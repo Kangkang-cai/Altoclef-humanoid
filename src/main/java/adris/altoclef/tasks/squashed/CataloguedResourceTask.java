@@ -20,6 +20,9 @@ public class CataloguedResourceTask extends ResourceTask {
     private final ItemTarget[] _targets;
     private final List<ResourceTask> _tasksToComplete;
 
+    // [2026-08-22 ping-pong 修复] 当前粘住的子任务: 一旦选中就执行到完成。
+    private ResourceTask _activeTask = null;
+
     public CataloguedResourceTask(boolean squash, ItemTarget... targets) {
         super(targets);
         _squasher = new TaskSquasher();
@@ -43,18 +46,29 @@ public class CataloguedResourceTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-
+        _activeTask = null;
     }
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
-        for (ResourceTask task : _tasksToComplete) {
-            for (ItemTarget target : task.getItemTargets()) {
-                // If we failed to meet this task's targets, do the task.
-                if (!StorageHelper.itemTargetsMetInventory(mod, target)) return task;
+        // [2026-08-22 ping-pong 修复] 旧逻辑每 tick 重选"第一个目标未满足"的
+        // 子任务: iron_sword 工作台合成 ↔ 2x2 木板/工作台/熔炉合成轮流上场,
+        // 互相清对方的光标/合成格、关对方的界面, 形成大横跳 (tasks.log
+        // 11:37:23-11:39:45: TaskPingPong 6x/5s 多组, EnsureFreeCursorSlotTask
+        // 逐槽换位找不到落点)。改为粘性选择: 一旦选中子任务, 坚持到它所有
+        // 目标满足 (isFinished, 不含光标的背包判定) 才轮换到下一个。
+        if (_activeTask != null && _activeTask.isFinished(mod)) {
+            _activeTask = null;
+        }
+        if (_activeTask == null) {
+            for (ResourceTask task : _tasksToComplete) {
+                if (!task.isFinished(mod)) {
+                    _activeTask = task;
+                    break;
+                }
             }
         }
-        return null;
+        return _activeTask;
     }
 
     @Override

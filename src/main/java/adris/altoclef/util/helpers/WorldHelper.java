@@ -37,9 +37,16 @@ public interface WorldHelper {
 
     /**
      * Get the number of in-game ticks the game/world has been active for.
+     *
+     * (2026-08-23 崩溃修复) 主菜单/世界加载中 networkHandler 为 null,
+     * 旧实现 Objects.requireNonNull 直接 NPE → 主线程崩溃 (JankDebug
+     * 在主菜单也会触发 frameMs>60 → 调这里)。无连接/未进世界时返回 0。
      */
     static int getTicks() {
-        ClientConnection con = Objects.requireNonNull(MinecraftClient.getInstance().getNetworkHandler()).getConnection();
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getNetworkHandler() == null) return 0;
+        ClientConnection con = client.getNetworkHandler().getConnection();
+        if (con == null) return 0;
         return ((ClientConnectionAccessor) con).getTicks();
     }
 
@@ -107,6 +114,35 @@ public interface WorldHelper {
 
     static boolean isSolid(AltoClef mod, BlockPos pos) {
         return mod.getWorld().getBlockState(pos).isSolidBlock(mod.getWorld(), pos);
+    }
+
+    /**
+     * (2026-08-26 用户要求: 导航目标尽量是空气, 别定位到墙/方块内部) 找 target
+     * 附近可站立的空气位置 (供导航用): 检查 target 及其 6 邻域, 方块本身非实心
+     * (能站进去) + 脚下实心 (能站住), 取离玩家最近者。找不到返回 target 原值
+     * (调用方自行兜底)。典型用途: 走到某地牢砖块/方块旁边时, 目标是"旁边的空气",
+     * 而不是砖块本身 — baritone 才不会钻进墙里乱挖。
+     */
+    public static BlockPos findStandableAirNear(AltoClef mod, BlockPos target) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        BlockPos[] candidates = new BlockPos[]{
+                target,
+                target.up(), target.down(),
+                target.north(), target.south(), target.east(), target.west()
+        };
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (BlockPos c : candidates) {
+            // 站立格本身不能是实心 (要能站进去), 脚下要实心 (能站住)。
+            if (isSolid(mod, c)) continue;
+            if (!isSolid(mod, c.down())) continue;
+            double d = c.getSquaredDistance(player);
+            if (d < bestDist) {
+                bestDist = d;
+                best = c;
+            }
+        }
+        return best != null ? best : target;
     }
 
     /**
@@ -181,6 +217,189 @@ public interface WorldHelper {
         return null;
     }
 
+    /**
+     * Rough "are we in a cave/mine" check: our head is covered by solid blocks
+     * within a short column above us, OR we're well below sea level. Used to
+     * decide whether the bot should climb back to the surface (e.g. sheep and
+     * other surface animals will never be found down here).
+     *
+     * (2026-08-27 用户拍板: y≥58 即视为地表) 旧版 y<58 判深 + 头顶 24 格长扫描
+     * 判深。卡死现场 (15:46): bot 站 y=63 (村庄/山脚, 旁边就有自己放的床),
+     * 头顶 +2~+26 扫到远处屋顶/山体/岸坡 1 个实心块 → deep=true 恒定 → 反复
+     * Returning to surface 派 GetToYTask(58) (58<63, 反而往下挖) → 横跳打转,
+     * 连近在眼前能睡的床都被 route1"地下跳过"挡住。故: y≥58 直接算地表;
+     * 24 格长扫描撤销, 只保留 y<58 的深硬阈值。真挖矿(通常 y<58)不受影响。
+     */
+    static boolean isDeepUnderground(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
+        BlockPos pos = mod.getPlayer().getBlockPos();
+        // 5+ blocks below sea level: genuinely deep cave/mine.
+        return pos.getY() < 58;
+    }
+
+    /**
+     * (2026-08-22 峡谷搭高脱困) 玩家是否被困在低洼处(峡谷底/深坑): 能见
+     * 天(非深地下)但周围岩壁比玩家高出很多, 步行无路可上。十字采样 4
+     * 方向 × 4/8/12/16 距离的柱子, 玩家头顶 +12 格以上出现【连续 4 格
+     * 实心方块】即视为岩壁(连续性要求排除了树叶/浮空桥误判)。返回需
+     * 要脱困到达的目标 Y(最高岩壁顶+1), 未被困返回 -1。
+     *
+     * 用户设计 (2026-08-22): bot 在峡谷底收集木头, 两侧壁高 50 格,
+     * BiasedExplore 在谷底永远打转 (tasks.log 11:21-11:36 "Returning to
+     * surface to collect wood" ↔ "Biased exploration" 循环 16+ 次)。
+     * 探索无果后应触发搭高 (GetToYTask 让 Baritone 边跳边放方块)。
+     * 注意: 该策略只用于收集【地表资源】(木头/食物) 的前置 — 找矿物
+     * 时往下挖是正确行为, 不适用。
+     *
+     * 水中无法放方块 (用户提醒): 玩家在水中时不判定为被困, 交给
+     * GoToSurfaceTask 的海底退化逻辑(挖到海平面之上)处理。
+     */
+    static int getPitEscapeY(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return -1;
+        if (mod.getPlayer().isTouchingWater()) return -1;
+        if (isDeepUnderground(mod)) return -1; // 深地下由常规逻辑处理
+        BlockPos p = mod.getPlayer().getBlockPos();
+        int scanStart = p.getY() + 12;
+
+        // (2026-08-31 峡谷误判修复, 用户定位) 旧逻辑任一方向任一距离扫到"连续4格
+        // 实心"就算被困 → 仅【单侧】高山也会误判成"峡谷深坑", 劫持"回到表面"
+        // 去算动态搭高高度(日志 108→109→110 来回跳, 绕过固定表面高度58)。真正的
+        // 峡谷是【两侧对向】都是高墙。改为要求"对向两个方向都扫到高墙"才判定被困:
+        // 东西对向 或 南北对向, 单侧高山不再误判 → 走固定表面高度逻辑。
+
+        // 4 个采样方向 (E, W, S, N) 各自扫出的最高岩壁顶 Y, -1 表示该方向无高墙。
+        int eastTop = -1, westTop = -1, southTop = -1, northTop = -1;
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int idx = 0; idx < dirs.length; ++idx) {
+            int top = -1;
+            for (int d : new int[]{4, 8, 12, 16}) {
+                int x = p.getX() + dirs[idx][0] * d;
+                int z = p.getZ() + dirs[idx][1] * d;
+                int run = 0;
+                int runTop = -1;
+                for (int y = scanStart; y < scanStart + 60 && y < mod.getWorld().getHeight(); ++y) {
+                    BlockPos check = new BlockPos(x, y, z);
+                    if (!mod.getChunkTracker().isChunkLoaded(check)) break;
+                    if (mod.getWorld().getBlockState(check).isOpaqueFullCube(mod.getWorld(), check)) {
+                        run++;
+                        runTop = y;
+                        if (run >= 4 && runTop > top) {
+                            top = runTop;
+                        }
+                    } else {
+                        run = 0;
+                    }
+                }
+            }
+            if (idx == 0) eastTop = top;
+            else if (idx == 1) westTop = top;
+            else if (idx == 2) southTop = top;
+            else northTop = top;
+        }
+
+        // 需对向成对: (E 且 W) 或 (S 且 N) 都是高墙才算被困。取两者较高者作为攀顶目标。
+        int bestTop = -1;
+        if (eastTop >= 0 && westTop >= 0) bestTop = Math.max(eastTop, westTop);
+        if (southTop >= 0 && northTop >= 0) bestTop = Math.max(bestTop, Math.max(southTop, northTop));
+        return bestTop < 0 ? -1 : bestTop + 1; // 壁顶站立位
+    }
+
+    /**
+     * Finds a standing Y level on dry land at (centerX, centerZ) or in rings
+     * around it (up to {@code radius} blocks out). Returns the first land
+     * column's surface standing Y, or -1 when everything nearby is water or
+     * unloaded (e.g. we're underneath an ocean).
+     */
+    static int getLandSurfaceY(AltoClef mod, int centerX, int centerZ, int radius) {
+        for (int r = 0; r <= radius; ++r) {
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue; // ring cells only
+                    int surfaceY = getLandColumnSurfaceY(mod, centerX + dx, centerZ + dz);
+                    if (surfaceY >= 0) return surfaceY;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * (2026-08-25 开船过海) 判断从 from 到 to 的直线路径上是否横跨连续
+     * ≥ minWidth 格的大水面 (需要开船)。沿直线每 4 格采样一列, 该列在海平面
+     * 附近 (y=58~70) 是否为水。陆地列会打断连续水域计数。
+     */
+    static boolean isLargeWaterCrossing(AltoClef mod, BlockPos from, BlockPos to, int minWidth) {
+        Vec3d d = new Vec3d(to.getX() - from.getX(), 0, to.getZ() - from.getZ());
+        double len = Math.sqrt(d.x * d.x + d.z * d.z);
+        if (len < minWidth) return false;
+        Vec3d dir = d.multiply(1.0 / len);
+        int bestRun = 0;
+        int curRun = 0;
+        for (double s = 0; s <= len; s += 4) {
+            BlockPos p = new BlockPos((int) (from.getX() + dir.x * s), 0, (int) (from.getZ() + dir.z * s));
+            if (isSeaLevelWater(mod, p)) {
+                curRun++;
+                bestRun = Math.max(bestRun, curRun);
+            } else {
+                curRun = 0;
+            }
+        }
+        return bestRun * 4 >= minWidth;
+    }
+
+    /** 该列在海平面附近 (y=58~70) 是否有水 (水面)。 */
+    static boolean isSeaLevelWater(AltoClef mod, BlockPos xz) {
+        for (int y = 70; y >= 58; y--) {
+            BlockPos c = new BlockPos(xz.getX(), y, xz.getZ());
+            if (!mod.getChunkTracker().isChunkLoaded(c)) continue;
+            Block b = mod.getWorld().getBlockState(c).getBlock();
+            if (b == Blocks.WATER) return true;
+            if (b != Blocks.AIR) return false; // 陆地/其他方块
+        }
+        return false;
+    }
+
+    /**
+     * (2026-08-25 开船过海: 远岸目标) 从 startXZ 沿 dir (水平单位向量) 扫描,
+     * 找到第一块【越过一段连续水域之后的陆地】 (即水域尽头), 作为船的远岸目标。
+     * 找不到 (水域超过 maxScan) 返回 null, 调用方回退用原目标。
+     */
+    static BlockPos findFarShore(AltoClef mod, BlockPos startXZ, Vec3d dir, int maxScan, int minWaterWidth) {
+        boolean inWater = false;
+        int waterRun = 0;
+        for (int s = 4; s <= maxScan; s += 4) {
+            BlockPos p = new BlockPos((int) (startXZ.getX() + dir.x * s), 0, (int) (startXZ.getZ() + dir.z * s));
+            if (isSeaLevelWater(mod, p)) {
+                inWater = true;
+                waterRun += 4;
+            } else if (inWater) {
+                // 水域结束 → 这是远岸 (水域宽度够才算是"跨海")。
+                if (waterRun >= minWaterWidth) {
+                    return p;
+                }
+                inWater = false;
+                waterRun = 0;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Standing Y (topmost non-air block + 1) for a single column, or -1 if the
+     * column is a lake/ocean (water surface) or not chunk-loaded.
+     */
+    static int getLandColumnSurfaceY(AltoClef mod, int x, int z) {
+        for (int y = WORLD_CEILING_Y; y >= WORLD_FLOOR_Y; --y) {
+            BlockPos check = new BlockPos(x, y, z);
+            if (!mod.getChunkTracker().isChunkLoaded(check)) return -1;
+            BlockState state = mod.getWorld().getBlockState(check);
+            if (state.isAir()) continue;
+            if (state.getBlock() == Blocks.WATER) return -1; // lake/ocean column
+            return y + 1;
+        }
+        return -1;
+    }
+
     static boolean isUnopenedChest(AltoClef mod, BlockPos pos) {
         return mod.getItemStorage().getContainerAtPosition(pos).isEmpty();
     }
@@ -206,6 +425,40 @@ public interface WorldHelper {
                 && canReach(mod, pos);
         mod.getExtraBaritoneSettings().setInteractionPaused(prevInteractionPaused);
         return result;
+    }
+
+    /**
+     * (2026-08-30 没镐别挖石头墙, 用户) 供 Baritone 寻路 avoidBlockBreak 谓词用:
+     * 该方块所需采矿等级 > 当前等级 → 应避开 (没镐时石头/矿石都挖不动, 让寻路
+     * 改走门)。关键: 只用 vanilla BlockState.isToolRequired (经
+     * MiningRequirement.getMinimumRequirementForBlock), 【绝不能】调
+     * plausibleToBreak/CalculationContext —— 它们会回调 shouldAvoidBreaking
+     * (本谓词), 互相递归 → StackOverflow 崩溃 (上次实测 11:28)。可能有寻路线程
+     * 读世界, 用 try/catch 兜底 (World.getBlockState 本身不抛, 未加载返回 air)。
+     */
+    static boolean shouldAvoidUnminable(AltoClef mod, adris.altoclef.util.MiningRequirement currentReq, BlockPos pos) {
+        try {
+            Block block = mod.getWorld().getBlockState(pos).getBlock();
+            adris.altoclef.util.MiningRequirement blockReq = adris.altoclef.util.MiningRequirement.getMinimumRequirementForBlock(block);
+            return blockReq.compareTo(currentReq) > 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 目标方块的 6 个相邻面是否贴着液体（水/岩浆，含流动状态）。
+     * 用于"远离液体"策略：挖开贴着液体的方块会让水/岩浆灌进通道，
+     * 精确堵水需要流体 BFS 反推源头 + 放置规划 + 失败重试，复杂度过高，
+     * 因此挖掘目标选择和通道挖掘都回避这类方块。
+     */
+    public static boolean isAdjacentToLiquid(AltoClef mod, BlockPos pos) {
+        for (Direction dir : Direction.values()) {
+            if (!mod.getWorld().getBlockState(pos.offset(dir)).getFluidState().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static boolean isInNetherPortal(AltoClef mod) {
@@ -268,6 +521,16 @@ public interface WorldHelper {
         || b.matchesKey(BiomeKeys.LUKEWARM_OCEAN)
         || b.matchesKey(BiomeKeys.WARM_OCEAN)
         || b.matchesKey(BiomeKeys.FROZEN_OCEAN));
+    }
+
+    /**
+     * (2026-08-31 [PLAINS-BIAS]) 平原系 biome 判定 (含向日葵平原)。
+     * 找食物/找动物时 bot 优先导航到草原, 动物/作物收获概率更高。
+     * 模仿 isOcean 用 matchesKey 判 biome, 无需实际地形检查。
+     */
+    static boolean isPlains(RegistryEntry<Biome> b){
+        return (b.matchesKey(BiomeKeys.PLAINS)
+        || b.matchesKey(BiomeKeys.SUNFLOWER_PLAINS));
     }
 
     static boolean isAir(AltoClef mod, BlockPos pos) {
@@ -398,5 +661,18 @@ public interface WorldHelper {
         }
         // https://minecraft.fandom.com/wiki/Daylight_cycle
         return 12542 <= time && time <= 23992;
+    }
+
+    /**
+     * (2026-08-22 睡醒判定) 晴朗白天区间: 睡觉成功的自然结果 (时间跳回
+     * 早晨), 睡意应立即解除, 而非等 30s 去抖宽限自然过期。雷暴天除外
+     * (雷暴白天也可睡, 不算"睡醒")。
+     */
+    static boolean isBrightDaytime() {
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null) return false;
+        if (world.isThundering() && world.isRaining()) return false;
+        int time = (int)(world.getTimeOfDay() % 24000);
+        return time < 12542;
     }
 }

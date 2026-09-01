@@ -346,7 +346,11 @@ public class BotBehaviour {
             synchronized (settings.getGlobalHeuristicMutex()) {
                 globalHeuristics = new ArrayList<>(settings.getGlobalHeuristics());
             }
-            _allowWalkThroughFlowingWater = settings.isFlowingWaterPassAllowed();
+            // 过河探索 (2026-08-21): 默认允许穿过流动水。静水游泳 Baritone
+            // 原生支持, 但河岸/激流段的 FLOWING water 默认被当作不可通行,
+            // 导致 bot 在河边反复绕路甚至放弃过河。强制默认开启; 需要精确
+            // 控制流水的任务(如地狱门建造)会在自己的 onTick 里显式覆盖。
+            _allowWalkThroughFlowingWater = true;
 
             rayFluidHandling = RayTraceUtils.fluidHandling;
         }

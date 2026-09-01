@@ -2,6 +2,7 @@ package adris.altoclef.util.helpers;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.util.WoodType;
+import adris.altoclef.util.slots.Slot;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.LeavesBlock;
@@ -11,6 +12,8 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.potion.PotionUtil;
+import net.minecraft.potion.Potions;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.tag.TagKey;
 import net.minecraft.util.DyeColor;
@@ -21,6 +24,51 @@ import java.util.*;
  * Helper functions and definitions for useful groupings of items
  */
 public class ItemHelper {
+
+    /**
+     * (2026-08-23 防火药水) 背包里是否有防火药水 (饮用型或喷溅型)。
+     * 药水的种类在 NBT 里 (Items.POTION 是同一个物品, 靠 PotionUtil 区分),
+     * 普通 ItemTarget 无法区分 — 必须逐 stack 检查药水 NBT。
+     */
+    public static boolean isFireResPotionStack(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        if (stack.getItem() != Items.POTION && stack.getItem() != Items.SPLASH_POTION) return false;
+        return PotionUtil.getPotion(stack) == Potions.FIRE_RESISTANCE;
+    }
+
+    /**
+     * (2026-08-23 防火药水) 玩家背包 (main + offhand) 中防火药水总数。
+     * 直接扫描背包, 不依赖 ItemStorageTracker 缓存 (缓存统计 bug 已在
+     * 原木/结构方块上踩过两次坑)。
+     */
+    public static int countFireResPotions(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return 0;
+        int count = 0;
+        for (ItemStack stack : mod.getPlayer().getInventory().main) {
+            if (isFireResPotionStack(stack)) count += stack.getCount();
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (isFireResPotionStack(offhand)) count += offhand.getCount();
+        return count;
+    }
+
+    /**
+     * (2026-08-23 防火药水) 第一个防火药水所在的背包槽位 (无则 null)。
+     * PlayerInventory.main 的 index 映射: 0-8 热栏 (window 36-44),
+     * 9-35 背包 (window 9-35)。
+     */
+    public static Slot getFireResPotionSlot(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return null;
+        for (int i = 0; i < mod.getPlayer().getInventory().main.size(); ++i) {
+            ItemStack stack = mod.getPlayer().getInventory().main.get(i);
+            if (isFireResPotionStack(stack)) {
+                return Slot.getFromCurrentScreenInventory(i);
+            }
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (isFireResPotionStack(offhand)) return adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT;
+        return null;
+    }
 
     public static String stripItemName(Item item) {
         String[] possibilities = new String[]{"item.minecraft.", "block.minecraft."};
@@ -75,6 +123,31 @@ public class ItemHelper {
     public static final Item[] DYE = new Item[]{Items.WHITE_DYE, Items.BLACK_DYE, Items.BLUE_DYE, Items.BROWN_DYE, Items.CYAN_DYE, Items.GRAY_DYE, Items.GREEN_DYE, Items.LIGHT_BLUE_DYE, Items.LIGHT_GRAY_DYE, Items.LIME_DYE, Items.MAGENTA_DYE, Items.ORANGE_DYE, Items.PINK_DYE, Items.PURPLE_DYE, Items.RED_DYE, Items.YELLOW_DYE};
     public static final Item[] WOOL = new Item[]{Items.WHITE_WOOL, Items.BLACK_WOOL, Items.BLUE_WOOL, Items.BROWN_WOOL, Items.CYAN_WOOL, Items.GRAY_WOOL, Items.GREEN_WOOL, Items.LIGHT_BLUE_WOOL, Items.LIGHT_GRAY_WOOL, Items.LIME_WOOL, Items.MAGENTA_WOOL, Items.ORANGE_WOOL, Items.PINK_WOOL, Items.PURPLE_WOOL, Items.RED_WOOL, Items.YELLOW_WOOL};
     public static final Item[] BED = new Item[]{Items.WHITE_BED, Items.BLACK_BED, Items.BLUE_BED, Items.BROWN_BED, Items.CYAN_BED, Items.GRAY_BED, Items.GREEN_BED, Items.LIGHT_BLUE_BED, Items.LIGHT_GRAY_BED, Items.LIME_BED, Items.MAGENTA_BED, Items.ORANGE_BED, Items.PINK_BED, Items.PURPLE_BED, Items.RED_BED, Items.YELLOW_BED};
+
+    /**
+     * 贵重掉落物（2026-08-21 用户原则：重要物品要持续感知）：这些物品的
+     * 掉落物实体即使捡拾暂时失败（满背包/够不着）也不允许永久拉黑——
+     * 满背包会随腾位恢复，永久拉黑 = 主动丢弃。只有距离过远（实体自然
+     * 卸载出渲染距离）才真正放弃。Settings.importantItems（钻石/下界合金
+     * 等）和行为保护物品在调用处另行叠加。
+     */
+    private static final Item[] VALUABLE_DROP_ITEMS = {
+            Items.IRON_INGOT, Items.GOLD_INGOT, Items.COPPER_INGOT,
+            Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GHAST_TEAR,
+            Items.IRON_SWORD, Items.IRON_PICKAXE, Items.IRON_AXE, Items.IRON_SHOVEL,
+            Items.STONE_SWORD, Items.STONE_PICKAXE, Items.STONE_AXE, Items.STONE_SHOVEL,
+            Items.BUCKET, Items.FLINT_AND_STEEL, Items.SHIELD
+    };
+
+    public static boolean isValuableDropItem(Item item) {
+        for (Item check : VALUABLE_DROP_ITEMS) {
+            if (check == item) return true;
+        }
+        for (Item bed : BED) {
+            if (bed == item) return true;
+        }
+        return false;
+    }
     public static final Item[] CARPET = new Item[]{Items.WHITE_CARPET, Items.BLACK_CARPET, Items.BLUE_CARPET, Items.BROWN_CARPET, Items.CYAN_CARPET, Items.GRAY_CARPET, Items.GREEN_CARPET, Items.LIGHT_BLUE_CARPET, Items.LIGHT_GRAY_CARPET, Items.LIME_CARPET, Items.MAGENTA_CARPET, Items.ORANGE_CARPET, Items.PINK_CARPET, Items.PURPLE_CARPET, Items.RED_CARPET, Items.YELLOW_CARPET};
 
     public static final Item[] SHULKER_BOXES = new Item[]{Items.WHITE_SHULKER_BOX, Items.BLACK_SHULKER_BOX, Items.BLUE_SHULKER_BOX, Items.BROWN_SHULKER_BOX, Items.CYAN_SHULKER_BOX, Items.GRAY_SHULKER_BOX, Items.GREEN_SHULKER_BOX, Items.LIGHT_BLUE_SHULKER_BOX, Items.LIGHT_GRAY_SHULKER_BOX, Items.LIME_SHULKER_BOX, Items.MAGENTA_SHULKER_BOX, Items.ORANGE_SHULKER_BOX, Items.PINK_SHULKER_BOX, Items.PURPLE_SHULKER_BOX, Items.RED_SHULKER_BOX, Items.YELLOW_SHULKER_BOX};
@@ -378,7 +451,7 @@ public class ItemHelper {
         }
     }
 
-    private static boolean isStackProtected(AltoClef mod, ItemStack stack) {
+    public static boolean isStackProtected(AltoClef mod, ItemStack stack) {
         if (stack.hasCustomName() && mod.getModSettings().getDontThrowAwayCustomNameItems())
             return true;
         return mod.getBehaviour().isProtected(stack.getItem()) || mod.getModSettings().isImportant(stack.getItem());
@@ -390,7 +463,33 @@ public class ItemHelper {
             return false;
         if (isStackProtected(mod, stack))
             return false;
+        // (2026-08-27 用户要求: 水桶/盾牌绝不能丢) 打末影龙/保命关键物品,
+        // 与 StorageHelper.getRandomThrowableSlot 的 NEVER_DISCARD 清单一致。
+        // 旧代码这条丢垃圾路径 (getGarbageSlot) 只查 isStackProtected (按任务
+        // 保护), 非相关任务激活时水桶/盾牌会被当垃圾丢掉 (用户实测)。
+        Item item = stack.getItem();
+        if (item == Items.WATER_BUCKET || item == Items.LAVA_BUCKET
+                || item == Items.BUCKET || item == Items.SHIELD) {
+            return false;
+        }
+        // (2026-08-25 保留方块, 用户指定) 圆石/深板岩圆石至少保留一组 (64):
+        // 当前背包数量 ≤ 保留量时不丢 (合成熔炉/石镐/石剑常用, 丢光了会卡死)。
+        if (isReservedBlockUnderLimit(mod, stack))
+            return false;
         return mod.getModSettings().isThrowaway(stack.getItem()) || mod.getModSettings().shouldThrowawayUnusedItems();
+    }
+
+    /**
+     * (2026-08-25 保留方块) 圆石(cobblestone)/深板岩圆石(cobbled_deepslate)
+     * 若背包数量 ≤ Settings.reservedBuildingBlockCount (默认 64, 一组) 则视为
+     * 不可丢 — 保证 bot 始终留一组可合成熔炉/石工具。超过保留量才允许丢弃。
+     * 供 canThrowAwayStack 与 StorageHelper.getRandomThrowableSlot 共用。
+     */
+    public static boolean isReservedBlockUnderLimit(AltoClef mod, ItemStack stack) {
+        Item item = stack.getItem();
+        if (item != Items.COBBLESTONE && item != Items.COBBLED_DEEPSLATE) return false;
+        int have = StorageHelper.countItemInInventoryReal(mod, item);
+        return have <= mod.getModSettings().getReservedBuildingBlockCount();
     }
 
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")

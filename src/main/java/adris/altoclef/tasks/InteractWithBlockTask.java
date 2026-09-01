@@ -3,6 +3,7 @@ package adris.altoclef.tasks;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -11,6 +12,7 @@ import adris.altoclef.util.baritone.GoalBlockSide;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalNear;
@@ -18,6 +20,7 @@ import baritone.api.pathing.goals.GoalTwoBlocks;
 import baritone.api.process.ICustomGoalProcess;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.BlockState;
 import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -38,6 +41,13 @@ public class InteractWithBlockTask extends Task {
     private final Input _interactInput;
     private final boolean _shiftClick;
     private final TimerGame _clickTimer = new TimerGame(5);
+    // 右键卡死检测：可达且持续 WAIT_FOR_CLICK 但目标界面没打开（典型
+    // 原因：床/箱子上方有实体方块，MC 拒绝使用/打开）。原代码的 5 秒
+    // 超时 (_clickTimer) 只挂在永远不返回的 CLICK_ATTEMPTED 分支上，
+    // WAIT_FOR_CLICK 每 tick reset 计时器 → 永久卡在"等待右键"。
+    // 现在 2 秒无进展就检查目标上方：有可破坏方块 → 撸掉再试。
+    private final TimerGame _clickStuckTimer = new TimerGame(2);
+    private boolean _clickStuckTiming = false;
     private final MovementProgressChecker _moveChecker = new MovementProgressChecker(4, 0.1, 4, 0.01);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
     private final int reachDistance = 0;
@@ -115,6 +125,16 @@ public class InteractWithBlockTask extends Task {
             return new GoalTwoBlocks(target);
         } else {
             if (sideMatters) {
+                // (2026-09-01 修复放床 dir=UP 错位死循环: UP 面 GoalBlockSide(buffer=1)
+                // 要求 y站 - y目 > 1(站在目标上方 2 格以上); 但贴地面放床 click TOP
+                // 时 bot 就站在目标同层+1 的地面 → 永远判不"正确侧" → Baritone
+                // 规划去地下两格 → 4 tick 走不动被 Wander 踢走, 又被 PlaceBed 外层
+                // GetToBlockTask 拉回 → Interact↔Wander↔GetToBlock 乒乓(14:22 14 秒
+                // 2 整轮, 床根本没放进世界)。UP/DOWN 水平点击放宽为近旁 1 格。
+                if (interactSide == Direction.UP || interactSide == Direction.DOWN) {
+                    BlockPos anchor = (interactSide == Direction.UP) ? target.up() : target.down();
+                    return new GoalNear(anchor.add(interactOffset), Math.max(1, reachDistance));
+                }
                 // Make sure we're on the right side of the block.
                 Goal sideGoal = new GoalBlockSide(target, interactSide, 1);
                 return new GoalAnd(sideGoal, new GoalNear(target.add(interactOffset), reachDistance));
@@ -130,6 +150,12 @@ public class InteractWithBlockTask extends Task {
     protected void onStart(AltoClef mod) {
         _moveChecker.reset();
         _wanderTask.resetWander();
+        // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
+        // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
+        if (!_shiftClick) {
+            mod.getInputControls().release(Input.SNEAK);
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
+        }
     }
 
     @Override
@@ -168,6 +194,7 @@ public class InteractWithBlockTask extends Task {
                     proc.setGoalAndPath(moveGoal);
                 }
                 _clickTimer.reset();
+                _clickStuckTiming = false;
             }
             case WAIT_FOR_CLICK -> {
                 setDebugState("Waiting for click");
@@ -175,6 +202,45 @@ public class InteractWithBlockTask extends Task {
                     proc.onLostControl();
                 }
                 _clickTimer.reset();
+                // 卡死检测：可达、正对目标、右键按下却迟迟没有结果。
+                if (!_clickStuckTiming) {
+                    _clickStuckTiming = true;
+                    _clickStuckTimer.reset();
+                } else if (_clickStuckTimer.elapsed()) {
+                    _clickStuckTiming = false;
+                    // 床/箱子等上方有实体方块会被 MC 拒绝使用 → 撸掉它再试。
+                    if (_interactInput == Input.CLICK_RIGHT) {
+                        BlockPos above = _target.up();
+                        if (WorldHelper.isSolid(mod, above) && WorldHelper.canBreak(mod, above)) {
+                            Debug.logMessage("(InteractWithBlockTask) Click stuck for 2s, clearing block above "
+                                    + _target.toShortString() + " -> " + above.toShortString());
+                            setDebugState("Clearing block above interaction target");
+                            return new DestroyBlockTask(above);
+                        }
+                    }
+                    // (2026-09-01 人类化 H2: 右键 2s 卡住, 上方又没大实心方块, 还可能是
+                    // 草/花/藤/双植物这种"非实心非空气非流体"但 MC 仍 reject 放方块/点床的植被
+                    // 挡在 _target (地面) 或 _target.up() (放置落点/床的本格)。人类这时会
+                    // 直接左键点掉眼前这株小草, 不会 wander 重选。此处就清 _target / up / up(2) 三格,
+                    // 绝不挖远处土方石 (否则跟 isSolid 清段重叠, 越界破坏地形)。
+                    if (_interactInput == Input.CLICK_RIGHT) {
+                        BlockPos[] probe = new BlockPos[]{_target, _target.up(), _target.up(2)};
+                        for (BlockPos p : probe) {
+                            BlockState bs = mod.getWorld().getBlockState(p);
+                            boolean air = WorldHelper.isAir(mod, p);
+                            boolean solid = WorldHelper.isSolid(mod, p);
+                            boolean fluid = !bs.getFluidState().isEmpty();
+                            if (!air && !solid && !fluid && WorldHelper.canBreak(mod, p)) {
+                                Debug.logMessage("(InteractWithBlockTask) Click stuck for 2s, clearing veget " + p.toShortString() + " block=" + bs.getBlock());
+                                setDebugState("Brushing veget off right-click target");
+                                return new DestroyBlockTask(p);
+                            }
+                        }
+                    }
+                    // 上方没东西可撸：按原有超时逻辑放弃并 wander。
+                    mod.getBlockTracker().requestBlockUnreachable(_target);
+                    return _wanderTask;
+                }
             }
             case CLICK_ATTEMPTED -> {
                 Debug.logInternal("(InteractWithBlockTask: Click attempted!)");
@@ -184,6 +250,7 @@ public class InteractWithBlockTask extends Task {
                 if (_clickTimer.elapsed()) {
                     // We tried clicking but failed.
                     _clickTimer.reset();
+                    _clickStuckTiming = false;
                     mod.getBlockTracker().requestBlockUnreachable(_target);
                     return _wanderTask;
                 }
@@ -247,12 +314,41 @@ public class InteractWithBlockTask extends Task {
                 } else {
                     mod.getSlotHandler().forceDeequipRightClickableItem();
                 }
+                // 潜行劫持修复 (2026-08-21): MC 原版机制是 sneak + 手持任意
+                // 物品右键 → 跳过方块交互改为使用物品(手持方块=贴着箱子放
+                // 方块, GUI 打不开)。sneak 有两个泄漏通道: 卡住的按键
+                // (PlayerInteractionFixChain 的 10s 兜底太慢) 和 baritone
+                // InputOverrideHandler 的强制状态(每 tick 重按, 仅 release
+                // 键位压不住)。本点击不需要 shift → 点击瞬间双通道强制松开。
+                if (!_shiftClick) {
+                    mod.getInputControls().release(Input.SNEAK);
+                    mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
+                }
                 mod.getInputControls().tryPress(_interactInput);
                 //mod.getClientBaritone().getInputOverrideHandler().setInputForceState(_interactInput, true);
                 if (_shiftClick) {
                     mod.getInputControls().hold(Input.SNEAK);
                 }
+            } else if (_forceClickTimer.elapsed()) {
+                // (2026-09-01 WAIT_FOR_CLICK 兜底): reachable 已非空且每 tick lookAt() 过
+                // 但 isLookingAt 因方块面/角度/半块(床头床脚) 判错 → 1.5s 后强制一次交互;
+                // 若仍失败由 CLICK_ATTEMPTED 的 5s _clickTimer / 清上方卡死检测接手。
+                if (_toUse != null) {
+                    mod.getSlotHandler().forceEquipItem(_toUse, false);
+                } else {
+                    mod.getSlotHandler().forceDeequipRightClickableItem();
+                }
+                if (!_shiftClick) {
+                    mod.getInputControls().release(Input.SNEAK);
+                    mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
+                }
+                mod.getInputControls().tryPress(_interactInput);
+                if (_shiftClick) {
+                    mod.getInputControls().hold(Input.SNEAK);
+                }
+                return ClickResponse.CLICK_ATTEMPTED;
             }
+            _forceClickTimer.reset();
             return ClickResponse.WAIT_FOR_CLICK;
         }
         if (_shiftClick) {
@@ -270,4 +366,8 @@ public class InteractWithBlockTask extends Task {
         WAIT_FOR_CLICK,
         CLICK_ATTEMPTED
     }
+    // (2026-09-01 WAIT_FOR_CLICK 兜底: reachable 成立且 lookAt() 调过, 但 isLookingAt
+    // 因方块面/角度/半块(床头床脚) 持续判 FALSE 时, 1.5s 后强制一次点击 (CLICK_ATTEMPTED)。
+    // 否则只写 WAIT_FOR_CLICK 但 5s _clickTimer 仅挂 CLICK_ATTEMPTED 分支 = 死循环。
+    private final TimerGame _forceClickTimer = new TimerGame(1.5);
 }

@@ -4,6 +4,8 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.time.TimerReal;
 import net.minecraft.client.MinecraftClient;
@@ -11,6 +13,8 @@ import net.minecraft.client.gui.screen.*;
 import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
 import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.math.BlockPos;
 
 public class DeathMenuChain extends TaskChain {
 
@@ -75,14 +79,45 @@ public class DeathMenuChain extends TaskChain {
         if (screen instanceof DeathScreen) {
             if (_waitOnDeathScreenBeforeRespawnTimer.elapsed()) {
                 _waitOnDeathScreenBeforeRespawnTimer.reset();
+                // Record the death grave BEFORE respawning — the instant
+                // requestRespawn() runs, the player entity is moved to the
+                // world spawn and we lose the original death coordinates.
+                try {
+                    PlayerEntity player = MinecraftClient.getInstance().player;
+                    if (player != null && MinecraftClient.getInstance().world != null) {
+                        BlockPos deathPos = player.getBlockPos();
+                        Dimension deathDim = WorldHelper.getCurrentDimension();
+                        long deathTick = MinecraftClient.getInstance().world.getTime();
+                        mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick);
+                        String msg = String.format(
+                                "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d)",
+                                deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
+                                deathTick, _deathCount + 1);
+                        Debug.logMessage(msg);
+                        Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
+                    } else {
+                        Debug.logWarning("Failed to record death grave: player/world is null.");
+                        Debug.logToFile("death_recovery.log",
+                                "[RECORD FAIL] player=" + (MinecraftClient.getInstance().player == null)
+                                        + " world=" + (MinecraftClient.getInstance().world == null));
+                    }
+                } catch (Throwable t) {
+                    Debug.logWarning("Exception while recording death grave: " + t.getMessage());
+                    Debug.logToFile("death_recovery.log", "[RECORD ERROR] " + t);
+                }
+
                 if (shouldAutoRespawn(mod)) {
                     _deathCount++;
                     Debug.logMessage("RESPAWNING... (this is death #" + _deathCount + ")");
+                    Debug.logToFile("death_recovery.log",
+                            "[RESPAWN] death #" + _deathCount + " autoRespawn=true");
                     assert MinecraftClient.getInstance().player != null;
                     MinecraftClient.getInstance().player.requestRespawn();
                     MinecraftClient.getInstance().setScreen(null);
                 } else {
                     // Cancel if we die and are not auto-respawning.
+                    Debug.logToFile("death_recovery.log",
+                            "[RESPAWN SKIP] autoRespawn=false; canceling user task.");
                     mod.cancelUserTask();
                 }
             }

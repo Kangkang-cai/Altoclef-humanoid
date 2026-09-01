@@ -8,6 +8,7 @@ import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 
 public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequiresGrounded {
 
@@ -35,6 +36,16 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
     protected Task onTick(AltoClef mod) {
         if (_dimension != null && WorldHelper.getCurrentDimension() != _dimension) {
             return new DefaultGoToDimensionTask(_dimension);
+        }
+        // (2026-08-23 区块外导航) 目标方块在未加载 chunk 时, baritone 无法
+        // 计算路径 (目标方块未知/不可达) → 寻路失败 → 标记 unreachable →
+        // 随机 wander, 永远到不了记忆中的远处传送门/床/资源。修复: 先
+        // GetToChunkTask 走到目标所在 chunk, 玩家靠近时 chunk 自动加载,
+        // 之后回到 GoalBlock 正常寻路。用户确认: "记着的坐标在区块外还能
+        // 正确导航吗" — 原实现不能, 此修复让 bot 分步接近。
+        if (!mod.getChunkTracker().isChunkLoaded(_position)) {
+            setDebugState("Target chunk not loaded, going to chunk first");
+            return new GetToChunkTask(new ChunkPos(_position));
         }
         return super.onTick(mod);
     }

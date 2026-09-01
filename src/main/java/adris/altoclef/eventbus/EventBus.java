@@ -21,38 +21,40 @@ public class EventBus {
     private static final List<Pair<Class, Subscription>> _toAdd = new ArrayList<>();
 
     public static <T> void publish(T event) {
-        Class type = event.getClass();
+        synchronized (EventBus.class) {
+            Class type = event.getClass();
 
-        // Add all subscriptions we need to add
-        for (Pair<Class, Subscription> toAdd : _toAdd) {
-            subscribeInternal(toAdd.getLeft(), toAdd.getRight());
-        }
-        _toAdd.clear();
-
-        if (_topics.containsKey(type)) {
-            List<Subscription> subscribers = _topics.get(type);
-
-            // Subscriptions can be deleted while they're called
-            List<Subscription> toDelete = new ArrayList<>();
-
-            // Go through our subscription list. We shouldn't modify the list while we're iterating it.
-            _lock = true;
-            for (Subscription subRaw : subscribers) {
-                Subscription<T> sub;
-                try {
-                    sub = (Subscription<T>) subRaw;
-                    if (sub.shouldDelete()) {
-                        toDelete.add(sub);
-                    } else {
-                        sub.accept(event);
-                    }
-                } catch (ClassCastException e) {
-                    System.err.println("TRIED PUBLISHING MISMAPPED EVENT: " + event);
-                    e.printStackTrace();
-                }
+            // Add all subscriptions we need to add
+            for (Pair<Class, Subscription> toAdd : _toAdd) {
+                subscribeInternal(toAdd.getLeft(), toAdd.getRight());
             }
-            // Delete all subscriptions
-            _lock = false;
+            _toAdd.clear();
+
+            if (_topics.containsKey(type)) {
+                List<Subscription> subscribers = _topics.get(type);
+
+                // Subscriptions can be deleted while they're called
+                List<Subscription> toDelete = new ArrayList<>();
+
+                // Go through our subscription list. We shouldn't modify the list while we're iterating it.
+                _lock = true;
+                for (Subscription subRaw : subscribers) {
+                    Subscription<T> sub;
+                    try {
+                        sub = (Subscription<T>) subRaw;
+                        if (sub.shouldDelete()) {
+                            toDelete.add(sub);
+                        } else {
+                            sub.accept(event);
+                        }
+                    } catch (ClassCastException e) {
+                        System.err.println("TRIED PUBLISHING MISMAPPED EVENT: " + event);
+                        e.printStackTrace();
+                    }
+                }
+                // Delete all subscriptions
+                _lock = false;
+            }
         }
     }
 
@@ -64,13 +66,15 @@ public class EventBus {
     }
 
     public static <T> Subscription<T> subscribe(Class<T> type, Consumer<T> consumeEvent) {
-        Subscription<T> sub = new Subscription<>(consumeEvent);
-        if (_lock) {
-            _toAdd.add(new Pair<>(type, sub));
-        } else {
-            subscribeInternal(type, sub);
+        synchronized (EventBus.class) {
+            Subscription<T> sub = new Subscription<>(consumeEvent);
+            if (_lock) {
+                _toAdd.add(new Pair<>(type, sub));
+            } else {
+                subscribeInternal(type, sub);
+            }
+            return sub;
         }
-        return sub;
     }
 
     public static <T> void unsubscribe(Subscription<T> subscription) {

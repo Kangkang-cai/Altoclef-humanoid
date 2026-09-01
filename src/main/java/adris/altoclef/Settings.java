@@ -158,8 +158,11 @@ public class Settings implements IFailableConfigFile {
      * How close we must be to attack/interact with an entity.
      * 6 works well for singleplayer
      * 4 works better on more restrictive multiplayer servers
+     * (2026-08-30 4→3.2 近战收紧, 用户"靠近距离不够/经常空打"。4 格比 MC 近战
+     * 真实命中(~3格)远, 导致 3~4 格挥剑空挥。3.2 贴近真实射程, 空挥带几乎消失,
+     * 靠近距离(≈reach-1≈2.2)也更近。)
      */
-    private float entityReachRange = 4;
+    private float entityReachRange = 3.2f;
 
     /**
      * Before grabbing ANYTHING, get a pickaxe.
@@ -250,6 +253,15 @@ public class Settings implements IFailableConfigFile {
     private boolean autoEat = true;
 
     /**
+     * If true, the bot uses privileged world access: it reads block/entity positions
+     * directly from the world regardless of whether a human could actually see them.
+     * <p>
+     * If false (default, human-like), the bot can only perceive what a human could
+     * see (line of sight + field of view + distance) or hear (nearby sounds).
+     */
+    private boolean cheatScan = false;
+
+    /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
      */
     private boolean autoMLGBucket = true;
@@ -267,6 +279,83 @@ public class Settings implements IFailableConfigFile {
      * If disabled, the bot will stop running when you die.
      */
     private boolean autoRespawn = true;
+
+    /**
+     * If true (and autoRespawn is on), the bot will try to return to the
+     * remembered death point and pick up the dropped items after respawn.
+     *
+     * The feature is deliberately low priority:
+     *   - It will NOT run before the bot has at least a stone pickaxe
+     *     (see deathRecoveryRequireStonePickaxe).
+     *   - MobDefenseChain / WorldSurvivalChain always take precedence so
+     *     recovery won't run into lava / into a crowd of mobs.
+     *   - If the grave is further than deathRecoveryMaxDistance blocks away
+     *     or the 5-minute despawn window is nearly up, it is skipped.
+     */
+    private boolean recoverDropsAfterDeath = true;
+
+    /**
+     * Only attempt drop recovery if the death point is within this (Euclidean)
+     * horizontal distance from the current player position.
+     *
+     * Walking 100-150 blocks typically takes ~40-70s and comfortably fits
+     * inside the 5-minute despawn window; beyond that the drops are likely
+     * to be gone before we arrive or the detour isn't worth the risk.
+     *
+     * Set to 0 to disable the distance check entirely (not recommended).
+     */
+    private int deathRecoveryMaxDistance = 1000; // (2026-08-31 150→1000: 用户实测远死亡(424格)需要回去拾取, 150太小被 TOO_FAR/ABANDON 遗弃)
+
+    /**
+     * If true, refuse to start recovery until the bot has at least a stone
+     * pickaxe in its inventory. Recovery without even a stone pickaxe is
+     * almost always a mistake: the bot has nothing to defend itself with,
+     * can barely break blocks if it needs to dig out, and a wood-only
+     * "naked" run is usually better spent gathering tools first.
+     */
+    private boolean deathRecoveryRequireStonePickaxe = true;
+
+    /**
+     * Maximum time (in real-game seconds) we will spend on a single recovery
+     * attempt (navigation + picking up drops). If we haven't finished by
+     * then the grave is abandoned and the memory is cleared.
+     *
+     * Defaults to 270 s = 4.5 min, leaving a 30 s safety margin before the
+     * 5-minute item despawn kicks in.
+     */
+    private int deathRecoveryTimeoutSeconds = 270;
+
+    /**
+     * Once a death grave record is older than this many seconds (counted in
+     * game ticks) it is considered unrecoverable (the 5-minute despawn
+     * window has already closed) and will be silently discarded.
+     *
+     * Defaults to 360 s = 6 min to allow a small grace period beyond the
+     * strict 5 min window.
+     */
+    private int deathRecoveryForgetAfterSeconds = 360;
+
+    /**
+     * If the bot dies this many times in a row (without a long surviving gap
+     * in between), death drop recovery is abandoned: repeatedly walking back
+     * to the grave keeps getting it killed, so the drops are simply left
+     * behind. The streak resets after ~10 minutes of survival.
+     *
+     * Set to 0 to disable the check and always attempt recovery.
+     */
+    private int deathRecoveryMaxConsecutiveDeaths = 3;
+
+    /**
+     * 决策链（用户任务/食物/死亡恢复）的任务树每 N 个游戏 tick 执行一次。
+     * 默认 1 = 20Hz（每 tick 执行，原版速度）。之前降为 4 = 5Hz 想减少
+     * 切换噪音，但副作用是容器交互（MoveItemToSlotTask 拿起/放下）决策
+     * 间隔拉长，叠加光标同步延迟导致"拿起放下反复 4-5 次"（用户实测，
+     * 2026-08-24 已改回 1）。
+     *
+     * 安全不受影响：链仲裁（优先级抢占）和反射链（MLG 落水桶、岩浆/
+     * 火焰/溺水逃生、怪物防御、交互修复）始终以 20Hz 运行。
+     */
+    private int taskTickInterval = 1;
 
     /**
      * This setting lets you configure what the bot should do if it needs to go to the nether
@@ -304,7 +393,8 @@ public class Settings implements IFailableConfigFile {
             Items.ANDESITE,
             Items.GRANITE,
             Items.TUFF,
-            Items.COBBLESTONE,
+            // (2026-08-25 用户指定) 圆石(原石)不再可丢 — 合成熔炉/石镐/石剑常用
+            //Items.COBBLESTONE,
             Items.DIRT,
             Items.GRAVEL,
             Items.COBBLED_DEEPSLATE,
@@ -318,7 +408,17 @@ public class Settings implements IFailableConfigFile {
             Items.NETHER_BRICK,
             Items.BASALT,
             Items.BLACKSTONE,
-            Items.END_STONE
+            Items.END_STONE,
+            // (2026-08-25 杂物优先丢, 用户指定) 草/种子/线/石英/皮革/烈焰弹及
+            // 常见掉落物杂物 — 背包满腾位时优先丢这些, 不要丢镐/木头/重要物资
+            Items.GRASS,
+            Items.WHEAT_SEEDS, Items.MELON_SEEDS, Items.PUMPKIN_SEEDS, Items.BEETROOT_SEEDS,
+            Items.STRING,
+            Items.QUARTZ,
+            Items.LEATHER,
+            Items.FIRE_CHARGE,
+            Items.BONE, Items.BONE_MEAL, Items.FEATHER, Items.ROTTEN_FLESH,
+            Items.SPIDER_EYE, Items.GUNPOWDER, Items.EGG, Items.ARROW
     );
 
     /**
@@ -362,7 +462,18 @@ public class Settings implements IFailableConfigFile {
             Stream.of(ItemHelper.DIAMOND_TOOLS),
             Stream.of(ItemHelper.NETHERITE_TOOLS),
             // Don't throw away shulker boxes that would be pretty bad lol
-            Stream.of(ItemHelper.SHULKER_BOXES)
+            Stream.of(ItemHelper.SHULKER_BOXES),
+            // (2026-08-25 重要物资保护, 用户指定) 末影珍珠/烈焰棒(末影之眼材料)、
+            // 金锭(猪灵交易)/铁锭、床(末地打龙)、原木/木板(木头) — 这些都不参与
+            // 丢物, 背包满腾位只丢杂物/垃圾。
+            Stream.of(Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GOLD_INGOT, Items.IRON_INGOT),
+            // (2026-08-25 用户指定) 打火石(点火刚需) 不可丢; 圆石/深板岩圆石
+            // 走"至少保留一组(64)"逻辑 (见 ItemHelper.canThrowAwayStack), 超出的
+            // 可丢, 不放在这里完全保护。
+            Stream.of(Items.FLINT_AND_STEEL),
+            Stream.of(ItemHelper.BED),
+            Stream.of(ItemHelper.LOG),
+            Stream.of(ItemHelper.PLANKS)
     ).toList();
 
     /**
@@ -375,6 +486,9 @@ public class Settings implements IFailableConfigFile {
 
     /**
      * If `limitFuelsToSupportedFuels` is true, will use these items and ONLY these items as smelting fuel.
+     * (2026-08-24) 原木【不在】燃料列表里 — 用户设计: 先做木板再烧, 别直接用
+     * 原木烧 (原木还能做工具/合成台)。缺燃料时 CollectFuelTask 会用
+     * CollectPlanksTask 把需要的原木合成木板 (2x2 格, 有界批量) 再烧。
      */
     @JsonSerialize(using = ItemSerializer.class)
     @JsonDeserialize(using = ItemDeserializer.class)
@@ -493,12 +607,44 @@ public class Settings implements IFailableConfigFile {
         return autoEat;
     }
 
+    public boolean isCheatScan() {
+        return cheatScan;
+    }
+
     public boolean isAutoReconnect() {
         return autoReconnect;
     }
 
     public boolean isAutoRespawn() {
         return autoRespawn;
+    }
+
+    public boolean shouldRecoverDropsAfterDeath() {
+        return recoverDropsAfterDeath;
+    }
+
+    public int getDeathRecoveryMaxDistance() {
+        return deathRecoveryMaxDistance;
+    }
+
+    public boolean shouldDeathRecoveryRequireStonePickaxe() {
+        return deathRecoveryRequireStonePickaxe;
+    }
+
+    public int getDeathRecoveryTimeoutSeconds() {
+        return deathRecoveryTimeoutSeconds;
+    }
+
+    public int getDeathRecoveryForgetAfterSeconds() {
+        return deathRecoveryForgetAfterSeconds;
+    }
+
+    public int getDeathRecoveryMaxConsecutiveDeaths() {
+        return deathRecoveryMaxConsecutiveDeaths;
+    }
+
+    public int getTaskTickInterval() {
+        return taskTickInterval;
     }
 
     public boolean shouldReplantCrops() {

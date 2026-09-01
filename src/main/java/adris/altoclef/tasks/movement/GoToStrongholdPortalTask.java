@@ -1,19 +1,68 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
+import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
+import java.util.HashSet;
+import java.util.Set;
 
 public class GoToStrongholdPortalTask extends Task {
+
+    // (2026-08-26 用户修改: 地牢高度不确定, y=45 在当前版本不对) 到达判定 =
+    // 看到地牢砖块, 不再按固定深度。俯冲高度约在 Y=0, 挖到 Y<=0 还没见砖块 →
+    // 转水平随机探索 (地牢在别处)。
+    private static final int STRONGHOLD_BOTTOM_Y = 0;
+    // (2026-08-26 用户设计: 8 分钟探索兜底) 格栅探索超过 8 分钟还没找到传送门
+    // → 直接回估计坐标深挖找传送门 (传送门就在估计位置正下方, 不再瞎转)。
+    private static final long EXPLORE_FALLBACK_MS = 8 * 60 * 1000L;
+    // 砖块"看到"距离 (视野内 + LOS)。
+    private static final int BRICK_SEE_RANGE = 10;
+    // (2026-08-26 用户修改: 8 分钟兜底 = 直接透视传送门) 兜底时扫世界找传送门
+    // 框架的半径 (无视 LOS/FOV, 仅限已加载区块)。地牢传送门房一般离入口 ~50 格内。
+    private static final int PORTAL_PERCEIVE_RANGE = 40;
+    // 扫描节流: 下挖/探索期间扫描砖块避免每 tick 扫 20³=8000 个方块卡顿。
+    private static final int SCAN_INTERVAL_TICKS = 10;
+
+    // 阶段: 0=走到估计XZ, 1=下挖找砖块, 2=挖进地牢(暴露空气), 3=格栅探索。
+    private static final int PHASE_WALK = 0;
+    private static final int PHASE_DIG = 1;
+    private static final int PHASE_ENTER = 2;
+    private static final int PHASE_EXPLORE = 3;
 
     private final LocateStrongholdCoordinatesTask _locateCoordsTask;
     private BlockPos _strongholdCoordinates;
     private final int _targetEyes;
+    // 持久导航任务 (2026-08-26 修复: 每 tick 新建 → 开挖横跳)。
+    private Task _approachTask = null;
+    private Task _digTask = null;
+    // 探索任务持久化 (记忆走过的 cell + 找到的传送门)。
+    private ExploreStrongholdTask _exploreTask = null;
+    private int _phase = PHASE_WALK;
+    private long _exploreStartMs = 0;
+    private int _scanTicks = 0;
+    // 阶段 2 挖进地牢: 最多打掉的砖块数, 防止看到满墙砖无限凿墙。
+    private int _enterBricksBroken = 0;
+    private static final int ENTER_MAX_BRICKS = 8;
+    // (2026-08-26 用户要求: 第一次导航要可靠走进地牢) 直挖可能偏几格挖偏
+    // (眼睛落点 XZ 与地牢实际投影差几格 → 挖到 y=0 没见砖 → 转大范围搜索)。
+    // 下挖途中每挖 PROBE_EVERY_BLOCKS 格, 在井底附近【近距扫描】地牢砖块,
+    // 找到 → 挖过去从那里进地牢; 没有 → 继续下挖。保证第一次下挖大概率命中。
+    private static final int PROBE_EVERY_BLOCKS = 6;
+    private static final int PROBE_SCAN_RADIUS = 4;
+    // 下挖起点 Y: 用于统计已挖深度, 判断何时探路。
+    private int _digStartY = Integer.MAX_VALUE;
 
     public GoToStrongholdPortalTask(int targetEyes){
         _targetEyes = targetEyes;
@@ -23,48 +72,235 @@ public class GoToStrongholdPortalTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
-        mod.getBlockTracker().trackBlock(Blocks.END_PORTAL_FRAME);
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
-        /*
-            If we don't know where stronghold is, find out where stronghold is.
-            If we do know where stronghold is, fast travel there
-            If there search it
-         */
         if (_strongholdCoordinates == null) {
             _strongholdCoordinates = _locateCoordsTask.getStrongholdCoordinates().orElse(null);
             if (_strongholdCoordinates == null) {
-                if (mod.getItemStorage().getItemCount(Items.ENDER_EYE) < _targetEyes && mod.getEntityTracker().itemDropped(Items.ENDER_EYE)) {
+                // 直接扫世界找掉落眼睛 (32 格覆盖飞行落点), 不依赖陈旧缓存。
+                boolean ridingBoat = mod.getPlayer() != null
+                        && mod.getPlayer().getVehicle() instanceof BoatEntity;
+                if (!ridingBoat
+                        && mod.getItemStorage().getItemCount(Items.ENDER_EYE) < _targetEyes
+                        && findNearbyDroppedEye(mod, 32) != null) {
                     setDebugState("Picking up dropped eye");
                     return new PickupDroppedItemTask(Items.ENDER_EYE, _targetEyes);
+                }
+                // (2026-08-26 用户要求: 一进任务就看到地牢砖块 → 不要跑回地面丢
+                // 珍珠) 新任务/中途重启时 _locateCoordsTask 是新实例, _stronghold
+                // Coordinates 必为 null → 默认会走丢珍珠定位 (Locate 会挖回地表丢眼)。
+                // 若此刻视野内已经能看到地牢砖块 (bot 本来就在强地牢位置), 说明
+                // 定位已完成, 直接跳过丢眼, 以当前位置为起点进入格栅探索, 省掉
+                // "挖回地表 → 丢珍珠 → 再下来" 的无谓往返。
+                if (findVisibleStrongholdBrick(mod) != null) {
+                    setDebugState("Already seeing stronghold bricks, exploring directly.");
+                    _strongholdCoordinates = mod.getPlayer().getBlockPos();
+                    _phase = PHASE_EXPLORE;
+                    return null;
                 }
                 setDebugState("Triangulating stronghold...");
                 return _locateCoordsTask;
             }
         }
-        // Search stone brick chunks, but while we're wandering, go to the nether
-        setDebugState("Searching for Stronghold...");
-        return new SearchChunkForBlockTask(Blocks.STONE_BRICKS) {
-            @Override
-            protected Task onTick(AltoClef mod) {
-                if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD) {
-                    return getWanderTask(mod);
-                }
-                return super.onTick(mod);
-            }
 
-            @Override
-            protected Task getWanderTask(AltoClef mod) {
-                return new FastTravelTask(_strongholdCoordinates, 300,true);
+        // 阶段 0: 走到估计 XZ (持久, 走完才进下挖)。
+        if (_phase == PHASE_WALK) {
+            if (_approachTask != null && !_approachTask.isFinished(mod)) {
+                return _approachTask;
             }
-        };
+            _approachTask = null;
+            if (Math.abs(mod.getPlayer().getX() - _strongholdCoordinates.getX()) > 1
+                    || Math.abs(mod.getPlayer().getZ() - _strongholdCoordinates.getZ()) > 1) {
+                if (WorldHelper.isLargeWaterCrossing(mod, mod.getPlayer().getBlockPos(), _strongholdCoordinates, 30)) {
+                    setDebugState("Crossing large water by boat to stronghold ("
+                            + _strongholdCoordinates.getX() + ", " + _strongholdCoordinates.getZ() + ")");
+                    _approachTask = new BoatCrossingTask(_strongholdCoordinates);
+                } else {
+                    setDebugState("Walking to stronghold estimate ("
+                            + _strongholdCoordinates.getX() + ", " + _strongholdCoordinates.getZ() + ")");
+                    _approachTask = new GetToXZTask(_strongholdCoordinates.getX(), _strongholdCoordinates.getZ());
+                }
+                return _approachTask;
+            }
+            _digStartY = Integer.MAX_VALUE; // 重新进入下挖 → 重置探路起点
+            _phase = PHASE_DIG;
+        }
+
+        // 阶段 1: 下挖找砖块 (持久)。下挖过程中看到地牢砖块 → 挖进地牢 (阶段 2);
+        // 挖到 Y<=0 还没见砖 → 转水平探索 (阶段 3, 地牢在别处)。
+        if (_phase == PHASE_DIG) {
+            if (_digStartY == Integer.MAX_VALUE) {
+                _digStartY = mod.getPlayer().getBlockPos().getY();
+            }
+            if (_digTask != null && !_digTask.isFinished(mod)) {
+                if (++_scanTicks >= SCAN_INTERVAL_TICKS) {
+                    _scanTicks = 0;
+                    if (findVisibleStrongholdBrick(mod) != null) {
+                        setDebugState("Saw stronghold brick while digging, entering stronghold.");
+                        _digTask = null;
+                        _phase = PHASE_ENTER;
+                    } else if (mod.getPlayer().getY() <= _digStartY - PROBE_EVERY_BLOCKS) {
+                        // (2026-08-26 用户要求: 第一次导航可靠进地牢) 挖了
+                        // PROBE_EVERY_BLOCKS 格没见砖 → 井底近距扫描附近地牢砖块;
+                        // 找到 → 挖过去 (偏几格也能进地牢); 没有 → 重新计段继续下挖。
+                        _digTask = null;
+                        _digStartY = mod.getPlayer().getBlockPos().getY();
+                        BlockPos probeBrick = findNearbyStrongholdBrick(mod, PROBE_SCAN_RADIUS);
+                        if (probeBrick != null) {
+                            setDebugState("Probe found stronghold brick nearby ("
+                                    + probeBrick.getX() + "," + probeBrick.getY() + "," + probeBrick.getZ()
+                                    + "), digging to it to enter.");
+                            // (2026-08-26 用户要求: 导航目标尽量是空气) 目标是砖块
+                            // 旁边的可站立空气, 不是砖块本身 (定位到墙里会乱挖)。
+                            _digTask = new GetToBlockTask(WorldHelper.findStandableAirNear(mod, probeBrick));
+                        } else {
+                            _digTask = new GetToYTask(STRONGHOLD_BOTTOM_Y);
+                        }
+                    }
+                }
+                return _digTask;
+            }
+            _digTask = null;
+            if (findVisibleStrongholdBrick(mod) != null) {
+                _phase = PHASE_ENTER;
+                return null;
+            }
+            if (mod.getPlayer().getY() <= STRONGHOLD_BOTTOM_Y) {
+                setDebugState("Dug to y=" + STRONGHOLD_BOTTOM_Y + " without seeing stronghold, horizontal search.");
+                _phase = PHASE_EXPLORE;
+                return null;
+            }
+            _digTask = new GetToYTask(STRONGHOLD_BOTTOM_Y);
+            return _digTask;
+        }
+
+        // 阶段 2: 挖进地牢 (打掉可见砖块, 暴露地牢空气, 打开通道)。
+        // (2026-08-26 用户要求: 刚看到砖块可能只是擦边, 必须挖出地牢空气才算
+        // 打开通道, 之后搜索才有意义。)
+        if (_phase == PHASE_ENTER) {
+            BlockPos brick = findVisibleStrongholdBrick(mod);
+            if (brick != null && _enterBricksBroken < ENTER_MAX_BRICKS) {
+                _enterBricksBroken++;
+                setDebugState("Breaking stronghold brick to open passage (brick " + _enterBricksBroken + ").");
+                return new DestroyBlockTask(brick);
+            }
+            _phase = PHASE_EXPLORE;
+            return null;
+        }
+
+        // 阶段 3: 格栅探索 (12×12 前重, 只认砖块空间, 8 分钟兜底)。
+        if (_phase == PHASE_EXPLORE) {
+            if (_exploreTask == null) {
+                _exploreTask = new ExploreStrongholdTask(_strongholdCoordinates);
+                _exploreStartMs = System.currentTimeMillis();
+            }
+            if (_exploreTask.isFinished(mod)) {
+                return null;
+            }
+            // (2026-08-26 用户修改: 8 分钟兜底 = 直接透视传送门位置, 不返回估计
+            // 坐标) 探索超时还没找到 → 直接扫世界找传送门框架 (无视 LOS/FOV 感知,
+            // 仅限已加载区块)。找到 → 直接走向传送门深挖; 没感知到 (区块没加载) →
+            // 继续探索等感知。
+            if (System.currentTimeMillis() - _exploreStartMs > EXPLORE_FALLBACK_MS) {
+                BlockPos portal = findPortalFramePerceived(mod);
+                if (portal != null) {
+                    setDebugState("Explored for 8min, going straight to perceived portal ("
+                            + portal.getX() + ", " + portal.getZ() + ").");
+                    _exploreTask = null;
+                    _enterBricksBroken = 0;
+                    _strongholdCoordinates = portal; // 目标改为透视到的传送门位置
+                    _phase = PHASE_WALK; // 走到传送门, 再下挖
+                    return null;
+                }
+                setDebugState("Explored for 8min but portal not perceived yet, continuing to explore.");
+                return _exploreTask;
+            }
+            return _exploreTask;
+        }
+
+        return null;
+    }
+
+    /** 透视找传送门框架 (无视 LOS/FOV, 仅限已加载区块 — 未加载区块 getBlockState=空气)。
+     * (2026-08-26 用户修改: 8 分钟兜底直接透视传送门位置, 不返回估计坐标。) */
+    private BlockPos findPortalFramePerceived(AltoClef mod) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        for (BlockPos pos : WorldHelper.scanRegion(mod,
+                player.add(-PORTAL_PERCEIVE_RANGE, -PORTAL_PERCEIVE_RANGE, -PORTAL_PERCEIVE_RANGE),
+                player.add(PORTAL_PERCEIVE_RANGE, PORTAL_PERCEIVE_RANGE, PORTAL_PERCEIVE_RANGE))) {
+            if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.END_PORTAL_FRAME) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
+    /** 视野内 + LOS 可见的地牢砖块。 */
+    private BlockPos findVisibleStrongholdBrick(AltoClef mod) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        for (BlockPos pos : WorldHelper.scanRegion(mod,
+                player.add(-BRICK_SEE_RANGE, -BRICK_SEE_RANGE, -BRICK_SEE_RANGE),
+                player.add(BRICK_SEE_RANGE, BRICK_SEE_RANGE, BRICK_SEE_RANGE))) {
+            if (isStrongholdBrick(mod.getWorld().getBlockState(pos).getBlock())
+                    && VisibilityHelper.isBlockInView(mod, pos)
+                    && VisibilityHelper.isBlockVisible(mod, pos)) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
+    /** 井底附近近距扫描地牢砖块 (无视 LOS/FOV, 仅限已加载区块, 小范围)。
+     * (2026-08-26 用户要求: 第一次导航要可靠走进地牢) 直挖偏几格时, 在挖井底部
+     * 周围扫一圈找地牢砖块, 找到 → 挖过去从那里进地牢, 不用等挖到 y=0 才转
+     * 大范围搜索。范围小 (半径 4), 不算大范围透视。 */
+    private BlockPos findNearbyStrongholdBrick(AltoClef mod, int radius) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        for (BlockPos pos : WorldHelper.scanRegion(mod,
+                player.add(-radius, -4, -radius),
+                player.add(radius, 2, radius))) {
+            if (isStrongholdBrick(mod.getWorld().getBlockState(pos).getBlock())) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
+    /** 地牢砖块 (石砖/裂纹石砖/苔藓石砖/虫蚀 + 石砖楼梯/台阶), 用于"看到砖=在地牢"。 */
+    private boolean isStrongholdBrick(Block b) {
+        return b == Blocks.STONE_BRICKS
+                || b == Blocks.CRACKED_STONE_BRICKS
+                || b == Blocks.MOSSY_STONE_BRICKS
+                || b == Blocks.INFESTED_STONE_BRICKS
+                || b == Blocks.INFESTED_CRACKED_STONE_BRICKS
+                || b == Blocks.INFESTED_MOSSY_STONE_BRICKS
+                || b == Blocks.STONE_BRICK_STAIRS
+                || b == Blocks.STONE_BRICK_SLAB;
+    }
+
+    private ItemEntity findNearbyDroppedEye(AltoClef mod, int range) {
+        Vec3d p = mod.getPlayer().getPos();
+        double r2 = range * range;
+        for (Entity e : mod.getWorld().getEntities()) {
+            if (e instanceof ItemEntity ie
+                    && ie.getStack().getItem() == Items.ENDER_EYE
+                    && ie.isAlive()
+                    && ie.squaredDistanceTo(p) < r2) {
+                return ie;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        return _exploreTask != null && _exploreTask.isFinished(mod);
     }
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-        mod.getBlockTracker().stopTracking(Blocks.END_PORTAL_FRAME);
     }
 
     @Override

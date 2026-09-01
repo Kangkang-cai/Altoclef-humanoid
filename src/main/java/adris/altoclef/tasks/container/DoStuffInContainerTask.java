@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.container;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
@@ -16,6 +17,7 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.block.Block;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -98,6 +100,16 @@ public abstract class DoStuffInContainerTask extends Task {
                 nearest = Optional.empty();
             }
         }
+        if (nearest.isEmpty()) {
+            // (2026-08-30 分而治之: 眼前真实容器优先于缓存) 容器可能来自上一个
+            // 中断的任务(如已放置的熔炉), tracker 因重启/中断丢失记忆 → nearest
+            // 空了就误走"造新容器"。抢在造之前, 主动扫 bot 近场真实方块, 看到
+            // 一个目标容器(熔炉就在眼前)直接过去用, 不重做。
+            nearest = findNearbyContainerBlock(mod, currentPos);
+            if (nearest.isPresent()) {
+                mod.getBlockTracker().trackBlock(_containerBlocks);
+            }
+        }
         if (nearest.isPresent()) {
             costToWalk = BaritoneHelper.calculateGenericHeuristic(currentPos, WorldHelper.toVec3d(nearest.get()));
         }
@@ -107,22 +119,55 @@ public abstract class DoStuffInContainerTask extends Task {
         if (costToWalk > getCostToMakeNew(mod)) {
             _placeForceTimer.reset();
         }
-        if (nearest.isEmpty() || (!_placeForceTimer.elapsed() && _justPlacedTimer.elapsed())) {
+        // (2026-09-01 工作台 Place↔Walking 乒乓根因修复)
+        boolean nearestMissing = nearest.isEmpty();
+        boolean placeForceActive = !_placeForceTimer.elapsed()
+                && StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches()) > 0;
+        if (nearestMissing || placeForceActive) {
             // It's cheaper to make a new one, or our only option.
 
             // We're no longer going to our previous container.
             _cachedContainerPosition = null;
 
-            // Get if we don't have...
-            if (!mod.getItemStorage().hasItem(_containerTarget)) {
+            // (2026-08-31 统一所有权模型) 判定"要不要现场造/拿一张新的同类容器"
+            // 一律用统一的 USE 语义: 背包真有 或 世界里存在有效同类方块(已放置
+            // 的台子/熔炉) 都算"我有可用的", 就不去再合成一张。旧逻辑
+            // `!hasItem(_containerTarget)` 只看背包物品 —— 台子一放下就变成方块、
+            // 不再是背包物品 → 恒 true → 反复"Getting container item → 现场再造",
+            // 每轮再造进 2x2 合成格又被网格清理器打断, 造出十张台子/横跳
+            // (日志 TaskPingPong 实锤)。统一用 USE, 一台即可复用, 不用给台子
+            // 单独维护任何状态。
+            if (!StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, _containerTarget.getMatches())) {
                 setDebugState("Getting container item");
+                Debug.logTrace("craft-place", "要造/取新容器 " + _containerTarget.toString()
+                        + ", isItemOwned(USE)=" + StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, _containerTarget.getMatches())
+                        + ", 背包实时数=" + StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches())
+                        + ", nearest=" + nearest.orElse(null));
                 return TaskCatalogue.getItemTask(_containerTarget);
             }
 
-            setDebugState("Placing container...");
+            if (StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches()) > 0) {
+                // 台子真背在包里: 放下来用。
+                setDebugState("Placing container...");
+                Debug.logTrace("craft-place", "背包有容器 " + _containerTarget.toString() + ", 放下来用");
+                _justPlacedTimer.reset();
+                return _placeTask;
+            }
 
+            // 手头没有现成台子物品, 但世界里有(刚放/记忆中): 复用那一张, 不重造。
+            BlockPos stillThere = _placeTask.getPlaced();
+            if (stillThere != null && mod.getBlockTracker().blockIsValid(stillThere, _containerBlocks)) {
+                setDebugState("Using the container we already placed");
+                Debug.logTrace("craft-place", "复用已放置容器 " + _containerTarget.toString() + " @" + stillThere.toShortString());
+                _cachedContainerPosition = stillThere;
+                _placeForceTimer.reset();
+                _justPlacedTimer.reset();
+                return new DoToClosestBlockTask(InteractWithBlockTask::new, _containerBlocks);
+            }
+            // 记忆里有台子但刚放点已失效: 也先按"有可用"放一张, 不反复去合成。
+            setDebugState("Placing container (re-using existing)...");
+            Debug.logTrace("craft-place", "世界有容器但刚放点失效, 重新放置 " + _containerTarget.toString());
             _justPlacedTimer.reset();
-            // Now place!
             return _placeTask;
         }
 
@@ -154,6 +199,34 @@ public abstract class DoStuffInContainerTask extends Task {
 
     public ItemTarget getContainerTarget() {
         return _containerTarget;
+    }
+
+    /**
+     * (2026-08-30 分而治之: 眼前真实容器优先于缓存) 当 tracker 无目标容器记忆
+     * (如上一个中断任务留下的熔炉), 主动扫 bot 附近真实方块, 返回第一个可到达的
+     * 目标容器。仅当遍历式查找失败时调用(触发频率极低), 故直接用世界扫描可接受。
+     */
+    private Optional<BlockPos> findNearbyContainerBlock(AltoClef mod, Vec3d center) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null || client.player == null) return Optional.empty();
+        int cx = (int) Math.floor(center.x);
+        int cy = (int) Math.floor(center.y);
+        int cz = (int) Math.floor(center.z);
+        int radius = 4;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = new BlockPos(cx + dx, cy + dy, cz + dz);
+                    Block block = client.world.getBlockState(pos).getBlock();
+                    for (Block containerBlock : _containerBlocks) {
+                        if (block == containerBlock && WorldHelper.canReach(mod, pos)) {
+                            return Optional.of(pos);
+                        }
+                    }
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     // Virtual

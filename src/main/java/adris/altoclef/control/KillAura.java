@@ -1,6 +1,8 @@
 package adris.altoclef.control;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
+import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.StlHelper;
 import net.minecraft.entity.Entity;
@@ -54,7 +56,7 @@ public class KillAura {
                     if (_hitDelay.elapsed()) {
                         _hitDelay.reset();
 
-                        Optional<Entity> toHit = _targets.stream().min(StlHelper.compareValues(entity -> entity.squaredDistanceTo(mod.getPlayer())));
+                        Optional<Entity> toHit = getMostThreateningTarget(mod);
 
                         toHit.ifPresent(entity -> attack(mod, entity));
                     }
@@ -78,13 +80,20 @@ public class KillAura {
             return;
         }
 
-        Optional<Entity> toHit = _targets.stream().min(StlHelper.compareValues(entity -> entity.squaredDistanceTo(mod.getPlayer())));
+        Optional<Entity> toHit = getMostThreateningTarget(mod);
 
         if (mod.getPlayer() == null || mod.getPlayer().getAttackCooldownProgress(0) < 1) {
             return;
         }
 
         toHit.ifPresent(entity -> attack(mod, entity, true));
+    }
+
+    /**
+     * Pick the most dangerous nearby target instead of just the closest one.
+     */
+    private Optional<Entity> getMostThreateningTarget(AltoClef mod) {
+        return _targets.stream().max(StlHelper.compareValues(entity -> ThreatEvaluator.evaluate(mod, entity)));
     }
 
     private void performFastestAttack(AltoClef mod) {
@@ -114,6 +123,9 @@ public class KillAura {
                 canAttack = mod.getSlotHandler().forceDeequipHitTool();
             }
             if (canAttack) {
+                // Log the attack so it can be extracted as an action label
+                // (killaura attacks happen outside the task tree).
+                Debug.logInternal("KillAura attacking " + entity.getType().getTranslationKey());
                 mod.getControllerExtras().attack(entity);
             }
         }

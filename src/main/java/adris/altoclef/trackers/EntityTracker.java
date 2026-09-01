@@ -10,9 +10,11 @@ import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.baritone.CachedProjectile;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.ProjectileHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.EyeOfEnderEntity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.*;
 import net.minecraft.entity.player.PlayerEntity;
@@ -22,6 +24,7 @@ import net.minecraft.entity.projectile.ProjectileEntity;
 import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
 import net.minecraft.entity.projectile.thrown.ExperienceBottleEntity;
 import net.minecraft.item.Item;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.*;
@@ -45,6 +48,13 @@ public class EntityTracker extends Tracker {
     private final HashMap<String, Vec3d> _playerLastCoordinates = new HashMap<>();
 
     private final EntityLocateBlacklist _entityBlacklist = new EntityLocateBlacklist();
+
+    // How many game ticks an entity stays "perceived" after we last saw/heard it.
+    // 20 seconds at 20 ticks/second.
+    private static final long PERCEIVE_MEMORY_TICKS = 20 * 20;
+
+    // Last game tick we perceived each entity (seen or heard).
+    private final HashMap<Entity, Long> _lastPerceivedTick = new HashMap<>();
 
     private final HashMap<PlayerEntity, List<Entity>> _entitiesCollidingWithPlayerAccumulator = new HashMap<>();
     private final HashMap<PlayerEntity, HashSet<Entity>> _entitiesCollidingWithPlayer = new HashMap<>();
@@ -319,8 +329,12 @@ public class EntityTracker extends Tracker {
             }
             _entitiesCollidingWithPlayerAccumulator.clear();
 
+            // Currently-loaded entities, so we can forget unloaded ones from our memory.
+            Set<Entity> loadedEntities = new HashSet<>();
+
             // Loop through all entities and track 'em
             for (Entity entity : MinecraftClient.getInstance().world.getEntities()) {
+                loadedEntities.add(entity);
 
                 // Catalogue based on type. Some types may get "squashed" or combined into one.
                 Class type = entity.getClass();
@@ -331,6 +345,39 @@ public class EntityTracker extends Tracker {
 
                 // Don't catalogue our own player.
                 if (type == PlayerEntity.class && entity.equals(_mod.getPlayer())) continue;
+
+                // Human-like perception: only report entities we can see or hear.
+                // (Body contact is handled separately via collision events, so it still works.)
+                // Once perceived, an entity stays "known" for a while even after we
+                // lose sight/sound of it, just like a human remembering where it was.
+                if (!_mod.getModSettings().isCheatScan()) {
+                    // (2026-08-25 用户指定) 末影之眼永久感知 — 定位地牢的关键
+                    // 道具, 丢出后若飞出视野/离远就感知丢失会白丢 (眼睛可能
+                    // 没破碎落地待捡)。飞行实体 + 掉落物都豁免人类模型感知,
+                    // 同床/传送门的"无限制感知"。
+                    boolean isEnderEye = entity instanceof EyeOfEnderEntity
+                            || (entity instanceof ItemEntity ie && ie.getStack().getItem() == Items.ENDER_EYE);
+                    if (!isEnderEye) {
+                        long nowTick = WorldHelper.getTicks();
+                        boolean directlyPerceived = VisibilityHelper.isEntityVisible(_mod, entity) || _mod.getSoundTracker().isEntityAudible(entity.getPos());
+                        boolean perceived = directlyPerceived;
+                        if (!perceived) {
+                            Long lastPerceived = _lastPerceivedTick.get(entity);
+                            perceived = lastPerceived != null && (nowTick - lastPerceived) < PERCEIVE_MEMORY_TICKS;
+                        }
+                        if (perceived) {
+                            // Only a fresh direct perception (sight/sound) extends the memory
+                            // window. Being inside the window must NOT refresh the timestamp,
+                            // otherwise a loaded-but-unseen entity would be remembered forever.
+                            if (directlyPerceived) {
+                                _lastPerceivedTick.put(entity, nowTick);
+                            }
+                        } else {
+                            _lastPerceivedTick.remove(entity);
+                            continue;
+                        }
+                    }
+                }
 
                 if (!_entityMap.containsKey(type)) {
                     _entityMap.put(type, new ArrayList<>());
@@ -395,6 +442,10 @@ public class EntityTracker extends Tracker {
                     _playerLastCoordinates.put(name, player.getPos());
                 }
             }
+
+            // Forget entities that are no longer loaded, so our perception memory
+            // doesn't leak stale references (a re-loaded entity re-registers when seen).
+            _lastPerceivedTick.keySet().removeIf(entity -> !loadedEntities.contains(entity));
         }
     }
 
@@ -402,5 +453,6 @@ public class EntityTracker extends Tracker {
     protected void reset() {
         // Dirty clears everything else.
         _entityBlacklist.clear();
+        _lastPerceivedTick.clear();
     }
 }

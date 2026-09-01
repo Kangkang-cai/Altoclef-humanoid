@@ -18,6 +18,15 @@ public class CollectPlanksTask extends ResourceTask {
     private final Item[] _logs;
     private final int _targetCount;
     private boolean _logsInNether;
+    // (2026-08-31 采集粘滞) 一旦进入"砍原木"子任务就保持到本轮采集完成(或工具需求),
+    // 不再因为"已有原木够转木板"就中途切回合成 —— 否则砍一两根原木就被合木板打断,
+    // 采集不连贯(日志 18:20:51 砍 logs 被 Craft 2x2 planks 打断,/镐/斧类工具需求仍允许打断)。
+    private boolean _miningCommitted = false;
+    // 持久化的砍木子任务实例: 提交后持续复用同一实例, 避免每 tick 重建
+    // (任务系统频繁打断重开是横跳常见根因)。
+    private ResourceTask _mineTaskCache = null;
+    // 记录并核对 _mineTaskCache 的目标 Item (isEqual 复用判断)。
+    private Item[] _mineTaskLogs = null;
 
     public CollectPlanksTask(Item[] planks, Item[] logs, int count, boolean logsInNether) {
         super(new ItemTarget(planks, count));
@@ -46,11 +55,27 @@ public class CollectPlanksTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-
+        _miningCommitted = false;
+        _mineTaskCache = null;
+        _mineTaskLogs = null;
     }
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+
+        // (2026-08-31 采集粘滞) 正在砍原木子任务进行中: 保持采集, 不因
+        // "已有原木够转木板"切回合成 (不合而打断采集节奏)。
+        if (_miningCommitted) {
+            if (_mineTaskCache != null) {
+                if (!_mineTaskCache.isFinished(mod)) {
+                    return _mineTaskCache;
+                }
+                // 本轮砍伐目标已达成 → 解除提交, 允许切去合成。
+                _miningCommitted = false;
+                _mineTaskCache = null;
+                _mineTaskLogs = null;
+            }
+        }
 
         // Craft when we can
         int totalInventoryPlankCount = mod.getItemStorage().getItemCount(_planks);
@@ -65,7 +90,21 @@ public class CollectPlanksTask extends ResourceTask {
                     }
                     int plankCount = mod.getItemStorage().getItemCount(plankCheck);
                     int otherPlankCount = totalInventoryPlankCount - plankCount;
-                    int targetTotalPlanks = Math.min(count*4 + plankCount, _targetCount - otherPlankCount);
+                    // (2026-09-01 过度合成修复, 用户"把所有木头一次做成木板") 这里只做
+                    // “还缺的木板数”= 目标 - 已有其它木板, 并硬性夹在 [1, 目标] 内:
+                    // ① 下限 ≥1, 防止 otherPlankCount 恰好等于/超过目标时算成 0 或负数
+                    //   (0 → CraftGeneric 把“需求”当 0, 判定材料全齐 → 把全部原木塞进
+                    //   配方一次转光, 日志实锤 Craft 2x2 _item=birch_planks x 0)。
+                    // ② 上限受 _targetCount 封顶, 单种原木即使一大把(如 8+ 根)也只转
+                    //   需要的当量, 不贪多一次做光所有木头。
+                    int deficitPlanks = _targetCount - otherPlankCount;
+                    int targetTotalPlanks = Math.max(1, Math.min(_targetCount, Math.min(count*4 + plankCount, deficitPlanks)));
+                    Debug.logToFile("altoclef_trace.log",
+                            "[CRAFT-LIMIT]\tplanks target=" + _targetCount
+                                    + " have(plank=" + plankCount + " other=" + otherPlankCount
+                                    + " log=" + count + ")" +
+                                    " -> craft " + targetTotalPlanks
+                                    + " (禁止滑坡: 只做缺口, 一次转 1 原木=4 木板当量)");
                     setDebugState("We have " + logCheck + ", crafting " + targetTotalPlanks + " planks.");
                     return new CraftInInventoryTask(new RecipeTarget(plankCheck, targetTotalPlanks, generatePlankRecipe(_logs)));
                 }
@@ -81,12 +120,18 @@ public class CollectPlanksTask extends ResourceTask {
             //blocksTomine.add(new ItemTarget(ItemUtil.PLANKS));
         }
 
-        ResourceTask mineTask = new MineAndCollectTask(blocksTomine.toArray(ItemTarget[]::new), MiningRequirement.HAND);
-        // Kinda jank
-        if (_logsInNether) {
-            mineTask.forceDimension(Dimension.NETHER);
+        // 复用同一砍木子任务实例, 避免每 tick 重建.
+        if (_mineTaskCache == null || _mineTaskLogs == null
+                || !Arrays.equals(_mineTaskLogs, _logs)) {
+            _mineTaskCache = new MineAndCollectTask(blocksTomine.toArray(ItemTarget[]::new), MiningRequirement.HAND);
+            _mineTaskLogs = _logs;
+            if (_logsInNether) {
+                _mineTaskCache.forceDimension(Dimension.NETHER);
+            }
         }
-        return mineTask;
+        // 一旦派发砍木子任务 → 提交粘滞: 本 tick 下一轮起持续采集, 不中途切合成。
+        _miningCommitted = true;
+        return _mineTaskCache;
     }
 
     @Override

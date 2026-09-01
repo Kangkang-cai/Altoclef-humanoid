@@ -104,6 +104,12 @@ public class DefaultGoToDimensionTask extends Task {
             return new GetToBlockTask(closest.get());
         }
 
+        Optional<BlockPos> remembered = mod.getWorldMemory().getNearestPortal(mod.getPlayer().getPos());
+        if (remembered.isPresent()) {
+            setDebugState("Going to remembered nether portal pos");
+            return new GetToBlockTask(remembered.get());
+        }
+
         setDebugState("Constructing nether portal with obsidian");
         return new ConstructNetherPortalObsidianTask();
     }
@@ -118,6 +124,19 @@ public class DefaultGoToDimensionTask extends Task {
             setDebugState("Going to nether portal");
             return new EnterNetherPortalTask(Dimension.NETHER);
         }
+
+        Optional<BlockPos> lastUsed = mod.getMiscBlockTracker().getLastUsedNetherPortal(Dimension.OVERWORLD);
+        if (lastUsed.isPresent()) {
+            setDebugState("Going to last nether portal pos");
+            return new GetToBlockTask(lastUsed.get());
+        }
+
+        Optional<BlockPos> remembered = mod.getWorldMemory().getNearestPortal(mod.getPlayer().getPos());
+        if (remembered.isPresent()) {
+            setDebugState("Going to remembered nether portal pos");
+            return new GetToBlockTask(remembered.get());
+        }
+
         return switch (mod.getModSettings().getOverworldToNetherBehaviour()) {
             case BUILD_PORTAL_VANILLA -> _cachedNetherBucketConstructionTask;
             case GO_TO_HOME_BASE -> new GetToBlockTask(mod.getModSettings().getHomeBasePosition());

@@ -7,6 +7,7 @@ import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.CraftingRecipe;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.RecipeTarget;
@@ -100,7 +101,7 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
         }
 
         // If we already have some of our target, we need less "same" materials.
-        int currentTargetCount = mod.getItemStorage().getItemCount(_target);
+        int currentTargetCount = StorageHelper.countItemsInInventoryReal(mod, _target.getMatches());
         int currentTargetsRequired = _target.getTargetCount() - currentTargetCount;
 
         if (canCraftTotal >= currentTargetsRequired) {
@@ -110,7 +111,7 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
             // We may need to convert our raw materials into our "matching" materials.
             int trueCanCraftTotal = 0;
             for (Item sameCheck : _sameResourceTarget.getMatches()) {
-                int trueCount = mod.getItemStorage().getItemCount(sameCheck);
+                int trueCount = StorageHelper.countItemsInInventoryReal(mod, sameCheck);
                 int trueCanCraft = (trueCount / _sameResourcePerRecipe) * _recipe.outputCount();
                 trueCanCraftTotal += trueCanCraft;
             }
@@ -141,8 +142,13 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
     }
 
     // Virtual
+    // (2026-09-01 "bed<->food 父任务横跳 + 羊毛已在背包仍 Collect 999999"
+    //  根因之一) 默认实现用 tracker 缓存 getItemCount, 刚捡的羊毛/材料被
+    //  判 0 -> canCraftTotal<need -> getAllSameResourcesTask -> Collect 999999
+    //  wool -> 无意义地杀羊/游荡, 永不退回合成路径; 改真实背包计数, 与
+    //  ResourceTask / CollectFoodTask / CollectWoolTask 口径统一。
     protected int getExpectedTotalCountOfSameItem(AltoClef mod, Item sameItem) {
-        return mod.getItemStorage().getItemCount(sameItem);
+        return StorageHelper.countItemsInInventoryReal(mod, sameItem);
     }
 
     // Virtual

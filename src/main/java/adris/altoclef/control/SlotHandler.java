@@ -93,7 +93,10 @@ public class SlotHandler {
         // If our item is in our cursor, simply move it to the hotbar.
         boolean inCursor = StorageHelper.getItemStackInSlot(CursorSlot.SLOT).getItem() == toEquip;
 
-        List<Slot> itemSlots = _mod.getItemStorage().getSlotsWithItemScreen(toEquip);
+        // (2026-08-24 真实背包扫描) 改用直接扫玩家背包槽位找物品, 不走 tracker
+        // 缓存 — 缓存可能陈旧 (金锭刚收进背包就读不到 → 返回 false → 交易
+        // 交互不触发, 用户实测 13:52 卡死: Approach 猪灵反复)。
+        List<Slot> itemSlots = StorageHelper.getItemSlotsInInventoryReal(_mod, toEquip);
         if (itemSlots.size() != 0) {
             Slot slot = itemSlots.get(0);
             int hotbar = 1;
@@ -112,7 +115,8 @@ public class SlotHandler {
     public void forceDeequipRightClickableItem() {
         forceDeequip(stack -> {
             Item item = stack.getItem();
-                    return item instanceof BucketItem // water,lava,milk,fishes
+                    return item instanceof BlockItem // any placeable block (2026-08-21: 手持圆石/木板右键, 视线稍偏或潜行残留就"贴着箱子放方块", 交互失效; 纯交互点击前换下方块, 空手右键无副作用)
+                            || item instanceof BucketItem // water,lava,milk,fishes
                             || item instanceof EnderEyeItem
                             || item == Items.BOW
                             || item == Items.CROSSBOW
@@ -201,9 +205,13 @@ public class SlotHandler {
         if (toEquip.matches(StorageHelper.getItemStackInSlot(target).getItem())) return true;
 
         for (Item item : toEquip.getMatches()) {
-            if (_mod.getItemStorage().hasItem(item)) {
-                if (forceEquipItem(item)) return true;
-            }
+            // (2026-08-26 修复: ItemStorage 缓存陈旧导致坐不了船) 旧代码用
+            // _mod.getItemStorage().hasItem(item) 当闸门 — 缓存可能陈旧 (船刚
+            // 造好/捡回背包 cache 没刷新 → hasItem false → forceEquipItem 直接
+            // 失败 → "Could not equip boat, swimming across instead", 18:00 日志
+            // 实锤)。forceEquipItem(item) 内部用 getItemSlotsInInventoryReal 真实
+            // 扫描背包, 直接以真实扫描为准, 不被陈旧缓存卡住。
+            if (forceEquipItem(item)) return true;
         }
         return false;
     }

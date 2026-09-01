@@ -22,7 +22,14 @@ public class SlotScreenMapping {
             e(SmithingTableSlot.class, screen -> screen instanceof SmithingScreen, SmithingTableSlot::new),
             e(BrewingStandSlot.class, screen -> screen instanceof BrewingStandScreen, BrewingStandSlot::new),
             e(ChestSlot.class, screen -> screen instanceof GenericContainerScreen, ChestSlot::new),
-            e(PlayerSlot.class, screen -> true, PlayerSlot::new), // Order matters, leave this BEFORE the BACK!
+            // 修复 (ping-pong 2026-08-21 12:36 "卡在熔炉界面"): 原谓词是
+            // screen -> true, 导致熔炉/箱子等界面打开时 PlayerSlot 合成格
+            // (window slot 1-4) 的 isScreenOpen() 仍为 true, conversion slot
+            // 检查会误读当前容器的同名槽位 (熔炉 slot 1 = 燃料槽!), 燃料槽
+            // 里的木板被计入玩家木板数 → "材料够/不够" 随界面开关横跳。
+            // 2x2 合成格只在玩家背包界面 (InventoryScreen) 可见; 无界面时
+            // 保留 true 以兼容 getFromScreen 的槽位映射 (PlayerScreenHandler)。
+            e(PlayerSlot.class, screen -> screen == null || screen instanceof InventoryScreen, PlayerSlot::new), // Order matters, leave this BEFORE the BACK!
             e(CursorSlot.class, screen -> true, (slot, inv) -> CursorSlot.SLOT) // Order matters, leave this in the BACK!
     );
 

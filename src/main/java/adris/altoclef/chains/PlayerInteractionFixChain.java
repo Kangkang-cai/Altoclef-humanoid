@@ -9,10 +9,13 @@ import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.screen.DeathScreen;
@@ -20,6 +23,8 @@ import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Optional;
 
@@ -35,13 +40,37 @@ public class PlayerInteractionFixChain extends TaskChain {
     private Screen _lastScreen;
     private Rotation _lastLookRotation;
 
+    // ==== Stuck-breaker（卡住撸方块，2026-08-21）====
+    // 荷叶/藤蔓/树干等挡路时 bot 会呆住——这些方块不在 Baritone 的
+    // "可破坏障碍"意识里，任务层也看不到它们。行为级修复（模拟人类）：
+    // bot 想移动但水平位置 ~1.5 秒不变 → 朝面前方块（脚部，其次眼部）
+    // 看过去，长按左键 2 秒把它撸掉。和人类"瞄准方向然后长按"一致，
+    // 不依赖任务层的精确方块定位。
+    private final TimerGame _stuckDetectTimer = new TimerGame(1.5);
+    private Vec3d _lastPos = null;
+    private boolean _breakingForward = false;
+    private int _breakForwardTicks = 0;
+    private BlockPos _breakForwardTarget = null;
+    private static final int BREAK_FORWARD_HOLD_TICKS = 40; // 2 秒 @ 20tps
+    // (2026-08-27 开门) 卡住时前方是【木门】→ 长按的是右键开门, 不是左键砸。
+    // 门的类型多(云杉/深色云杉/橡木/丛林/金合欢/红树/绯红/诡异…)但都能右键
+    // 开, 区别对待: true=右键开门, false=左键破坏。
+    private static final int DOOR_OPEN_HOLD_TICKS = 2; // 0.1 秒, 一下点开即可 (2026-08-27 由 6 缩短, 开门更利索)
+    private boolean _breakingForwardIsDoor = false;
+    private int _stuckBreakCount = 0;
+
     public PlayerInteractionFixChain(TaskRunner runner) {
         super(runner);
     }
 
     @Override
     protected void onStop(AltoClef mod) {
-
+        // 保险：链停止时松开我们可能按住的左键/右键。
+        if (_breakingForward) {
+            mod.getInputControls().release(_breakingForwardIsDoor ? Input.CLICK_RIGHT : Input.CLICK_LEFT);
+            _breakingForward = false;
+            _breakingForwardIsDoor = false;
+        }
     }
 
     @Override
@@ -84,16 +113,98 @@ public class PlayerInteractionFixChain extends TaskChain {
         // Unpress shift (it gets stuck for some reason???)
         if (mod.getInputControls().isHeldDown(Input.SNEAK)) {
             if (_shiftDepressTimeout.elapsed()) {
-                Debug.logMessage("Unpressing shift/sneak");
                 mod.getInputControls().release(Input.SNEAK);
             }
         } else {
             _shiftDepressTimeout.reset();
         }
 
+        // ==== Sprint-jump (bunny hop) REMOVED (2026-08-21) ====
+        // 自研边跑边跳实测效果差（该跳不跳/不该跳乱跳），按用户要求直接
+        // 删除。Baritone 原生寻路自带的跳跃不受影响。
+
+        // ==== Stuck-breaker：卡住时瞄准前方长按左键撸掉挡路方块 ====
+        boolean baritonePathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+        boolean tryingToMove = baritonePathing
+                || (mod.getPlayer().input != null
+                    && Math.abs(mod.getPlayer().input.movementForward) + Math.abs(mod.getPlayer().input.movementSideways) > 0.1f);
+        boolean screenClosed = MinecraftClient.getInstance().currentScreen == null;
+        if (_breakingForward) {
+            // 长按（右键开门 或 左键撸前方）中：保持瞄准，倒计时结束（或
+            // 界面弹出/目标没了）松键。
+            boolean targetGone = _breakForwardTarget == null
+                    || WorldHelper.isAir(mod, _breakForwardTarget);
+            if (--_breakForwardTicks <= 0 || !screenClosed || targetGone) {
+                mod.getInputControls().release(_breakingForwardIsDoor ? Input.CLICK_RIGHT : Input.CLICK_LEFT);
+                _breakingForward = false;
+                _breakingForwardIsDoor = false;
+                _stuckDetectTimer.reset(); // 给 bot 时间恢复移动再重新计卡
+            } else {
+                LookHelper.lookAt(mod, _breakForwardTarget);
+            }
+        } else if (screenClosed && tryingToMove && !mod.getControllerExtras().isBreakingBlock()) {
+            Vec3d pos = mod.getPlayer().getPos();
+            boolean stationary = _lastPos != null && _lastPos.squaredDistanceTo(pos) < 0.0025; // ~0.05 格
+            _lastPos = pos;
+            if (stationary) {
+                if (_stuckDetectTimer.elapsed()) {
+                    BlockPos front = getFrontBlockingBlock(mod);
+                    if (front != null) {
+                        Block fblock = mod.getWorld().getBlockState(front).getBlock();
+                        // (2026-08-27 开门, 用户)
+                        // 挡路的是【木门】(云杉/深色云杉/橡木等全部类型) → 右键
+                        // 打开, 不是左键硬砸。木门也属于"可挖", 但硬砸要好几下、
+                        // 还会一直卡门反复横跳 — 人类是直接开门走进去。
+                        // 用硬度区分: 1.18 木门 hardness=3.0, 铁门(徒手开不了)=5.0。
+                        boolean openableDoor = fblock instanceof DoorBlock
+                                && fblock.getDefaultState().getHardness(mod.getWorld(), front) < 5.0f;
+                        if (openableDoor) {
+                            _stuckBreakCount++;
+                            String m = "[Stuck-door] #" + _stuckBreakCount + " opening "
+                                    + front.toShortString() + " (" + fblock.getTranslationKey() + ")";
+                            Debug.logMessage(m);
+                            Debug.logToFile("altoclef_diag.log", m);
+                            LookHelper.lookAt(mod, front);
+                            _breakingForwardIsDoor = true;
+                            mod.getInputControls().hold(Input.CLICK_RIGHT);
+                            _breakingForward = true;
+                            _breakForwardTicks = DOOR_OPEN_HOLD_TICKS;
+                            _breakForwardTarget = front;
+                        } else if (WorldHelper.canBreak(mod, front)) {
+                            _stuckBreakCount++;
+                            String m = "[Stuck-break] #" + _stuckBreakCount + " holding left click on "
+                                    + front.toShortString() + " ("
+                                    + fblock.getTranslationKey() + ")";
+                            Debug.logMessage(m);
+                            Debug.logToFile("altoclef_diag.log", m);
+                            LookHelper.lookAt(mod, front);
+                            _breakingForwardIsDoor = false;
+                            mod.getInputControls().hold(Input.CLICK_LEFT);
+                            _breakingForward = true;
+                            _breakForwardTicks = BREAK_FORWARD_HOLD_TICKS;
+                            _breakForwardTarget = front;
+                        } else {
+                            // 前方没有可撸的实体方块：不触发，等下一轮卡住计时。
+                            _stuckDetectTimer.reset();
+                        }
+                    } else {
+                        _stuckDetectTimer.reset();
+                    }
+                }
+            } else {
+                _stuckDetectTimer.reset();
+            }
+        } else {
+            _lastPos = null;
+            _stuckDetectTimer.reset();
+        }
+
         // Refresh inventory
         if (_generalDuctTapeSwapTimeout.elapsed()) {
-            if (!mod.getControllerExtras().isBreakingBlock()) {
+            // [2026-08-22] 屏幕开着(容器/合成操作进行中)时禁止全背包双击刷新:
+            // refreshInventory 对每个槽 PICKUP 两次, 会打乱刚放进 3x3 合成格的
+            // 配方和光标上的物品, 与合成任务的点击序列互相打架 (合成卡死诱因)。
+            if (!mod.getControllerExtras().isBreakingBlock() && MinecraftClient.getInstance().currentScreen == null) {
                 Debug.logMessage("Refreshed inventory...");
                 mod.getSlotHandler().refreshInventory();
                 _generalDuctTapeSwapTimeout.reset();
@@ -126,7 +237,19 @@ public class PlayerInteractionFixChain extends TaskChain {
                 if (ItemHelper.canThrowAwayStack(mod, StorageHelper.getItemStackInCursorSlot())) {
                     mod.getSlotHandler().clickSlot(Slot.UNDEFINED, 0, SlotActionType.PICKUP);
                 } else {
-                    Debug.logMessage("Cursor stack edge case: Full inventory AND NO GARBAGE! We're stuck.");
+                    // (2026-08-23 满背包卡死修复) 光标物品不能扔 (是要留的) 且
+                    // 背包满无垃圾 → 旧逻辑只打日志 "We're stuck" 永久卡死 (用户:
+                    // "东西捡不上又不会丢东西所以卡住不动")。用保底: 随机丢一个
+                    // 非关键物品腾位, 让光标物品能放回背包。
+                    Slot toDrop = StorageHelper.getRandomThrowableSlot(mod);
+                    if (toDrop != null) {
+                        ItemStack rs = StorageHelper.getItemStackInSlot(toDrop);
+                        Debug.logMessage("(PlayerInteractionFix) Cursor stuck with full inventory — random tossing "
+                                + rs.getCount() + "x " + rs.getItem().getTranslationKey() + " to make room.");
+                        mod.getSlotHandler().clickSlot(toDrop, 0, SlotActionType.PICKUP);
+                    } else {
+                        Debug.logMessage("Cursor stack edge case: Full inventory AND NO GARBAGE! We're stuck.");
+                    }
                 }
             }
             return Float.NEGATIVE_INFINITY;
@@ -141,6 +264,25 @@ public class PlayerInteractionFixChain extends TaskChain {
         return Float.NEGATIVE_INFINITY;
     }
 
+    /**
+     * 玩家面前挡路的方块：按当前朝向（baritone 移动时会把视角对准移动
+     * 方向）取脚部前方，若是空气再取眼部前方。荷叶在脚部高度、藤蔓/
+     * 树干在眼部高度。都为空返回 null。
+     */
+    private BlockPos getFrontBlockingBlock(AltoClef mod) {
+        float yaw = mod.getPlayer().getYaw();
+        // MC yaw: 0=南(+Z), 90=西(-X)；前向向量 = (-sin(yaw), 0, cos(yaw))
+        int dx = (int) Math.round(-Math.sin(Math.toRadians(yaw)));
+        int dz = (int) Math.round(Math.cos(Math.toRadians(yaw)));
+        if (dx == 0 && dz == 0) dz = 1;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        BlockPos frontFeet = feet.add(dx, 0, dz);
+        if (!WorldHelper.isAir(mod, frontFeet)) return frontFeet;
+        BlockPos frontEye = feet.add(dx, 1, dz);
+        if (!WorldHelper.isAir(mod, frontEye)) return frontEye;
+        return null;
+    }
+
     private boolean shouldCloseOpenScreen(AltoClef mod) {
         if (!mod.getModSettings().shouldCloseScreenWhenLookingOrMining())
             return false;
@@ -152,6 +294,15 @@ public class PlayerInteractionFixChain extends TaskChain {
         // We're in the player screen/a screen we DON'T want to cancel out of
         if (openScreen == null || openScreen instanceof ChatScreen || openScreen instanceof GameMenuScreen || openScreen instanceof DeathScreen) {
             _mouseMovingButScreenOpenTimeout.reset();
+            return false;
+        }
+        // [2026-08-22 合成界面被误关修复] 原逻辑: 界面打开 0.2 秒后视角只要
+        // 转 0.1° 就关屏。合成任务操作工作台/背包期间 LookHelper 完全可能
+        // 转头(对准容器/移动残留视角), 界面被反复关闭重开, 合成永远完不成。
+        // 收紧触发条件: 只在 Baritone 正在寻路(真的要移动)时才认为界面是
+        // 移动前忘关的残留物, 值得自动关闭。
+        if (!mod.getClientBaritone().getPathingBehavior().isPathing()) {
+            _lastScreen = openScreen;
             return false;
         }
         // Check for rotation change

@@ -3,7 +3,7 @@ package adris.altoclef.tasks.resources;
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
-import adris.altoclef.tasks.movement.TimeoutWanderTask;
+import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import net.minecraft.entity.Entity;
@@ -15,6 +15,11 @@ public class KillAndLootTask extends ResourceTask {
     private final Class _toKill;
 
     private final Task _killTask;
+
+    // Cached exploration instance: returned every tick while the mob is missing.
+    // (BiasedExploreTask uses identity isEqual, so callers MUST reuse the same
+    // instance instead of constructing a new one each tick.)
+    private BiasedExploreTask _exploreTask;
 
     public KillAndLootTask(Class toKill, Predicate<Entity> shouldKill, ItemTarget... itemTargets) {
         super(itemTargets.clone());
@@ -46,7 +51,15 @@ public class KillAndLootTask extends ResourceTask {
                 return getToCorrectDimensionTask(mod);
             }
             setDebugState("Searching for mob...");
-            return new TimeoutWanderTask(9999999);
+            // Steer toward places we remember seeing this mob before.
+            // Reuse the cached instance; only swap once it finished.
+            if (_exploreTask == null || _exploreTask.isFinished(mod)) {
+                // [PLAINS-BIAS] (2026-08-31 用户需求) CollectFoodTask → killTaskOrNull 触发
+                // 的找动物/找食物探索: foodExplore=true 让探索机制内部优先 100% 导航到平原
+                // biome, 提高动物/食物收获概率。挖矿/砍木等 non-food 探索不经过这里, 不受影响。
+                _exploreTask = new BiasedExploreTask(true, () -> mod.getWorldMemory().getAnimalLocations((Class<?>) _toKill));
+            }
+            return _exploreTask;
         }
         // We found the mob!
         return _killTask;

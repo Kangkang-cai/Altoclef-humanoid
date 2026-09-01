@@ -31,6 +31,24 @@ import java.util.stream.Stream;
 @SuppressWarnings({"ConstantConditions", "rawtypes"})
 public class StorageHelper {
 
+    /**
+     * (2026-08-31 统一所有权模型) 全系统"我们有没有 X / 材料够不够"的唯一
+     * 语义判定入口, 替代散落各处互不一致的计数口径。
+     *
+     * USE    : 只要能拿来干活就算拥有 —— 方块类物品, 世界里存在有效同类方块
+     *          (已放置的台子/熔炉/床) 也算拥有。用于"能不能用这个容器/方块"。
+     * POSSESS: 必须真的背在背包里才算拥有(要带走/当下材料/把装备穿在身上)。
+     *          已放置的方块不算 —— 床要带走就必须真的背着, 不能因为附近有张床
+     *          就算完成。
+     *
+     * 除特别说明外, 统一的"计数"固定用 {@link #countItemsInInventoryReal}
+     * (真实扫 主背包+护甲+副手+光标), 杜绝 track 缓存陈旧导致的误判。
+     */
+    public enum Ownership {
+        USE,
+        POSSESS
+    }
+
     public static List<PlayerSlot> INACCESSIBLE_PLAYER_SLOTS = Stream.concat(Stream.of(PlayerSlot.CRAFT_INPUT_SLOTS), Stream.of(PlayerSlot.ARMOR_SLOTS)).toList();
 
     public static void closeScreen() {
@@ -93,9 +111,21 @@ public class StorageHelper {
     }
     private static boolean h(AltoClef mod, boolean inventoryOnly, Item ...items) {
         if (inventoryOnly) {
-            return mod.getItemStorage().hasItemInventoryOnly(items);
+            if (mod.getItemStorage().hasItemInventoryOnly(items)) return true;
+        } else {
+            if (mod.getItemStorage().hasItem(items)) return true;
         }
-        return mod.getItemStorage().hasItem(items);
+        // (2026-08-23 兜底直扫) 用户反馈: 背包里有铁镐/钻石镐, 但 bot 仍触发
+        // "Satisfy Mining Req: STONE" 去重做石镐 ("它似乎把背包里的东西跳过了")。
+        // ItemStorageTracker 缓存万一漏检/未刷新, 直接扫玩家主背包槽位兜底。
+        if (MinecraftClient.getInstance().player == null) return false;
+        for (ItemStack stack : MinecraftClient.getInstance().player.getInventory().main) {
+            if (stack.isEmpty()) continue;
+            for (Item item : items) {
+                if (stack.getItem() == item) return true;
+            }
+        }
+        return false;
     }
     private static boolean miningRequirementMetInner(AltoClef mod, boolean inventoryOnly, MiningRequirement requirement) {
         switch (requirement) {
@@ -119,6 +149,215 @@ public class StorageHelper {
     }
     public static boolean miningRequirementMetInventory(AltoClef mod, MiningRequirement requirement) {
         return miningRequirementMetInner(mod, true, requirement);
+    }
+
+    /**
+     * (2026-08-24 真实背包计数兜底) 直接扫玩家真实背包槽位 (主背包+护甲+
+     * 副手+光标, 不走 tracker 缓存)。用途: 任务启动瞬间 tracker 缓存可能
+     * 陈旧/未初始化, 导致"背包明明有金锭/生金矿却判定为没有" → 一直挖金
+     * (用户实测: 启动 gamer 检测不到金锭, 按 esc 刷新才检测到)。与
+     * miningRequirementMet 的"镐检测兜底"同一思路: 判定关键资源时以真实
+     * 背包为准。
+     */
+    public static int countItemInInventoryReal(AltoClef mod, Item item) {
+        int count = 0;
+        for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
+            if (stack.getItem() == item) count += stack.getCount();
+        }
+        return count;
+    }
+
+    /**
+     * (2026-08-24 真实背包计数兜底, 多物品版) 同 countItemInInventoryReal,
+     * 但接受多个匹配物品 (任一个都计入), 供 SmeltInFurnaceTask 等材料判定
+     * 使用 — 材料槽/目标可能匹配多种物品。
+     */
+    public static int countItemsInInventoryReal(AltoClef mod, Item... items) {
+        int count = 0;
+        for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
+            for (Item item : items) {
+                if (stack.getItem() == item) {
+                    count += stack.getCount();
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * (2026-09-01 合成格材料计数, 修复"把所有材料做光") 统计【真实背包 + 2x2 合成格 + 光标】
+     * 中匹配物品的数量。与 {@link #countItemsInInventoryReal} 不同: 后者只扫玩家主背包+
+     * 护甲+副手+光标, 不含 2x2 合成格 — 当收集材料被搬进合成格等待合成(如做合成台/木斧
+     * 时木板放进 2x2 格)后, 合成格里的材料会从"真实背包"里消失 → 判定"缺材料"→ 反复
+     * 派发收集 → 又塞进合成格 → 把所有材料喂光(用户实测: planks x4 真实持有恒 0 反复收集)。
+     * 这里的语义是"我们到底有没有这么多可用来合成的材料", 合成格里的当然算。
+     */
+    public static int countItemsInInventoryRealIncludingCraftGrid(AltoClef mod, Item... items) {
+        int count = countItemsInInventoryReal(mod, items);
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) return count;
+        for (PlayerSlot craftSlot : PlayerSlot.CRAFT_INPUT_SLOTS) {
+            ItemStack stack = getItemStackInSlot(craftSlot);
+            if (stack.isEmpty()) continue;
+            for (Item item : items) {
+                if (stack.getItem() == item) {
+                    count += stack.getCount();
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * (2026-09-01 同步 countItemInInventoryReal, 含合成格版) 统计单个物品在
+     * 真实背包 + 2x2 合成格 + 光标中的数量。见 {@link #countItemsInInventoryRealIncludingCraftGrid}。
+     */
+    public static int countItemInInventoryRealIncludingCraftGrid(AltoClef mod, Item item) {
+        return countItemsInInventoryRealIncludingCraftGrid(mod, item);
+    }
+
+    /**
+     * (2026-09-01) 仅统计 2x2 合成格中匹配物品的数量。配合
+     * {@link #countItemsInInventoryReal} 实现"背包 + 合成格"口径。
+     */
+    public static int countItemsInCraftGrid(AltoClef mod, Item... items) {
+        int count = 0;
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) return 0;
+        for (PlayerSlot craftSlot : PlayerSlot.CRAFT_INPUT_SLOTS) {
+            ItemStack stack = getItemStackInSlot(craftSlot);
+            if (stack.isEmpty()) continue;
+            for (Item item : items) {
+                if (stack.getItem() == item) {
+                    count += stack.getCount();
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * (2026-09-01) 判定是否拥有目标物品, 计数口径为【真实背包 + 2x2 合成格 + 光标】。
+     * 语义同 {@link #isItemOwned}, 差别仅在把合成格中的材料也计入"已有" —— 防止
+     * 材料搬进合成格等待合成时被判"缺失"而反复收集 (见 countItemsInInventoryRealIncludingCraftGrid)。
+     */
+    // (2026-09-01 致命BUG修复 — 导致 CollectRecipeResources 卡死 62s 0事件)
+    // 之前版本: for each match 只要 count>0 就 return true, 完全忽略
+    // target.getTargetCount() 的数量要求。做 crafting_table 需 4 木板但玩家
+    // 只有 1 时, 仍判"有木板 = 达标", 提前 finished=true 且不派任何收集子任务。
+    // 修复: 对所有匹配物品累计真实计数, 和 target.getTargetCount() 比较。
+    public static boolean itemTargetOwnedIncludingCraftGrid(AltoClef mod, Ownership semantics, ItemTarget target) {
+        int total = countItemsInInventoryRealIncludingCraftGrid(mod, target.getMatches());
+        if (total >= target.getTargetCount()) {
+            return true;
+        }
+        if (semantics == Ownership.USE) {
+            // 方块类 USE 语义: 世界里存在有效同类方块也算拥有 (复用 isItemOwned 逻辑)。
+            // 例: 附近有已放置的工作台 → 即使背包没工作台物品也判定 USE 达标。
+            return isItemOwned(mod, semantics, target.getMatches());
+        }
+        return false;
+    }
+
+    /**
+     * (2026-08-31 统一所有权模型) 统一"我们是否拥有任一给定物品"谓词。
+     *
+     * 计数一律用真实背包 (主背包+护甲+副手+光标), 不走缓存。
+     * {@link Ownership#USE}: 方块类物品若世界里存在有效同类方块, 也算拥有
+     *                      (已放置的台子/熔炉/床 = 可用), 无需真背在身上。
+     * {@link Ownership#POSSESS}: 必须真实背着才作数 (要带走/当下材料/穿身上)。
+     */
+    public static boolean isItemOwned(AltoClef mod, Ownership semantics, Item... items) {
+        if (countItemsInInventoryReal(mod, items) > 0) return true;
+        if (semantics == Ownership.USE) {
+            for (Item item : items) {
+                if (item instanceof BlockItem blockItem) {
+                    if (mod.getBlockTracker().anyFound(blockItem.getBlock())) {
+                        return true;
+                    }
+                    // (2026-08-31 容器方块判定兜底) BlockTracker.anyFound 依赖近区扫描
+                    // 缓存时序 —— 刚合成/刚放下的台子可能因缓存未刷新而未被感知, 导致
+                    // 容器任务误判"没台子"→ 每轮再造一张(用户实测做个位工作台, 并且
+                    // 打断采石)。直接扫 bot 近处真实世界方块, 确认眼前/脚下的同类方块
+                    // 立即算"已有可用", 不依赖异步缓存。
+                    if (nearbyWorldHasBlock(mod, blockItem.getBlock())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-08-31) 扫 bot 近处(半径 8, 纵向 -4~+4)的真实世界方块, 是否含目标方块。
+     * 供 {@link #isItemOwned} 容器方块兜底, 覆盖 BlockTracker 缓存未刷新的窗口期。
+     */
+    private static boolean nearbyWorldHasBlock(AltoClef mod, net.minecraft.block.Block target) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
+        net.minecraft.util.math.BlockPos p = mod.getPlayer().getBlockPos();
+        for (int dx = -8; dx <= 8; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    net.minecraft.util.math.BlockPos check = new net.minecraft.util.math.BlockPos(p.getX() + dx, p.getY() + dy, p.getZ() + dz);
+                    if (!mod.getChunkTracker().isChunkLoaded(check)) continue;
+                    if (mod.getWorld().getBlockState(check).getBlock() == target) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-08-31 统一所有权模型) 统一"是否拥有 x 个某物品" (多物品任其计数都算)。
+     * 语义同 {@link #isItemOwned}; 计数为真实背包计数, USE 时"已放置方块"视为
+     * 额外 +1 可用量。
+     */
+    public static int countItemOwnedReal(AltoClef mod, Ownership semantics, Item... items) {
+        int count = countItemsInInventoryReal(mod, items);
+        if (count == 0 && semantics == Ownership.USE) {
+            for (Item item : items) {
+                if (item instanceof BlockItem blockItem && mod.getBlockTracker().anyFound(blockItem.getBlock())) {
+                    return 1;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * (2026-08-31 统一所有权模型) 从 {@code target} 取出所有匹配物品交给
+     * {@link #countItemOwnedReal} 判定是否达标。
+     */
+    public static boolean itemTargetOwned(AltoClef mod, Ownership semantics, ItemTarget target) {
+        return countItemOwnedReal(mod, semantics, target.getMatches()) >= target.getTargetCount();
+    }
+
+    /**
+     * (2026-08-24 真实背包槽位扫描) 直接扫玩家主背包槽位 (不走 tracker 缓存),
+     * 返回含任一所给物品的槽位。供 SlotHandler.forceEquipItem 等"装备/交互
+     * 前找物品槽"使用 — tracker 缓存可能陈旧 (金锭刚收进背包就读不到 →
+     * forceEquipItem 返回 false → 交易交互不触发, 用户实测 13:52 卡死循环)。
+     */
+    public static List<Slot> getItemSlotsInInventoryReal(AltoClef mod, Item... items) {
+        List<Slot> result = new ArrayList<>();
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) return result;
+        for (int i = 0; i < player.getInventory().main.size(); i++) {
+            ItemStack stack = player.getInventory().main.get(i);
+            for (Item item : items) {
+                if (stack.getItem() == item) {
+                    result.add(Slot.getFromCurrentScreenInventory(i));
+                    break;
+                }
+            }
+        }
+        return result;
     }
 
     public static Optional<Slot> getBestToolSlot(AltoClef mod, BlockState state) {
@@ -154,6 +393,42 @@ public class StorageHelper {
         return Optional.ofNullable(bestToolSlot);
     }
 
+    // "Bulk" 建材/杂物：满背包无垃圾可扔时优先丢这些腾位（人类也是这么
+    // 清背包的——丢一把圆石，不丢铁锭）。只丢 >= 16 个的整堆。
+    private static final Item[] BULK_DISPOSAL_ITEMS = {
+            Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.DIRT, Items.GRAVEL,
+            Items.SAND, Items.GRANITE, Items.DIORITE, Items.ANDESITE,
+            Items.NETHERRACK, Items.TUFF, Items.CALCITE, Items.ROTTEN_FLESH
+    };
+
+    public static boolean isBulkDisposalItem(Item item) {
+        for (Item bulk : BULK_DISPOSAL_ITEMS) {
+            if (bulk == item) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 满背包腾位（2026-08-21 床掉落物丢失 bug）：背包全满且没有任何垃圾
+     * 可扔时，返回一个"大堆廉价建材"槽位（>= 16 个的圆石/泥土/花岗岩等，
+     * 非保护物品），把它扔掉换取一个空位。返回 null = 没有可丢的。
+     * 用于捡不起掉落物（如刚撸掉的床掉在脚边）的死循环场景。
+     */
+    public static Slot getBulkDisposalSlot(AltoClef mod) {
+        Slot best = null;
+        int bestCount = 15; // 只丢 >= 16 的堆，小堆建材留着用
+        for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, BULK_DISPOSAL_ITEMS)) {
+            ItemStack stack = getItemStackInSlot(slot);
+            if (stack == null || stack.isEmpty()) continue;
+            if (ItemHelper.isStackProtected(mod, stack)) continue;
+            if (stack.getCount() > bestCount) {
+                bestCount = stack.getCount();
+                best = slot;
+            }
+        }
+        return best;
+    }
+
     // Gets a slot with an item we can throw away
     public static Optional<Slot> getGarbageSlot(AltoClef mod) {
         // Throwaway items, but keep a few for building.
@@ -175,7 +450,17 @@ public class StorageHelper {
             }
         }
         if (!throwawayBlockItems.isEmpty() && totalBlockThrowaways > mod.getModSettings().getReservedBuildingBlockCount()) {
-            return Optional.of(throwawayBlockItems.get(0));
+            // (2026-08-23) 丢最大堆而非第一个槽位 — 石头偏多时优先丢大堆。
+            Slot largest = null;
+            int largestCount = -1;
+            for (Slot slot : throwawayBlockItems) {
+                int count = StorageHelper.getItemStackInSlot(slot).getCount();
+                if (count > largestCount) {
+                    largestCount = count;
+                    largest = slot;
+                }
+            }
+            return Optional.of(largest);
         }
 
         // Try throwing away lower tier tools
@@ -204,6 +489,27 @@ public class StorageHelper {
             }
         }
 
+        // (2026-08-23 重复工具可扔) 用户设计: 三个铁镐、三个钻石镐这种同材料
+        // 重复工具可以扔, 只保留一把。按 (工具类, 材料等级) 分组, 同组 >1 个
+        // 就丢一个多余的。低阶工具 (木镐 vs 铁镐) 已由上面逻辑处理, 这里只
+        // 处理"同材料多把"的重复。
+        final HashMap<String, List<Slot>> toolGroups = new HashMap<>();
+        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+            if (stack.isEmpty() || !ItemHelper.canThrowAwayStack(mod, stack))
+                continue;
+            Item item = stack.getItem();
+            if (item instanceof ToolItem tool) {
+                String key = tool.getClass().getName() + ":" + tool.getMaterial().getMiningLevel();
+                toolGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(slot);
+            }
+        }
+        for (List<Slot> slots : toolGroups.values()) {
+            if (slots.size() > 1) {
+                return Optional.of(slots.get(0));
+            }
+        }
+
         // Now we're getting desparate
         if (mod.getModSettings().shouldThrowawayUnusedItems()) {
 
@@ -220,6 +526,10 @@ public class StorageHelper {
                         continue;
                     }
                 }
+                // (2026-08-23 别把唯一/最好的镐扔了) 满背包腾位时曾把唯一石镐
+                // 当"unused"扔掉 → 在地狱里重建要木头 → 死循环收集木头 (日志
+                // 实锤)。扔了就没镐可用的槽位不加入候选。
+                if (wouldLeaveNoPickaxe(mod, stack)) continue;
                 // Throw away-able slots are good!
                 if (ItemHelper.canThrowAwayStack(mod, stack)) {
                     possibleSlots.add(slot);
@@ -232,7 +542,36 @@ public class StorageHelper {
             final int totalFoodScore = calcTotalFoodScore;
 
             if (!possibleSlots.isEmpty()) {
-                return possibleSlots.stream().min((leftSlot, rightSlot) -> {
+                // (2026-08-23 丢物优先级) 用户原则: 石头/杂石偏多, 满背包
+                // 时优先丢超量 (>64) 的最大石头堆; 原木绝不优先丢 (木头是
+                // 燃料/合成刚需), 只有别无可丢才轮到它。原逻辑最后按
+                // "最小数量"挑 — 原木通常是小堆, 结果木头比 64 圆石先丢。
+                Slot biggestBulk = null;
+                int biggestBulkCount = 64;
+                List<Slot> nonLogSlots = new ArrayList<>();
+                boolean sawLog = false;
+                for (Slot slot : possibleSlots) {
+                    ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+                    if (stack.isEmpty()) continue;
+                    if (ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) {
+                        sawLog = true;
+                        continue;
+                    }
+                    nonLogSlots.add(slot);
+                    if (isBulkDisposalItem(stack.getItem()) && stack.getCount() > biggestBulkCount) {
+                        biggestBulkCount = stack.getCount();
+                        biggestBulk = slot;
+                    }
+                }
+                if (biggestBulk != null) {
+                    return Optional.of(biggestBulk);
+                }
+                // 原木垫底: 有非原木候选就只在非原木里挑。
+                List<Slot> candidates = nonLogSlots.isEmpty() && sawLog ? possibleSlots : nonLogSlots;
+                if (candidates.isEmpty()) {
+                    return Optional.empty();
+                }
+                return candidates.stream().min((leftSlot, rightSlot) -> {
                     ItemStack left = StorageHelper.getItemStackInSlot(leftSlot),
                             right = StorageHelper.getItemStackInSlot(rightSlot);
                     boolean leftIsTool = left.getItem() instanceof ToolItem;
@@ -285,6 +624,112 @@ public class StorageHelper {
     }
 
     /**
+     * (2026-08-23 别把唯一/最好的镐扔了) 扔了这把镐之后, 背包里是否一把镐
+     * 都不剩 (没有同级或更高级的镐)。是 → 不能扔 (否则无法挖矿, 在地狱里
+     * 重建要木头 → 死循环)。非镐物品返回 false (可正常走丢物逻辑)。
+     */
+    public static boolean wouldLeaveNoPickaxe(AltoClef mod, ItemStack stack) {
+        if (!(stack.getItem() instanceof PickaxeItem thisPick)) return false;
+        int level = thisPick.getMaterial().getMiningLevel();
+        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            ItemStack s = getItemStackInSlot(slot);
+            if (s.isEmpty() || s == stack) continue;
+            if (s.getItem() instanceof PickaxeItem other && other.getMaterial().getMiningLevel() >= level) {
+                return false; // 还有同级或更好的镐, 扔这把没问题
+            }
+        }
+        return true; // 扔了就一把镐都不剩
+    }
+
+    /**
+     * (2026-08-27 用户要求: 可堆叠物品应放一起省空间, 放在丢垃圾之前)
+     * 找一对可合并的槽位: A 是部分堆 (未满), B 是同类且能完全装下 A (装下后
+     * 不超上限)。合并后 A 腾空、B 变大 → 省一个格子。只扫玩家主背包 (排除
+     * 护甲/副手/光标 — 副手保持不动)。返回 {A, B} 或 null (没有可合并的)。
+     * 供 ConsolidateInventoryTask 与 EnsureFreeInventorySlotTask 使用。
+     */
+    public static Slot[] findMergeableStackPair(AltoClef mod) {
+        List<Slot> playerSlots = new ArrayList<>();
+        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            if (!(slot instanceof PlayerSlot ps)) continue;
+            if (ArrayUtils.contains(PlayerSlot.ARMOR_SLOTS, ps)) continue;
+            if (ps.equals(PlayerSlot.OFFHAND_SLOT)) continue;
+            if (ps.equals(CursorSlot.SLOT)) continue;
+            playerSlots.add(ps);
+        }
+        for (Slot a : playerSlots) {
+            ItemStack sa = getItemStackInSlot(a);
+            if (sa.isEmpty() || sa.getCount() >= sa.getMaxCount()) continue;
+            for (Slot b : playerSlots) {
+                if (a.equals(b)) continue;
+                ItemStack sb = getItemStackInSlot(b);
+                if (sb.isEmpty() || sb.getItem() != sa.getItem()) continue;
+                if (sb.getCount() + sa.getCount() <= sb.getMaxCount()) {
+                    return new Slot[]{a, b};
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * (2026-08-23 保底随机丢) 满背包且 getGarbageSlot / getBulkDisposalSlot 都
+     * 找不到可丢时, 随机挑一个非护甲/非副手/非关键任务的非空槽位丢弃 — 用户
+     * 要求"加个保底, 随便丢东西出去", 否则捡不起掉落物时永久空转卡死。
+     * 排除: 护甲槽/副手(盾)、空槽、关键任务物品 (桶/末影之眼/打火石/火焰弹)、
+     * 以及扔了就没镐可用的镐。
+     */
+    public static Slot getRandomThrowableSlot(AltoClef mod) {
+        final Item[] NEVER_DISCARD = new Item[]{
+                Items.WATER_BUCKET, Items.LAVA_BUCKET, Items.BUCKET,
+                Items.ENDER_EYE, Items.ENDER_PEARL, Items.BLAZE_ROD,
+                Items.GOLD_INGOT, Items.IRON_INGOT,
+                Items.FLINT_AND_STEEL, Items.FIRE_CHARGE,
+                Items.SHIELD,
+                // (2026-08-31 用户"做完木棍把木棍丢出来/背包很空") 木棍是合成基础
+                // 材料(工具/火把/床等都要), 刚合成/待用的木棍绝不能被"满包随机丢"
+                // 当垃圾扔掉。加到永不随机丢清单。
+                Items.STICK
+        };
+        List<Slot> unprotected = new ArrayList<>();
+        List<Slot> protectedSlots = new ArrayList<>();
+        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            if (slot instanceof PlayerSlot ps && ArrayUtils.contains(PlayerSlot.ARMOR_SLOTS, ps)) continue;
+            if (slot.equals(PlayerSlot.OFFHAND_SLOT)) continue;
+            ItemStack stack = getItemStackInSlot(slot);
+            if (stack.isEmpty()) continue;
+            if (ArrayUtils.contains(NEVER_DISCARD, stack.getItem())) continue;
+            // (2026-08-25 镐永不丢, 用户指定) 用户实测随机丢把镐子全丢掉了。
+            // 镐是挖矿刚需, 任何镐都不参与随机丢 (原 wouldLeaveNoPickaxe 只
+            // 护"唯一镐", 两把镐时仍会丢 — 不够)。剑/斧/铲等工具同理保守保护。
+            if (stack.getItem() instanceof net.minecraft.item.PickaxeItem) continue;
+            if (stack.getItem() instanceof net.minecraft.item.SwordItem) continue;
+            if (stack.getItem() instanceof net.minecraft.item.AxeItem) continue;
+            if (stack.getItem() instanceof net.minecraft.item.ShovelItem) continue;
+            if (ArrayUtils.contains(ItemHelper.BED, stack.getItem())) continue;
+            if (ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) continue;
+            if (ArrayUtils.contains(ItemHelper.PLANKS, stack.getItem())) continue;
+            // (2026-08-25 保留方块) 圆石/深板岩圆石 ≤ 保留量不参与随机丢
+            if (ItemHelper.isReservedBlockUnderLimit(mod, stack)) continue;
+            if (wouldLeaveNoPickaxe(mod, stack)) continue;
+            if (ItemHelper.isStackProtected(mod, stack)) {
+                protectedSlots.add(slot);
+            } else {
+                unprotected.add(slot);
+            }
+        }
+        Collections.shuffle(unprotected);
+        if (!unprotected.isEmpty()) return unprotected.get(0);
+        // (2026-08-31 修"受保护物品也被丢", 用户"背包空还丢木棍/丢东西") 原实现"全被保护时
+        // 也从受保护槽随机丢一个 (protectedSlots.get(0))" —— 直接违反"保护"承诺, 把刚合成
+        // 的木棍/工具/床这类被任务标记为保护、不能丢的物品也丢出去; 且与背包是否满无关
+        // (空背包同样触发, 用户实测为空背包仍丢东西)。受保护物品绝不该为腾位被随机丢:
+        // 宁可返回 null 让调用方等待/换策略(可能短暂 STUCK), 也不动任何受保护物品。
+        // 用户优先级: 数据保护 > 万一卡一下。
+        return null;
+    }
+
+    /**
      * @return whether EVERY item target in {@code targetsToMeet} is met in our inventory or conversion slots.
      */
     public static boolean itemTargetsMet(AltoClef mod, ItemTarget ...targetsToMeet) {
@@ -297,6 +742,48 @@ public class StorageHelper {
      */
     public static boolean itemTargetsMetInventory(AltoClef mod, ItemTarget ...targetsToMeet) {
         return Arrays.stream(targetsToMeet).allMatch(target -> mod.getItemStorage().getItemCountInventoryOnly(target.getMatches()) >= target.getTargetCount());
+    }
+    /**
+     * (2026-09-01 真实背包统一口径, 修"已入包仍反复捡/杀")
+     * 直接扫真实玩家背包 (main 36 + offHand + cursor), 不经过 ItemStorageTracker 缓存。
+     * 缓存滞后会把 isFinished / 达标门控永远卡在 false, 导致任务永不完成 (羊肉/羊毛
+     * 已在背包, 仍反复拾取/杀羊, 甚至 bed↔food 父任务级横跳)。
+     * 语义与 itemTargetsMetInventory 相同: 所有匹配物真实计数 >= target。
+     */
+    public static boolean itemTargetsMetReal(AltoClef mod, ItemTarget ...targetsToMeet) {
+        PlayerInventory inv = (mod.getPlayer() == null) ? null : mod.getPlayer().getInventory();
+        if (inv == null) return false;
+        for (ItemTarget target : targetsToMeet) {
+            int count = 0;
+            Item[] matches = target.getMatches();
+            for (ItemStack stack : inv.main) {
+                if (stack == null || stack.isEmpty()) continue;
+                for (Item m : matches) {
+                    if (stack.getItem() == m) { count += stack.getCount(); break; }
+                }
+            }
+            for (ItemStack stack : inv.armor) {
+                if (stack == null || stack.isEmpty()) continue;
+                for (Item m : matches) {
+                    if (stack.getItem() == m) { count += stack.getCount(); break; }
+                }
+            }
+            ItemStack off = inv.offHand.get(0);
+            if (off != null && !off.isEmpty()) {
+                for (Item m : matches) {
+                    if (off.getItem() == m) { count += off.getCount(); break; }
+                }
+            }
+            // 光标也计入 (已抓到手里就视为已有, 几秒后就能落袋; 与 countItemsInInventoryReal includeCursor 口径一致)
+            ItemStack cur = getItemStackInCursorSlot();
+            if (cur != null && !cur.isEmpty()) {
+                for (Item m : matches) {
+                    if (cur.getItem() == m) { count += cur.getCount(); break; }
+                }
+            }
+            if (count < target.getTargetCount()) return false;
+        }
+        return true;
     }
 
     /**
@@ -356,7 +843,11 @@ public class StorageHelper {
     public static int calculateInventoryFoodScore(AltoClef mod) {
         int result = 0;
         for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
-            if (stack.isFood())
+            // Spider eyes are technically food but never a food RESERVE
+            // (FoodChain refuses to eat them). Counting them here would make
+            // "only spider eyes in backpack" look well-stocked while the bot
+            // starves. Keep this in sync with FoodChain.calculateFood.
+            if (stack.isFood() && stack.getItem() != Items.SPIDER_EYE)
                 result += Objects.requireNonNull(stack.getItem().getFoodComponent()).getHunger() * stack.getCount();
         }
         return result;
@@ -367,6 +858,23 @@ public class StorageHelper {
             if (mod.getModSettings().isSupportedFuel(stack.getItem())) {
                 result += ItemHelper.getFuelAmount(stack.getItem()) * stack.getCount();
             }
+        }
+        // The 2x2 crafting grid and the cursor slot hold OUR items too and can
+        // be pulled back at any moment. Excluding them made this count flip
+        // around the "need fuel?" threshold whenever a crafting branch moved
+        // planks (a supported fuel!) between the grid and the inventory:
+        // SmeltInFurnaceTask then ping-ponged forever between "Getting Fuel"
+        // and "Getting container item", each branch killing the other's
+        // subtree mid-flight (see task_switch.log [TaskPingPong] entries).
+        for (PlayerSlot slot : PlayerSlot.CRAFT_INPUT_SLOTS) {
+            ItemStack stack = getItemStackInSlot(slot);
+            if (mod.getModSettings().isSupportedFuel(stack.getItem())) {
+                result += ItemHelper.getFuelAmount(stack.getItem()) * stack.getCount();
+            }
+        }
+        ItemStack cursor = getItemStackInCursorSlot();
+        if (mod.getModSettings().isSupportedFuel(cursor.getItem())) {
+            result += ItemHelper.getFuelAmount(cursor.getItem()) * cursor.getCount();
         }
         return result;
     }
@@ -382,7 +890,10 @@ public class StorageHelper {
             int need = 0;
             if (target.getOutputItem() != null) {
                 need = target.getTargetCount();
-                need -= mod.getItemStorage().getItemCount(target.getOutputItem());
+                // (2026-08-25 真实背包兜底) 输出已有数改用真实背包计数 — tracker
+                // 缓存陈旧会误判"缺材料"→ 派发收集 → 挖洞横跳 (用户实测做金靴子:
+                // 背包有足够金粒却 Collecting 36 nuggets 挖洞, 09:14 日志)。
+                need -= countItemInInventoryReal(mod, target.getOutputItem());
             }
             // need holds how many items we need to CRAFT
             // However, a crafting recipe can output more than 1 of an item.
@@ -395,7 +906,8 @@ public class StorageHelper {
                     if (needs == null || needs.isEmpty()) continue;
 
                     // do NOT include craft or armor slots. This would include the OUTPUT (which we DO NOT want)
-                    List<Slot> slotsWithItem = mod.getItemStorage().getSlotsWithItemPlayerInventory(false, needs.getMatches());
+                    // (2026-08-25 真实背包兜底) 材料槽改用真实背包扫描 (见上)。
+                    List<Slot> slotsWithItem = new ArrayList<>(getItemSlotsInInventoryReal(mod, needs.getMatches()));
 
                     // Other slots may have our crafting supplies.
                     ScreenHandler screen = mod.getPlayer().currentScreenHandler;
@@ -458,6 +970,16 @@ public class StorageHelper {
         if (!StorageHelper.isPlayerInventoryOpen() || withItem.isEmpty() || itemTargetsMetInventory(mod, withItem)) {
             return Optional.empty();
         }
+        // 修复 (ping-pong 2026-08-21 12:13 + 12:23 两轮):
+        // 活动合成任务的【输出或材料】出现在合成格/光标是正常中间状态。
+        // 原版豁免只认合成"输出"且只覆盖光标槽——收集原木任务(目标=原木)
+        // 与做斧链里的木板合成(材料=原木)并存时, 斧链刚把原木放进 2x2
+        // 合成格(slot 1), 就被 INACCESSIBLE_PLAYER_SLOTS 循环判为"不可
+        // 访问"而强行搬回背包, 打断合成 → 斧链重新放原木 → 永久横跳。
+        // 豁免必须放在所有槽位检查之前, 同时覆盖合成格与光标。
+        if (isItemUsedByActiveCrafting(mod, withItem)) {
+            return Optional.empty();
+        }
         // Then check our "invalid" slots for our item.
         for (Slot slot : INACCESSIBLE_PLAYER_SLOTS) {
             if (withItem.matches(getItemStackInSlot(slot).getItem())) {
@@ -466,17 +988,43 @@ public class StorageHelper {
         }
         // Consider Cursor slot only if we have our player inventory open AND we're not crafting it...
         if (StorageHelper.isPlayerInventoryOpen() && withItem.matches(getItemStackInCursorSlot().getItem())) {
-            if (!mod.getUserTaskChain().getCurrentTask().thisOrChildSatisfies(task -> {
-                if (task instanceof CraftInInventoryTask invCraft) {
-                    return withItem.matches(invCraft.getRecipeTarget().getOutputItem());
-                }
-                return false;
-            })) {
+            if (!isItemUsedByActiveCrafting(mod, withItem)) {
                 return Optional.of(CursorSlot.SLOT);
             }
         }
         return Optional.empty();
     }
+
+    /**
+     * 物品是否正被某个活动中的合成任务使用（作为输出或配方材料）。
+     * 用于豁免"不可访问槽位"搬运：合成进行期间其材料/输出出现在
+     * 合成格或光标槽是正常中间状态，不应被强行搬回背包。
+     */
+    private static boolean isItemUsedByActiveCrafting(AltoClef mod, ItemTarget withItem) {
+        adris.altoclef.tasksystem.Task userTask = mod.getUserTaskChain().getCurrentTask();
+        if (userTask == null) return false;
+        return userTask.thisOrChildSatisfies(task -> {
+            if (task instanceof CraftInInventoryTask invCraft) {
+                if (invCraft.getRecipeTarget() == null) return false;
+                if (withItem.matches(invCraft.getRecipeTarget().getOutputItem())) {
+                    return true;
+                }
+                CraftingRecipe recipe = invCraft.getRecipeTarget().getRecipe();
+                if (recipe != null) {
+                    for (ItemTarget slotTarget : recipe.getSlots()) {
+                        if (slotTarget == null || slotTarget.isEmpty()) continue;
+                        for (Item ingredient : withItem.getMatches()) {
+                            if (slotTarget.matches(ingredient)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+    }
+
     public static boolean isItemInaccessibleToContainer(AltoClef mod, ItemTarget item) {
         return getFilledInventorySlotInaccessibleToContainer(mod, item).isPresent();
     }

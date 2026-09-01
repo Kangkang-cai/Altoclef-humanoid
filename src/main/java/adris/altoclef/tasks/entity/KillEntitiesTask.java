@@ -16,4 +16,9 @@ public class KillEntitiesTask extends DoToClosestEntityTask {
     public KillEntitiesTask(Class... entities) {
         super(KillEntityTask::new, entities);
     }
+
+    @Override
+    protected String toDebugString() {
+        return "Killing hostiles";
+    }
 }

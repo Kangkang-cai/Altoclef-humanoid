@@ -27,6 +27,7 @@ public class DoToClosestBlockTask extends AbstractDoToClosestObjectTask<BlockPos
 
     private final Predicate<BlockPos> _isValid;
 
+
     public DoToClosestBlockTask(Supplier<Vec3d> getOriginSupplier, Function<BlockPos, Task> getTargetTask, Function<Vec3d, Optional<BlockPos>> getClosestBlock, Predicate<BlockPos> isValid, Block... blocks) {
         _getOriginPos = getOriginSupplier;
         _getTargetTask = getTargetTask;
@@ -68,6 +69,11 @@ public class DoToClosestBlockTask extends AbstractDoToClosestObjectTask<BlockPos
 
     @Override
     protected Task getGoalTask(BlockPos obj) {
+        // 每 tick 重估目标 lambda — 目标 lambda 可能是状态机 (先 GetCloseToBlockTask
+        // 导航, 靠近后切 InteractWithBlockTask 交互, 如 CollectBucketLiquidTask 装水)。
+        // 不能缓存: 缓存会让导航任务一直 active 被复用, 永远切不到交互 (曾破坏装水)。
+        // 放末影之眼的目标切换 PingPong 改由 AbstractDoToClosestObjectTask 的
+        // pursuit 粘住逻辑解决 (当前目标有效就不随便换), 不在这里缓存。
         return _getTargetTask.apply(obj);
     }
 
