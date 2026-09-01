@@ -10,8 +10,10 @@ import adris.altoclef.trackers.storage.ContainerType;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.Slot;
 
+import net.minecraft.entity.Entity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayList;
@@ -24,6 +26,11 @@ public class LootContainerTask extends Task {
     private boolean _weDoneHere = false;
     private final Predicate<ItemStack> _check;
     public final BlockPos chest;
+    // (2026-09-01 矿车箱子, 用户"矿洞里看见矿车箱子不开") 非 null 时表示容器是
+    // 一个矿车箱子实体 (ChestMinecartEntity), 开箱需右键实体而非方块。屏幕打开后
+    // 复用同一套槽位拾取逻辑 (矿车箱子屏幕是 GenericContainerScreenHandler,
+    // ContainerType.CHEST 匹配)。
+    private final Entity _entity;
     public final List<Item> targets = new ArrayList<>();
 
     // (2026-08-27 拿了又放反复修复) 点箱子槽拿起物品后, 客户端光标有约 4-5 tick
@@ -37,13 +44,24 @@ public class LootContainerTask extends Task {
     private static final long PICKUP_SYNC_GRACE_MS = 500;
 
     public LootContainerTask(BlockPos chestPos, List<Item> items) {
-        chest = chestPos;
-        targets.addAll(items);
-        _check = x -> true;
+        this(chestPos, null, items, x -> true);
     }
 
     public LootContainerTask(BlockPos chestPos, List<Item> items, Predicate<ItemStack> pred) {
+        this(chestPos, null, items, pred);
+    }
+
+    /**
+     * (2026-09-01 矿车箱子) 容器是一个实体 (ChestMinecartEntity), 开箱用
+     * 右键实体而非 InteractWithBlockTask。
+     */
+    public LootContainerTask(Entity entity, List<Item> items, Predicate<ItemStack> pred) {
+        this(BlockPos.ORIGIN, entity, items, pred);
+    }
+
+    private LootContainerTask(BlockPos chestPos, Entity entity, List<Item> items, Predicate<ItemStack> pred) {
         chest = chestPos;
+        _entity = entity;
         targets.addAll(items);
         _check = pred;
     }
@@ -61,6 +79,9 @@ public class LootContainerTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
         if(!ContainerType.screenHandlerMatches(ContainerType.CHEST)) {
+            if (_entity != null) {
+                return openMinecart(mod);
+            }
             setDebugState("Interact with container");
             return new InteractWithBlockTask(chest);
         }
@@ -97,6 +118,28 @@ public class LootContainerTask extends Task {
         _pendingPickupSinceMs = System.currentTimeMillis();
         setDebugState("Looting items: " + targets);
         return new ClickSlotTask(optimal.get());
+    }
+
+    /**
+     * (2026-09-01 矿车箱子) 走近矿车箱子实体并在交互距离内右键打开其容器。
+     * 右键用 interactionManager.interactEntity 触发 (与 block 交互同机制)。
+     */
+    private Task openMinecart(AltoClef mod) {
+        Entity e = _entity;
+        if (e == null || !e.isAlive()) {
+            _weDoneHere = true; // 矿车没了, 结束
+            return null;
+        }
+        double reach = mod.getModSettings().getEntityReachRange();
+        if (e.squaredDistanceTo(mod.getPlayer()) > reach * reach) {
+            setDebugState("Approaching minecart chest");
+            return new adris.altoclef.tasks.movement.GetToEntityTask(e, 2);
+        }
+        // 在交互距离内: 面朝实体 + 右键打开。
+        adris.altoclef.util.helpers.LookHelper.lookAt(mod, e.getPos());
+        net.minecraft.client.MinecraftClient.getInstance().interactionManager
+                .interactEntity(mod.getPlayer(), e, Hand.MAIN_HAND);
+        return null;
     }
 
     @Override

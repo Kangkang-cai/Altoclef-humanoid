@@ -42,6 +42,7 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.entity.mob.SilverfishEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
+import net.minecraft.entity.vehicle.ChestMinecartEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -258,6 +259,8 @@ public class BeatMinecraft2Task extends Task {
     // 矿道/要塞)的箱子同样是 CHEST, 自动被同一机制覆盖。
     // _sweptContainers 记录派发过的箱子, 永不重复开(即使当时开失败)。
     private final Set<BlockPos> _sweptContainers = new HashSet<>();
+    // (2026-09-01 矿车箱子) 记录派发过的矿车箱子实体, 不重复开。
+    private final Set<ChestMinecartEntity> _sweptMinecarts = new HashSet<>();
     private LootContainerTask _nearbySweepTask = null;
     private static final double NEARBY_LOOT_RANGE = 48;
 
@@ -1240,6 +1243,68 @@ public class BeatMinecraft2Task extends Task {
                 // Stockpiling wood 打断, 圆石需 8 个永远集不齐)。
                 Task woodGate = getWoodPerfusionTask(mod);
                 if (woodGate != null) return woodGate;
+
+                // NEARBY LOOT SWEEP (2026-08-21 就近快速收集; 2026-09-01 优先级上移 +
+                // 矿车箱子): 附近有未搜刮的箱子/木桶/矿车箱子时优先拿空, 再去干正事。
+                // 2026-09-01 用户"矿洞里看见箱子/矿车箱子竟然不开, 被其他任务抢了":
+                // 原位置在 _gearTask/贪心挖矿之后, 铁装备阶段 shouldForce(_gearTask)
+                // 恒真把搜刮抢先跳过。移到 woodGate(木头硬前置)之后、装备/挖矿之前 —
+                // 视线内的箱子一出现就先开, 不再被正事抢。派发即标记 _swept*,
+                // 即使开不出来也不死循环。
+                // 候选必须可感知: 方块箱子 isBlockPerceivable (LOS, 防透视挖 40 格
+                // 岩层去开看不见的箱子), 矿车箱子 isEntityVisible (LOS)。
+                if (shouldForce(mod, _nearbySweepTask)) {
+                    return _nearbySweepTask;
+                }
+                _nearbySweepTask = null;
+                {
+                    mod.getBlockTracker().trackBlock(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL);
+                    BlockPos nearestContainer = null;
+                    double bestSq = NEARBY_LOOT_RANGE * NEARBY_LOOT_RANGE;
+                    BlockPos playerPos = mod.getPlayer().getBlockPos();
+                    for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL)) {
+                        if (_sweptContainers.contains(pos)) continue;
+                        if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
+                        double sq = pos.getSquaredDistance(playerPos);
+                        if (sq < bestSq) {
+                            bestSq = sq;
+                            nearestContainer = pos;
+                        }
+                    }
+                    // (2026-09-01 矿车箱子) 矿道遗迹常见 ChestMinecartEntity, 是实体
+                    // 非方块, BlockTracker 不覆盖 — 单独经 EntityTracker 检测 (LOS 感知)。
+                    ChestMinecartEntity nearestMinecart = null;
+                    double bestMinecartSq = NEARBY_LOOT_RANGE * NEARBY_LOOT_RANGE;
+                    for (ChestMinecartEntity mc : mod.getEntityTracker().getTrackedEntities(ChestMinecartEntity.class)) {
+                        if (mc == null || !mc.isAlive() || _sweptMinecarts.contains(mc)) continue;
+                        if (!VisibilityHelper.isEntityVisible(mod, mc)) continue;
+                        double sq = mc.squaredDistanceTo(mod.getPlayer());
+                        if (sq < bestMinecartSq) {
+                            bestMinecartSq = sq;
+                            nearestMinecart = mc;
+                        }
+                    }
+                    if (nearestMinecart != null && (nearestContainer == null
+                            || nearestMinecart.squaredDistanceTo(mod.getPlayer()) < bestSq)) {
+                        _sweptMinecarts.add(nearestMinecart);
+                        setDebugState("Sweeping nearby minecart loot");
+                        diagIronPhase(mod, "nearby loot sweep",
+                                "distSq=" + (int) nearestMinecart.squaredDistanceTo(mod.getPlayer())
+                                        + " minecart=" + nearestMinecart.getBlockPos().toShortString());
+                        _nearbySweepTask = new LootContainerTask(nearestMinecart, nearbySweepLootableItems(mod), _noCurseOfBinding);
+                        return _nearbySweepTask;
+                    }
+                    if (nearestContainer != null) {
+                        _sweptContainers.add(nearestContainer);
+                        setDebugState("Sweeping nearby structure loot: " + nearestContainer.toShortString());
+                        diagIronPhase(mod, "nearby loot sweep",
+                                "distSq=" + (int) nearestContainer.getSquaredDistance(playerPos)
+                                        + " chest=" + nearestContainer.toShortString());
+                        _nearbySweepTask = new LootContainerTask(nearestContainer, nearbySweepLootableItems(mod), _noCurseOfBinding);
+                        return _nearbySweepTask;
+                    }
+                }
+
                 // Make sure we have gear, then food.
                 // (2026-08-23 穿戴不收集) 原分支传全套 COLLECT_EYE_ARMOR →
                 // EquipArmorTask 发现缺件会先 CataloguedResourceTask 收集
@@ -1348,44 +1413,6 @@ public class BeatMinecraft2Task extends Task {
                                 return new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(cooked.get(), targetCount), new ItemTarget(raw, targetCount)));
                             }
                         }
-                    }
-                }
-
-                // NEARBY LOOT SWEEP (2026-08-21 就近快速收集):
-                // 附近有未搜刮的结构箱子(村庄/矿道遗迹/神殿)时优先拿空,
-                // 再去跑远路收集(木头等)。派发即标记 _sweptContainers,
-                // 即使该箱子开不出来也不会死循环。
-                // 2026-08-21 rev2: 候选必须 isBlockPerceivable — getKnownLocations
-                // 是裸缓存(区块扫描透视岩层), 不过滤会把地底刷怪笼遗迹的
-                // 箱子也算"就近可拿", bot 丢下正事去挖 40 格岩层。感知规则
-                // (VisibilityHelper): 视线可达, 或在"已见过的结构"推断半径内
-                // (村庄屋内箱子), 地下未见的箱子不再触发。
-                if (shouldForce(mod, _nearbySweepTask)) {
-                    return _nearbySweepTask;
-                }
-                _nearbySweepTask = null;
-                {
-                    mod.getBlockTracker().trackBlock(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL);
-                    BlockPos nearestContainer = null;
-                    double bestSq = NEARBY_LOOT_RANGE * NEARBY_LOOT_RANGE;
-                    BlockPos playerPos = mod.getPlayer().getBlockPos();
-                    for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL)) {
-                        if (_sweptContainers.contains(pos)) continue;
-                        if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
-                        double sq = pos.getSquaredDistance(playerPos);
-                        if (sq < bestSq) {
-                            bestSq = sq;
-                            nearestContainer = pos;
-                        }
-                    }
-                    if (nearestContainer != null) {
-                        _sweptContainers.add(nearestContainer);
-                        setDebugState("Sweeping nearby structure loot: " + nearestContainer.toShortString());
-                        diagIronPhase(mod, "nearby loot sweep",
-                                "distSq=" + (int) nearestContainer.getSquaredDistance(playerPos)
-                                        + " chest=" + nearestContainer.toShortString());
-                        _nearbySweepTask = new LootContainerTask(nearestContainer, nearbySweepLootableItems(mod), _noCurseOfBinding);
-                        return _nearbySweepTask;
                     }
                 }
 

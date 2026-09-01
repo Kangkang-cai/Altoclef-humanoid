@@ -1265,7 +1265,18 @@ public class MobDefenseChain extends SingleTaskChain {
             e.printStackTrace();
         }
 
-        _killAura.tickEnd(mod);
+        // (2026-09-01 用户"苦力怕近身被迫左键击打, 与举盾矛盾导致举盾失效")
+        // 举盾接爆(fuse 苦力怕在接爆范围内且有盾)时, 禁止 KillAura 左键攻击 —
+        // 否则盾举着的同时 killaura 对苦力怕挥砍, 盾牌动作被破坏, 爆炸格挡失败。
+        // 举盾只持续到苦力怕爆炸/远离(fuse<ABORT 自动放盾), 期间放弃近战合理。
+        CreeperEntity fusingCreeper = getClosestFusingCreeper(mod);
+        boolean shieldBlockingCreeper = ThreatEvaluator.hasShield(mod)
+                && fusingCreeper != null
+                && fusingCreeper.squaredDistanceTo(mod.getPlayer())
+                <= CREEPER_SHIELD_BLOCK_RANGE * CREEPER_SHIELD_BLOCK_RANGE;
+        if (!shieldBlockingCreeper) {
+            _killAura.tickEnd(mod);
+        }
     }
 
     private void applyForceField(AltoClef mod, Entity entity) {

@@ -66,12 +66,19 @@ public class BlockTracker extends Tracker {
     //   不, 远区 128²/(4²)×(255/2)≈26万? 实际 (256/4)²=4096 × 128层=52万 太大,
     //   所以远区 step=4 且 Y step=2 (64 层): (256/4)²×64 ≈ 26 万 / 8s ≈ 3.3万/秒。
     //   合计 ~5.5 万/秒, 较原 27 万/秒降 5 倍, 且近区高频覆盖可视 + 远区广覆盖。
+    // (2026-09-01 用户"探视力太瞎, 挺近有钻石没看到, 稀疏扫描太稀疏太慢")
+    // 旧参数: 近区 Y 只 ±8 层 → 玩家正下方 10+ 格的矿(挖隧道最常见)完全不被
+    // 近区覆盖; 远区 step=4 会漏掉 1-2 块的矿脉(钻石), 8s 一次太慢。而近区/远区
+    // 都在 Baritone 后台线程异步执行, 主 tick 无卡顿 — 上一轮"卡顿修复"把感知
+    // 缩到盲区反而没修好卡顿(真卡顿是 LOS 射线, 已用三重护栏解决)。放宽:
+    //   近区 Y ±8 → ±24 (竖直覆盖挖隧道落矿的常见场景);
+    //   远区 step 4 → 2 (不漏 1-2 块矿脉), 间隔 8s → 4s (更快刷新)。
     private static final double NEARBY_SCAN_INTERVAL = 0.2;   // 5Hz
     private static final int NEARBY_SCAN_RADIUS = 16;          // 可视范围 + 一点
-    private static final int NEARBY_SCAN_Y_RANGE = 8;          // 薄层: 玩家 ±8 层
-    private static final double FAR_SCAN_INTERVAL = 8.0;       // 低频
+    private static final int NEARBY_SCAN_Y_RANGE = 24;         // 玩家 ±24 层 (原8, 覆盖正上下方矿)
+    private static final double FAR_SCAN_INTERVAL = 4.0;       // 低频 (原8s, 刷新更快)
     private static final int FAR_SCAN_RADIUS = 128;            // 广范围
-    private static final int FAR_SCAN_STEP = 4;                // 稀疏采样 (4块扫1)
+    private static final int FAR_SCAN_STEP = 2;                // 稀疏采样 (原4, 不漏1-2块矿脉)
     private final TimerGame _nearbyTimer = new TimerGame(NEARBY_SCAN_INTERVAL);
     private final TimerGame _farTimer = new TimerGame(FAR_SCAN_INTERVAL);
 

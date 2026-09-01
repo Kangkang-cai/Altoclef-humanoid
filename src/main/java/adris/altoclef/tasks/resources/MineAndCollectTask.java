@@ -831,13 +831,12 @@ public class MineAndCollectTask extends ResourceTask {
             long nowMs = System.currentTimeMillis();
             if (nowMs - _lastWorldScanMs < WORLD_SCAN_INTERVAL_MS) return Optional.empty();
             _lastWorldScanMs = nowMs;
-            // (2026-09-01 性能修复: 1 tick 800ms 卡顿) 原 24 格半径三重循环逐块
-            // getBlockState → (2*24+1)^3 ≈ 117,649 次方块采样, 每 tick cache 未命中
-            // 就扫一遍, 3 秒一卡 700ms (altoclef_slowtick.log 实锤)。世界扫描是 cache
-            // miss 时的【兜底】, 不必覆盖 24 格 —— 主要目标由 BlockTracker cache +
-            // getNearField(3x3x3 紧贴) 提供, 世界扫描只负责"眼前可见的候选"。
-            // 硬性缩到 8 格半径(17^3≈4913 次, 快 24 倍), 且仍受 3 秒节流限制。
-            double limitedRange = Math.min(maxRange, 8);
+            // (2026-09-01 探视力, 用户"挺近有钻石没看到") 上一轮性能修复把世界
+            // 扫描硬缩到 8 格 (17^3≈4913 次) — 但那是 cache miss 兜底, 真卡顿
+            // 在 LOS 射线(已用三重护栏解决), 缩半径只把感知弄瞎、卡顿没解决。
+            // 恢复覆盖到 16 格 (33^3≈35,937 次), 3 秒节流下开销可控, 眼前可见的
+            // 矿不再漏。主选路仍是 BlockTracker cache(24格), 世界扫描兜底 16。
+            double limitedRange = Math.min(maxRange, 16);
             int r = (int) Math.ceil(limitedRange);
             BlockPos player = mod.getPlayer().getBlockPos();
             BlockPos best = null;

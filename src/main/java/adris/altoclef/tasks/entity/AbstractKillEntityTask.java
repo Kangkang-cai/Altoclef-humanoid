@@ -52,7 +52,11 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // 武器命中范围内、且格挡时也粘住小白不掉距。
     // (2026-08-31 用户最终值) 一会儿"2~3格太远"(原 default playerReach-1), 一会儿"0.8/0.4太近",
 // 最后定 1.5 格为近战贴身距离 (小白/羊牛无盾同用)。
-    private static final double MELEE_HUG_DISTANCE = 1.5;
+    // (2026-09-01 用户"打小白/僵尸距离太近, 放远一倍") 1.5 → 3.0: 骷髅箭/僵尸
+    // 近身太贴容易白挨打, 放远到 3 格仍可命中 (剑 reach ~3), 更安全。
+    private static final double MELEE_HUG_DISTANCE = 3.0;
+    // (2026-09-01 与 MobDefenseChain 一致) 正在 fuse 的苦力怕接爆范围。
+    private static final double CREEPER_SHIELD_BLOCK_RANGE = 16;
     // (2026-08-31 无盾近战并行诊断) 移动+攻击并行关键 tick 节流 (1 秒一条)。
     private static long _lastMeleeFixLog = 0;
 
@@ -224,7 +228,9 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // ThreatEvaluator 加权 (骷髅 60 > 苦力怕 40), 结果举盾朝骷髅、背对
         // 苦力怕。检测到 fuse 苦力怕时直接朝它举盾, 其他威胁一律让位。
         CreeperEntity fusingCreeper = getClosestFusingCreeper(mod);
-        if (fusingCreeper != null && fusingCreeper.isInRange(mod.getPlayer(), 10)) {
+        // (2026-09-01 接爆范围与 MobDefenseChain 一致 10→16: 苦力怕在 10.7 格引爆
+        // 时旧判定刚超界, 杀怪任务不举盾, 被链层"逃跑"接管)
+        if (fusingCreeper != null && fusingCreeper.isInRange(mod.getPlayer(), CREEPER_SHIELD_BLOCK_RANGE)) {
             setDebugState("Shield up vs fusing creeper (highest priority)");
             LookHelper.lookAt(mod, fusingCreeper.getPos());
             mod.getInputControls().hold(Input.CLICK_RIGHT);

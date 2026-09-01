@@ -55,6 +55,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 8 (was 5): diag logs showed the bot mining straight past caves whose
     // mouths were 6-7 blocks away — a human would notice and walk in.
     private static final int CAVE_SCAN_RADIUS = 8;
+    // (2026-09-01 用户"探索机制还是8格, 得调远") 矿洞【检测】保持 8 格
+    // (找洞口, 防误判), 但【进洞后的探索目标选择】扫描更远 — collectConnectedAir
+    // 以 EXPLORE_SCAN_RADIUS 为界, 探索段更长、推进更连贯, 不再 8 格一小段。
+    private static final int EXPLORE_SCAN_RADIUS = 16;
     // (2026-09-01 三维开阔度判定, 取代旧 CAVE_AREA_THRESHOLD=40 空气计数)
     // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长通道。
     // 连通空气集合的 X/Z/Y 跨度分别达到下面阈值才算"开阔天然洞", 触发矿洞探索。
@@ -482,7 +486,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 无天然空气 → null(洞已探索完/根本不是洞)。
      */
     static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude) {
-        Set<BlockPos> reachable = collectConnectedAir(mod, center);
+        // 探索目标选择用更远的 EXPLORE_SCAN_RADIUS, 探索段更长(用户"得调远一点")。
+        Set<BlockPos> reachable = collectConnectedAir(mod, center, EXPLORE_SCAN_RADIUS);
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
         for (BlockPos p : reachable) {
@@ -509,6 +514,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
          * 半径 ±CAVE_SCAN_RADIUS、容量封顶, 供 findNearbyCave 判断洞空气是否「已挖开/可达」。
          */
         static Set<BlockPos> collectConnectedAir(AltoClef mod, BlockPos start) {
+            return collectConnectedAir(mod, start, CAVE_SCAN_RADIUS);
+        }
+
+        /**
+         * (2026-09-01 探索半径分离) 以 radius 为水平界限 BFS 收集与 start 连通的空气。
+         * 检测(findNearbyCave)用 CAVE_SCAN_RADIUS(8, 防误判), 探索目标选择
+         * (pickFarthestNaturalCaveAir)用 EXPLORE_SCAN_RADIUS(16, 探索段更长)。
+         */
+        static Set<BlockPos> collectConnectedAir(AltoClef mod, BlockPos start, int radius) {
             Set<BlockPos> visited = new HashSet<>();
             Deque<BlockPos> queue = new ArrayDeque<>();
             queue.add(start);
@@ -520,8 +534,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                         for (int dx = -1; dx <= 1; dx++) {
                             if (dx == 0 && dy == 0 && dz == 0) continue;
                             BlockPos n = cur.add(dx, dy, dz);
-                            if (Math.abs(n.getX() - start.getX()) > CAVE_SCAN_RADIUS
-                                    || Math.abs(n.getZ() - start.getZ()) > CAVE_SCAN_RADIUS) continue;
+                            if (Math.abs(n.getX() - start.getX()) > radius
+                                    || Math.abs(n.getZ() - start.getZ()) > radius) continue;
                             net.minecraft.block.Block nb = mod.getWorld().getBlockState(n).getBlock();
                             if (nb == Blocks.AIR || nb == Blocks.CAVE_AIR) {
                                 queue.add(n);
