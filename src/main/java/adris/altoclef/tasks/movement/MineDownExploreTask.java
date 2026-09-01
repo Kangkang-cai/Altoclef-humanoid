@@ -376,6 +376,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
         private Optional<BlockPos> findNearbyCave(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
+        // (2026-09-01 露天不检测洞, 用户"露天地面挖楼梯仍触发矿洞") 上一轮只给
+        // 候选空气块加"有顶覆盖"判定不够: 露天场景下玩家能看到天空, 但玩家周围
+        // ±8 格内的候选空气块(如正在挖的楼梯前端)上方 24 格可能被山坡/悬崖/
+        // 树冠上方的局部实心遮挡 → 误判"有顶" → 仍算洞空气触发探索。人类站在
+        // 露天开阔地不会"感知到矿洞" — 改为以玩家为闸门: 玩家头顶无实心覆盖
+        // (露天) → 整个洞检测关闭。真正的洞(普通洞穴/繁茂洞穴/挖穿进洞)玩家
+        // 头顶有岩顶 → 不露天 → 正常检测。树冠不算顶(树下仍算露天)。
+        if (!hasOverheadCover(mod, center)) {
+            return Optional.empty();
+        }
         // (2026-08-31 挖穿才进洞探索, 用户"挖一半墙后探测到洞就触发探索, 不让挖方块还绕远路")
         // 只认「与玩家开放空间连通」的洞空气: 墙后隔着实心、还没挖开的洞空气不连通 →
         // 不触发探索, 继续挖穿; 一旦挖开/从洞口进入, 洞空气进入连通集 → 才触发 BiasedExplore
