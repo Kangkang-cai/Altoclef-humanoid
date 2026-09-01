@@ -41,6 +41,12 @@ import java.util.*;
 public class MobDefenseChain extends SingleTaskChain {
 
     private static final double CREEPER_KEEP_DISTANCE = 10;
+    // (2026-09-01 用户"有盾还跑苦力怕, 应举盾格挡爆炸") 举盾接爆的有效范围。
+    // 原 closeEnough 硬编码 10 格: 苦力怕在 10.7 格引爆时刚好超界 → 有盾也跑
+    // (日志实锤 fuse=0.39 hasShield=true distance=10.7)。苦力怕爆炸波及 ~6 格,
+    // 引爆距离实际可到 10+ 格, 扩大接爆范围到 16 格: 有盾时 fuse 的苦力怕一律
+    // 原地举盾(doShieldNuke 的 fuse<ABORT 会自动放盾), 不再因边界擦边逃跑。
+    private static final double CREEPER_SHIELD_BLOCK_RANGE = 16;
 
     // ---- 盾牌核弹 (Creeper Shield Nuke, 2026-08-23) ----
     // 苦力怕 fuse 在 [0.0, 1.0]，30 tick=1.5s 爆炸；举盾生效需 ~5 tick(0.25s)。
@@ -536,7 +542,8 @@ public class MobDefenseChain extends SingleTaskChain {
             // fuse 早期(<0.3) bot 之前也直接逃, 即使副手拿盾。改为: 有盾且苦力怕
             // 在 10 格内 → 任意 fuse 都原地举盾接爆, 不再逃。只有没盾/被围攻才
             // 降到自信战斗或逃跑兜底。
-            boolean closeEnough = blowingUp.squaredDistanceTo(mod.getPlayer()) <= 100.0; // 10格内才是威胁
+            boolean closeEnough = blowingUp.squaredDistanceTo(mod.getPlayer())
+                    <= CREEPER_SHIELD_BLOCK_RANGE * CREEPER_SHIELD_BLOCK_RANGE; // 有盾接爆范围(16格)内才是威胁
             if (closeEnough && canShieldNuke(mod)) {
                 _doingFunkyStuff = true;
                 boolean shielding = doShieldNuke(mod, blowingUp);
@@ -1424,7 +1431,11 @@ public class MobDefenseChain extends SingleTaskChain {
                 // We want to pick the closest creeper, but FIRST pick creepers about to blow
                 // At max fuse, the cost goes to basically zero.
                 double safety = getCreeperSafety(mod.getPlayer().getPos(), creeper);
+                // (2026-09-01 bugfix) 原代码忘了更新 worstSafety, 条件恒真 → 永远选
+                // 列表里【最后一个】fuse 苦力怕, 而不是最近/最危险的 — 有多个苦力怕时
+                // 会盯错目标(甚至选到远处不构成威胁的)导致近处引爆的反而被忽略。
                 if (safety < worstSafety) {
+                    worstSafety = safety;
                     target = creeper;
                 }
             }

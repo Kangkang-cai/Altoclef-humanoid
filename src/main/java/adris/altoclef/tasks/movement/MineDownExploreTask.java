@@ -469,11 +469,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * 玩家当前连通空间里【最远的天然空气】(排除自挖位置、y≤CAVE_NATURAL_AIR_MAX_Y、
-     * 排除调用方已失败的点)。ExploreCaveTask 用它作洞内导航目标: 每次到达后重扫,
-     * 目标随玩家推进不断指向洞穴更深处。无天然空气 → null(洞已探索完/根本没有洞)。
+     * 玩家当前连通空间里【离参考点 fromRef 最远的天然空气】(排除自挖位置、
+     * y≤CAVE_NATURAL_AIR_MAX_Y、排除调用方已访问/已失败的点)。
+     *
+     * (2026-09-01 策略修正, 用户"随机探索原地打转") 旧版从【玩家当前位置】取最远:
+     * collectConnectedAir 只扫 ±8 格, 目标总在近旁, 且"最远"随玩家移动左右翻转
+     * → 在小空间里来回绕圈。改为:
+     *   - BFS 仍以玩家当前位置为中心(只认连通可达的空气, 防透视);
+     *   - 距离参考点 fromRef 固定为【探索起点】 — 每次选点都朝"离入口更远"的方向
+     *     推, 目标一致向外, 不再左右横跳;
+     *   - exclude 由调用方传入 visited ∪ failed — 到过的点绝不回头。
+     * 无天然空气 → null(洞已探索完/根本不是洞)。
      */
-    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, Set<BlockPos> exclude) {
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude) {
         Set<BlockPos> reachable = collectConnectedAir(mod, center);
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
@@ -481,7 +489,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
             if (isSelfDugAir(mod, p)) continue;
             if (exclude != null && exclude.contains(p)) continue;
-            double d = p.getSquaredDistance(center);
+            double d = p.getSquaredDistance(fromRef);
             if (d > bestDistSq) {
                 bestDistSq = d;
                 best = p;
