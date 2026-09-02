@@ -171,11 +171,17 @@ public class CollectVisibleOresTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        // (2026-08-23) 达标按"生矿+锭"动态计数 (含光标), 见 onTick 注释。
-        if (_active != null && _activePlan != null
-                && countedItems(mod, _activePlan) < _activePlan.cap()
-                && !_active.isFinished(mod)) return false;
-        return !hasAnyVisibleOreWork(mod);
+        // (2026-09-01 防横跳, 用户"贪心引发任务横跳") 旧语义"范围内还有可见矿就永不
+        // 结束"(return !hasAnyVisibleOreWork): 触发放宽到 8 格可见后, 矿洞里可见矿
+        // 几乎一直存在 → 贪心任务永不释放 → 反复打断主线铁套任务 → 铁套↔贪心每
+        // ~2s 互抢 (日志 09:21 实锤)。改为【当前批次挖完即释放】(有界贪心):
+        // _active(本批 MineAndCollectTask)挖完 → 完成交还主线; 由 BeatMinecraft2Task
+        // 的冷却(已加大到 8s)控制下次再触发, 主线获得长窗口推进。
+        if (_active == null) {
+            // 还没选目标(或当前无可见矿): 有可见活就继续等 onTick 建目标, 否则完成。
+            return !hasAnyVisibleOreWork(mod);
+        }
+        return _active.isFinished(mod);
     }
 
     /**

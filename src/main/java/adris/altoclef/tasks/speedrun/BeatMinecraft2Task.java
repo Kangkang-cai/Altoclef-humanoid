@@ -336,9 +336,10 @@ public class BeatMinecraft2Task extends Task {
     // (2026-08-22 贪心收集) 顺手挖眼前可见矿石的粘性任务实例 + 触发
     // 节流 (无活可干时每 3 秒才重扫一次, 防 onTick 每 tick 全量扫描)。
     private CollectVisibleOresTask _greedyOreTask = null;
-    // (2026-08-28 感知延迟 3→1, 用户) 贪心矿检查冷却降为 1 游戏秒, 见矿→开始
-    // 响应从 ~1.5s 平均(最坏3s) 缩短到 ~0.5s 平均(最坏1s)。
-    private final TimerGame _greedyOreCheckCooldown = new TimerGame(1);
+    // (2026-09-01 防横跳, 用户) 贪心矿检查冷却 1→8 游戏秒: 贪心批次释放后给主线
+    // (铁套/挖铁等)长窗口推进, 不再每 1s 就因范围可见矿再次打断 → 铁套↔贪心横跳。
+    // 触发本身仍快(冷却到点立即判), 只是两次贪心之间留 8s 缓冲。
+    private final TimerGame _greedyOreCheckCooldown = new TimerGame(8);
     // (2026-08-22 工作台即收) findNearbyCraftingTable 的兜底暴力扫描
     // 节流 (16³=36k 次 getBlockState, 1 秒一次足够)。
     private final TimerGame _pickupTableScanTimer = new TimerGame(1);
