@@ -53,6 +53,17 @@ public class InputControls {
         _waitForRelease.add(input);
     }
 
+    /**
+     * (2026-09-01 容器交互短按, 用户"不应该是长按反而举盾") 清除之前 hold(战斗举盾)
+     * 残留的按下/等待释放状态, 强制发一次干净短按。否则 tryPress 因 _waitForRelease
+     * 短路不触发, 持续的长按会让 offhand 盾举起来, 右键开容器失效。
+     */
+    public void forcePress(Input input) {
+        release(input);
+        _waitForRelease.remove(input);
+        tryPress(input);
+    }
+
     public void hold(Input input) {
         if (!inputToKeyBinding(input).isPressed()) {
             KeyBinding.onKeyPressed(inputToKeyBinding(input).getDefaultKey());

@@ -324,7 +324,10 @@ public class InteractWithBlockTask extends Task {
                     mod.getInputControls().release(Input.SNEAK);
                     mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
                 }
-                mod.getInputControls().tryPress(_interactInput);
+                // (2026-09-01 短按, 用户"不应该是长按反而举盾") forcePress 清掉
+                // 战斗举盾残留的 hold, 确保右键是干净短按 — 长按会让 offhand 盾
+                // 举起, 开容器(熔炉/箱子)失效。
+                mod.getInputControls().forcePress(_interactInput);
                 //mod.getClientBaritone().getInputOverrideHandler().setInputForceState(_interactInput, true);
                 if (_shiftClick) {
                     mod.getInputControls().hold(Input.SNEAK);
@@ -342,7 +345,8 @@ public class InteractWithBlockTask extends Task {
                     mod.getInputControls().release(Input.SNEAK);
                     mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
                 }
-                mod.getInputControls().tryPress(_interactInput);
+                // (2026-09-01 短按, 同上方分支) 见右侧分支注释。
+                mod.getInputControls().forcePress(_interactInput);
                 if (_shiftClick) {
                     mod.getInputControls().hold(Input.SNEAK);
                 }
