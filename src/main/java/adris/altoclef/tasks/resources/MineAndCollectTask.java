@@ -467,6 +467,13 @@ public class MineAndCollectTask extends ResourceTask {
         private final java.util.Map<BlockPos, Long> _recentlySeen = new java.util.HashMap<>();
         private static final long RECENTLY_SEEN_TICKS = 100; // 5s 记忆期
         private static final int RECENTLY_SEEN_MAX_SIZE = 200;
+        // (2026-09-01 贪心触发放宽后修复, 用户"贪心挖目标矿的3x3x3") 贪心触发能看见
+        // GREEDY 范围内的可见矿(CollectVisibleOresTask 8格), 但本任务原先只认玩家
+        // 贴身 3x3x3 → 远处可见矿无起始目标 → "Waiting for calculations" 空转卡住。
+        // 补: 节流地找 GREEDY_TARGET_RANGE 内最近的可感知目标矿作起始目标。
+        private static final int GREEDY_TARGET_RANGE = 8;
+        private final adris.altoclef.util.time.TimerGame _greedyTargetScanTimer = new adris.altoclef.util.time.TimerGame(0.5);
+        private BlockPos _greedyTargetCache = null;
         // Throttle for [Diag-blind] logging (counts wander ticks).
         private int _blindDiagTick = 0;
         // 上次创建 wander 探索任务的游戏 tick（重建冷却用）。
@@ -634,11 +641,19 @@ public class MineAndCollectTask extends ResourceTask {
                 return nearField.map(Object.class::cast);
             }
             if (_greedy) {
-                // (2026-08-28 贪心=纯贴身) 只认玩家近身 3x3x3 紧贴的矿; 没有了就
-                // 交还 (返回空 → 不挖隧道, 由贪心任务重判), 不做任何 24 格发现。
+                // (2026-08-28 贪心=纯贴身) 先认玩家近身 3x3x3 紧贴的矿 (起始/链尾)。
                 Optional<BlockPos> nearMine = getNearFieldOreAt(mod, mod.getPlayer().getBlockPos());
                 if (nearMine.isPresent()) {
                     return nearMine.map(Object.class::cast);
+                }
+                // (2026-09-01 触发放宽后修复, 用户"贪心挖目标矿的3x3x3") 贪心触发能看见
+                // GREEDY_TARGET_RANGE 内(8格)的可见矿, 但上面只认贴身 3x3x3 → 远处可见矿
+                // 无起始目标 → "Waiting for calculations" 空转卡住 (日志 09:13 实锤)。
+                // 补: 找范围内最近的可感知目标矿作起始目标, 导航过去后由 _miningPos 的
+                // 3x3x3 链挖处理 (第 632 行, 正确设计)。FOV+LOS 门控, 不透视。
+                Optional<BlockPos> visibleTarget = findVisibleGreedyTarget(mod);
+                if (visibleTarget.isPresent()) {
+                    return visibleTarget.map(Object.class::cast);
                 }
                 // (2026-08-31 贪心挖完必捡掉落, 用户实测"挖完没拾取") 原 greedy 分支没矿就
                 // 直接返回空 → 近场没矿且 shouldAvoidPickingUp=true(父 ResourceTask 不兜底捡),
@@ -939,6 +954,48 @@ public class MineAndCollectTask extends ResourceTask {
                     }
                 }
             }
+            return Optional.ofNullable(best);
+        }
+
+        /**
+         * (2026-09-01 贪心起始目标, 用户"贪心挖目标矿的3x3x3") 找玩家
+         * GREEDY_TARGET_RANGE 内最近的可感知目标矿 (FOV+LOS, 不透视), 作为贪心的
+         * 起始目标 — 导航过去后由 _miningPos 的 3x3x3 链挖接手。节流 0.5s, 且仅在
+         * 无当前挖掘目标/无贴身矿时调用 (见 getClosestTo greedy 分支)。
+         */
+        private Optional<BlockPos> findVisibleGreedyTarget(AltoClef mod) {
+            if (!_greedyTargetScanTimer.elapsed()) {
+                return Optional.ofNullable(_greedyTargetCache);
+            }
+            _greedyTargetScanTimer.reset();
+            BlockPos player = mod.getPlayer().getBlockPos();
+            int r = GREEDY_TARGET_RANGE;
+            BlockPos best = null;
+            double bestSq = Double.POSITIVE_INFINITY;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        BlockPos p = player.add(dx, dy, dz);
+                        if (_blacklist.contains(p)) continue;
+                        Block actual = mod.getWorld().getBlockState(p).getBlock();
+                        boolean matches = false;
+                        for (Block target : _blocks) {
+                            if (actual == target) { matches = true; break; }
+                        }
+                        if (!matches) continue;
+                        // 必须可感知 (LOS+isBuriedOre): 被岩石包住的矿不可见, 不锁 (不透视)。
+                        if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue;
+                        if (!WorldHelper.canBreak(mod, p)) continue;
+                        if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                        double dSq = player.getSquaredDistance(p);
+                        if (dSq < bestSq) {
+                            bestSq = dSq;
+                            best = p;
+                        }
+                    }
+                }
+            }
+            _greedyTargetCache = best;
             return Optional.ofNullable(best);
         }
 
