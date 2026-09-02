@@ -157,6 +157,17 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
+     * (2026-09-01 铁套↔钻石套打架) 是否已有钻石装具穿在身上 (头盔/胸甲/护腿任一)。
+     * Path A "Equipping owned armor" 每 tick 先跑, 一旦穿上钻石件, 铁套阶段就
+     * 应让位 (钻石>铁), 否则铁件覆盖钻石件形成横跳。
+     */
+    private static boolean hasDiamondArmorEquipped(AltoClef mod) {
+        return StorageHelper.isArmorEquipped(mod, Items.DIAMOND_HELMET)
+                || StorageHelper.isArmorEquipped(mod, Items.DIAMOND_CHESTPLATE)
+                || StorageHelper.isArmorEquipped(mod, Items.DIAMOND_LEGGINGS);
+    }
+
+    /**
      * (2026-08-28 已有盾就不再做盾) IRON_GEAR 里带 SHIELD。即便 shieldMet
      * 判定"已有盾"(副手/主手) 都返回 true, 只要铁剑还没做出来 (gate
      * !gearMinMet = 缺铁剑), 就会拿整份 IRON_GEAR 去 getSquashedItemTask,
@@ -1477,7 +1488,12 @@ public class BeatMinecraft2Task extends Task {
                 // (2026-08-30 铁套保护, 用户) 工具 (铁剑/镐/盾) 就绪后、进钻石前,
                 // 先做一套铁甲穿上, 避免太容易死。先穿已持有未装备的铁甲, 缺件再
                 // 收集; 只有四件全穿身上 (ironArmorMet) 才结束本阶段。
-                if (!ironArmorMet(mod) && !eyeGearSatisfied) {
+                // (2026-09-01 铁套↔钻石套打架, 用户"装备铁套和钻石套打架了") 上方
+                // "Equipping owned armor" 已穿上钻石件(Path A 每 tick 先跑), 这里若
+                // 仍因 !ironArmorMet 强推铁件 → 铁件覆盖钻石件 → 下 tick Path A 见
+                // 钻石没了又装回 → 反复横跳 (日志 TaskPingPong 实锤)。已有钻石装具
+                // 时跳过铁套阶段 — 钻石>铁, 走钻石路径后不再强推铁套。
+                if (!ironArmorMet(mod) && !eyeGearSatisfied && !hasDiamondArmorEquipped(mod)) {
                     diagIronPhase(mod, "make iron armor set",
                             "ironArmorMet=" + ironArmorMet(mod)
                                     + " eyeGearSatisfied=" + eyeGearSatisfied);
