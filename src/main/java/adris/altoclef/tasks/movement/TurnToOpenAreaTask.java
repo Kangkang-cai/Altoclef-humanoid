@@ -71,10 +71,14 @@ public class TurnToOpenAreaTask extends Task {
     }
 
     // 该方向直到首个实心块的连通非实心格数 (站脚层 / 头顶层取较短者), 封顶 MAX_LOOK。
+    // (2026-09-01 方向向量修正, 用户"面向墙丢"根因) MC 朝向约定: yaw 0=南(+Z),
+    // 90=西(-X), 前向向量 = (-sin(yaw), 0, cos(yaw)) — 见 PlayerInteractionFixChain
+    // /SwingThroughChain/ExploreStrongholdTask 同款算法。旧代码用 (+sin, -cos) 正好
+    // 反向: 评分挑的 yaw 其"对面"才是开阔的, bot 面向最不开阔的墙丢东西。
     private double scoreDirection(AltoClef mod, BlockPos p, float yaw) {
         double rad = Math.toRadians(yaw);
-        int dx = (int) Math.round(Math.sin(rad));
-        int dz = -(int) Math.round(Math.cos(rad));
+        int dx = (int) Math.round(-Math.sin(rad));
+        int dz = (int) Math.round(Math.cos(rad));
         int foot = clearLen(mod, p, dx, dz, 0);
         int head = clearLen(mod, p, dx, dz, 1);
         return Math.min(foot, head);
