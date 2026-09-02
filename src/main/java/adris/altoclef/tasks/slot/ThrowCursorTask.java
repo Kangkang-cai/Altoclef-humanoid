@@ -1,79 +1,102 @@
 package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.tasks.movement.TurnToOpenAreaTask;
 import adris.altoclef.tasksystem.Task;
-import adris.altoclef.util.helpers.WorldHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.Slot;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 
+/**
+ * 丢弃光标上的物品。
+ *
+ * (2026-09-01 重设计, 用户"先转向空旷, 然后再丢") 容器界面点窗外(-999)丢光标
+ * 物品是 dropItem(stack,true)=随机初速度, 完全不读玩家朝向 — 任何"转向"对它都
+ * 无效, 东西随机落回脚边被满背包立刻捡回 (用户两轮实测)。方向可控的唯一可靠
+ * 路径是 Q 键 dropSelectedItem (dropItem(stack,false) 用朝向速度), 但 Q 丢的是
+ * 【选中的快捷栏槽】。流程分三步, 每步清晰可见:
+ *   1. 交换: 把光标物品交换进快捷栏并选中 (方向可控丢的必要前提);
+ *   2. 转向: 交给独立 TurnToOpenAreaTask 先转向开阔处 (视角稳定后完成);
+ *   3. 丢出: 关界面(光标旧物自动回背包), 按 Q 用朝向初速度丢向开阔处。
+ */
 public class ThrowCursorTask extends Task {
 
-    private final Task _throwTask = new ClickSlotTask(Slot.UNDEFINED);
+    // 阶段: 0=交换到快捷栏, 1=转向开阔处, 2=Q键丢出。
+    private int _phase = 0;
+    // 要丢弃的物品类型 (交换生效判定用)。
+    private Item _throwItem;
+    // 目标快捷栏槽 (PlayerInventory 0..8)。
+    private int _hotbarIndex = -1;
+    // 等待交换生效的 tick 上限 (防网络/UI 延迟卡死)。
+    private int _swapWaitTicks = 0;
+    private static final int SWAP_WAIT_MAX_TICKS = 10; // 0.5s
+    // 独立转向任务实例 (阶段 1 复用同一实例直到完成)。
+    private TurnToOpenAreaTask _turnTask;
 
     @Override
     protected void onStart(AltoClef mod) {
+        _phase = 0;
+        _throwItem = StorageHelper.getItemStackInCursorSlot().getItem();
+        _hotbarIndex = -1;
+        _swapWaitTicks = 0;
+        _turnTask = null;
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
-        // (2026-08-27 防止丢垃圾掉脚边无限循环, 用户实测) 丢物品前先把视角转成
-        // 水平、朝向最空旷的方向, 让被扔的物品有水平初速度飞出去, 而不是竖直掉
-        // 回脚下又被满背包立刻捡回 (旧版未控制视角: 相机朝天时垃圾垂直落回脚边,
-        // 前方两侧又有方块 → 一直扔一直捡, 背包永远满, 用户人工干预才脱身)。
-        // 物品掉落方向由玩家当前朝向决定, 这里主动瞄准"3 格内实心块最少"的方向。
-        steerLookAwayFromWalls(mod);
-        return _throwTask;
-    }
+        ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+        if (cursor.isEmpty()) {
+            // 光标已空(没有可丢的物品) → 完成。
+            return null;
+        }
 
-    // 找一个水平 45° 递增的朝向里, 前方(1~3 格, 站脚层 + 头顶 1 层)实心块最少的
-    // 那个方向, 把玩家视角水平对准它。pitch 放 0(正前方), 物品会带水平初速度。
-    private void steerLookAwayFromWalls(AltoClef mod) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return;
-        BlockPos p = mod.getPlayer().getBlockPos();
-        // 当前朝向作为基准, 平手时保持当前方向(避免无谓转身)。
-        float currentYaw = mod.getPlayer().getYaw();
-        double bestScore = scoreDirection(mod, p, currentYaw);
-        float bestYaw = currentYaw;
-        // 8 个水平方向, yaw 0 = -Z(北), 逆时针为正, 这里转成朝向并测空旷度。
-        for (int i = 0; i < 8; ++i) {
-            double rad = Math.PI * 2.0 * i / 8.0;
-            float yaw = (float) (Math.toDegrees(Math.PI / 4.0 * i));
-            double score = scoreDirection(mod, p, yaw);
-            if (score > bestScore) {
-                bestScore = score;
-                bestYaw = yaw;
+        if (_phase == 0) {
+            // 找快捷栏槽 (优先空的), 点击交换: 光标物品进快捷栏。
+            if (_hotbarIndex == -1) {
+                for (int i = 0; i < 9; i++) {
+                    if (StorageHelper.getItemStackInSlot(Slot.getFromCurrentScreenInventory(i)).isEmpty()) {
+                        _hotbarIndex = i;
+                        break;
+                    }
+                }
+                if (_hotbarIndex == -1) {
+                    _hotbarIndex = mod.getPlayer().getInventory().selectedSlot;
+                }
+                return new ClickSlotTask(Slot.getFromCurrentScreenInventory(_hotbarIndex));
             }
+            // 等待交换生效 (快捷栏槽里确实变成要丢的物品), 超时放弃(不误丢)。
+            if (++_swapWaitTicks > SWAP_WAIT_MAX_TICKS) {
+                StorageHelper.closeScreen();
+                return null; // 交换失败, 关界面放回光标物品, 不 Q 丢避免丢错
+            }
+            ItemStack inHotbar = StorageHelper.getItemStackInSlot(Slot.getFromCurrentScreenInventory(_hotbarIndex));
+            if (inHotbar.isEmpty() || inHotbar.getItem() != _throwItem) {
+                return null; // 交换还没生效, 继续等
+            }
+            mod.getPlayer().getInventory().selectedSlot = _hotbarIndex;
+            _phase = 1;
+            _turnTask = new TurnToOpenAreaTask();
+            return _turnTask;
         }
-        // (2026-09-01 用户确认: 直接 setYaw 绕过 baritone) 旧 LookHelper.lookAt 走
-        // baritone RotationMoveEvent, 背包/容器界面打开时不生效 → 视角从不转动 →
-        // 物品朝旧朝向被丢出(撞墙/垂直落回脚边)又被满背包立刻捡回。物品丢弃方向
-        // 直接读 player.getYaw(), 这里直接 setYaw/setPitch, 界面开着也立即生效。
-        try {
-            mod.getPlayer().setYaw(bestYaw);
-            mod.getPlayer().setPitch(0);
-        } catch (Exception ignored) {
-            // 设置视角失败也不阻断丢东西。
-        }
-    }
 
-    // 该朝向水平射线上 1~3 格(站脚层 + 头顶 1 层)的非实心块计数, 越高越开阔。
-    private double scoreDirection(AltoClef mod, BlockPos p, float yaw) {
-        double rad = Math.toRadians(yaw);
-        int dx = (int) Math.round(Math.sin(rad));
-        int dz = -(int) Math.round(Math.cos(rad));
-        double score = 0;
-        for (int d = 1; d <= 3; ++d) {
-            BlockPos a = p.add(dx * d, 0, dz * d);   // 站脚层
-            BlockPos b = p.add(dx * d, 1, dz * d);   // 头顶 1 层
-            if (!WorldHelper.isSolid(mod, a)) score += 1;
-            if (!WorldHelper.isSolid(mod, b)) score += 1;
+        if (_phase == 1) {
+            // 独立转向任务: 先转向开阔处, 视角稳定后才丢。
+            if (_turnTask != null && !_turnTask.isFinished(mod)) {
+                return _turnTask;
+            }
+            _turnTask = null;
+            _phase = 2;
         }
-        return score;
+
+        // 阶段 2: 关界面(光标旧物自动回背包) → Q 键用朝向初速度丢向开阔处。
+        StorageHelper.closeScreen();
+        mod.getPlayer().dropSelectedItem(true);
+        return null;
     }
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
     }
 
     @Override
@@ -88,6 +111,7 @@ public class ThrowCursorTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return _throwTask.isFinished(mod);
+        // 光标已空(物品已处理/丢弃) 即视为完成。
+        return StorageHelper.getItemStackInCursorSlot().isEmpty();
     }
 }
