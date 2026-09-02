@@ -139,9 +139,12 @@ public class InteractWithBlockTask extends Task {
                 Goal sideGoal = new GoalBlockSide(target, interactSide, 1);
                 return new GoalAnd(sideGoal, new GoalNear(target.add(interactOffset), reachDistance));
             } else {
-                // TODO: Cleaner method of picking which side to approach from. This is only here for the lava stuff.
-                return new GoalTwoBlocks(target.up());
-                //return new GoalNear(target.add(interactOffset), reachDistance);
+                // (2026-09-01 用户"熔炉距离太远右键失败, 用人类交互逻辑") 旧
+                // GoalTwoBlocks(target.up()) 让 bot 停在目标上方/过远位置, 开容器
+                // (熔炉/箱子/工作台) 时右键够不着 → CANT_REACH↔WAIT_FOR_CLICK 反复
+                // 打转。改为 GoalNear(target, 1): 走到容器旁 1 格内再右键, 人类开
+                // 箱就是走到跟前再点。
+                return new GoalNear(target.add(interactOffset), Math.max(1, reachDistance));
             }
         }
     }

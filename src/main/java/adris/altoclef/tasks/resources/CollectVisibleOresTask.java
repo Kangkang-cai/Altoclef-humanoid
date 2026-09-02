@@ -58,10 +58,12 @@ public class CollectVisibleOresTask extends Task {
 
     // (2026-09-01 贪心触发"看见"放宽, 用户"看到钻石都不触发贪心挖") 旧 3x3x3 贴身
     // 只算"触碰到"的矿, 眼前几格可见的钻石 vis=0 永不触发。改为扫 GREEDY_VISIBLE_RANGE
-    // 且必须 isBlockPerceivable(FOV+LOS+isBuriedOre, 防透视) — 眼前可见的矿才触发,
-    // 被岩石包住的矿仍不可感知, 不破坏防透视 (原"不透视远矿"约束由 LOS 门控承担,
-    // 不再靠把范围缩到 1)。
-    private static final int GREEDY_VISIBLE_RANGE = 8;
+    // 且必须可感知(见 isOreVisibleToGreedy, LOS+isBuriedOre 防透视, 但放宽到"暴露面
+    // 可见"而非死板中心 LOS) — 眼前可见的矿才触发, 被岩石包住的矿仍不可感知,
+    // 不破坏防透视。
+    // (2026-09-01 v2 用户"看见钻石依旧不挖") 8 格仍太近(钻石常在 8~16 格墙上),
+    // 且部分嵌岩的矿中心 LOS 被周边挡 → vis=0。扩到 16 格 + 宽松暴露面判定。
+    private static final int GREEDY_VISIBLE_RANGE = 16;
 
     // hasAnyVisibleOreWork / onTick 的静态节流缓存: 两者都可能每 tick 被
     // 调用, 而 countAllVisible 是 12 格暴力扫描 (1 秒一次可接受, 每 tick 不行)。
@@ -260,9 +262,8 @@ public class CollectVisibleOresTask extends Task {
         BlockPos player = mod.getPlayer().getBlockPos();
         int r = GREEDY_VISIBLE_RANGE;
         // (2026-09-01 触发"看见"放宽 + 防透视) 扫玩家近身 r 格, 但每个候选矿必须
-        // 过 isBlockPerceivable (LOS 视线 + isBuriedOre 包裹判定) — 眼前可见的矿
-        // 才计入 vis, 被岩石包住的矿(即使 8 格内)不算, 不透视。LOS 只对命中的
-        // 少数矿石方块执行, 代价极小。
+        // 过 isOreVisibleToGreedy (LOS 视线 + isBuriedOre 包裹判定, 且暴露面可见即算)
+        // — 眼前可见的矿才计入 vis, 被岩石包住的矿(即使 r 格内)不算, 不透视。
         Map<OrePlan, OreStat> counts = new IdentityHashMap<>();
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
@@ -270,7 +271,7 @@ public class CollectVisibleOresTask extends Task {
                     BlockPos pos = player.add(dx, dy, dz);
                     OrePlan plan = BLOCK_TO_PLAN.get(mod.getWorld().getBlockState(pos).getBlock());
                     if (plan == null) continue;
-                    if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
+                    if (!isOreVisibleToGreedy(mod, pos)) continue;
                     OreStat stat = counts.computeIfAbsent(plan, p -> new OreStat());
                     if (!WorldHelper.canBreak(mod, pos)) continue;
                     if (WorldHelper.isAdjacentToLiquid(mod, pos)) continue;
@@ -280,6 +281,25 @@ public class CollectVisibleOresTask extends Task {
         }
         _lastCounts = counts;
         return counts;
+    }
+
+    /**
+     * (2026-09-01 v2 用户"看见钻石依旧不挖") 贪心可见判定:
+     *   - 严格版: isBlockPerceivable (LOS 到方块中心 + isBuriedOre 包裹判定, 主线防透视同款);
+     *   - 宽松版: 任一个邻位是空气(暴露面), 且玩家 LOS 能看到该暴露面 — 部分嵌岩的矿
+     *     中心 LOS 会被周边挡, 但暴露面肉眼可见 (人类"看到就挖")。暴露面必须真的
+     *     LOS 可见, 不会隔墙看到其它 pocket 的矿, 不透视。
+     */
+    private static boolean isOreVisibleToGreedy(AltoClef mod, BlockPos pos) {
+        if (VisibilityHelper.isBlockPerceivable(mod, pos)) return true;
+        for (net.minecraft.util.math.Direction dir : net.minecraft.util.math.Direction.values()) {
+            BlockPos n = pos.offset(dir);
+            net.minecraft.block.BlockState ns = mod.getWorld().getBlockState(n);
+            if (ns.isAir() || ns.getBlock() == Blocks.CAVE_AIR) {
+                if (VisibilityHelper.isBlockVisible(mod, n)) return true;
+            }
+        }
+        return false;
     }
 
     @Override

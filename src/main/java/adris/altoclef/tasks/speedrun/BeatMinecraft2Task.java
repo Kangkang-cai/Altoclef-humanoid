@@ -1681,6 +1681,14 @@ public class BeatMinecraft2Task extends Task {
         // 导致 Restocking 反复误触发。改用直接扫描玩家背包 (main+offhand)
         // 统计原木, 不依赖 tracker 缓存刷新时机。
         int logCount = countLogsInPlayerInventory(mod);
+        // (2026-09-01 用户"地下不触发收集木头, 除非原木<4") 地下时原木 ≥
+        // woodRestockThreshold(4) 就地继续挖矿, 不回地表/不就地砍树 — 否则
+        // minWoodLogs(25) 未攒够就让 bot 在原木还很多时频繁回地表打断下矿
+        // (日志 10:35 "Returning to surface to collect wood" 实锤)。只有跌破
+        // 4 才算真缺木头, 才回地表。地表逻辑仍按原 minWoodLogs 攒满。
+        if ((isUndergroundDebounced(mod) || isInPit(mod)) && logCount >= _config.woodRestockThreshold) {
+            return null;
+        }
         // (2026-08-22) 地表资源前置: 树只长在地表。深处矿洞/水下时先挖回
         // 地表再收集 — Baritone 垂直挖穿几十格岩层耗时数分钟, 若直接派收集
         // 任务会被进度检查误判"不可达"而"挖一半就放弃换目标"。
