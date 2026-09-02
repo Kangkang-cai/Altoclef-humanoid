@@ -8,6 +8,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -55,10 +56,12 @@ public class CollectVisibleOresTask extends Task {
             new OrePlan(new Block[]{Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE}, Items.DIAMOND, 8, MiningRequirement.IRON, new Item[]{Items.DIAMOND}),
     };
 
-    // (2026-08-28 贪心只挖贴身矿, 用户拍板) 纯 3x3x3 紧贴: 贪婪不"透视"远矿,
-    // 只认玩家近身 1 格内的可挖矿。近场没矿就不触发、不挖隧道, 远处的矿交给
-    // 主线挖矿。范围这么小, 天然不会透视被岩石包住的矿。
-    private static final double VISIBLE_RANGE = 1;
+    // (2026-09-01 贪心触发"看见"放宽, 用户"看到钻石都不触发贪心挖") 旧 3x3x3 贴身
+    // 只算"触碰到"的矿, 眼前几格可见的钻石 vis=0 永不触发。改为扫 GREEDY_VISIBLE_RANGE
+    // 且必须 isBlockPerceivable(FOV+LOS+isBuriedOre, 防透视) — 眼前可见的矿才触发,
+    // 被岩石包住的矿仍不可感知, 不破坏防透视 (原"不透视远矿"约束由 LOS 门控承担,
+    // 不再靠把范围缩到 1)。
+    private static final int GREEDY_VISIBLE_RANGE = 8;
 
     // hasAnyVisibleOreWork / onTick 的静态节流缓存: 两者都可能每 tick 被
     // 调用, 而 countAllVisible 是 12 格暴力扫描 (1 秒一次可接受, 每 tick 不行)。
@@ -249,9 +252,11 @@ public class CollectVisibleOresTask extends Task {
         }
         _lastCheckMs = now;
         BlockPos player = mod.getPlayer().getBlockPos();
-        int r = (int) Math.ceil(VISIBLE_RANGE);
-        // (2026-08-28 贪心只挖贴身矿) 只扫玩家近身 3x3x3 (r=1)。范围极小,
-        // 不可能透视到被岩石包住的远矿, 也不需要空气 BFS/缓存。天然不透视。
+        int r = GREEDY_VISIBLE_RANGE;
+        // (2026-09-01 触发"看见"放宽 + 防透视) 扫玩家近身 r 格, 但每个候选矿必须
+        // 过 isBlockPerceivable (LOS 视线 + isBuriedOre 包裹判定) — 眼前可见的矿
+        // 才计入 vis, 被岩石包住的矿(即使 8 格内)不算, 不透视。LOS 只对命中的
+        // 少数矿石方块执行, 代价极小。
         Map<OrePlan, OreStat> counts = new IdentityHashMap<>();
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
@@ -259,6 +264,7 @@ public class CollectVisibleOresTask extends Task {
                     BlockPos pos = player.add(dx, dy, dz);
                     OrePlan plan = BLOCK_TO_PLAN.get(mod.getWorld().getBlockState(pos).getBlock());
                     if (plan == null) continue;
+                    if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
                     OreStat stat = counts.computeIfAbsent(plan, p -> new OreStat());
                     if (!WorldHelper.canBreak(mod, pos)) continue;
                     if (WorldHelper.isAdjacentToLiquid(mod, pos)) continue;

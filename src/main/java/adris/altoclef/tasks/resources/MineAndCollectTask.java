@@ -16,6 +16,7 @@ import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.slots.PlayerSlot;
+import adris.altoclef.util.slots.Slot;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -32,6 +33,7 @@ import net.minecraft.item.Items;
 import net.minecraft.block.BedBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.client.MinecraftClient;
@@ -43,6 +45,9 @@ public class MineAndCollectTask extends ResourceTask {
     private final MiningRequirement _requirement;
 
     private final TimerGame _cursorStackTimer = new TimerGame(3);
+    // (2026-09-01 手挖修复) 镐装备核对用独立更快的节流 (0.5s), 不依赖光标/
+    // PlayerInteractionFixChain 的 isBreakingBlock() 事件 — 有时不触发导致手挖。
+    private final TimerGame _toolEquipTimer = new TimerGame(0.5);
 
     private final MineOrCollectTask _subtask;
 
@@ -391,6 +396,35 @@ public class MineAndCollectTask extends ResourceTask {
                 }
             }
             _cursorStackTimer.reset();
+        }
+        // (2026-09-01 手挖修复, 用户"挖矿忘换镐手挖没检测") 独立 0.5s 节流核对
+        // 装备: PlayerInteractionFixChain 的自动换工具只在 isBreakingBlock() 事件
+        // 触发时跑, 事件偶发不触发 → 手挖, 且 miningRequirementMet 只查背包不查
+        // 装备 → 检测不到。这里直接对"正在挖的那块"找最佳工具并装备, 不依赖事件;
+        // 找不到合适工具却仍装备了不可用的手 → 记 [HAND-MINING] 诊断。
+        if (_toolEquipTimer.elapsed()) {
+            _toolEquipTimer.reset();
+            BlockPos miningPos = _subtask.miningPos();
+            if (miningPos != null) {
+                BlockState state = mod.getWorld().getBlockState(miningPos);
+                Optional<Slot> bestTool = StorageHelper.getBestToolSlot(mod, state);
+                Slot currentEquipped = PlayerSlot.getEquipSlot();
+                if (bestTool.isPresent() && !bestTool.get().equals(currentEquipped)) {
+                    Item equippedItem = StorageHelper.getItemStackInSlot(currentEquipped).getItem();
+                    Item bestItem = StorageHelper.getItemStackInSlot(bestTool.get()).getItem();
+                    if (equippedItem != bestItem) {
+                        mod.getSlotHandler().forceEquipSlot(bestTool.get());
+                    }
+                } else if (bestTool.isEmpty()) {
+                    // 无合适工具却在挖 (理论该被 miningRequirementMet 拦住): 手挖检测。
+                    Item equippedItem = StorageHelper.getItemStackInSlot(currentEquipped).getItem();
+                    if (!(equippedItem instanceof MiningToolItem) || !((MiningToolItem) equippedItem).isSuitableFor(state)) {
+                        Debug.logToFile("altoclef_diag.log",
+                                "[HAND-MINING] mining " + state.getBlock() + " at " + miningPos.toShortString()
+                                        + " with " + equippedItem + " (no suitable tool in inventory)");
+                    }
+                }
+            }
         }
     }
 
