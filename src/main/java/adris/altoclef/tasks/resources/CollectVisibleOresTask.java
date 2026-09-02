@@ -58,12 +58,12 @@ public class CollectVisibleOresTask extends Task {
 
     // (2026-09-01 贪心触发"看见"放宽, 用户"看到钻石都不触发贪心挖") 旧 3x3x3 贴身
     // 只算"触碰到"的矿, 眼前几格可见的钻石 vis=0 永不触发。改为扫 GREEDY_VISIBLE_RANGE
-    // 且必须可感知(见 isOreVisibleToGreedy, LOS+isBuriedOre 防透视, 但放宽到"暴露面
-    // 可见"而非死板中心 LOS) — 眼前可见的矿才触发, 被岩石包住的矿仍不可感知,
-    // 不破坏防透视。
-    // (2026-09-01 v2 用户"看见钻石依旧不挖") 8 格仍太近(钻石常在 8~16 格墙上),
-    // 且部分嵌岩的矿中心 LOS 被周边挡 → vis=0。扩到 16 格 + 宽松暴露面判定。
-    private static final int GREEDY_VISIBLE_RANGE = 16;
+    // 且必须 isBlockPerceivable(FOV+LOS+isBuriedOre, 防透视) — 眼前可见的矿才触发,
+    // 被岩石包住的矿仍不可感知, 不破坏防透视。
+    // (2026-09-01 v2 回退, 用户"钻石修改原因错误, 留下排查日志") 曾扩到 16 格+宽松
+    // 暴露面判定, 用户判定原因不对。回退到 8 格 + 严格 isBlockPerceivable; 具体为何
+    // 钻石 vis=0 用 [GreedyDiag] 日志排查 (范围内不可感知的钻石记位置/距离/失败原因)。
+    private static final int GREEDY_VISIBLE_RANGE = 8;
 
     // hasAnyVisibleOreWork / onTick 的静态节流缓存: 两者都可能每 tick 被
     // 调用, 而 countAllVisible 是 12 格暴力扫描 (1 秒一次可接受, 每 tick 不行)。
@@ -262,8 +262,9 @@ public class CollectVisibleOresTask extends Task {
         BlockPos player = mod.getPlayer().getBlockPos();
         int r = GREEDY_VISIBLE_RANGE;
         // (2026-09-01 触发"看见"放宽 + 防透视) 扫玩家近身 r 格, 但每个候选矿必须
-        // 过 isOreVisibleToGreedy (LOS 视线 + isBuriedOre 包裹判定, 且暴露面可见即算)
-        // — 眼前可见的矿才计入 vis, 被岩石包住的矿(即使 r 格内)不算, 不透视。
+        // 过 isBlockPerceivable (LOS 视线 + isBuriedOre 包裹判定) — 眼前可见的矿
+        // 才计入 vis, 被岩石包住的矿(即使 r 格内)不算, 不透视。LOS 只对命中的
+        // 少数矿石方块执行, 代价极小。
         Map<OrePlan, OreStat> counts = new IdentityHashMap<>();
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
@@ -271,7 +272,14 @@ public class CollectVisibleOresTask extends Task {
                     BlockPos pos = player.add(dx, dy, dz);
                     OrePlan plan = BLOCK_TO_PLAN.get(mod.getWorld().getBlockState(pos).getBlock());
                     if (plan == null) continue;
-                    if (!isOreVisibleToGreedy(mod, pos)) continue;
+                    if (!VisibilityHelper.isBlockPerceivable(mod, pos)) {
+                        // (2026-09-01 排查日志, 用户"钻石修改原因错误, 留下排查日志")
+                        // 范围内存在目标矿却不可感知时, 记录位置/距离/失败原因 —
+                        // 定位"看见钻石却不触发贪心"的真实原因 (透视为: 范围不够?
+                        // LOS 被挡? isBuriedOre 包裹? 还是根本没扫到)。
+                        logUnperceivableOre(mod, pos, player);
+                        continue;
+                    }
                     OreStat stat = counts.computeIfAbsent(plan, p -> new OreStat());
                     if (!WorldHelper.canBreak(mod, pos)) continue;
                     if (WorldHelper.isAdjacentToLiquid(mod, pos)) continue;
@@ -283,23 +291,24 @@ public class CollectVisibleOresTask extends Task {
         return counts;
     }
 
-    /**
-     * (2026-09-01 v2 用户"看见钻石依旧不挖") 贪心可见判定:
-     *   - 严格版: isBlockPerceivable (LOS 到方块中心 + isBuriedOre 包裹判定, 主线防透视同款);
-     *   - 宽松版: 任一个邻位是空气(暴露面), 且玩家 LOS 能看到该暴露面 — 部分嵌岩的矿
-     *     中心 LOS 会被周边挡, 但暴露面肉眼可见 (人类"看到就挖")。暴露面必须真的
-     *     LOS 可见, 不会隔墙看到其它 pocket 的矿, 不透视。
-     */
-    private static boolean isOreVisibleToGreedy(AltoClef mod, BlockPos pos) {
-        if (VisibilityHelper.isBlockPerceivable(mod, pos)) return true;
-        for (net.minecraft.util.math.Direction dir : net.minecraft.util.math.Direction.values()) {
-            BlockPos n = pos.offset(dir);
-            net.minecraft.block.BlockState ns = mod.getWorld().getBlockState(n);
-            if (ns.isAir() || ns.getBlock() == Blocks.CAVE_AIR) {
-                if (VisibilityHelper.isBlockVisible(mod, n)) return true;
-            }
-        }
-        return false;
+    // [GreedyDiag] 范围内不可感知的目标矿: 只对【钻石】(用户最关心的)记录, 节流
+    // 到最多每 5 秒一条, 避免刷屏。记录距离与 VisibilityHelper.perceivableFailReason
+    // (occluded=视线被挡 / 其它), 直接定位"看到却不触发"的原因。
+    private static long _lastGreedyDiagMs = 0;
+    private static final long GREEDY_DIAG_INTERVAL_MS = 5000;
+
+    private static void logUnperceivableOre(AltoClef mod, BlockPos pos, BlockPos player) {
+        if (pos.getY() < 0) return;
+        net.minecraft.block.Block b = mod.getWorld().getBlockState(pos).getBlock();
+        if (b != Blocks.DIAMOND_ORE && b != Blocks.DEEPSLATE_DIAMOND_ORE) return;
+        long now = System.currentTimeMillis();
+        if (now - _lastGreedyDiagMs < GREEDY_DIAG_INTERVAL_MS) return;
+        _lastGreedyDiagMs = now;
+        double dist = Math.sqrt(player.getSquaredDistance(pos));
+        String reason = VisibilityHelper.perceivableFailReason(mod, pos);
+        Debug.logToFile("altoclef_diag.log",
+                String.format("[GreedyDiag] diamond at %s dist=%.1f NOT perceivable: %s",
+                        pos.toShortString(), dist, reason));
     }
 
     @Override
