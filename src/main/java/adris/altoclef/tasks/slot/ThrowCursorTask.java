@@ -2,10 +2,8 @@ package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasksystem.Task;
-import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
-import baritone.api.utils.Rotation;
 import net.minecraft.util.math.BlockPos;
 
 public class ThrowCursorTask extends Task {
@@ -32,31 +30,45 @@ public class ThrowCursorTask extends Task {
     private void steerLookAwayFromWalls(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return;
         BlockPos p = mod.getPlayer().getBlockPos();
-        double bestScore = Double.NEGATIVE_INFINITY;
-        float bestYaw = mod.getPlayer().getYaw();
+        // 当前朝向作为基准, 平手时保持当前方向(避免无谓转身)。
+        float currentYaw = mod.getPlayer().getYaw();
+        double bestScore = scoreDirection(mod, p, currentYaw);
+        float bestYaw = currentYaw;
         // 8 个水平方向, yaw 0 = -Z(北), 逆时针为正, 这里转成朝向并测空旷度。
         for (int i = 0; i < 8; ++i) {
             double rad = Math.PI * 2.0 * i / 8.0;
             float yaw = (float) (Math.toDegrees(Math.PI / 4.0 * i));
-            int dx = (int) Math.round(Math.sin(rad));
-            int dz = -(int) Math.round(Math.cos(rad));
-            double score = 0;
-            for (int d = 1; d <= 3; ++d) {
-                BlockPos a = p.add(dx * d, 0, dz * d);   // 站脚层
-                BlockPos b = p.add(dx * d, 1, dz * d);   // 头顶 1 层
-                if (!WorldHelper.isSolid(mod, a)) score += 1;
-                if (!WorldHelper.isSolid(mod, b)) score += 1;
-            }
+            double score = scoreDirection(mod, p, yaw);
             if (score > bestScore) {
                 bestScore = score;
                 bestYaw = yaw;
             }
         }
+        // (2026-09-01 用户确认: 直接 setYaw 绕过 baritone) 旧 LookHelper.lookAt 走
+        // baritone RotationMoveEvent, 背包/容器界面打开时不生效 → 视角从不转动 →
+        // 物品朝旧朝向被丢出(撞墙/垂直落回脚边)又被满背包立刻捡回。物品丢弃方向
+        // 直接读 player.getYaw(), 这里直接 setYaw/setPitch, 界面开着也立即生效。
         try {
-            LookHelper.lookAt(mod, new Rotation(bestYaw, 0));
+            mod.getPlayer().setYaw(bestYaw);
+            mod.getPlayer().setPitch(0);
         } catch (Exception ignored) {
             // 设置视角失败也不阻断丢东西。
         }
+    }
+
+    // 该朝向水平射线上 1~3 格(站脚层 + 头顶 1 层)的非实心块计数, 越高越开阔。
+    private double scoreDirection(AltoClef mod, BlockPos p, float yaw) {
+        double rad = Math.toRadians(yaw);
+        int dx = (int) Math.round(Math.sin(rad));
+        int dz = -(int) Math.round(Math.cos(rad));
+        double score = 0;
+        for (int d = 1; d <= 3; ++d) {
+            BlockPos a = p.add(dx * d, 0, dz * d);   // 站脚层
+            BlockPos b = p.add(dx * d, 1, dz * d);   // 头顶 1 层
+            if (!WorldHelper.isSolid(mod, a)) score += 1;
+            if (!WorldHelper.isSolid(mod, b)) score += 1;
+        }
+        return score;
     }
 
     @Override
