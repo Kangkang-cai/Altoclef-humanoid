@@ -399,12 +399,11 @@ public class MineAndCollectTask extends ResourceTask {
             }
             _cursorStackTimer.reset();
         }
-        // (2026-09-01 手挖修复 v2, 用户"贪心挖铁矿手挖, 背包有铁镐") 独立 0.5s 节流:
-        // ① 位置兜底: _subtask.miningPos() 在探索挖隧道时(手挖高发)为 null → 用
-        //    控制器正在破坏的方块兜底; ② 方块陈旧(已挖掉→air)时跳过, 避免误判
-        //    (旧版对 air 块 getBestToolSlot 恒空 → 误报 [HAND-MINING]); ③ 已装备
-        //    合适工具不重复换; ④ getBestToolSlot 找不到时兜底任意镐; ⑤ 记录
-        //    [ToolEquip]/[HAND-MINING] 诊断, 下轮能直接看到换没换/为啥没换。
+        // (2026-09-01 手挖修复 简化版, 用户"检测到 better tool 却不换工具+代码臃肿")
+        // 根因: 旧版用 forceEquipSlot(点槽 SWAP) 装备, 在此挖矿上下文点击装备从不生效
+        // ([ToolEquip] 每 0.5s 检测到铁镐却恒 "had cobblestone")。改用代码库在无界面
+        // 场景广泛验证的 forceEquipItem(item) (战斗/坐船都用它, 稳定)。0.5s 节流;
+        // 位置兜底控制器正在破坏的方块; 方块已挖掉(air)跳过; 已装备合适工具不重复换。
         if (_toolEquipTimer.elapsed()) {
             _toolEquipTimer.reset();
             BlockPos miningPos = _subtask.miningPos();
@@ -413,50 +412,21 @@ public class MineAndCollectTask extends ResourceTask {
             }
             if (miningPos == null) return;
             BlockState state = mod.getWorld().getBlockState(miningPos);
-            if (state.isAir()) return; // 位置陈旧/方块已挖掉, 不误判不换工具
-            Slot currentEquipped = PlayerSlot.getEquipSlot();
-            Item equippedItem = StorageHelper.getItemStackInSlot(currentEquipped).getItem();
-            // 已装备合适工具 → 不动 (避免每 0.5s 反复换工具造成抖动)。
+            if (state.isAir()) return; // 位置陈旧/方块已挖掉, 不换工具
+            Item equippedItem = StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem();
             if (equippedItem instanceof MiningToolItem mt && mt.isSuitableFor(state)) return;
             Optional<Slot> bestTool = StorageHelper.getBestToolSlot(mod, state);
-            if (bestTool.isEmpty()) bestTool = findBestPickaxeSlot(mod); // 兜底: 任意镐
-            if (bestTool.isPresent() && !bestTool.get().equals(currentEquipped)) {
+            if (bestTool.isPresent()) {
                 Item bestItem = StorageHelper.getItemStackInSlot(bestTool.get()).getItem();
-                if (equippedItem != bestItem) {
-                    mod.getSlotHandler().forceEquipSlot(bestTool.get());
+                if (bestItem != equippedItem) {
+                    boolean ok = mod.getSlotHandler().forceEquipItem(bestItem);
                     Debug.logToFile("altoclef_diag.log",
-                            "[ToolEquip] equipping " + bestItem + " for " + state.getBlock()
-                                    + " at " + miningPos.toShortString() + " (had " + equippedItem + ")");
-                }
-            } else if (bestTool.isEmpty()) {
-                // 背包无任何镐/合适工具却仍在挖实心块 → 真手挖检测。
-                Debug.logToFile("altoclef_diag.log",
-                        "[HAND-MINING] mining " + state.getBlock() + " at " + miningPos.toShortString()
-                                + " with " + equippedItem + " (no pickaxe in inventory)");
-            }
-        }
-    }
-
-    /**
-     * (2026-09-01) 兜底: 从背包找最高采矿等级的镐 (getBestToolSlot 对某些状态
-     * 可能找不到/漏判时用)。只认真背包 inventory 0..35, 经 getFromCurrentScreenInventory
-     * 映射, 任意界面正确。
-     */
-    private Optional<Slot> findBestPickaxeSlot(AltoClef mod) {
-        Slot best = null;
-        int bestLevel = -1;
-        for (int i = 0; i <= 35; i++) {
-            Slot slot = Slot.getFromCurrentScreenInventory(i);
-            ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-            if (stack.getItem() instanceof net.minecraft.item.PickaxeItem pick) {
-                int level = pick.getMaterial().getMiningLevel();
-                if (level > bestLevel) {
-                    bestLevel = level;
-                    best = slot;
+                            "[ToolEquip] equip " + bestItem + " for " + state.getBlock()
+                                    + " (had " + equippedItem + ") ok=" + ok
+                                    + " now=" + StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem());
                 }
             }
         }
-        return Optional.ofNullable(best);
     }
 
     private static class MineOrCollectTask extends AbstractDoToClosestObjectTask<Object> {
