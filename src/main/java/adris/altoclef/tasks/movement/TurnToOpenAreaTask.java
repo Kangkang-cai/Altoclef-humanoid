@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.util.math.BlockPos;
@@ -33,8 +34,14 @@ public class TurnToOpenAreaTask extends Task {
         return null;
     }
 
-    // 找一个水平 45° 递增的朝向里, 前方(1~3 格, 站脚层 + 头顶 1 层)实心块最少的
-    // 那个方向, 直接 setYaw/setPitch。平手时保持当前朝向(避免无谓转身)。
+    // 找一个水平 45° 递增的朝向里, "前方连通非实心距离"最长(封顶 MAX_LOOK)的那个
+    // 方向, 直接 setYaw/setPitch。站脚层与头顶层都数, 取较短者 — 物品飞行高度
+    // 附近都不能被挡。平手时保持当前朝向(避免无谓转身)。
+    // (2026-09-01 用户"转向不对/盯着墙扔"): 旧 1~3 格计数在稍紧的空间里各方向
+    // 分数接近 → 平手保持当前(朝墙) → 不转向。改为数"直到首个实心块"的连通距离,
+    // 真正区分"朝洞内开敞"与"朝墙"。
+    private static final int MAX_LOOK = 8;
+
     private void steerLookAwayFromWalls(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return;
         BlockPos p = mod.getPlayer().getBlockPos();
@@ -53,23 +60,33 @@ public class TurnToOpenAreaTask extends Task {
         try {
             mod.getPlayer().setYaw(bestYaw);
             mod.getPlayer().setPitch(0);
+            // 诊断: 确认转向是否真的生效 (setYaw 后 player.getYaw 应等于 bestYaw;
+            // 若被 baritone/游戏 tick 覆盖, 这里能看到差值)。
+            Debug.logToFile("altoclef_diag.log",
+                    String.format("[TurnOpen] yaw %.1f -> %.1f (score %.0f), playerYawNow=%.1f",
+                            currentYaw, bestYaw, bestScore, mod.getPlayer().getYaw()));
         } catch (Exception ignored) {
             // 设置视角失败也不阻断后续丢东西。
         }
     }
 
+    // 该方向直到首个实心块的连通非实心格数 (站脚层 / 头顶层取较短者), 封顶 MAX_LOOK。
     private double scoreDirection(AltoClef mod, BlockPos p, float yaw) {
         double rad = Math.toRadians(yaw);
         int dx = (int) Math.round(Math.sin(rad));
         int dz = -(int) Math.round(Math.cos(rad));
-        double score = 0;
-        for (int d = 1; d <= 3; ++d) {
-            BlockPos a = p.add(dx * d, 0, dz * d);
-            BlockPos b = p.add(dx * d, 1, dz * d);
-            if (!WorldHelper.isSolid(mod, a)) score += 1;
-            if (!WorldHelper.isSolid(mod, b)) score += 1;
+        int foot = clearLen(mod, p, dx, dz, 0);
+        int head = clearLen(mod, p, dx, dz, 1);
+        return Math.min(foot, head);
+    }
+
+    private int clearLen(AltoClef mod, BlockPos p, int dx, int dz, int dy) {
+        for (int d = 1; d <= MAX_LOOK; d++) {
+            if (WorldHelper.isSolid(mod, p.add(dx * d, dy, dz * d))) {
+                return d - 1;
+            }
         }
-        return score;
+        return MAX_LOOK;
     }
 
     @Override
