@@ -43,6 +43,17 @@ public class CollectBucketLiquidTask extends ResourceTask {
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(15f);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
 
+    // (2026-09-03 用户: 找水/岩浆先回地表) 地下(y<58, 与 isDeepUnderground 同口径)
+    // 随机游荡找水几乎无果, 且持续探入未加载区块 → 地形生成 + 路径搜索把帧率拖到
+    // 100ms+ (altoclef_jank.log 实锤 "Wander for Infinity blocks" 期间 frameMs=102~146)。
+    // 地表河流/湖/海找水概率高, 地表也常有裸露岩浆池; 回地表路上 BlockTracker 近区
+    // 扫描会顺路发现液体源。到地表后以【有界游荡】(每段 SURFACE_SEARCH_WANDER_RANGE
+    // 自动返回重估, 顺路感知) 替代原先的无限游荡 (TimeoutWanderTask(∞) 永不结束)。
+    private static final int SURFACE_SEARCH_WANDER_RANGE = 50;
+    private static final int BELOW_SURFACE_Y = 58;
+    // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
+    private final TimerGame _liquidDiagTimer = new TimerGame(2);
+
     private boolean wasWandering = false;
 
     public CollectBucketLiquidTask(String liquidName, Item filledBucket, int targetCount, Block toCollect) {
@@ -149,21 +160,25 @@ public class CollectBucketLiquidTask extends ResourceTask {
         };
 
         // 2026-08-23: 诊断 - 检查 BlockTracker 是否感知到任何水
-        int totalWaterKnown = 0;
-        int sourceWaterKnown = 0;
-        int flowingWaterKnown = 0;
-        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.WATER)) {
-            totalWaterKnown++;
-            var state = MinecraftClient.getInstance().world.getBlockState(pos);
-            if (state.getFluidState().isStill()) {
-                sourceWaterKnown++;
-            } else {
-                flowingWaterKnown++;
+        // (2026-09-03 节流: 原每 tick 打印一条, 无水源时也刷屏, 影响帧率/难读日志)
+        if (_liquidDiagTimer.elapsed()) {
+            _liquidDiagTimer.reset();
+            int totalWaterKnown = 0;
+            int sourceWaterKnown = 0;
+            int flowingWaterKnown = 0;
+            for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.WATER)) {
+                totalWaterKnown++;
+                var state = MinecraftClient.getInstance().world.getBlockState(pos);
+                if (state.getFluidState().isStill()) {
+                    sourceWaterKnown++;
+                } else {
+                    flowingWaterKnown++;
+                }
             }
+            Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s",
+                    totalWaterKnown, sourceWaterKnown, flowingWaterKnown,
+                    totalWaterKnown > 0 ? "checking..." : "NONE");
         }
-        Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s",
-                totalWaterKnown, sourceWaterKnown, flowingWaterKnown,
-                totalWaterKnown > 0 ? "checking..." : "NONE");
 
         // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
         if (!mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
@@ -226,9 +241,22 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         // Oof, no liquid found.
-        setDebugState("Searching for liquid by wandering around aimlessly");
+        // (2026-09-03 用户: 找水/岩浆先回地表) 地下(主世界 y<58, 与 isDeepUnderground
+        // 同口径)几乎没有地表型水源, 随机游荡只会越钻越深 + 拖慢帧率; 先显式回地表
+        // (路上近区扫描顺路发现液体源即收), 地表找水(河/湖/海)与裸露岩浆池概率高。
+        // 只对主世界生效: 下界/末地 y<58 不代表"地下", 回地表逻辑无意义(且可能挖向
+        // 下界基岩天花板)。
+        if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                && mod.getPlayer() != null && mod.getPlayer().getY() < BELOW_SURFACE_Y) {
+            setDebugState("No " + _liquidName + " underground, returning to surface to search");
+            return new GoToSurfaceTask();
+        }
 
-        return new TimeoutWanderTask(Float.POSITIVE_INFINITY);
+        setDebugState("Searching for liquid by wandering around aimlessly");
+        // (2026-09-03 无限游荡 → 有界游荡) 地表探索用有界游荡: 每走完一段自动回到
+        // 本分支重估 (有液体源就近收 / 无则换方向再走一段), 不再 TimeoutWanderTask(∞)
+        // 一条路走到黑永不评估。游荡是探索手段, 不是目标。
+        return new TimeoutWanderTask(SURFACE_SEARCH_WANDER_RANGE);
     }
 
     @Override
