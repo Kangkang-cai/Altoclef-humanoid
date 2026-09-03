@@ -12,6 +12,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -28,6 +30,13 @@ import java.util.Set;
  * size + occlusion.
  */
 public final class VisibilityHelper {
+
+    // (2026-09-03) 方块 LOS 短缓存: 同一 BlockPos 的射线结果缓存
+    // LOS_CACHE_TTL_MS, 之后退化为查表。见 isBlockVisible 注释。
+    private static final Map<BlockPos, long[]> _losCache = new HashMap<>();
+    private static final Object _losCacheLock = new Object();
+    private static final long LOS_CACHE_TTL_MS = 400;
+    private static final int LOS_CACHE_MAX_ENTRIES = 4096;
 
     // Human view parameters (tunable defaults) — used for ENTITIES.
     public static final double MAX_VIEW_DISTANCE = 64.0;
@@ -225,14 +234,35 @@ public final class VisibilityHelper {
      * loaded area — perfectly obvious to a human, invisible to the bot.
      * Distance/FOV no longer apply to blocks (see class doc); the raycast
      * still blocks "seeing" through solid rock, so no X-ray.
+     *
+     * (2026-09-03 LOS 短缓存, 用户"找水每 tick 对缓存全部水打 LOS → 200ms/帧")
+     * cleanLineOfSight 是 DDA 射线, 每 tick 对 BlockTracker radius128 缓存里
+     * 全部水/矿 (最多 100 处/类型) 各打一束 = 帧卡 (矿石 500ms 卡顿同款根因)。
+     * 方块可见性只取决于玩家眼睛位置与目标 (不依赖朝向), 400ms 内玩家位移
+     * <~1 格, 结果稳定 → 加短缓存: 同一位置 400ms 内不重打射线, 全量评估一次
+     * 后每 tick 退化为查表, 帧率恢复。近区 5Hz 扫描新暴露的方块自然进入缓存。
      */
     public static boolean isBlockVisible(AltoClef mod, BlockPos pos) {
         ClientPlayerEntity player = mod.getPlayer();
         if (player == null) return false;
+        long now = System.currentTimeMillis();
+        synchronized (_losCacheLock) {
+            long[] cached = _losCache.get(pos);
+            if (cached != null && (now - cached[0]) < LOS_CACHE_TTL_MS) {
+                return cached[1] == 1L;
+            }
+            if (_losCache.size() > LOS_CACHE_MAX_ENTRIES) {
+                _losCache.clear(); // 满则整体清空, 简单安全 (下一 tick 自然重建)
+            }
+        }
         // Use the BlockPos overload: it treats "ray hits the target block itself"
         // as visible. The Vec3d overload is for entities and would report the
         // target block as occluding itself (never visible).
-        return LookHelper.cleanLineOfSight(player, pos, BLOCK_RAY_MAX_DISTANCE);
+        boolean visible = LookHelper.cleanLineOfSight(player, pos, BLOCK_RAY_MAX_DISTANCE);
+        synchronized (_losCacheLock) {
+            _losCache.put(pos, new long[]{now, visible ? 1L : 0L});
+        }
+        return visible;
     }
 
     /**

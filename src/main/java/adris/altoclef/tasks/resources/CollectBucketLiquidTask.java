@@ -13,6 +13,7 @@ import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.utils.Rotation;
@@ -51,11 +52,6 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 自动返回重估, 顺路感知) 替代原先的无限游荡 (TimeoutWanderTask(∞) 永不结束)。
     private static final int SURFACE_SEARCH_WANDER_RANGE = 50;
     private static final int BELOW_SURFACE_Y = 58;
-    // (2026-09-03 帧卡根因修复) isSourceLiquid/isFlowingWater 谓词里每 tick 对缓存里
-    // 每个水方块调 WorldHelper.canReach (= baritone 可达性计算, 很贵)。radius128 远区
-    // 扫到的远处水(tasks.log 实锤 task=200ms)全被逐一算可达 → 帧卡。>64 格的水先
-    // 粗筛掉, 走近了(游荡/溯源)再算 — 装水桶本就需要靠近。
-    private static final double WATER_CONSIDER_RANGE = 64;
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
 
@@ -151,10 +147,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
 
         Predicate<BlockPos> isSourceLiquid = blockPos -> {
             if (_blacklist.contains(blockPos)) return false;
-            // (2026-09-03 帧卡根因修复) 远离玩家的水不调 canReach (baritone 可达性
-            // 计算极贵, 每 tick 对 radius128 缓存里的水全算一遍 = task=200ms 实锤)。
-            // 走近(游荡/溯源/回地表路上)后再评估即可 — 装水桶本就要靠近。
-            if (!blockPos.isWithinDistance(mod.getPlayer().getPos(), WATER_CONSIDER_RANGE)) return false;
+            // (2026-09-03 用户原则: 不满足 FOV/LOS 的不评估可达性, 且不限制距离)
+            // 看不到的水(墙后/未暴露表面)直接排除, 不进入后续 canReach。
+            // LOS 射线已有 400ms 短缓存 (VisibilityHelper), 不会每 tick 重打。
+            if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos.up())) return false; // We may try reaching the block above.
             assert MinecraftClient.getInstance().world != null;
@@ -199,8 +195,8 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // 找所有流动水位置
             Predicate<BlockPos> isFlowingWater = blockPos -> {
                 if (_blacklist.contains(blockPos)) return false;
-                // (2026-09-03 帧卡修复) 同上: 远处水不调 canReach。
-                if (!blockPos.isWithinDistance(mod.getPlayer().getPos(), WATER_CONSIDER_RANGE)) return false;
+                // (2026-09-03 用户原则) 不满足 FOV/LOS 的不评估可达性。
+                if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)) return false;
                 if (!WorldHelper.canReach(mod, blockPos)) return false;
                 assert MinecraftClient.getInstance().world != null;
                 var state = MinecraftClient.getInstance().world.getBlockState(blockPos);
