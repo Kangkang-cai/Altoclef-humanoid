@@ -425,7 +425,13 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             _pickupNavItem = itemEntity;
             _pickupNavTarget = null;
         }
-        boolean falling = !itemEntity.isOnGround() && !itemEntity.isTouchingWater();
+        // (2026-09-02 修: 已消失掉落物不再等落地) 旧 `!isOnGround() && !isTouchingWater()`
+        // 对【已被捡走/despawn 的陈旧实体】(tracker 感知记忆 20s 未过期) 恒 true →
+        // falling 分支无限循环 "Waiting for dropped item to land" 卡死 (日志实锤
+        // 19:07 Greedy mining diamond 挖完钻石后卡 18 秒)。实体已不在世界 → 不走
+        // "等落地", 交给 isValid(isAlive)/进度检查释放。
+        boolean falling = itemEntity.isAlive()
+                && !itemEntity.isOnGround() && !itemEntity.isTouchingWater();
         if (falling) {
             // 还在下落 (未落地未入水): 等落定, 不追实时 pos (防 TaskPingPong)。
             // 超时后兜底改为慢追 (见字段注释)。

@@ -21,7 +21,10 @@ import baritone.api.process.ICustomGoalProcess;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.BlockState;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3i;
@@ -180,6 +183,24 @@ public class InteractWithBlockTask extends Task {
             return _wanderTask;
         }
         if (!_moveChecker.check(mod)) {
+            // (2026-09-02 Q2: 目标正上方被实心方块堵住 → 到不了 → 先清掉暴露目标再试)
+            // 用户实测: 开熔炉时 bot 误把圆石放到炉顶(69,-21,394), 之后目标炉(69,-22,394)
+            // 一直 CANT_REACH (不是 WAIT_FOR_CLICK)。旧的"清上方"逻辑只挂在
+            // WAIT_FOR_CLICK 分支, 所以到这里就直接 requestBlockUnreachable + 随机探索,
+            // 石头永远不拆、炉子永远开不开 (日志: Stuck-break 在砸 69,-21 但主任务泄气走)。
+            // 此处在【放弃前】、仅当是右键交互且目标正上方有可破坏实心方块时, 先
+            // DestroyBlockTask 清掉它"暴露"容器, 回来再开炉取物 —— 人类也会清碍事方块
+            // 而不是扭头游走。判定口径与下方 WAIT_FOR_CLICK 分支的 isSolid+canBreak 一致,
+            // 只碰 _target.up()(绝不清目标本体), 且只有真走不到(卡住)才触发, 不误伤。
+            if (_interactInput == Input.CLICK_RIGHT) {
+                BlockPos above = _target.up();
+                if (WorldHelper.isSolid(mod, above) && WorldHelper.canBreak(mod, above)) {
+                    Debug.logMessage("(InteractWithBlockTask) CANT_REACH stuck, clearing solid above "
+                            + _target.toShortString() + " -> " + above.toShortString());
+                    setDebugState("Clearing block above interaction target");
+                    return new DestroyBlockTask(above);
+                }
+            }
             Debug.logMessage("Failed, blacklisting and wandering.");
             mod.getBlockTracker().requestBlockUnreachable(_target);
             return _wanderTask;
@@ -226,8 +247,12 @@ public class InteractWithBlockTask extends Task {
                     // 挡在 _target (地面) 或 _target.up() (放置落点/床的本格)。人类这时会
                     // 直接左键点掉眼前这株小草, 不会 wander 重选。此处就清 _target / up / up(2) 三格,
                     // 绝不挖远处土方石 (否则跟 isSolid 清段重叠, 越界破坏地形)。
+                    // (2026-09-02 修: 去掉 _target 本身) 日志实锤 18:45 开箱(45,-12,360)卡
+                    // 住 → "Brushing veget off right-click target -> Destroy block at 45,-12,360"
+                    // 把【箱子】当植被去挖! 开容器时 _target 是箱子(isSolid=false 被判成植被)。
+                    // 目标本身是用户要交互的方块, 绝不清; 只清目标上方挡住视线/放置的植被。
                     if (_interactInput == Input.CLICK_RIGHT) {
-                        BlockPos[] probe = new BlockPos[]{_target, _target.up(), _target.up(2)};
+                        BlockPos[] probe = new BlockPos[]{_target.up(), _target.up(2)};
                         for (BlockPos p : probe) {
                             BlockState bs = mod.getWorld().getBlockState(p);
                             boolean air = WorldHelper.isAir(mod, p);
@@ -311,7 +336,13 @@ public class InteractWithBlockTask extends Task {
         Optional<Rotation> reachable = getCurrentReach();
         if (reachable.isPresent()) {
             LookHelper.lookAt(mod, reachable.get());
-            if (mod.getClientBaritone().getPlayerContext().isLookingAt(_target)) {
+            // (2026-09-02 人类操作: 精确瞄准再点击, 用户"还是举盾, 提前右键")
+            // 旧代码用 baritone isLookingAt(宽松朝向判定, 不保证射线命中) + 每 tick
+            // forcePress 右键: 副手持盾 + 视角稍偏(射线没命中箱子) → 每 tick 右键 =
+            // 每 tick 举盾, 箱子永远打不开 (日志 Waiting for click 反复 + 把箱子当
+            // 植被挖)。改为 MC 准星射线确认【真正命中目标方块】才点击, 命中期间按
+            // 节流间隔重复短按, 未命中(瞄准中)绝不多点 — 从根上不举盾。
+            if (isPreciselyAiming(mod)) {
                 if (_toUse != null) {
                     mod.getSlotHandler().forceEquipItem(_toUse, false);
                 } else {
@@ -327,11 +358,12 @@ public class InteractWithBlockTask extends Task {
                     mod.getInputControls().release(Input.SNEAK);
                     mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
                 }
-                // (2026-09-01 短按, 用户"不应该是长按反而举盾") forcePress 清掉
-                // 战斗举盾残留的 hold, 确保右键是干净短按 — 长按会让 offhand 盾
-                // 举起, 开容器(熔炉/箱子)失效。
-                mod.getInputControls().forcePress(_interactInput);
-                //mod.getClientBaritone().getInputOverrideHandler().setInputForceState(_interactInput, true);
+                // (2026-09-02 节流点击) 命中后按 _clickPressTimer(0.3s) 间隔重复
+                // 短按, 不再每 tick 狂点 — 每 tick 点 = 持盾时每 tick 举盾。
+                if (_clickPressTimer.elapsed()) {
+                    mod.getInputControls().forcePress(_interactInput);
+                    _clickPressTimer.reset();
+                }
                 if (_shiftClick) {
                     mod.getInputControls().hold(Input.SNEAK);
                 }
@@ -368,6 +400,19 @@ public class InteractWithBlockTask extends Task {
         return LookHelper.getReach(_target, _direction);
     }
 
+    /**
+     * (2026-09-02 人类操作: 精确瞄准) 用 MC 准星射线确认【真正命中】目标方块。
+     * baritone isLookingAt 只判朝向(宽松), 副手持盾时视角稍偏 → 每 tick 右键 =
+     * 举盾, 箱子打不开。这里要求 crosshairTarget 是 BLOCK 命中且 blockPos ==
+     * _target — 真命中才可右键。
+     */
+    private boolean isPreciselyAiming(AltoClef mod) {
+        HitResult hr = MinecraftClient.getInstance().crosshairTarget;
+        return hr instanceof BlockHitResult bhr
+                && bhr.getType() == HitResult.Type.BLOCK
+                && bhr.getBlockPos().equals(_target);
+    }
+
     public enum ClickResponse {
         CANT_REACH,
         WAIT_FOR_CLICK,
@@ -377,4 +422,7 @@ public class InteractWithBlockTask extends Task {
     // 因方块面/角度/半块(床头床脚) 持续判 FALSE 时, 1.5s 后强制一次点击 (CLICK_ATTEMPTED)。
     // 否则只写 WAIT_FOR_CLICK 但 5s _clickTimer 仅挂 CLICK_ATTEMPTED 分支 = 死循环。
     private final TimerGame _forceClickTimer = new TimerGame(1.5);
+    // (2026-09-02 人类操作: 精确瞄准+节流点击) 命中目标方块后按此间隔重复右键,
+    // 避免每 tick 狂点(持盾时每 tick 点 = 每 tick 举盾, 箱子打不开)。
+    private final TimerGame _clickPressTimer = new TimerGame(0.3);
 }

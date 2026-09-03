@@ -129,6 +129,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     protected void onStop(AltoClef mod, Task interruptTask) {
         if (!AltoClef.inGame())
             return;
+        // (2026-09-02 自挖记录修复: onStop 双通道补记)
+        // 根因: Task.tickInternal 换子任务走 _sub.stop() 中断旧实例, 从不调子任务
+        // isFinished。MineDownExploreTask 挖隧道每 tick new DestroyBlockTask、挖开
+        // 后被框架 stop 替换 → isFinished 永不执行 → 自挖记录(isFinished 里唯一入口)
+        // 从未触发, altoclef_selfdug.log 从未生成(实锤) → 自挖隧道空气全被矿洞检测
+        // 当"天然空气" → 探索矿洞导航进自己挖的隧道。
+        // onStop 是父任务换任务必走路径, 在此补记: 开始时实心、停止时已变空气 =
+        // 我们真实挖开的一格(幂等: isFinished 先记过就不重复)。
+        if (WorldHelper.isAir(mod, _pos) && _wasSolidAtStart && !_selfDugRecorded) {
+            _selfDugRecorded = true;
+            adris.altoclef.tasks.movement.MineDownExploreTask.recordBrokenBlock(mod, _pos);
+        }
         mod.getBehaviour().pop();
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();

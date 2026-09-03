@@ -56,7 +56,48 @@ public class DoToClosestBlockTask extends AbstractDoToClosestObjectTask<BlockPos
         if (_getClosest != null) {
             return _getClosest.apply(pos);
         }
-        return mod.getBlockTracker().getNearestTracking(pos, _isValid, _targetBlocks);
+        Optional<BlockPos> fromCache = mod.getBlockTracker().getNearestTracking(pos, _isValid, _targetBlocks);
+        if (fromCache.isPresent()) return fromCache;
+        // (2026-09-02 近场兜底, 用户"收熔炉没定位到身边几格的熔炉→无限探索")
+        // BlockTracker 缓存滞后/重启丢记忆时, 身边的容器(熔炉/工作台)可能不在缓存
+        // → getNearestTracking 空 → AbstractDoToClosestObjectTask 走 wander 无限探索
+        // (tasks.log 15:29 Emptying furnace Walking to container 120,19,393 → Doing
+        // something to closest block → Wander for Infinity 实锤)。扫玩家近场真实方块
+        // 兜底, 眼前的目标方块直接命中, 不重做。
+        return findNearbyTargetBlock(mod, pos);
+    }
+
+    /**
+     * (2026-09-02) 玩家近场(半径 6)真实世界扫描, 找最近的目标方块(只看匹配块,
+     * chunk 已加载)。缓存 miss 时的兜底, 防"身边容器却无限探索"。
+     */
+    private Optional<BlockPos> findNearbyTargetBlock(AltoClef mod, Vec3d center) {
+        if (mod.getWorld() == null || mod.getPlayer() == null) return Optional.empty();
+        BlockPos player = mod.getPlayer().getBlockPos();
+        final int R = 6;
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (int dx = -R; dx <= R; dx++) {
+            for (int dy = -R; dy <= R; dy++) {
+                for (int dz = -R; dz <= R; dz++) {
+                    BlockPos p = player.add(dx, dy, dz);
+                    if (!mod.getChunkTracker().isChunkLoaded(p)) continue;
+                    Block actual = mod.getWorld().getBlockState(p).getBlock();
+                    boolean match = false;
+                    for (Block target : _targetBlocks) {
+                        if (actual == target) { match = true; break; }
+                    }
+                    if (!match) continue;
+                    if (_isValid != null && !_isValid.test(p)) continue;
+                    double dSq = p.getSquaredDistance(center);
+                    if (dSq < bestSq) {
+                        bestSq = dSq;
+                        best = p;
+                    }
+                }
+            }
+        }
+        return Optional.ofNullable(best);
     }
 
     @Override

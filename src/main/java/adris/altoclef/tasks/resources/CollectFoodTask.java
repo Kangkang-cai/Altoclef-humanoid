@@ -383,6 +383,11 @@ public class CollectFoodTask extends Task {
                     // Peta
                     if (livingEntity.isBaby()) continue;
                 }
+                // (2026-09-03 用户"收集食物被导航到海水里去") 目标食材(鱼/泡在水里的
+                // 动物)若落在海洋 biome → 跳过, 不去海里收集(会溺水/低效)。与既有探索
+                // 落水限制同一套判定(WorldHelper.isOcean, 海岸拒绝/河湖放行), 口径一致。
+                // 鱼本身已用 FISH_PENALTY=0 排除, 这里兜底拦住泡在海里的陆生动物。
+                if (WorldHelper.isOcean(mod.getWorld().getBiome(nearest.get().getBlockPos()))) continue;
                 int hungerPerformance = cookable.getCookedUnits();
                 double sqDistance = nearest.get().squaredDistanceTo(mod.getPlayer());
                 double score = (double) 100 * hungerPerformance / (sqDistance);

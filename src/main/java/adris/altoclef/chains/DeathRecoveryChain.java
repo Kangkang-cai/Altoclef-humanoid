@@ -6,6 +6,7 @@ import adris.altoclef.Settings;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.tasks.movement.DeathRecoveryTask;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.trackers.WorldMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.MiningRequirement;
@@ -184,13 +185,19 @@ public class DeathRecoveryChain extends SingleTaskChain {
                 && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)) {
             if (ageTicks % 100L == 0L) {
                 Debug.logToFile("death_recovery.log", String.format(
-                        "[DEFER NO_PICKAXE] grave=%s dim=%s dist=%.1f age=%ds; waiting for stone pickaxe",
+                        "[DEFER NO_PICKAXE] grave=%s dim=%s dist=%.1f age=%ds; actively crafting stone pickaxe",
                         grave.position, currentDim, distXZ, ageSeconds));
             }
-            // If we somehow started a recovery task already, stop it now
-            // because the bot actually lost the pickaxe mid-trip.
-            if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
-            return Float.NEGATIVE_INFINITY;
+            // (2026-09-02 主动搞镐, 用户"恢复任务被长收集任务抢走/镐永远等不来") 旧逻辑
+            // 只 DEFER 返回负无穷, 把优先级全让给普通任务; 但没有任何任务负责去造镐
+            // → 背包没镐就永远 DEFER, 直到 Guard 1 (TOO_OLD, 5 分钟掉落消失) 放弃、
+            // 装备真丢 (23:04 日志: age=120s 仍 NO_PICKAXE)。改为【主动派发石镐获取
+            // 任务】并以死亡恢复优先级运行, 保证不被耗时长的一般收集任务饿死; 镐一到
+            // 位 Guard 3 即放行、转入真正去墓地的拾取。主动搞镐不违背"没镐不裸捡"。
+            if (!(getCurrentTask() instanceof SatisfyMiningRequirementTask)) {
+                setTask(new SatisfyMiningRequirementTask(MiningRequirement.STONE));
+            }
+            return ACTIVE_PRIORITY;
         }
 
         // ------------------------------------------------------------

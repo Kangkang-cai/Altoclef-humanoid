@@ -247,7 +247,11 @@ public class MineAndCollectTask extends ResourceTask {
         // 有台 + 木板不足但原木够合成木板(有效≥3) + 木棍够 → 直接派木斧(内部Collect会合木板)
         if (hasTableUse && effectivePlanks >= 3 && sticksReal >= 2) return true;
         // 全自给(最常见): 没台, 但有效木板≥8 = 4做台 + 3做斧 + 2木棍需1木板 = 8
-        return effectivePlanks >= 8;
+        // (2026-09-02 递归修复) 仅无台时允许全自给 COMMIT: 有台但缺木棍时做不了
+        // 木斧, computeNextAxeTask 会因缺棍落到撸原木 fallback → 形成 wood→做斧→
+        // 撸原木→wood 自我递归 (tasks.log t=784 实锤卡死)。有台+缺棍返回 false,
+        // 回主收集任务砍树攒料, 木棍由后续合成阶段处理, 不卡死也不递归。
+        return !hasTableUse && effectivePlanks >= 8;
     }
 
     /**
@@ -276,9 +280,15 @@ public class MineAndCollectTask extends ResourceTask {
                 Debug.logMessage("[Axe] phase -> crafting_table (effPlanks=" + effectivePlanks + " >=4, 2x2 planks→table)");
                 return TaskCatalogue.getItemTask(Items.CRAFTING_TABLE, 1);
             }
-            // 有效木板不够 4(做台) → 先徒手撸 2 根原木凑料
-            Debug.logMessage("[Axe] phase -> punch 2 logs (effPlanks=" + effectivePlanks + " <4 for table)");
-            return TaskCatalogue.getItemTask("log", 2);
+            // (2026-09-02 递归修复) 有效木板不够 4(做台) 时不能再"撸 2 根原木":
+            // getItemTask("log", N) 返回 MineAndCollectTask(wood), 与当前任务同构,
+            // 材料在合成格/光标间波动一旦让这里可触达, 就形成 wood→做斧→撸原木→wood
+            // 自我递归, 任务系统疯狂 STOP/START 同一任务 (tasks.log t=784 实锤, 木头
+            // 停在 2 不再增长)。COMMIT 已保证 effPlanks>=8 理论上走不到, 但计数会波动。
+            // 返回 null 让 onResourceTick 解除 COMMIT 回主收集任务砍树 — 主任务本身就
+            // 是收木头, 攒够材料后下 tick 自然重新 COMMIT。
+            Debug.logMessage("[Axe] phase -> abort axe chain, back to chopping (effPlanks=" + effectivePlanks + " <4 for table)");
+            return null;
         }
 
         // 3) 有工作台了 → 做木斧 (3x3: 3木板 + 2木棍)
@@ -287,9 +297,12 @@ public class MineAndCollectTask extends ResourceTask {
             return TaskCatalogue.getItemTask(Items.WOODEN_AXE, 1);
         }
 
-        // 4) 兜底: 材料还是不够 → 再撸 2 根原木, 等材料齐了回来
-        Debug.logMessage("[Axe] phase fallback -> punch 2 logs (effPlanks=" + effectivePlanks + " sticks=" + sticksReal + ")");
-        return TaskCatalogue.getItemTask("log", 2);
+        // 4) 兜底: 材料还是不够(如缺木棍/木板当量不足) → 返回 null 放弃本次 COMMIT,
+        //    回主收集任务砍树攒料。绝不能返回 getItemTask("log", N): 那是
+        //    MineAndCollectTask(wood), 与当前任务同构, 会形成 wood→做斧→撸原木→wood
+        //    自我递归 (tasks.log t=784 卡死实锤, 木头停在 2 不再增长)。
+        Debug.logMessage("[Axe] phase fallback -> abort axe chain, back to chopping (effPlanks=" + effectivePlanks + " sticks=" + sticksReal + ")");
+        return null;
     }
 
     @Override
@@ -380,7 +393,12 @@ public class MineAndCollectTask extends ResourceTask {
             if (cursorStack != null && !cursorStack.isEmpty()) {
                 // We have something in our cursor stack
                 Item item = cursorStack.getItem();
-                if (item.isSuitableFor(mod.getWorld().getBlockState(_subtask.miningPos()))) {
+                // (2026-09-02 崩溃修复) 光标分支误用可能为 null 的 miningPos 查
+                // getBlockState → NPE (crash: Cannot invoke BlockPos.method_10264
+                // because "$$0" is null; 场景: 找到刷怪笼/开箱切任务瞬间没有正在挖
+                // 的方块)。无当前挖掘方块时无法判断光标工具是否适用, 直接跳过换工具。
+                BlockPos cursorMiningPos = _subtask.miningPos();
+                if (cursorMiningPos != null && item.isSuitableFor(mod.getWorld().getBlockState(cursorMiningPos))) {
                     // Our cursor stack would help us mine our current block
                     Item currentlyEquipped = StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem();
                     if (item instanceof MiningToolItem) {
@@ -404,7 +422,12 @@ public class MineAndCollectTask extends ResourceTask {
         // ([ToolEquip] 每 0.5s 检测到铁镐却恒 "had cobblestone")。改用代码库在无界面
         // 场景广泛验证的 forceEquipItem(item) (战斗/坐船都用它, 稳定)。0.5s 节流;
         // 位置兜底控制器正在破坏的方块; 方块已挖掉(air)跳过; 已装备合适工具不重复换。
-        if (_toolEquipTimer.elapsed()) {
+        // (2026-09-02 吃东西↔换镐拉锯修复) 换镐分支必须让位 autoEat: 旧代码这里没有
+        // isTryingToEat 检查 — 挖矿时 autoEat 把食物放主手右键吃, 换镐 0.5s 又
+        // forceEquipItem 换回镐, FoodChain 下一 tick 又换回食物 → 无限拉锯
+        // ([ToolEquip] equip iron_pickaxe (had cooked_porkchop) 0.5s 一次实锤,
+        // 镐子永远站不稳)。正在吃时直接 return, 吃完 isTryingToEat=false 自然恢复。
+        if (_toolEquipTimer.elapsed() && !mod.getFoodChain().isTryingToEat()) {
             _toolEquipTimer.reset();
             BlockPos miningPos = _subtask.miningPos();
             if (miningPos == null && mod.getControllerExtras().isBreakingBlock()) {
@@ -468,6 +491,15 @@ public class MineAndCollectTask extends ResourceTask {
         private final java.util.Map<BlockPos, Long> _recentlySeen = new java.util.HashMap<>();
         private static final long RECENTLY_SEEN_TICKS = 100; // 5s 记忆期
         private static final int RECENTLY_SEEN_MAX_SIZE = 200;
+        // (2026-09-02 记忆兜底回溯, 用户"杀完怪该回去挖记忆中的钻石") 独立的"最近真实
+        // 感知(LOS)过的矿"记录, 供眼前无矿时的记忆兜底导航。与 _recentlySeen(5s, 供
+        // 近场链挖)分开——战斗可能打断挖掘数十秒, 5s 太短, 这里给更长的回溯窗口,
+        // 让 bot 杀完怪后能回到它【真看过】的矿继续挖, 而不是扭头去挖隧道/空转。
+        // 判据: 必须是 LOS 真感知(不透视), 且在本窗口内(40s)、直线距离 ≤48 格; 只要
+        // 眼前有任何可感知矿, 仍优先眼前(既有"舍近求远不可取"原则不受影响)。
+        private final java.util.Map<BlockPos, Long> _seenOreTick = new java.util.HashMap<>();
+        private static final long MEMORY_NAV_LIFETIME_TICKS = 800; // 40s 记忆回溯窗口
+        private static final double MEMORY_NAV_RANGE = 48; // 记忆兜底导航距离上限
         // (2026-09-01 贪心触发放宽后修复, 用户"贪心挖目标矿的3x3x3") 贪心触发能看见
         // GREEDY 范围内的可见矿(CollectVisibleOresTask 8格), 但本任务原先只认玩家
         // 贴身 3x3x3 → 远处可见矿无起始目标 → "Waiting for calculations" 空转卡住。
@@ -746,6 +778,22 @@ public class MineAndCollectTask extends ResourceTask {
             if (closestDrop.isPresent()) {
                 return closestDrop.map(Object.class::cast);
             }
+            // (2026-09-02 记忆兜底导航, 用户"杀完怪该回去挖记忆中的钻石") 眼前既无
+            // 可感知矿、又无掉落、材料仍未达标, 且不是地表人造目标(床/木/羊毛等
+            // 有各自的近场直达)时, 若世界记忆里有【本窗口内真看过(LOS)**的该资源矿**,
+            // 就把它当导航目标走回去, 而不是立刻去挖隧道/空转。防透视不破: 目标
+            // 必须是 LOS 真感知过才入选; 走过去途中若是被岩石包住的矿, 依旧挖不开
+            // (到点真感知到才由正常挖掘接手), 只是"人类式回到记得的位置", 不隔墙。
+            // 只要眼前有任何可感知矿, 上面 closestBlock/nearbyMine 已优先返回, 这里
+            // 仅兜底, 不抢近目标 (保留"舍近求远不可取", 2026-08-21 原则)。
+            if (closestBlock.isEmpty() && !isTargetingSurfaceResource()) {
+                Optional<BlockPos> memoryNav = pickNearestMemoryOre(mod, pos);
+                if (memoryNav.isPresent()) {
+                    Debug.logMessage("[MineMem] no perceivable ore -> navigating to recently-seen ore "
+                            + memoryNav.get().toShortString() + " (dist=" + (int) Math.sqrt(memoryNav.get().getSquaredDistance(pos)) + ")");
+                    return memoryNav.map(Object.class::cast);
+                }
+            }
             // (2026-09-01 trace) 目标选择结果: 没挖的紧贴矿/掉落/远处矿, 记录
             // bot 最终将去处理的方块——区分木头(wood)/石头(cobble)高发地。
             if (closestBlock.isEmpty() && closestDrop.isEmpty() && !satisfied) {
@@ -760,6 +808,40 @@ public class MineAndCollectTask extends ResourceTask {
         @Override
         protected Vec3d getOriginPos(AltoClef mod) {
             return mod.getPlayer().getPos();
+        }
+
+        /**
+         * (2026-09-02 记忆兜底) 从"最近真看过(LOS)的矿"里挑一个作为导航回溯目标。
+         * 仅当眼前无任何可感知矿时才调用 (见 getClosestTo)。约束: 必须在本窗口内
+         * 被 LOS 真感知过 (记录在 _seenOreTick), 且直线距离 ≤ MEMORY_NAV_RANGE,
+         * 未进黑名单、可破坏。返回位置后由上层 GetToBlock 导航过去, 到点真感知到矿
+         * 才由正常挖掘接手; 若矿已被挖掉/不可达, 会走 _blacklist 自我淘汰, 不会死循环
+         * 扑向同一空位。顺带修剪过期记忆, 防 _seenOreTick 无限膨胀。
+         */
+        private Optional<BlockPos> pickNearestMemoryOre(AltoClef mod, Vec3d fromPos) {
+            long nowTick = WorldHelper.getTicks();
+            if (_seenOreTick.isEmpty()) return Optional.empty();
+            double maxSq = MEMORY_NAV_RANGE * MEMORY_NAV_RANGE;
+            BlockPos best = null;
+            double bestSq = Double.POSITIVE_INFINITY;
+            boolean pruned = false;
+            for (java.util.Map.Entry<BlockPos, Long> e : _seenOreTick.entrySet()) {
+                BlockPos p = e.getKey();
+                long seen = e.getValue();
+                if (nowTick - seen >= MEMORY_NAV_LIFETIME_TICKS) {
+                    pruned = true;
+                    continue;
+                }
+                if (_blacklist.contains(p)) continue;
+                if (!WorldHelper.canBreak(mod, p)) continue;
+                double sq = p.getSquaredDistance(fromPos);
+                if (sq >= maxSq) continue;
+                if (sq < bestSq) { bestSq = sq; best = p; }
+            }
+            if (pruned && _seenOreTick.size() > 128) {
+                _seenOreTick.entrySet().removeIf(x -> nowTick - x.getValue() >= MEMORY_NAV_LIFETIME_TICKS);
+            }
+            return Optional.ofNullable(best);
         }
 
         /**
@@ -809,7 +891,10 @@ public class MineAndCollectTask extends ResourceTask {
                     // 优化, 不改判定: 幸存块的全部检查与原实现相同)。
                     if (p.getSquaredDistance(fromPos) >= maxSq) continue;
                     boolean perceivable = VisibilityHelper.isBlockPerceivable(mod, p);
-                    if (perceivable) _recentlySeen.put(p, nowTick);
+                    if (perceivable) {
+                        _recentlySeen.put(p, nowTick);
+                        _seenOreTick.put(p, nowTick); // (2026-09-02) 记录"真看过"供记忆兜底
+                    }
                     boolean remembered = !perceivable && _recentlySeen.containsKey(p)
                             && (nowTick - _recentlySeen.get(p)) < RECENTLY_SEEN_TICKS;
                     if (!perceivable && !remembered) continue;
@@ -863,6 +948,7 @@ public class MineAndCollectTask extends ResourceTask {
                 if (failMs != null && nowMs - failMs < LOS_FAIL_CACHE_MS) continue;
                 if (++raycasts > MAX_LOS_RAYCASTS_PER_CALL) break;
                 if (VisibilityHelper.isBlockPerceivable(mod, p)) {
+                    _seenOreTick.put(p, (long) WorldHelper.getTicks()); // (2026-09-02) 记录"真看过"供记忆兜底
                     return Optional.of(p);
                 }
                 _losFailCache.put(p, nowMs);
@@ -1337,6 +1423,9 @@ public class MineAndCollectTask extends ResourceTask {
                 return false;
             }
             if (obj instanceof ItemEntity drop) {
+                // (2026-09-02 isAlive: 已消失(被捡/despawn)的掉落物立即失效, 防 pursuit
+                // 粘住陈旧实体 → PickupDroppedItemTask 卡 "Waiting for dropped item to land")。
+                if (!drop.isAlive()) return false;
                 Item item = drop.getStack().getItem();
                 for (ItemTarget target : _targets) {
                     if (target.matches(item)) return true;

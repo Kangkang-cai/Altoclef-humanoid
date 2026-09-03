@@ -51,10 +51,12 @@ public class MobDefenseChain extends SingleTaskChain {
     // ---- 盾牌核弹 (Creeper Shield Nuke, 2026-08-23) ----
     // 苦力怕 fuse 在 [0.0, 1.0]，30 tick=1.5s 爆炸；举盾生效需 ~5 tick(0.25s)。
     // TRIGGER_FUSE=0.45 → 距爆炸 0.825s(16.5 tick)，留 11 tick 余量应对转向滞后。
-    // ABORT_FUSE=0.2 → fuse 回落到此以下说明苦力怕已离开或取消引爆，停止举盾。
-    // 血量阈值和怪物数阈值与自信战斗保持一致 (用户设计: ≥40% HP, ≤3 只普通怪)。
-    private static final float SHIELD_NUKE_TRIGGER_FUSE = 0.45f;
-    private static final float SHIELD_NUKE_ABORT_FUSE = 0.20f;
+    // (2026-09-01 用户"苦力怕修复仍失效被炸死"根因) ABORT_FUSE 0.2 对【刚起 fuse 的
+    // 苦力怕】致命: 苦力怕 fuse 从 0 开始上升, 启动时 fuse=0.07(日志实锤) < 0.2 →
+    // 盾核弹第 2 tick 就因 fuseDropped 放盾 → 永远坚持不到爆炸, 期间被骷髅战(95)/
+    // 逃跑接管 → 被炸。改为 0.001: 只在 fuse 真正回落到 0(苦力怕去 fuse/离开)才放盾,
+    // 起 fuse 的苦力怕一直举盾接到爆炸。
+    private static final float SHIELD_NUKE_ABORT_FUSE = 0.001f;
     private static final float SHIELD_NUKE_MIN_HEALTH_RATIO = 0.40f;
     private static final int SHIELD_NUKE_MAX_HOSTILES = 3;
     // 本次举盾持续 tick 数，用于爆炸后保护判定
@@ -75,6 +77,12 @@ public class MobDefenseChain extends SingleTaskChain {
     // (2026-09-01 用户) 纯近战怪数量达到此值才逃跑(被围殴), 1~2 只直接打。
     // 远程攻击者(骷髅/烈焰等能射)与苦力怕(爆炸)不受此限制: 永远保留逃跑路径。
     private static final int RETREAT_MELEE_THRESHOLD = 3;
+    // (2026-09-02 贴脸近战立即击杀, 用户"僵尸在脸上早该杀了, 快死才反应")
+    // 近战怪在此距离内视为"贴脸正在攻击我们" → 立即进击杀清单, 不等
+    // killHostileWhenCloseForSeconds(12s) 计时。否则僵尸贴脸 12 秒早把人打残,
+    // 直到血量跌进 isVulnurable 才触发击杀 (日志实锤 19:04:34 僵尸 0.9 格贴脸,
+    // 快死才 FIGHT)。
+    private static final double MELEE_ATTACK_RANGE = 3.0;
     // Kind of a silly solution
     public static Class[] HOSTILE_ANNOYING_CLASSES = new Class[]{SkeletonEntity.class, ZombieEntity.class, SpiderEntity.class, CaveSpiderEntity.class, WitchEntity.class, PiglinEntity.class, PiglinBruteEntity.class, HoglinEntity.class, ZoglinEntity.class, BlazeEntity.class, WitherSkeletonEntity.class, PillagerEntity.class, DrownedEntity.class};
     private final KillAura _killAura = new KillAura();
@@ -210,6 +218,23 @@ public class MobDefenseChain extends SingleTaskChain {
             // Stop putting stuff out if we no longer need to put out a fire.
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
             _wasPuttingOutFire = false;
+        }
+
+        // (2026-09-02 苦力怕盾牌核弹持久化根因修复) 举盾接爆一旦启动就必须持续 hold
+        // 到苦力怕爆炸/目标消失/fuse 回落, 绝不能被状态机打断。旧实现 stateEvaluate
+        // 用 "_defenseState = RETREAT 假装" 承接盾牌核弹, 但 stateRetreat 开头会
+        // 无条件 release 盾 + 清 _shieldNukeStartTick → 盾牌核弹只撑 1 tick
+        // (日志实锤 11:00:25.18 EVALUATE->RETREAT(75) 后 0.05s 就被打回 EVALUATE(0),
+        // 0.8~1.5 格的苦力怕在 prio=0 下引爆炸死)。改为: 盾牌核弹激活期间每 tick
+        // 在状态机之前直接续 hold, 返回高优先, 保证赢过进食/普通任务。
+        if (_shieldNukeStartTick >= 0 && _shieldNukeTarget != null) {
+            if (doShieldNuke(mod, _shieldNukeTarget)) {
+                return 90;
+            }
+            // 已结束(爆炸/目标消失/fuse 回落): doShieldNuke 内部已放盾清状态。
+            // 若是在集中战斗中接爆的, 保留 FIGHT 上下文让骷髅战无缝续打。
+            _defenseState = (_fightTask != null || !_fightTargets.isEmpty())
+                    ? DefenseState.FIGHT : DefenseState.EVALUATE;
         }
 
         if (prioritizeEating(mod) && !_inCombat) {
@@ -548,12 +573,14 @@ public class MobDefenseChain extends SingleTaskChain {
                 _doingFunkyStuff = true;
                 boolean shielding = doShieldNuke(mod, blowingUp);
                 if (shielding) {
-                    // 优先级与原逃跑一致 (50~100)，随 fuse 上升而抢占；同时因为
-                    // 我们直接 hold 输入不切 task，优先级其实无意义，但保持原
-                    // 有 fuse 曲线便于日志直观。
-                    _defenseState = DefenseState.RETREAT; // 假装 RETREAT 避免状态机混乱
+                    // (2026-09-02 苦力怕修复根因) 不再假装 RETREAT: stateRetreat
+                    // 开头会无条件放盾 + 清 _shieldNukeStartTick, 盾牌核弹第 2 tick
+                    // 就被打断。举盾持久化改由 getPriorityInner 顶部统一接管,
+                    // 这里保持 EVALUATE, 下一 tick 顶部检查 _shieldNukeStartTick>=0
+                    // 继续 hold。优先级 90 确保抢在普通 fight/逃跑前。
+                    _defenseState = DefenseState.EVALUATE;
                     _runAwayTask = null;
-                    return 60 + 0.3f * 50; // 略高于原逃跑优先级 (>=82.5)，确保抢在一般 fight 前
+                    return 90;
                 }
             } else if (closeEnough) {
                 Debug.logMessage("Shield Nuke unavailable (no shield or swarmed): fuse=%.2f, hasShield=%s, nearbyHostiles=%d",
@@ -663,12 +690,23 @@ public class MobDefenseChain extends SingleTaskChain {
 
                     // Give each hostile a timer, if they're close for too long deal with them.
                     if (isClose) {
-                        if (!_closeAnnoyingEntities.containsKey(hostile)) {
-                            _closeAnnoyingEntities.put(hostile, new TimerGame(mod.getModSettings().getKillHostileWhenCloseForSeconds()));
-                            _closeAnnoyingEntities.get(hostile).reset();
-                        }
-                        if (_closeAnnoyingEntities.get(hostile).elapsed()) {
+                        // (2026-09-02 贴脸近战立即击杀, 用户"僵尸在脸上早该杀了, 快死才反应")
+                        // 近战怪贴脸(攻击距离内)且正在攻击我们 → 立即进击杀清单, 不等 12s 计时
+                        // —— 否则 bot 满血硬吃僵尸 12 秒(日志实锤 19:04 僵尸 0.9 格贴脸, 直到
+                        // 血量跌进 isVulnurable 才 FIGHT, 差点死)。只有远处烦人怪才走计时。
+                        if (!isRangedThreat(hostile)
+                                && hostile.isInRange(mod.getPlayer(), MELEE_ATTACK_RANGE)
+                                && EntityHelper.isAngryAtPlayer(mod, hostile)) {
                             toDealWith.add(hostile);
+                            _closeAnnoyingEntities.remove(hostile);
+                        } else {
+                            if (!_closeAnnoyingEntities.containsKey(hostile)) {
+                                _closeAnnoyingEntities.put(hostile, new TimerGame(mod.getModSettings().getKillHostileWhenCloseForSeconds()));
+                                _closeAnnoyingEntities.get(hostile).reset();
+                            }
+                            if (_closeAnnoyingEntities.get(hostile).elapsed()) {
+                                toDealWith.add(hostile);
+                            }
                         }
                     } else {
                         _closeAnnoyingEntities.remove(hostile);
@@ -769,10 +807,14 @@ public class MobDefenseChain extends SingleTaskChain {
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
-            // (2026-08-23 盾牌核弹) 战斗中苦力怕自爆同样优先举盾——有盾有血量时
-            // 不必中断战斗逃跑，硬接爆炸后立刻续打（状态机不切 RETREAT，保留
-            // FIGHT 上下文，爆炸结束后 _fightTargets / _fightTask 仍有效）。
-            if (fuse >= SHIELD_NUKE_TRIGGER_FUSE && canShieldNuke(mod)) {
+            // (2026-09-02 苦力怕修复根因) 去掉 fuse>=0.45 门槛: 苦力怕点燃是从
+            // fuse≈0 开始上升的, 战斗中刚点燃的苦力怕 fuse=0.04(日志实锤, 11:00:22.9
+            // FIGHT->RETREAT prio=51.78) 远小于 0.45 → 直接走逃跑分支(逃跑必放盾)
+            // → 有盾也被炸死。改与 stateEvaluate 口径一致: 有盾且苦力怕在接爆范围
+            // (16格)内, 任意 fuse 都原地举盾硬接(用户规则: 有盾接爆 > 逃跑)。
+            boolean closeEnough = blowingUp.squaredDistanceTo(mod.getPlayer())
+                    <= CREEPER_SHIELD_BLOCK_RANGE * CREEPER_SHIELD_BLOCK_RANGE;
+            if (closeEnough && canShieldNuke(mod)) {
                 _doingFunkyStuff = true;
                 boolean shielding = doShieldNuke(mod, blowingUp);
                 if (shielding) {
@@ -923,6 +965,21 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     private float stateRetreat(AltoClef mod) {
+        // (2026-09-02 苦力怕修复) 逃跑途中若点燃的苦力怕逼近(16格内)且副手有盾,
+        // 立即转原地举盾接爆 —— 不再边逃边被炸 (用户规则: 有盾接爆 > 逃跑, 任意 fuse)。
+        // 举盾启动后由 getPriorityInner 顶部每 tick 续 hold, 不会被下方放盾逻辑打断。
+        CreeperEntity escapeCreeper = getClosestFusingCreeper(mod);
+        if (escapeCreeper != null) {
+            boolean closeEnough = escapeCreeper.squaredDistanceTo(mod.getPlayer())
+                    <= CREEPER_SHIELD_BLOCK_RANGE * CREEPER_SHIELD_BLOCK_RANGE;
+            if (closeEnough && canShieldNuke(mod)) {
+                _doingFunkyStuff = true;
+                if (doShieldNuke(mod, escapeCreeper)) {
+                    _runAwayTask = null;
+                    return 90;
+                }
+            }
+        }
         // (2026-08-23) 进入逃跑状态时，如果之前在做盾牌核弹，必须释放盾牌
         // 否则举盾状态会一直持续，导致移动极慢（用户反馈）
         if (_shieldNukeStartTick > 0) {

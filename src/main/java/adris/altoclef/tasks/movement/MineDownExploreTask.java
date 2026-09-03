@@ -3,6 +3,7 @@ package adris.altoclef.tasks.movement;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
@@ -12,6 +13,9 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.mob.BlazeEntity;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayDeque;
@@ -73,6 +77,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 防自挖楼梯上半段/浅层洞口被计入)。
     // 自挖网络里天然空气≈0 → 永不误判; 挖穿进真洞时洞内天然空气连通 → 正常触发。
     private static final int CAVE_NATURAL_AIR_MAX_Y = 45;
+    // (2026-09-02 钻石任务矿洞深度上界, 用户"下挖到合法深度却导航到上方矿洞")
+    // 矿洞认定 + 探索导航都只认【目标深度附近】的天然空气: y 不能高于
+    // targetY + 本缓冲 (钻石 targetY=-24 → 只认 -8 以下)。否则 bot 在钻石层
+    // 挖洞时, 连通空气向上蔓延到的浅层洞会被当成"当前深度该探索的洞" → 导航
+    // 离开钻石层。package-private 供 ExploreCaveTask 复用。
+    static final int CAVE_ABOVE_TARGET_BUFFER = 16;
     // 天然空气的最少数量: 配合三维跨度, 过滤"恰好一条天然窄缝穿过扫描区"的小概率情形。
     private static final int MIN_NATURAL_CAVE_AIR = 24;
     // 自挖位置记录上限(每维度, 容量封顶, 超限逐出最旧并重写文件), 防内存/文件无限增长。
@@ -125,6 +135,25 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int MAX_LIQUID_RETREATS = 8;
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
+    // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
+    // 完成)后的冷却步数: 冷却内不再探测矿洞, 让 bot 挖离洞区/换向, 避免
+    // 探索→挖几步→又探测到同一洞→又探索 的死循环 (日志 17:01 at 63,33,428 /
+    // 51,33,406 反复实锤)。12 步 ≈ 挖 12 格隧道远离洞区边缘。
+    private static final int CAVE_EXPLORE_COOLDOWN_STEPS = 12;
+    private int _caveExploreCooldownSteps = 0;
+    // (2026-09-02 刷怪笼危险处理, 用户"先清怪再挖刷怪笼") 挖通道时【感知到】的
+    // 刷怪笼是持续刷怪源, 不清掉会一直被怪打 (用户"bot 找到刷怪笼后被怪物一直
+    // 打")。流程: 感知(8 格, 看到就感知, 不需要 FOV/LOS — 危险源主动避让, 类似
+    // 床的无条件感知) → 有镐: 先清 16 格内敌对怪再挖掉刷怪笼 (粘性, 状态机驱动);
+    // 无镐: 换向远离 + 记黑名单 (徒手挖不动 SPAWNER 硬度5, 硬挖会被刷怪打死)。
+    // 挖掉的/避让的刷怪笼位置都记入黑名单, 防隧道反复挖回同一地牢。
+    private static final int SPAWNER_SCAN_RANGE = 8;          // 感知范围(格)
+    private static final int HOSTILE_CLEAN_RANGE = 16;        // 清怪范围=刷怪笼激活半径
+    private static final long SPAWNER_SCAN_INTERVAL_MS = 500; // 近场扫描节流, 防每 tick 卡顿
+    private int _spawnerPhase = 0;                            // 0=无/完成, 1=清怪, 2=挖刷怪笼
+    private BlockPos _spawnerTarget = null;
+    private long _lastSpawnerScanMs = 0;
+    private final Set<BlockPos> _avoidedSpawners = new HashSet<>();
 
     public MineDownExploreTask() {
         this(DEFAULT_TARGET_Y);
@@ -172,6 +201,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected Task onTick(AltoClef mod) {
 
+        if (_caveExploreCooldownSteps > 0) {
+            _caveExploreCooldownSteps--;
+        }
+
         if (_inCave) {
             // We found a cave while digging: prefer exploring inside it.
             // A watchdog bounds the detour so a huge cave network can't trap
@@ -189,6 +222,76 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             }
             _inCave = false;
             _subTask = null;
+            // (2026-09-02) 探索结束(超时/完成): 启动冷却防立刻重新探测同一洞;
+            // 隧道模式下换一个水平方向继续挖, 避免原方向挖回刚探索过的洞区再次触发。
+            _caveExploreCooldownSteps = CAVE_EXPLORE_COOLDOWN_STEPS;
+            if (_tunnelMode) {
+                retreatAndRedig(mod);
+            }
+        }
+
+        // (2026-09-02 刷怪笼危险处理, 用户"先清怪再挖刷怪笼") 挖通道时感知到刷怪笼:
+        // 有镐 → 先清 16 格内敌对怪再挖掉刷怪笼(粘性); 无镐 → 换向远离+记黑名单。
+        // 放在探测洞/挖隧道之前, 危险源优先于一切探索。
+        if (_spawnerPhase > 0) {
+            if (_spawnerTarget == null || !WorldHelper.canBreak(mod, _spawnerTarget)) {
+                // 目标已挖掉/不可挖: 处理完成, 记黑名单后恢复挖通道。
+                if (_spawnerTarget != null) {
+                    _avoidedSpawners.add(_spawnerTarget);
+                }
+                _spawnerPhase = 0;
+                _spawnerTarget = null;
+            } else if (_spawnerPhase == 1) {
+                // 先清怪: 16 格内还有敌对怪 → 继续清; 清完切挖刷怪笼。
+                if (hasHostileWithin(mod, HOSTILE_CLEAN_RANGE)) {
+                    setDebugState("Clearing hostiles before mining spawner");
+                    return new KillEntitiesTask(
+                            e -> e instanceof HostileEntity
+                                    && e.squaredDistanceTo(mod.getPlayer()) < HOSTILE_CLEAN_RANGE * HOSTILE_CLEAN_RANGE,
+                            HostileEntity.class);
+                }
+                _spawnerPhase = 2;
+            } else {
+                // 挖刷怪笼: 破坏进度在 MobDefense 高威胁打断后由本状态机续挖 (粘性)。
+                setDebugState("Mining spawner at " + _spawnerTarget.toShortString());
+                return new DestroyBlockTask(_spawnerTarget);
+            }
+        } else {
+            long now = System.currentTimeMillis();
+            if (now - _lastSpawnerScanMs >= SPAWNER_SCAN_INTERVAL_MS) {
+                _lastSpawnerScanMs = now;
+                BlockPos spawner = findNearbySpawner(mod);
+                if (spawner != null) {
+                    // (2026-09-02 烈焰人刷怪笼保护, 用户"破坏刷怪笼会不会把烈焰人的
+                    // 也破坏了") 下界堡垒的烈焰人刷怪笼是 CollectBlazeRodsTask 收集
+                    // 烈焰棒的关键设施 — 破坏它会卡死主线(没烈焰棒做不了末影之眼,
+                    // 也进不了末地)。检测到烈焰人刷怪笼 → 记入已处理集(本任务不再
+                    // 碰), 绝不破坏/远离。
+                    if (isProtectedSpawner(mod, spawner)) {
+                        _avoidedSpawners.add(spawner);
+                        Debug.logToFile("altoclef_diag.log",
+                                "[Spawner] blaze spawner at " + spawner.toShortString()
+                                        + " protected (needed for blaze rods), NOT breaking it.");
+                    } else if (StorageHelper.miningRequirementMet(mod, MiningRequirement.WOOD)) {
+                        _spawnerTarget = spawner;
+                        _spawnerPhase = 1;
+                        Debug.logMessage("[Spawner] found spawner at " + spawner.toShortString()
+                                + ", clearing hostiles then mining it.");
+                        Debug.logToFile("altoclef_diag.log",
+                                "[Spawner] found spawner at " + spawner.toShortString()
+                                        + ", clearing hostiles then mining it.");
+                    } else {
+                        // 无镐: 换向远离 + 记黑名单 (徒手挖不动 SPAWNER, 硬挖会被刷怪打死)。
+                        _avoidedSpawners.add(spawner);
+                        retreatAndRedig(mod);
+                        Debug.logMessage("[Spawner] no pickaxe, retreating from spawner at "
+                                + spawner.toShortString());
+                        Debug.logToFile("altoclef_diag.log",
+                                "[Spawner] no pickaxe, retreating from spawner at "
+                                        + spawner.toShortString());
+                    }
+                }
+            }
         }
 
         // Check if we should keep digging.
@@ -198,7 +301,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // findNearbyCave 永不走 → 挖穿进洞也不触发探索, 反复 "Shaft done" 空转卡死。
             // 这里在判定"结束"前先扫一次: 井底已有连通洞空气(从洞口可达)→ 进洞探索,
             // 否则才真正 shaft done。
-            if (!_inCave) {
+            if (!_inCave && _caveExploreCooldownSteps <= 0) {
                 Optional<BlockPos> cave = findNearbyCave(mod);
                 if (cave.isPresent()) {
                     _inCave = true;
@@ -207,7 +310,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     _caveExploreTimer.reset();
                     // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
                     // (其落点被强制抬到 48 格外地表, 从未真正走进洞里)。
-                    _subTask = new ExploreCaveTask();
+                    _subTask = new ExploreCaveTask(_targetY);
                     return _subTask;
                 }
             }
@@ -221,7 +324,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         // Watch for caves periodically.
-        if (_step % CAVE_SCAN_EVERY_STEPS == 0) {
+        // (2026-09-02 用户"钻石任务应到 -24 却被矿洞探索接替") 仅 TUNNEL 模式
+        // (已到目标深度, 水平隧道挖矿) 才中途探测洞; 楼梯下沉模式(起始高于目标
+        // 深度)先沉到目标深度再探测, 否则浅层大洞网络会一直抢占探索, 永不沉到
+        // 钻石层 y=-24 (日志 17:01 at 63,33,428 / 51,33,406 浅层反复触发实锤)。
+        // 冷却内不探测(防同一洞反复)。
+        if (_tunnelMode && _caveExploreCooldownSteps <= 0 && _step % CAVE_SCAN_EVERY_STEPS == 0) {
             Optional<BlockPos> cave = findNearbyCave(mod);
             if (cave.isPresent()) {
                 _inCave = true;
@@ -232,7 +340,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 _caveExploreTimer.reset();
                 // (2026-09-01 真正进洞) 专用洞内导航任务: 直奔最远天然洞空气,
                 // 到达后重扫跟深(见 ExploreCaveTask), 25s 看门狗兜底不影响挖矿主线。
-                _subTask = new ExploreCaveTask();
+                // (2026-09-02 传 targetY) 导航目标限目标深度附近, 不导航到上方浅层。
+                _subTask = new ExploreCaveTask(_targetY);
                 return _subTask;
             }
         }
@@ -360,6 +469,55 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
     }
 
+    /**
+     * (2026-09-02 刷怪笼危险处理) 近场(SPAWNER_SCAN_RANGE=8)扫 SPAWNER 方块
+     * (chunk 已加载即可, "看到就感知", 无需 FOV/LOS — 危险源主动识别, 类似床)。
+     * 已避让/已挖掉的刷怪笼在黑名单中, 不再重复处理。
+     */
+    private BlockPos findNearbySpawner(AltoClef mod) {
+        if (mod.getWorld() == null || mod.getPlayer() == null) return null;
+        BlockPos player = mod.getPlayer().getBlockPos();
+        final int R = SPAWNER_SCAN_RANGE;
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (int dx = -R; dx <= R; dx++) {
+            for (int dy = -R; dy <= R; dy++) {
+                for (int dz = -R; dz <= R; dz++) {
+                    BlockPos p = player.add(dx, dy, dz);
+                    if (_avoidedSpawners.contains(p)) continue;
+                    if (!mod.getChunkTracker().isChunkLoaded(p)) continue;
+                    if (mod.getWorld().getBlockState(p).getBlock() == Blocks.SPAWNER) {
+                        double dSq = p.getSquaredDistance(player);
+                        if (dSq < bestSq) {
+                            bestSq = dSq;
+                            best = p;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /** (2026-09-02 刷怪笼危险处理) 玩家 range 内是否有存活的敌对实体。 */
+    private boolean hasHostileWithin(AltoClef mod, double range) {
+        if (mod.getPlayer() == null) return false;
+        double rangeSq = range * range;
+        for (Entity e : mod.getEntityTracker().getHostiles()) {
+            if (e.isAlive() && e.squaredDistanceTo(mod.getPlayer()) < rangeSq) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-02 烈焰人刷怪笼保护) 下界烈焰棒任务依赖烈焰人刷怪笼持续刷烈焰人,
+     * 破坏它会卡死主线(没烈焰棒 → 做不了末影之眼 → 进不了末地)。是烈焰人刷怪笼
+     * → 本任务绝不处理(保护)。非烈焰人(僵尸/骷髅/蜘蛛等)地牢刷怪笼正常清源。
+     */
+    private boolean isProtectedSpawner(AltoClef mod, BlockPos pos) {
+        return WorldHelper.getSpawnerEntity(mod, pos) instanceof BlazeEntity;
+    }
+
     private boolean reachedBottom(AltoClef mod) {
         // Pre-start safety: isFinished() may be called before onStart() (the task
         // framework evaluates candidate subtasks before swapping them in — if the
@@ -485,13 +643,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      *   - exclude 由调用方传入 visited ∪ failed — 到过的点绝不回头。
      * 无天然空气 → null(洞已探索完/根本不是洞)。
      */
-    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude) {
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int maxY) {
         // 探索目标选择用更远的 EXPLORE_SCAN_RADIUS, 探索段更长(用户"得调远一点")。
         Set<BlockPos> reachable = collectConnectedAir(mod, center, EXPLORE_SCAN_RADIUS);
+        // (2026-09-02 目标深度上界) 导航目标也只选目标深度附近的天然空气, 防止
+        // 钻石任务在洞内向外推时把目标选到上方浅层, 离开钻石层。
+        int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, maxY);
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
         for (BlockPos p : reachable) {
-            if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
+            if (p.getY() > naturalMaxY) continue;
             if (isSelfDugAir(mod, p)) continue;
             if (exclude != null && exclude.contains(p)) continue;
             double d = p.getSquaredDistance(fromRef);
@@ -595,8 +756,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 自挖网络天然空气≈0 → 数量闸门直接拦下; 挖穿进真洞 → 洞内天然空气
         // 经自挖口连通进集合, 数量+三维跨度均达标 → 正常触发。
         Set<BlockPos> naturalAir = new HashSet<>();
+        // (2026-09-02 目标深度上界) 只认目标深度附近的天然空气: 钻石任务在 -24 时,
+        // -8 以上的浅层洞空气不计入 — 防止"下挖到合法深度却被上方矿洞导航走"。
+        int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetY + CAVE_ABOVE_TARGET_BUFFER);
         for (BlockPos p : reachableAir) {
-            if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
+            if (p.getY() > naturalMaxY) continue;
             if (isSelfDugAir(mod, p)) continue;
             naturalAir.add(p);
         }

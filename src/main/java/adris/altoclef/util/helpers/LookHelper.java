@@ -30,7 +30,12 @@ public interface LookHelper {
         IPlayerContext ctx = BaritoneAPI.getProvider().getPrimaryBaritone().getPlayerContext();
         if (side == null) {
             assert MinecraftClient.getInstance().player != null;
-            reachable = RotationUtils.reachable(ctx.player(), target, ctx.playerController().getBlockReachDistance());
+            // (2026-09-02 持盾右键变举盾, 用户"开箱/熔炉走太远右键变举盾") MC 方块
+            // 交互距离是 4.5, 但 bot 在 4.5 格边缘点击时射线常差一点没点中方块 →
+            // 副手持盾右键被 MC 当成举盾 (不开容器)。点击判定距离收紧到 3 格内:
+            // bot 走到容器旁再点, 保证点中方块不举盾。导航 GoalNear(target,1) 本
+            // 就停在 1 格, 收紧只改变"何时开始点击", 不影响已走近的交互。
+            reachable = RotationUtils.reachable(ctx.player(), target, 3.0);
         } else {
             Vec3i sideVector = side.getVector();
             Vec3d centerOffset = new Vec3d(0.5 + sideVector.getX() * 0.5, 0.5 + sideVector.getY() * 0.5, 0.5 + sideVector.getZ() * 0.5);

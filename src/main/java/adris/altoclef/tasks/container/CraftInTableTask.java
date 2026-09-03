@@ -183,20 +183,28 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
 
         // Grab from output FIRST
         if (StorageHelper.isPlayerInventoryOpen()) {
-            // [2026-08-21 光标卡死修复] 光标残留非本配方物品(如被中断的点击
-            // 留下的床)时点输出格全部无效(MC 输出格不接收光标物品), 先放回
-            // 背包。排除配方材料/输出: 手动合成点击序列的合法中间态。
+            // (2026-09-02 材料制作不被打断) 仅"输出就绪待收"时才清理光标残留。
+            // 3x3 合成格操作不需要光标空, 旧逻辑每 tick 有非配方残留就派
+            // EnsureFreeCursorSlotTask — 光标残留遇背包满时其内部反复点击横跳,
+            // 打断材料收集(合木棍→合木板), 石镐缺木棍卡死 (tasks.log 14:25:07)。
+            // 与 CraftInInventoryTask 同款修复。
             ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
-            if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)) {
-                setDebugState("Returning stranded cursor item: " + cursor.getItem().getTranslationKey());
-                return new EnsureFreeCursorSlotTask();
+            RecipeTarget readyTarget = null;
+            Item outputItem = StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT).getItem();
+            for (RecipeTarget target : _targets) {
+                if (target.getOutputItem() == outputItem
+                        && mod.getItemStorage().getItemCount(target.getOutputItem()) < target.getTargetCount()) {
+                    readyTarget = target;
+                    break;
+                }
             }
-            if (cursor.isEmpty()) {
-                Item outputItem = StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT).getItem();
-                for (RecipeTarget target : _targets) {
-                    if (target.getOutputItem() == outputItem && mod.getItemStorage().getItemCount(target.getOutputItem()) < target.getTargetCount()) {
-                        return new ReceiveCraftingOutputSlotTask(PlayerSlot.CRAFT_OUTPUT_SLOT, target.getTargetCount());
-                    }
+            if (readyTarget != null) {
+                if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)) {
+                    setDebugState("Returning stranded cursor item: " + cursor.getItem().getTranslationKey());
+                    return new EnsureFreeCursorSlotTask();
+                }
+                if (cursor.isEmpty()) {
+                    return new ReceiveCraftingOutputSlotTask(PlayerSlot.CRAFT_OUTPUT_SLOT, readyTarget.getTargetCount());
                 }
             }
         }

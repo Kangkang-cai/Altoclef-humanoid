@@ -6,6 +6,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.Slot;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.item.ItemStack;
 
 import java.util.Optional;
@@ -25,12 +26,22 @@ public class EnsureFreeCursorSlotTask extends Task {
     // 复用上次的目标; 仅当目标槽已失效/放成功后回退为重新寻找。
     // (2026-09-01 起锁定槽只来自 findRealBackpackFit 的确定性扫描, 不会横跳。)
     private Slot _lockTargetSlot = null;
+    // (2026-09-02 卡住封顶, 用户"清2x2格子光标腾位卡 7-8 秒") 光标里是同物堆叠槽时
+    // ClickSlotTask(PICKUP/左键) 是【交换】而非【合并】, 光标永不空 → "_placeAttempts
+    // 超限→抛→重锁同槽再放"反复横跳 (tasks.log 22:32:37-46: Clicking slot9 ↔ Throwing
+    // Cursor 循环 5 拍)。放置尝试计数在抛丢分支被重置为 0, 计数上限形同虚设, 于是
+    // 能拖到 7-8 秒。加硬时间兜底: 光标非空且任务激活超过 CURSOR_FREE_LIMIT_TICKS
+    // 还没放下 → 直接跳过放置、强制进抛丢级联一次跑完, 把这类交换死锁封顶在几 tick
+    // 内, 不无限拖。不影响"光标里有真空能放/贵重同物能合并"的正常快路径。
+    private static final long CURSOR_FREE_LIMIT_TICKS = 40; // ~2s, 超过则强制抛丢
+    private long _startTick = -1;
 
     @Override
     protected void onStart(AltoClef mod) {
          // YEET
          _placeAttempts = 0;
          _lockTargetSlot = null;
+         _startTick = WorldHelper.getTicks();
     }
 
     @Override
@@ -39,6 +50,13 @@ public class EnsureFreeCursorSlotTask extends Task {
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
 
         if (!cursor.isEmpty()) {
+            // (2026-09-02 硬时间兜底) 光标长期放不下 → 直接强制抛丢级联, 不让
+            // 交换死锁无限拖 (详见字段注释)。
+            if (_startTick >= 0 && WorldHelper.getTicks() - _startTick > CURSOR_FREE_LIMIT_TICKS) {
+                _placeAttempts = MAX_PLACE_ATTEMPTS + 1;
+                Debug.logMessage("(EnsureFreeCursorSlotTask) cursor stuck > " + CURSOR_FREE_LIMIT_TICKS
+                        + " ticks, forcing throw cascade for " + cursor.getItem().getTranslationKey());
+            }
             _placeAttempts++;
             if (_placeAttempts <= MAX_PLACE_ATTEMPTS) {
                 // 优先复用已锁定的目标槽 (锁定的槽若仍能放同物就不换)。

@@ -133,6 +133,12 @@ public class EntityTracker extends Tracker {
                 if (!itemDropped(item)) continue;
                 for (ItemEntity entity : _itemDropLocations.get(item)) {
                     if (_entityBlacklist.unreachable(entity)) continue;
+                    // (2026-09-02 修: 已消失掉落物不再返回) 掉落物被捡走/despawn 后,
+                    // tracker 感知记忆(20s)内实体仍在此列表但 isAlive=false → 若不过滤,
+                    // Ore 持续 pursuit 陈旧实体 → PickupDroppedItemTask 卡 "Waiting for
+                    // dropped item to land" (日志实锤 19:07 挖完钻石卡 18 秒)。getClosestEntity
+                    // 有 isAlive 过滤, getClosestItemDrop 漏了 — 补上。
+                    if (!entity.isAlive()) continue;
                     if (!entity.getStack().getItem().equals(item)) continue;
                     if (!acceptPredicate.test(entity)) continue;
 
@@ -182,9 +188,11 @@ public class EntityTracker extends Tracker {
         ensureUpdated();
         for (Item item : items) {
             if (_itemDropLocations.containsKey(item)) {
-                // Find a non-blacklisted item
+                // Find a non-blacklisted, still-alive item
+                // (2026-09-02 isAlive: 已消失(被捡/despawn)的掉落物不算"有掉落物",
+                // 否则 itemDropped 恒 true → 挖矿持续追陈旧实体卡住)。
                 for (ItemEntity entity : _itemDropLocations.get(item)) {
-                    if (!_entityBlacklist.unreachable(entity)) return true;
+                    if (entity.isAlive() && !_entityBlacklist.unreachable(entity)) return true;
                 }
             }
         }

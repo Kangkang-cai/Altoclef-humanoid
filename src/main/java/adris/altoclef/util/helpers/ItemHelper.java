@@ -472,8 +472,18 @@ public class ItemHelper {
                 || item == Items.BUCKET || item == Items.SHIELD) {
             return false;
         }
+        // (2026-09-02 木棍主路径保护, 用户"做铁镐前把木棍当垃圾丢了→没木棍卡住")
+        // 木棍是 2x2 合成基础材料(工具/火把/床都要)。旧代码只在兜底随机丢
+        // StorageHelper.getRandomThrowableSlot 的 NEVER_DISCARD 里保护了 STICK,
+        // 但这 【canThrowAwayStack 是主丢垃圾路径 getGarbageSlot / 合成抛光标
+        // (EnsureFreeCursorSlotTask→ThrowCursorTask) 共用的单一收口】 却漏了它 —
+        // throwAwayUnusedItems=true 时木棍被当普通垃圾/光标垃圾丢光, 想做铁镐
+        // 时没木棍直接卡死 (用户实测)。在此统一保护, 与 getRandomThrowableSlot
+        // 清单口径一致, 两路径都堵上。
         // (2026-08-25 保留方块, 用户指定) 圆石/深板岩圆石至少保留一组 (64):
         // 当前背包数量 ≤ 保留量时不丢 (合成熔炉/石镐/石剑常用, 丢光了会卡死)。
+        if (item == Items.STICK)
+            return false;
         if (isReservedBlockUnderLimit(mod, stack))
             return false;
         return mod.getModSettings().isThrowaway(stack.getItem()) || mod.getModSettings().shouldThrowawayUnusedItems();

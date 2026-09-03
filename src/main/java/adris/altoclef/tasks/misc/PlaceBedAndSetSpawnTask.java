@@ -91,6 +91,11 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final TimerGame _humanSleepTimer = new TimerGame(3);
     // 记录上次侧, 成功换侧时 reset 大超时, 避免一次 wander4s 就耗光 _bedInteractTimeout
     private int _humanSleepSideLast = -1;
+    // (2026-09-02 交互失败左键清障) 放床/上床交互尝试无效(超时)后, 左键清一遍
+    // 交互区域的植被(草/花/藤)再重试右键 — 防"站在草里放床失败/床被草包住点不到"
+    // (用户: 没破坏掉草, 站在草里很蠢; 建议交互无效就左键几下再右键)。每区域/
+    // 每侧只清一次, 避免横跳。
+    private boolean _interactClearedVeg = false;
 
     public PlaceBedAndSetSpawnTask() {
 
@@ -107,6 +112,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _humanSleepSide = 0;
         _humanSleepSideLast = -1;
         _humanSleepTimer.reset();
+        _interactClearedVeg = false;
 
         // Don't break our bed thing.
         mod.getBehaviour().push();
@@ -405,10 +411,22 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
             // ⑥ 小超时换侧: 3 秒内没睡进去/没 Respawn 消息 → 换下一侧 (共 4 侧)
             if (_humanSleepTimer.elapsed()) {
+                // (2026-09-02 加强) 换侧前先左键清一遍床边植被 — 床可能被草包住
+                // 点不到(人类: 睡不进去先撸两下草再点)。每侧只清一次。
+                if (!_interactClearedVeg) {
+                    _interactClearedVeg = true;
+                    BlockPos veg = findBlockingVegetationAround(mod, _bedForSpawnPoint);
+                    if (veg != null) {
+                        _humanSleepSideLast = -1; // 回来重走"到位→瞄→右键"小超时
+                        setDebugState("Sleep no-response -> brushing grass/flowers around bed");
+                        return new DestroyBlockTask(veg);
+                    }
+                }
                 String m2 = "[Diag-bed] human-sleep 3s no-sleep, bumping side " + _humanSleepSide + "-> " + ((_humanSleepSide + 1) % 4);
                 Debug.logMessage(m2);
                 Debug.logToFile("altoclef_diag.log", m2);
                 _humanSleepSide = (_humanSleepSide + 1) % 4;
+                _interactClearedVeg = false; // 换侧重置"已清障"
                 // 推玩家 1 格: 用 4 ticks 的 WanderTask(1) 走开当前站位=换侧前抖一下
                 mod.getBehaviour().avoidBlockPlacing(pos -> false);
                 return new TimeoutWanderTask(1, true);
@@ -506,13 +524,18 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // 以及上方 y+1 头空, 把 short_grass / tall_grass / flower / vine / double_plant
         // 这类"非实心非空气非流体、但 BedBlock 放下去会被 Minecraft reject"的植被撸掉。
         // 人类玩家就这么干: 左键几下清掉挡方块的草, 直接右键放床, 不等 wander 重扫。
-        // 清理范围是床的 footprint (X=1..2 Y=0..1 Z=-1..0), 不挖远处的土方块, 不破坏地形。
+        // (2026-09-02 加强) 清理范围从"床 footprint (X=1..2)"扩大到含【玩家站位格
+        // X=0 及其站床侧 Z=-1】 — 用户实测 bot"站在草里放床失败": 站位格的草丛没清,
+        // 点床 raycast 被脚边植被干扰。现把站位格(0,0,0)/(0,1,0)与站床侧(0,0,-1)/
+        // (0,1,-1)一起纳入, 放床前把脚下/身边草也清掉。
         {
             BlockPos foot = _currentBedRegion;
-            // 要清理的 8 格: 床 footprint X=1..2 (两格床) Y=0..1 Z=-1..0 (站床侧+床里侧)
+            // 要清理的 12 格: 床 footprint X=1..2 (两格床) Y=0..1 Z=-1..0 (站床侧+床里侧)
+            // + 玩家站位格 X=0 (BED_PLACE_STAND_POS) 及站床侧
             int[][] DEL = new int[][]{
                 {1,0,0},{2,0,0},  {1,1,0},{2,1,0},
-                {1,0,-1},{2,0,-1},{1,1,-1},{2,1,-1}
+                {1,0,-1},{2,0,-1},{1,1,-1},{2,1,-1},
+                {0,0,0},{0,1,0},  {0,0,-1},{0,1,-1}
             };
             for (int[] d : DEL) {
                 BlockPos p = foot.add(d[0], d[1], d[2]);
@@ -529,6 +552,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     Debug.logMessage(m);
                     Debug.logToFile("altoclef_diag.log", m);
                     _placeAttemptTimer = null;
+                    _interactClearedVeg = false; // 重新放床前重置"已清障"标志
                     setDebugState("Brushing grass/flowers off bed footprint (pre-place)");
                     return new DestroyBlockTask(p);
                 }
@@ -596,6 +620,18 @@ public class PlaceBedAndSetSpawnTask extends Task {
         if (_placeAttemptTimer != null && _placeAttemptTimer.elapsed()) {
             BlockPos saw = findPlacedBedNearRegion(mod, _currentBedRegion);
             if (saw == null) {
+                // (2026-09-02 加强) 交互无效(3s 没放上床): 先左键清一遍放床区域
+                // 植被再右键重试; 已清过仍失败才换区域 — 不再"站在草里傻放"就换地方。
+                if (!_interactClearedVeg) {
+                    _interactClearedVeg = true;
+                    BlockPos veg = findBlockingVegetationAround(mod, _currentBedRegion);
+                    if (veg != null) {
+                        _placeAttemptTimer = null;
+                        _progressChecker.reset();
+                        setDebugState("Place bed failed -> brushing grass/flowers, retry");
+                        return new DestroyBlockTask(veg);
+                    }
+                }
                 String m = "[Diag-bed] PLACE BED TIMEOUT after 3s at region " + (_currentBedRegion == null ? "null" : _currentBedRegion.toShortString())
                         + ", rescanning new region (old goal unreachable / blocked).";
                 Debug.logMessage(m);
@@ -605,6 +641,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 _regionScanTimer.reset();
                 _placeAttemptTimer = null;
                 _progressChecker.reset();
+                _interactClearedVeg = false; // 换区域重置"已清障"
                 return null;
             }
             _placeAttemptTimer = null;
@@ -761,6 +798,30 @@ public class PlaceBedAndSetSpawnTask extends Task {
             BlockPos neighbor = remembered.offset(dir);
             if (mod.getWorld().getBlockState(neighbor).getBlock() instanceof BedBlock) {
                 return neighbor;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * (2026-09-02 交互失败左键清障) 扫 center 周围 3x2x3 小范围, 找"挡交互"的
+     * 植被方块 — 草/花/藤/双植物等非实心非空气非流体可破坏方块。返回首个待清
+     * 方块, 无则 null。放床/上床交互无效时用它左键清一遍再右键重试, 人类感:
+     * "睡不进去/放不下, 先撸两下草再点"。
+     */
+    private BlockPos findBlockingVegetationAround(AltoClef mod, BlockPos center) {
+        if (center == null) return null;
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    BlockPos p = center.add(dx, dy, dz);
+                    BlockState bs = mod.getWorld().getBlockState(p);
+                    if (WorldHelper.isAir(mod, p)) continue;
+                    if (WorldHelper.isSolid(mod, p)) continue;
+                    if (!bs.getFluidState().isEmpty()) continue;
+                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    return p;
+                }
             }
         }
         return null;

@@ -18,6 +18,7 @@ import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.*;
+import adris.altoclef.tasks.squashed.CataloguedResourceTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
@@ -273,6 +274,10 @@ public class BeatMinecraft2Task extends Task {
     // (2026-09-01 矿车箱子) 记录派发过的矿车箱子实体, 不重复开。
     private final Set<ChestMinecartEntity> _sweptMinecarts = new HashSet<>();
     private LootContainerTask _nearbySweepTask = null;
+    // (2026-09-02 刷怪笼抑制开箱) 近场扫描 SPAWNER 的节流缓存 (ms + 结果),
+    // 避免每 tick 全扫 17^3 方块造成卡顿。
+    private long _lastSpawnerBlockScanMs = 0;
+    private boolean _spawnerBlockedCached = false;
     private static final double NEARBY_LOOT_RANGE = 48;
 
     // ==== Craft table pickup 限额 (2026-08-21 修复: "while we're at it" 死循环) ====
@@ -1052,6 +1057,39 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
+     * (2026-09-02 刷怪笼抑制开箱) 玩家近场 8 格内是否有 SPAWNER (500ms 节流缓存)。
+     * 有刷怪笼时禁止就近搜刮 — 刷怪笼地牢先由 MineDownExploreTask 清源(先清怪再挖
+     * 掉刷怪笼), 箱子等刷完再开, 避免搜刮抢走挖刷怪笼任务(用户"挖/打/开别打架")。
+     */
+    private boolean nearbySpawnerBlocked(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (now - _lastSpawnerBlockScanMs < 500) {
+            return _spawnerBlockedCached;
+        }
+        _lastSpawnerBlockScanMs = now;
+        boolean blocked = false;
+        if (mod.getWorld() != null && mod.getPlayer() != null) {
+            BlockPos player = mod.getPlayer().getBlockPos();
+            final int R = 8;
+            outer:
+            for (int dx = -R; dx <= R; dx++) {
+                for (int dy = -R; dy <= R; dy++) {
+                    for (int dz = -R; dz <= R; dz++) {
+                        BlockPos p = player.add(dx, dy, dz);
+                        if (mod.getChunkTracker().isChunkLoaded(p)
+                                && mod.getWorld().getBlockState(p).getBlock() == Blocks.SPAWNER) {
+                            blocked = true;
+                            break outer;
+                        }
+                    }
+                }
+            }
+        }
+        _spawnerBlockedCached = blocked;
+        return blocked;
+    }
+
+    /**
      * 就近搜刮的目标物品清单 (2026-08-21): 村庄/矿道遗迹箱子里值得拿的
      * 东西。与 lootableItems()(下界传送门专用: 金/黑曜石/打火石)不同,
      * 这里覆盖主循环通用刚需: 食物、铁、煤、钻石、床(出生点保险)、工具
@@ -1265,6 +1303,11 @@ public class BeatMinecraft2Task extends Task {
                 // 即使开不出来也不死循环。
                 // 候选必须可感知: 方块箱子 isBlockPerceivable (LOS, 防透视挖 40 格
                 // 岩层去开看不见的箱子), 矿车箱子 isEntityVisible (LOS)。
+                // (2026-09-02 刷怪笼抑制开箱, 用户"先清怪再挖刷怪笼, 挖/打/开别打架")
+                // 附近 8 格内有刷怪笼时不触发就近搜刮: 刷怪笼地牢先由挖矿任务的
+                // MineDownExploreTask 清源(先清怪再挖掉刷怪笼), 箱子等刷完再开 —
+                // 否则搜刮会抢走挖刷怪笼任务, 刷怪源永远不清。
+                if (!nearbySpawnerBlocked(mod)) {
                 if (shouldForce(mod, _nearbySweepTask)) {
                     return _nearbySweepTask;
                 }
@@ -1315,6 +1358,7 @@ public class BeatMinecraft2Task extends Task {
                         _nearbySweepTask = new LootContainerTask(nearestContainer, nearbySweepLootableItems(mod), _noCurseOfBinding);
                         return _nearbySweepTask;
                     }
+                }
                 }
 
                 // Make sure we have gear, then food.
@@ -1594,6 +1638,15 @@ public class BeatMinecraft2Task extends Task {
                         || (task instanceof DoStuffInContainerTask cont
                             && (cont.getContainerTarget().matches(Items.FURNACE)
                                 || cont.getContainerTarget().matches(Items.CRAFTING_TABLE))) // 用熔炉/工作台
+                        // (2026-09-02 整个装备合成链都算忙, 用户"做铁装做一件就收一下
+                        // 工作台再放下来做下一件") 铁装/铁套/钻石装 squash(合并)
+                        // CataloguedResourceTask 逐件做护甲。每件做完的瞬间其 activeTask
+                        // 归零重选, 那 1 tick 上方顺序子任务不是 Craft* → isMainLineBusy
+                        // 误判 false → 顶部"顺路收工作台/熔炉"分支把台子挖走, 下一件又
+                        // 得重放台子。整条 squash 链视为忙, 台/炉在整个装备周期内让位,
+                        // 铁齐全后直接用同一张台子把装备全部做完。台子不在近旁时
+                        // findNearby=false 本就不触发, 故只抑制"正要接着用台"的场景。
+                        || task instanceof CataloguedResourceTask
         );
     }
 
@@ -1734,7 +1787,7 @@ public class BeatMinecraft2Task extends Task {
                 if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
                     _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.minWoodLogs);
                 }
-                return _woodStockpileTask;
+                return prependAxeForWood(mod, _woodStockpileTask);
             }
         } else if (logCount < _config.woodRestockThreshold) {
             setDebugState("Restocking wood (logs): " + logCount + "/" + _config.woodRestockThreshold);
@@ -1745,9 +1798,36 @@ public class BeatMinecraft2Task extends Task {
             if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
                 _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.minWoodLogs);
             }
-            return _woodStockpileTask;
+            return prependAxeForWood(mod, _woodStockpileTask);
         }
         return null;
+    }
+
+    /**
+     * (2026-09-03 option A, 用户"囤 25 原木徒手撸树慢") 囤木前若材料够就顺手先做把斧子
+     * 加速砍树, 不够就维持当前返回原任务(继续手撸/攒料)。只做明显便宜的两条路:
+     * 有台 USE → 直接合成石斧/木斧; 判定用真实背包(含 2x2 合成格)。绝不派发
+     * getItemTask("log") — 那会与收集原木 MineAndCollectTask 同构自我递归 (2026-09-02
+     * 修复回退点)。返回 null 等价于原任务。
+     */
+    private Task prependAxeForWood(AltoClef mod, Task woodTask) {
+        for (Item axe : new Item[]{Items.STONE_AXE, Items.IRON_AXE, Items.DIAMOND_AXE, Items.NETHERITE_AXE}) {
+            if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, axe)) return woodTask;
+        }
+        boolean hasTableUse = StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, Items.CRAFTING_TABLE);
+        if (!hasTableUse) return woodTask;
+        int sticks = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.STICK);
+        int cobble = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.COBBLESTONE);
+        int planks = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS);
+        if (cobble >= 3 && sticks >= 2) {
+            setDebugState("Stockpiling wood: crafting stone axe first");
+            return TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
+        }
+        if (planks >= 3 && sticks >= 2) {
+            setDebugState("Stockpiling wood: crafting wooden axe first");
+            return TaskCatalogue.getItemTask(Items.WOODEN_AXE, 1);
+        }
+        return woodTask;
     }
 
     private Task getBlazeRodsTask(AltoClef mod, int count) {

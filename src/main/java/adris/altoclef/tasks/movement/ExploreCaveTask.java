@@ -50,6 +50,18 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _exploreStart;
     private BlockPos _currentTarget;
     private boolean _done = false;
+    // (2026-09-02 目标深度) 钻石任务等深挖目标下, 探索导航只选目标深度附近的
+    // 天然空气 (maxY = targetY + CAVE_ABOVE_TARGET_BUFFER), 防止在洞里向外推时
+    // 把目标选到上方浅层、离开钻石层 (用户"下挖到合法深度却导航到上方矿洞")。
+    private final int _targetY;
+
+    public ExploreCaveTask() {
+        this(10);
+    }
+
+    public ExploreCaveTask(int targetY) {
+        _targetY = targetY;
+    }
 
     @Override
     protected void onStart(AltoClef mod) {
@@ -109,7 +121,8 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private BlockPos pickNext(AltoClef mod, BlockPos center) {
         Set<BlockPos> exclude = new HashSet<>(_visited);
         exclude.addAll(_failedTargets);
-        return MineDownExploreTask.pickFarthestNaturalCaveAir(mod, center, _exploreStart, exclude);
+        return MineDownExploreTask.pickFarthestNaturalCaveAir(mod, center, _exploreStart, exclude,
+                _targetY + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER);
     }
 
     /**
