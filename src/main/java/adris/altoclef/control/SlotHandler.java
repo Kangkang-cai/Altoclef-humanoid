@@ -26,6 +26,8 @@ public class SlotHandler {
 
     private final TimerGame _slotActionTimer = new TimerGame(0);
     private boolean _overrideTimerOnce = false;
+    // (2026-09-03 诊断) 点击合成格放东西诊断日志节流时间戳(ms).
+    private long _lastCraftGridClickDiagMs = 0;
 
     public SlotHandler(AltoClef mod) {
         _mod = mod;
@@ -56,8 +58,36 @@ public class SlotHandler {
             return;
         }
 
-        // NOT THE CASE! We may have something in the cursor slot to place.
-        //if (getItemStackInSlot(slot).isEmpty()) return getItemStackInSlot(slot);
+        // (2026-09-03 诊断: 抓"垃圾被塞进 2x2 合成格"根因, 用户复现 tuff x21 在
+        // window1 + itemt diag 已确凿 inPlayerInv=true). 只要光标非空且目标是
+        // 玩家自带 2x2 合成格/输出槽 (window≤4), 记录谁在点击往合成格放东西。
+        // 节流 500ms; 含调用方类名, 帮助区分是配方放置(正常)还是丢垃圾/腾位误放(bug)。
+        try {
+            ClientPlayerEntity p = MinecraftClient.getInstance().player;
+            if (p != null && p.currentScreenHandler instanceof net.minecraft.screen.PlayerScreenHandler
+                    && slot.getWindowSlot() >= 0 && slot.getWindowSlot() <= 4
+                    && !StorageHelper.getItemStackInCursorSlot().isEmpty()) {
+                long now = System.currentTimeMillis();
+                if (now - _lastCraftGridClickDiagMs > 500) {
+                    _lastCraftGridClickDiagMs = now;
+                    StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                    StackTraceElement caller = null;
+                    for (int i = 2; i < st.length; i++) {
+                        if (!st[i].getClassName().equals(SlotHandler.class.getName())) {
+                            caller = st[i];
+                            break;
+                        }
+                    }
+                    if (caller == null && st.length > 2) caller = st[2];
+                    Debug.logToFile("altoclef_craftgrid_click.log",
+                            "[CraftGridClick] put=" + StorageHelper.getItemStackInCursorSlot()
+                                    + " -> window=" + slot.getWindowSlot()
+                                    + " type=" + type + " btn=" + mouseButton
+                                    + " caller=" + caller);
+                }
+            }
+        } catch (Exception ignored) {
+        }
 
         clickWindowSlot(slot.getWindowSlot(), mouseButton, type);
     }

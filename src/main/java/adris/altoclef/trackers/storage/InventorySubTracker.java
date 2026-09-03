@@ -39,6 +39,8 @@ public class InventorySubTracker extends Tracker {
     // slot 动作就永不刷新 → getItemCount 永久返回 0。改为每 500ms 强制全量
     // 重建一次缓存, 从根上解决"缓存与实际不一致"。
     private long _lastForcedRefreshTime = 0;
+    // (2026-09-03 诊断) 合成格非空诊断日志节流时间戳(ms).
+    private long _lastCraftGridDiagMs = 0;
     private static final long FORCE_REFRESH_INTERVAL_MS = 500;
 
     public InventorySubTracker(TrackerManager manager) {
@@ -209,6 +211,55 @@ public class InventorySubTracker extends Tracker {
                 continue;
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             // Add separately if we're in a container vs player inventory.
+
+            // (2026-09-03 诊断: 抓"闪长岩/垃圾被当背包塞进合成格"根因, 用户
+            // "bot 往 2x2 合成格塞满闪长岩"). 在玩家自带 2x2 背包界面
+            // (PlayerScreenHandler) 下, 合成格(window1-4)/输出槽(window0)会被
+            // isSlotInPlayerInventory() 归入玩家背包槽. 若里面非空, 记录物品,
+            // 判断是否真有"垃圾被当背包物品"在合成格. 节流 2s, 只在合成格非空时打。
+            if (stack != null && !stack.isEmpty()
+                    && MinecraftClient.getInstance().player != null
+                    && MinecraftClient.getInstance().player.currentScreenHandler instanceof net.minecraft.screen.PlayerScreenHandler
+                    && slot.getWindowSlot() >= 0 && slot.getWindowSlot() <= 4) {
+                long now = System.currentTimeMillis();
+                if (now - _lastCraftGridDiagMs > 2000) {
+                    _lastCraftGridDiagMs = now;
+                    // (2026-09-03 诊断增强) 区分"合成格里真有 tuff" vs "读取 window1 映射
+                    // 错读到背包格". 打印 handler 真实槽内容(MC 权威) + handler 类型/slot 数
+                    // + 背包各格是否有同样物品(若背包也有 tuff 说明是映射重叠).
+                    String realSlots = "";
+                    String tuffInMain = "";
+                    try {
+                        int n = handler.slots.size();
+                        realSlots = "n=" + n;
+                        for (int w = 0; w < Math.min(46, n); w++) {
+                            net.minecraft.screen.slot.Slot ms = handler.getSlot(w);
+                            if (ms != null && !ms.getStack().isEmpty()) {
+                                realSlots += " [" + w + "]=" + ms.getStack().getItem()
+                                        + "x" + ms.getStack().getCount();
+                            }
+                        }
+                        if (MinecraftClient.getInstance().player != null) {
+                            PlayerInventory inv = MinecraftClient.getInstance().player.getInventory();
+                            for (int i = 0; i < inv.main.size(); i++) {
+                                ItemStack s = inv.main.get(i);
+                                if (s != null && s.getItem() == net.minecraft.item.Items.TUFF)
+                                    tuffInMain += " main[" + i + "]x" + s.getCount();
+                            }
+                        }
+                    } catch (Exception ignore) {
+                    }
+                    adris.altoclef.Debug.logToFile("altoclef_craftgrid_diag.log",
+                            "[CraftGridDiag] windowSlot=" + slot.getWindowSlot()
+                                    + " item=" + stack.getItem()
+                                    + " count=" + stack.getCount()
+                                    + " inPlayerInv=" + slot.isSlotInPlayerInventory()
+                                    + " gettingIntoPlayerSlots=true"
+                                    + " handler=" + handler.getClass().getSimpleName()
+                                    + " | realSlots=" + realSlots
+                                    + " | tuffInMain=" + tuffInMain);
+                }
+            }
 
             if (!shouldIgnoreSlotForContainer(slot)) {
                 registerItem(stack, slot, slot.isSlotInPlayerInventory());

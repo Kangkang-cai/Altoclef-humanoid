@@ -151,9 +151,17 @@ public class FoodChain extends SingleTaskChain {
         // 吃东西一直卡着 (用户反馈)。先把副手盾换到背包空槽, 空出副手再
         // 装备食物 + 右键进食。
         if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) {
-            adris.altoclef.util.slots.Slot emptySlot = mod.getItemStorage()
-                    .getSlotsWithItemPlayerInventory(true, Items.AIR).stream()
-                    .filter(s -> !adris.altoclef.util.slots.Slot.isCursor(s))
+            // (2026-09-03 2x2合成格污染根因, 用户"背包格东西被塞进合成格") 给副手盾找
+            // 放位的空槽绝不能用 getSlotsWithItemPlayerInventory(true, AIR) —— 该查询走
+            // tracker, 而 PlayerScreenHandler 下(无 GUI 时 MC 默认 handler 也是它)合成
+            // 输出(window0)+2x2合成格(window1-4)被 isSlotInPlayerInventory 归入"玩家背包
+            // 槽"。背包真满时唯一搜到的"空槽"就是合成格 → SWAP 点合成格 → 背包物品被
+            // 换进 2x2 格 (craftgrid_click.log 实锤 startEat 反复把铁腿/金苹果/深板岩/
+            // 树苗换进 window1-4)。只认真背包 inventory 0..35 (getRealBackpackSlots,
+            // 任意界面均天然排除合成格/输出槽/护甲/副手/光标); 无真背包装空槽则本次
+            // 不换盾、放弃进食(下方守卫 stopEat, 不卡死), 等下个 tick 或腾出空位再试。
+            adris.altoclef.util.slots.Slot emptySlot = adris.altoclef.util.helpers.StorageHelper.getRealBackpackSlots().stream()
+                    .filter(s -> adris.altoclef.util.helpers.StorageHelper.getItemStackInSlot(s).isEmpty())
                     .findFirst().orElse(null);
             if (emptySlot != null) {
                 mod.getSlotHandler().clickSlot(emptySlot,

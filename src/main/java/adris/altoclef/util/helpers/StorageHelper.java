@@ -418,6 +418,11 @@ public class StorageHelper {
         Slot best = null;
         int bestCount = 15; // 只丢 >= 16 的堆，小堆建材留着用
         for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, BULK_DISPOSAL_ITEMS)) {
+            // (2026-09-03 同 getGarbageSlot 根因) PlayerScreenHandler 下合成格(window0-4)
+            // 会被 tracker 当玩家背包槽混进候选 — tuff 本身就是 BULK 清单项, 用户复现
+            // tuffx21 卡在合成格。合成格不是存储, 点它是拿起/交换, 腾不出真背包位。
+            if (isCraftingGridAreaSlot(slot))
+                continue;
             ItemStack stack = getItemStackInSlot(slot);
             if (stack == null || stack.isEmpty()) continue;
             if (ItemHelper.isStackProtected(mod, stack)) continue;
@@ -430,6 +435,22 @@ public class StorageHelper {
     }
 
     // Gets a slot with an item we can throw away
+    /**
+     * (2026-09-03 合成格区域判定) 当前屏幕为玩家自带 2x2 背包界面(PlayerScreenHandler,
+     * 无 GUI 时 MC 默认也是它)时, window 0-4 = 合成输出(0)+2x2合成格(1-4), 会被
+     * isSlotInPlayerInventory() 误归入"玩家背包槽"。合成格不是存储: 找垃圾槽/找空位/
+     * 找可丢槽等"作用于真背包"的操作必须排除它, 否则会把合成格里的垃圾(tuff/闪长岩)
+     * 当目标点击 → 拿起/交换 → 光标↔合成格循环卡死。容器/工作台界面 window 0-4 是
+     * 真实容器槽, 不受影响。
+     */
+    private static boolean isCraftingGridAreaSlot(Slot slot) {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) return false;
+        if (!(player.currentScreenHandler instanceof net.minecraft.screen.PlayerScreenHandler)) return false;
+        int w = slot.getWindowSlot();
+        return w >= 0 && w <= 4;
+    }
+
     public static Optional<Slot> getGarbageSlot(AltoClef mod) {
         // Throwaway items, but keep a few for building.
         final List<Slot> throwawayBlockItems = new ArrayList<>();
@@ -437,6 +458,14 @@ public class StorageHelper {
         for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, mod.getModSettings().getThrowawayItems(mod))) {
             // Our cursor slot is NOT a garbage slot
             if (Slot.isCursor(slot))
+                continue;
+            // (2026-09-03 根因修复: 2x2 合成格被当垃圾槽, 用户"bot 往合成格塞满 tuff")
+            // PlayerScreenHandler 下 window0-4(合成输出+2x2合成格)被 isSlotInPlayerInventory
+            // 归入玩家背包槽 → 这里的候选含合成格里的物品(tuff/闪长岩等垃圾)。返回它
+            // 作为"垃圾槽"后, 调用方 clickSlot 点它 = 拿起/交换而非丢弃, tuff 在光标与
+            // 合成格间循环 → "Breaking the crafting grid" 卡死。合成格不是存储, 绝不作为
+            // 垃圾/丢出候选。
+            if (isCraftingGridAreaSlot(slot))
                 continue;
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (!ItemHelper.canThrowAwayStack(mod, stack))
@@ -477,6 +506,9 @@ public class StorageHelper {
         final HashMap<Class, Integer> bestMaterials = new HashMap<>();
         final HashMap<Class, Slot> bestTool = new HashMap<>();
         for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当工具垃圾候选。
+            if (isCraftingGridAreaSlot(slot))
+                continue;
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (!ItemHelper.canThrowAwayStack(mod, stack))
                 continue;
@@ -505,6 +537,9 @@ public class StorageHelper {
         // 处理"同材料多把"的重复。
         final HashMap<String, List<Slot>> toolGroups = new HashMap<>();
         for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当工具垃圾候选。
+            if (isCraftingGridAreaSlot(slot))
+                continue;
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (stack.isEmpty() || !ItemHelper.canThrowAwayStack(mod, stack))
                 continue;
@@ -529,6 +564,9 @@ public class StorageHelper {
             // Get all non-important items. For now there is no measure of value.
             final List<Slot> possibleSlots = new ArrayList<>();
             for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+                // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当垃圾候选。
+                if (isCraftingGridAreaSlot(slot))
+                    continue;
                 ItemStack stack = StorageHelper.getItemStackInSlot(slot);
                 // If we're an armor slot, don't count us.
                 if (slot instanceof PlayerSlot playerSlot) {
