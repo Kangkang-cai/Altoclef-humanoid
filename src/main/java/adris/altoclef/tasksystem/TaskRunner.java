@@ -42,9 +42,22 @@ public class TaskRunner {
         // Get highest priority chain and run
         TaskChain maxChain = null;
         float maxPriority = Float.NEGATIVE_INFINITY;
+        final long MS = 1000_000L;
+        // (2026-09-03 诊断) 每链 getPriority 耗时定位: JankDebug 显示 ~200ms 全在
+        // TaskRunner.tick, 但不知道是哪条链的仲裁/任务树吃掉。单链>30ms 才记录,
+        // 0.5s 节流防刷屏。
+        long lastSlowChainLogMs = 0;
         for (TaskChain chain : _chains) {
             if (!chain.isActive()) continue;
+            long c0 = System.nanoTime();
             float priority = chain.getPriority(_mod);
+            long chainMs = (System.nanoTime() - c0) / MS;
+            if (chainMs > 30 && System.currentTimeMillis() - lastSlowChainLogMs > 500) {
+                lastSlowChainLogMs = System.currentTimeMillis();
+                Debug.logToFile("altoclef_jank.log",
+                        "[JankChain] " + chain.getName() + ".getPriority took " + chainMs + "ms"
+                                + " tick=" + _tickCounter);
+            }
             if (priority > maxPriority) {
                 maxPriority = priority;
                 maxChain = chain;
@@ -71,7 +84,15 @@ public class TaskRunner {
             // 反射链（shouldTickEveryTick）保持 20Hz。仲裁本身不受影响。
             int interval = Math.max(1, _mod.getModSettings().getTaskTickInterval());
             if (maxChain.shouldTickEveryTick() || (_tickCounter % interval) == 0) {
+                long t0 = System.nanoTime();
                 maxChain.tick(_mod);
+                long tickMs = (System.nanoTime() - t0) / MS;
+                if (tickMs > 30 && System.currentTimeMillis() - lastSlowChainLogMs > 500) {
+                    lastSlowChainLogMs = System.currentTimeMillis();
+                    Debug.logToFile("altoclef_jank.log",
+                            "[JankChain] " + maxChain.getName() + ".tick took " + tickMs + "ms"
+                                    + " tick=" + _tickCounter + " tasks=" + maxChain.getTasks());
+                }
             }
         }
 
