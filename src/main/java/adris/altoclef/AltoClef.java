@@ -230,14 +230,16 @@ public class AltoClef implements ModInitializer {
 
         // TODO: should this go here?
         _storageTracker.setDirty();
+        final long MS = 1000_000L; // nanoseconds per millisecond
+        long tMisc = System.nanoTime();
         _containerSubTracker.onServerTick();
         _miscBlockTracker.tick();
+        long miscMs = (System.nanoTime() - tMisc) / MS;
 
         // [SlowTickDebug] measure how long each synchronous phase of the client
         // tick takes. When the bot "stands still forever computing", one of these
         // phases is what it's actually waiting on. We only log when a phase blows
         // past the threshold (ms), so normal ticks stay silent.
-        final long MS = 1000_000L; // nanoseconds per millisecond
 
         long t0 = System.nanoTime();
         _knowledgeMemory.tick();
@@ -266,8 +268,10 @@ public class AltoClef implements ModInitializer {
             Debug.logToFile("altoclef_slowtick.log", m);
         }
 
+        long tTrack = System.nanoTime();
         _trackerManager.tick();
         _blockTracker.preTickTask();
+        long trackMs = (System.nanoTime() - tTrack) / MS;
         t0 = System.nanoTime();
         _taskRunner.tick();
         long runMs = (System.nanoTime() - t0) / MS;
@@ -296,8 +300,13 @@ public class AltoClef implements ModInitializer {
         // 空安全, 但加载屏的帧耗时波动毫无诊断价值, 且曾导致 NPE 崩溃。
         long frameMs = (System.nanoTime() - frameStart) / MS;
         if (inGame() && (frameMs > 60 || frameGapMs > 100)) {
+            // (2026-09-03 分阶段拆解) 附带各 tick 阶段耗时, 便于直接定位 200ms
+            // 级帧卡是哪一段吃掉的 (原只记整帧, 阶段>500ms 才单独记 SlowTick,
+            // 100~200ms 的分散耗时查不到来源)。
             String m = "[JankDebug] frameMs=" + frameMs + " frameGapMs=" + frameGapMs
                     + " tick=" + WorldHelper.getTicks()
+                    + " phases: misc=" + miscMs + "ms knowledge=" + knowMs + "ms world=" + worldMs
+                    + "ms track=" + trackMs + "ms task=" + runMs + "ms"
                     + " task=" + (_taskRunner.getCurrentTaskChain() == null ? "null"
                         : _taskRunner.getCurrentTaskChain().getTasks().toString());
             Debug.logToFile("altoclef_jank.log", m);
