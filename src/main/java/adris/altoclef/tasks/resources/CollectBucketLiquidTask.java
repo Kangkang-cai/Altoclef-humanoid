@@ -51,6 +51,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 自动返回重估, 顺路感知) 替代原先的无限游荡 (TimeoutWanderTask(∞) 永不结束)。
     private static final int SURFACE_SEARCH_WANDER_RANGE = 50;
     private static final int BELOW_SURFACE_Y = 58;
+    // (2026-09-03 帧卡根因修复) isSourceLiquid/isFlowingWater 谓词里每 tick 对缓存里
+    // 每个水方块调 WorldHelper.canReach (= baritone 可达性计算, 很贵)。radius128 远区
+    // 扫到的远处水(tasks.log 实锤 task=200ms)全被逐一算可达 → 帧卡。>64 格的水先
+    // 粗筛掉, 走近了(游荡/溯源)再算 — 装水桶本就需要靠近。
+    private static final double WATER_CONSIDER_RANGE = 64;
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
 
@@ -146,6 +151,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
 
         Predicate<BlockPos> isSourceLiquid = blockPos -> {
             if (_blacklist.contains(blockPos)) return false;
+            // (2026-09-03 帧卡根因修复) 远离玩家的水不调 canReach (baritone 可达性
+            // 计算极贵, 每 tick 对 radius128 缓存里的水全算一遍 = task=200ms 实锤)。
+            // 走近(游荡/溯源/回地表路上)后再评估即可 — 装水桶本就要靠近。
+            if (!blockPos.isWithinDistance(mod.getPlayer().getPos(), WATER_CONSIDER_RANGE)) return false;
             if (!WorldHelper.canReach(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos.up())) return false; // We may try reaching the block above.
             assert MinecraftClient.getInstance().world != null;
@@ -181,11 +190,17 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
-        if (!mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
+        // (2026-09-03 防溯源↔回地表打架, 用户实锤) 深地下(y<58)不回溯源: 回地表路上
+        // 一看到流动水就被溯源任务劫持横向走, 溯源无果又回到回地表 → 反复横跳。
+        // 溯源只在已到地表且无源时进行 (地表溪流沿上游找源是合理行为)。
+        if (!isBelowSurface(mod)
+                && !mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
             setDebugState("No source found, tracing flowing water to source...");
             // 找所有流动水位置
             Predicate<BlockPos> isFlowingWater = blockPos -> {
                 if (_blacklist.contains(blockPos)) return false;
+                // (2026-09-03 帧卡修复) 同上: 远处水不调 canReach。
+                if (!blockPos.isWithinDistance(mod.getPlayer().getPos(), WATER_CONSIDER_RANGE)) return false;
                 if (!WorldHelper.canReach(mod, blockPos)) return false;
                 assert MinecraftClient.getInstance().world != null;
                 var state = MinecraftClient.getInstance().world.getBlockState(blockPos);
@@ -279,6 +294,16 @@ public class CollectBucketLiquidTask extends ResourceTask {
     @Override
     protected String toDebugStringName() {
         return "Collect " + _count + " " + _liquidName + " buckets";
+    }
+
+    /**
+     * (2026-09-03) 是否属于"深地下应回地表找液体"的场景: 主世界 y<58
+     * (与 WorldHelper.isDeepUnderground 同口径)。下界/末地不算 — 回地表语义
+     * 只对主世界有意义 (下界 y<58 也满是岩浆, 无需回任何"地表")。
+     */
+    private boolean isBelowSurface(AltoClef mod) {
+        return WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                && mod.getPlayer() != null && mod.getPlayer().getY() < BELOW_SURFACE_Y;
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {

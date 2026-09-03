@@ -16,6 +16,9 @@ public class TaskRunner {
     // the overlay's "(no task running)"). Log the first occurrence immediately,
     // then at most once every ~5s so a stuck bot doesn't flood the log.
     private long _lastEmptyWinnerLogMs = 0;
+    // (2026-09-03) JankChain 慢链日志节流 (0.5s)。实例字段: 局部变量每 tick 重置
+    // 导致节流失效、每 tick 刷屏。
+    private long _lastSlowChainLogMs = 0;
 
     // 决策降频：决策链（用户任务/食物/死亡恢复）的任务树每 N 个游戏 tick
     // 执行一次（默认 4 = 5Hz，更接近人类决策速度）。链仲裁（优先级抢占、
@@ -46,14 +49,13 @@ public class TaskRunner {
         // (2026-09-03 诊断) 每链 getPriority 耗时定位: JankDebug 显示 ~200ms 全在
         // TaskRunner.tick, 但不知道是哪条链的仲裁/任务树吃掉。单链>30ms 才记录,
         // 0.5s 节流防刷屏。
-        long lastSlowChainLogMs = 0;
         for (TaskChain chain : _chains) {
             if (!chain.isActive()) continue;
             long c0 = System.nanoTime();
             float priority = chain.getPriority(_mod);
             long chainMs = (System.nanoTime() - c0) / MS;
-            if (chainMs > 30 && System.currentTimeMillis() - lastSlowChainLogMs > 500) {
-                lastSlowChainLogMs = System.currentTimeMillis();
+            if (chainMs > 30 && System.currentTimeMillis() - _lastSlowChainLogMs > 500) {
+                _lastSlowChainLogMs = System.currentTimeMillis();
                 Debug.logToFile("altoclef_jank.log",
                         "[JankChain] " + chain.getName() + ".getPriority took " + chainMs + "ms"
                                 + " tick=" + _tickCounter);
@@ -87,8 +89,8 @@ public class TaskRunner {
                 long t0 = System.nanoTime();
                 maxChain.tick(_mod);
                 long tickMs = (System.nanoTime() - t0) / MS;
-                if (tickMs > 30 && System.currentTimeMillis() - lastSlowChainLogMs > 500) {
-                    lastSlowChainLogMs = System.currentTimeMillis();
+                if (tickMs > 30 && System.currentTimeMillis() - _lastSlowChainLogMs > 500) {
+                    _lastSlowChainLogMs = System.currentTimeMillis();
                     Debug.logToFile("altoclef_jank.log",
                             "[JankChain] " + maxChain.getName() + ".tick took " + tickMs + "ms"
                                     + " tick=" + _tickCounter + " tasks=" + maxChain.getTasks());
