@@ -32,6 +32,16 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     private final TimerGame _tryToMineTimer = new TimerGame(5);
 
+    // (2026-09-03 够不着直接放弃, 用户"没用的随机探索, 再够不到直接放弃") 对悬浮/太高
+    // 的目标(reach 持续缺失), 旧逻辑 _tryToMineTimer 超时 → "Getting to block…"设
+    // baritone 目标 → 够不着 → wander → 重试同目标 → 无限空转(09:10 撸树顶 y=68 原木
+    // 空转 30s, 既不搭方块垫脚也不放弃)。requestBlockUnreachable 原只在 _moveChecker
+    // 失败触发, 但 bot 能走动(moveChecker 通过)就不触发 → 永远不判不可达。这里补:
+    // reach 持续缺失超时仍够不着 → 判不可达黑名单并【直接放弃】(返回 null 交上层
+    // MineAndCollectTask 换下一个目标), 不再随机探索空转。不做搭方块垫脚(用户判定放弃)。
+    private int _gettingToBlockTick = 0;
+    private static final int GETTING_TO_BLOCK_GIVE_UP_TICKS = 40; // 2s, 够不着即放弃
+
     // For vines and stuff
     private boolean _wasClose = false;
 
@@ -52,6 +62,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         StorageHelper.closeScreen();
         _wasSolidAtStart = WorldHelper.isSolid(mod, _pos);
         _selfDugRecorded = false;
+        _gettingToBlockTick = 0;
 
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
@@ -85,6 +96,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         Optional<Rotation> reach = LookHelper.getReach(_pos);
         if (reach.isPresent()) {
             _tryToMineTimer.reset();
+            _gettingToBlockTick = 0;
         }
         if (!_tryToMineTimer.elapsed()) {
             if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround())) {
@@ -110,6 +122,15 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         } else {
             setDebugState("Getting to block...");
+            // (2026-09-03 够不着即放弃) reach 持续缺失且累计足够长仍够不着 → 判不可达,
+            // 黑名单交给上层换目标, 不再无限 "Getting to block → wander → 重试同目标"。
+            if (_gettingToBlockTick++ > GETTING_TO_BLOCK_GIVE_UP_TICKS) {
+                Debug.logMessage("(DestroyBlockTask) unreachable after " + _gettingToBlockTick
+                        + " ticks, abandoning " + _pos.toShortString());
+                mod.getBlockTracker().requestBlockUnreachable(_pos);
+                _gettingToBlockTick = 0;
+                return null; // 直接放弃, 交上层换下一个目标, 不随机探索
+            }
             boolean isClose = _pos.isWithinDistance(mod.getPlayer().getPos(), 1);
             if (isClose != _wasClose) {
                 mod.getClientBaritone().getCustomGoalProcess().onLostControl();

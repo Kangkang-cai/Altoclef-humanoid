@@ -455,6 +455,13 @@ public class SmeltInFurnaceTask extends ResourceTask {
         }
 
         @Override
+        protected double getMaxWalkDistance(AltoClef mod) {
+            // (2026-09-03 远熔炉该现做而非远走, 用户"定位特别远的熔炉不如现做一个")
+            // 已有熔炉超过 40 格就不去, 走现做(先挖/找圆石做熔炉)就近烧, 不上百格远赴。
+            return 40;
+        }
+
+        @Override
         protected BlockPos overrideContainerPosition(AltoClef mod) {
             // (2026-08-24 震荡修复) 优先返回玩家附近【真实存在】的熔炉 (直接扫
             // 世界方块, 不依赖 BlockTracker)。原因: 围蔽墙里新放置的熔炉可能

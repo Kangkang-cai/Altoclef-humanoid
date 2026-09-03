@@ -442,8 +442,18 @@ public class StorageHelper {
             if (!ItemHelper.canThrowAwayStack(mod, stack))
                 continue;
             if (stack.getItem() instanceof BlockItem) {
-                totalBlockThrowaways += stack.getCount();
-                throwawayBlockItems.add(slot);
+                // (2026-09-03 垃圾方块有就丢, 用户"安山岩/闪长岩/凝灰岩/树苗/泥土
+                // 不丢") 只有圆石/深板岩圆石作为建筑材料保留一组(64, 由
+                // canThrowAwayStack 的 isReservedBlockUnderLimit 兜底), 其余
+                // throwawayItems 方块(树苗/泥土/安山岩等)都是垃圾, 有就丢 — 旧
+                // 逻辑把它们的总量也塞进保留闸门, 合计 <64 时一个都不丢。
+                Item blockItem = stack.getItem();
+                if (blockItem == Items.COBBLESTONE || blockItem == Items.COBBLED_DEEPSLATE) {
+                    totalBlockThrowaways += stack.getCount();
+                    throwawayBlockItems.add(slot);
+                } else {
+                    return Optional.of(slot);
+                }
             } else {
                 // Throw away this non-block immediately.
                 return Optional.of(slot);
@@ -642,6 +652,31 @@ public class StorageHelper {
     }
 
     /**
+     * (2026-09-03 真背包槽枚举) 只枚举玩家主背包 inventory slot 0..35, 并经
+     * getFromCurrentScreenInventory 按当前屏幕正确映射。任意界面 (背包/工作台/
+     * 熔炉/箱子) 都天然排除合成格/输出槽/护甲/副手/光标 —— 与 EnsureFreeCursor
+     * SlotTask.findRealBackpackFit 的口径一致 (见 _fix_report cursor 根因)。凡
+     * "腾位/合并/找可丢"这些只应作用于真背包的扫描, 一律用它而非全是 PlayerSlot
+     * 的 getCurrentScreenSlots() (后者在 2x2 合成界面会把合成格/输出槽也算进来)。
+     */
+    public static List<Slot> getRealBackpackSlots() {
+        List<Slot> result = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            Slot slot = Slot.getFromCurrentScreenInventory(i);
+            // (2026-09-03 修复: 不能按子类过滤) 各屏幕下真背包区槽的容器类不同 ——
+            // 2x2 界面是 PlayerSlot, 3x3 工作台界面是 CraftingTableSlot, 熔炉界面是
+            // FurnaceSlotPlayer, 箱子界面是... 一概不是 PlayerSlot 就漏掉(用户实测同类
+            // "满包收合成产物走兜底抛丢" 死锁, 因 getSwapableRealBackpackSlot 借不到槽)。
+            // 只要经 getFromCurrentScreenInventory(0..35) 映射到的就是玩家背包装具(天然
+            // 排除合成格/输出槽/护甲/副手/光标), 与具体子类无关, 无条件收集。
+            if (slot != null) {
+                result.add(slot);
+            }
+        }
+        return result;
+    }
+
+    /**
      * (2026-08-27 用户要求: 可堆叠物品应放一起省空间, 放在丢垃圾之前)
      * 找一对可合并的槽位: A 是部分堆 (未满), B 是同类且能完全装下 A (装下后
      * 不超上限)。合并后 A 腾空、B 变大 → 省一个格子。只扫玩家主背包 (排除
@@ -649,14 +684,18 @@ public class StorageHelper {
      * 供 ConsolidateInventoryTask 与 EnsureFreeInventorySlotTask 使用。
      */
     public static Slot[] findMergeableStackPair(AltoClef mod) {
-        List<Slot> playerSlots = new ArrayList<>();
-        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
-            if (!(slot instanceof PlayerSlot ps)) continue;
-            if (ArrayUtils.contains(PlayerSlot.ARMOR_SLOTS, ps)) continue;
-            if (ps.equals(PlayerSlot.OFFHAND_SLOT)) continue;
-            if (ps.equals(CursorSlot.SLOT)) continue;
-            playerSlots.add(ps);
-        }
+        // (2026-09-03 根因修复: 2x2 合成格被当背包, 用户"默认任务反复横跳")
+        // 旧实现用 getCurrentScreenSlots() 过滤 instanceof PlayerSlot —— 玩家自带
+        // 的 2x2 合成界面里, 合成格 (window 1-4) 与输出槽 (window 0) 都是
+        // PlayerSlot 实例, 会被当成背包可合并堆。后果: ConsolidateInventoryTask
+        // 反复"合并"合成格里的木板 (不腾背包空格), 而配方一重摆又填满合成格 →
+        // findMergeableStackPair 恒 true → EnsureFreeInventorySlotTask 永远走
+        // "做合并"而非"丢垃圾"→ 收不进合成台输出 → Craft(2x2)↔Receiving output
+        // ↔EnsureFree↔Consolidate 高频横跳空转 (日志 2026-09-03 10:46-47
+        // TaskPingPong, [ConsolidateDiag] emptySlots=0 findMergeablePair=true 持续)。
+        // 改用 getRealBackpackSlots(): 只枚举真背包 inventory slot 0..35 并经
+        // getFromCurrentScreenInventory 映射, 天然排除合成格/输出槽/护甲/副手/光标。
+        List<Slot> playerSlots = getRealBackpackSlots();
         for (Slot a : playerSlots) {
             ItemStack sa = getItemStackInSlot(a);
             if (sa.isEmpty() || sa.getCount() >= sa.getMaxCount()) continue;
@@ -693,9 +732,10 @@ public class StorageHelper {
         };
         List<Slot> unprotected = new ArrayList<>();
         List<Slot> protectedSlots = new ArrayList<>();
-        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
-            if (slot instanceof PlayerSlot ps && ArrayUtils.contains(PlayerSlot.ARMOR_SLOTS, ps)) continue;
-            if (slot.equals(PlayerSlot.OFFHAND_SLOT)) continue;
+        // (2026-09-03 同根因收口) 只遍历真背包槽, 不用 getCurrentScreenSlots ——
+        // 2x2 合成界面会把合成格/输出槽当背包候选随机丢, 丢了也不腾背包位
+        // (与 findMergeableStackPair 同根因)。getRealBackpackSlots 已排除护甲/副手。
+        for (Slot slot : getRealBackpackSlots()) {
             ItemStack stack = getItemStackInSlot(slot);
             if (stack.isEmpty()) continue;
             if (ArrayUtils.contains(NEVER_DISCARD, stack.getItem())) continue;

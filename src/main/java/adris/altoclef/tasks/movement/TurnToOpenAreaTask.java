@@ -20,6 +20,26 @@ public class TurnToOpenAreaTask extends Task {
     private static final int STABLE_TICKS = 3;
     private int _ticks = 0;
 
+    // (2026-09-03 主动挖开堆头用) 记录本次转向选中的最佳方向与评分, 供调用方
+    // (ThrowCursorTask) 判断四周是否封闭: 若最佳评分仍 <= cleared(前方紧贴实心) 则
+    // 说明四周无开阔处, 应主动挖开该方向的可挖方块打通空间, 而不是把物品丢到贴脸
+    // 处被满背包立刻捡回。
+    private float _bestYaw = 0;
+    private int _bestScore = 0;
+
+    // 该门槛: 最佳方向前方本层与头顶层连通非实心格数取短者, 达到该值才视为"开阔"。
+    // (2026-09-03 用户"丢出撞到上面方块, 认为的开阔还不够开阔": 旧值 2 太宽容 —
+    // 判定时两层纵深只到 1~2 格就被当开阔, 物品飞出碰到前方/头顶 2 格外的方块。
+    // 丢弃需要物品真正飞离抓取范围, 前方脚层与头顶层都必须有足够纵深。提高为 3。
+    // 注意与 ThrowCursorTask.MAX_DIG=4 配套: 判定为封闭时开挖能打通到 ≥3 格。
+    public static final int OPEN_SCORE_THRESHOLD = 3;
+    public boolean isEnclosed() {
+        return _bestScore < OPEN_SCORE_THRESHOLD;
+    }
+    public float getBestYaw() {
+        return _bestYaw;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _ticks = 0;
@@ -57,6 +77,8 @@ public class TurnToOpenAreaTask extends Task {
                 bestYaw = yaw;
             }
         }
+        _bestYaw = bestYaw;
+        _bestScore = (int) bestScore;
         try {
             mod.getPlayer().setYaw(bestYaw);
             mod.getPlayer().setPitch(0);

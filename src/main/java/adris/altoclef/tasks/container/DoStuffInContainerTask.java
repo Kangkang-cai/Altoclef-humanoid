@@ -8,6 +8,7 @@ import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
+import adris.altoclef.tasks.slot.ThrowCursorTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
@@ -75,6 +76,24 @@ public abstract class DoStuffInContainerTask extends Task {
         }
 
         if (isContainerOpen(mod)) {
+            // (2026-09-03 满包收物死锁修复, 用户"丢出撞面前方块弹回→入包→又丢死循环")
+            // 容器界面打开、正要收产物时若背包无真实空位, 先腾位掉一件(丢垃圾/挖面前
+            // 方块), 腾出空格再收, 避免 ReceiveCraftingOutputSlotTask 满包时派
+            // ThrowCursorTask 挖面前方块 → DestroyBlockTask closeScreen 关界面 → 父链
+            // isContainerOpen=false 切回 walk&open 重开界面, 挖方块永远被打断 → 兜底
+            // 直接丢 → 撞面前方块弹回背包 → 无限循环。此刻界面开着, 由 EnsureFree
+            // 负责真正腾出空格; EnsureFree 内部能合并/丢垃圾/挖面前方块, 腾完再收。
+            // 判定用【背包真实空槽数==0】(getSlotThatCanFit 依赖光标物品会误判)。
+            if (mod.getPlayer() != null && mod.getPlayer().getInventory().getEmptySlot() < 0) {
+                // 关键: 必须先关掉容器界面, 否则 EnsureFree→ThrowCursorTask→DestroyBlockTask
+                // 挖面前方块时 closeScreen 关界面, 下一 tick 父链又把它切回 walk&open,
+                // 挖方块永远被掐断(根因就是这里)。主动关界面后, 父链 isContainerOpen=false
+                // 看到的是"我们自己在腾位", 会停留(不切 walk&open 抢先), 腾完那件掉、
+                // 背包空出一个格, 再回来 open 收产物。等价于"关界面→腾位→重开"。
+                StorageHelper.closeScreen();
+                setDebugState("Freeing inventory before receiving output");
+                return new EnsureFreeInventorySlotTask();
+            }
             return containerSubTask(mod);
         }
 
@@ -112,6 +131,18 @@ public abstract class DoStuffInContainerTask extends Task {
         }
         if (nearest.isPresent()) {
             costToWalk = BaritoneHelper.calculateGenericHeuristic(currentPos, WorldHelper.toVec3d(nearest.get()));
+            // (2026-09-03 远熔炉该现做而非远走, 用户"定位了特别远的熔炉, 还不如现做一个")
+            // 已有容器超过 walk 距离上限(熔炉=40格)时, 把 walk 成本抬到远大于现做
+            // 成本, 强制走下方"现做/放置容器"分支。Baritone 启发式对上百格平坦/水路
+            // 路线系统性低估, 曾导致 bot 舍近求远去上百格熔炉(日志 10:35 Walking to
+            // container 118,70,449)。近炉(≤上限)照常复用, 不受影响。
+            double maxWalk = getMaxWalkDistance(mod);
+            if (nearest.get().getSquaredDistance(currentPos) > maxWalk * maxWalk) {
+                costToWalk = Float.MAX_VALUE;
+                // 视同为"无可用近容器": 置空 nearest 让下方 nearestMissing=true,
+                // 即使后备背包无熔炉物品也走现做/获取容器分支, 而非傻走去远炉。
+                nearest = Optional.empty();
+            }
         }
 
         // Make a new container if going to the container is a pretty bad cost.
@@ -175,6 +206,23 @@ public abstract class DoStuffInContainerTask extends Task {
         // TODO: Finish committing to optionals, this is ugly.
         _cachedContainerPosition = nearest.get();
 
+        // (2026-09-03 满包收物死锁修复, 用户"丢出撞面前方块弹回→入包→又丢死循环")
+        // 打开容器前先保证背包至少有一个真实空位。根因链: 满包收合成产物时,
+        // ReceiveCraftingOutputSlotTask 派 EnsureFreeInventorySlotTask → ThrowCursorTask
+        // 挖面前方块; 但容器界面开着, 挖方块 DestroyBlockTask 会 closeScreen() 关界面,
+        // 下一 tick 父类 isContainerOpen=false → 立刻切回 walk&open 重开界面, 把挖方块
+        // 子链掐断 → 面前方块永远挖不完 → 兜底直接丢 → 撞面前方块弹回背包 → 无限循环
+        // (tasks.log 14:11 实锤, Destroy block 97,-45,449 每 tick 被打断)。
+        // 在"打开容器前"加闸门: 若背包无真实空位, 先回 EnsureFreeInventorySlotTask
+        // 腾位掉一件(此刻界面未开, 父链停留在此任务上, 挖面前方块能完整跑完) —
+        // 腾出空格后父链才真正走去打开容器, 不再死锁。
+        // 判定用【背包真实空槽数==0】(而非 getSlotThatCanFit, 后者依赖光标物品 —
+        // 满包收物时光标常为空, 会误判放得下而跳过腾位)。
+        if (mod.getPlayer() != null && mod.getPlayer().getInventory().getEmptySlot() < 0) {
+            setDebugState("Freeing inventory before opening container");
+            return new EnsureFreeInventorySlotTask();
+        }
+
         // Walk to it and open it
 
         // Wait for food
@@ -188,9 +236,15 @@ public abstract class DoStuffInContainerTask extends Task {
             setDebugState("Clearing cursor slot (otherwise this causes BIG problems)");
             // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)` —
             // 背包满时点垃圾槽只交换不扔, 光标杂物永远腾不掉 → 走 EnsureFree 真正扔出。
+            // (2026-09-03 满包腾位时"拿垃圾→被点回"死循环修复) 这个分支原本把光标物品
+            // "放回背包某个能放下的真槽"——但若该物品正是满包腾位时从 slot 里主动拿起的
+            // **垃圾**(攻击家化等低价值物), 放回等于抵消腾位, 且与游走腾位/挖方块链互相
+            // 拆台(日志 14:31 t=598 反复: EnsureFree 拿 slot16→Throwing→DestroyBlock→父容器
+            // Clearing cursor→Click 点回 slot16→又拿…… 2秒一轮死循环)。因此这里不再"放回",
+            // 而是干脆把光标垃圾真正【扔出】青远, 由 ThrowCursorTask(含挖面前方块兜底)处理。
             Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(StorageHelper.getItemStackInCursorSlot(), false);
-            if (toMoveTo.isEmpty()) {
-                return new EnsureFreeInventorySlotTask();
+            if (toMoveTo.isEmpty() || ItemHelper.canThrowAwayStack(mod, StorageHelper.getItemStackInCursorSlot())) {
+                return new ThrowCursorTask();
             } else {
                 return new ClickSlotTask(toMoveTo.get());
             }
@@ -268,4 +322,13 @@ public abstract class DoStuffInContainerTask extends Task {
     protected abstract Task containerSubTask(AltoClef mod);
 
     protected abstract double getCostToMakeNew(AltoClef mod);
+
+    /**
+     * (2026-09-03 远容器该现做而非远走, 用户) 已有容器超过该距离(格)即被视作"不可达",
+     * 强制走"现做/放置容器"分支。默认无限(不限制现行为), 子类可收紧(如
+     * SmeltInFurnaceTask 熔炉=40格)。见 onTick 内 costToWalk 处的超距判断。
+     */
+    protected double getMaxWalkDistance(AltoClef mod) {
+        return Double.MAX_VALUE;
+    }
 }

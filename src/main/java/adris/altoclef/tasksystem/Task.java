@@ -68,6 +68,11 @@ public abstract class Task {
         // Debug state print
         if (!_oldDebugState.equals(_debugState)) {
             Debug.logInternal(toString());
+            // (2026-09-03 日志系统完善, 用户"应有一文件保存左上角 debugState 变化历史",
+            // 便于复现卡死时精确定位状态机走到哪一步) debugState 变化时同步持久化到
+            // altoclef_debugstate.log (位于游戏目录)。toString() 已含 toDebugString +
+            // 当前 debugState, 与左上角显示一致。变化才写, 不刷屏。
+            Debug.logToFile("altoclef_debugstate.log", toString());
             _oldDebugState = _debugState;
         }
         // We have a sub task

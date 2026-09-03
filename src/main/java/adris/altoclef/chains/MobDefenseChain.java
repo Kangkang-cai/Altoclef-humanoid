@@ -1040,6 +1040,11 @@ public class MobDefenseChain extends SingleTaskChain {
             _defenseState = escalate(mod);
             return priorityForState();
         }
+        // (2026-09-03 逃跑也反击, 用户"逃跑时也要继续击打身边的怪, 不能只跑") 逃跑
+        // 不等于放弃抵抗: 维持 KillAura 贴身近战(左键), 边跑边打咬上来的近战怪。
+        // 不冲突"逃跑绝不举盾"(那是右键), 也不与盾牌核弹路径冲突(举盾时上面已
+        // return 90, 不会走到这; doForceField 内部对 fuse 苦力怕也有盾牌保护)。
+        doForceField(mod);
         // [MOB-DIAG] #2 只读: 逃跑实测 (0.5s 节流)。
         logEscapeDiag(mod);
         setTask(_runAwayTask);

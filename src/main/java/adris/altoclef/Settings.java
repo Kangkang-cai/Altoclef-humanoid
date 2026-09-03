@@ -304,7 +304,7 @@ public class Settings implements IFailableConfigFile {
      *
      * Set to 0 to disable the distance check entirely (not recommended).
      */
-    private int deathRecoveryMaxDistance = 1000; // (2026-08-31 150→1000: 用户实测远死亡(424格)需要回去拾取, 150太小被 TOO_FAR/ABANDON 遗弃)
+    private int deathRecoveryMaxDistance = 200; // (2026-09-03 1000→200: 用户实测远距离(424格)回收太久/风险大, 缩短到200格内才回收)
 
     /**
      * If true, refuse to start recovery until the bot has at least a stone
@@ -418,7 +418,16 @@ public class Settings implements IFailableConfigFile {
             Items.LEATHER,
             Items.FIRE_CHARGE,
             Items.BONE, Items.BONE_MEAL, Items.FEATHER, Items.ROTTEN_FLESH,
-            Items.SPIDER_EYE, Items.GUNPOWDER, Items.EGG, Items.ARROW
+            Items.SPIDER_EYE, Items.GUNPOWDER, Items.EGG, Items.ARROW,
+            // (2026-09-03 用户指定直接丢名单) 树苗/生铜/铁轨/多余铁盔甲/木石工具
+            // — 背包满腾位时这些都是可丢垃圾, 不应占着空位。
+            Items.OAK_SAPLING, Items.SPRUCE_SAPLING, Items.BIRCH_SAPLING,
+            Items.JUNGLE_SAPLING, Items.ACACIA_SAPLING, Items.DARK_OAK_SAPLING,
+            Items.RAW_COPPER,
+            Items.RAIL,
+            Items.IRON_HELMET, Items.IRON_CHESTPLATE, Items.IRON_LEGGINGS, Items.IRON_BOOTS,
+            Items.WOODEN_PICKAXE, Items.WOODEN_AXE, Items.WOODEN_SHOVEL, Items.WOODEN_SWORD, Items.WOODEN_HOE,
+            Items.STONE_PICKAXE, Items.STONE_AXE, Items.STONE_SHOVEL, Items.STONE_SWORD, Items.STONE_HOE
     );
 
     /**

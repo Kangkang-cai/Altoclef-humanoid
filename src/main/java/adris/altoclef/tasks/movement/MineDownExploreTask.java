@@ -95,6 +95,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _selfDugByDim
             = new java.util.HashMap<>();
     private static boolean _selfDugLoaded = false;
+    // =========================================================================
+    // (2026-09-03 已探索洞穴区域记忆, 用户"bot 同一个矿洞打转10分钟, 要区域记忆":
+    // 该坐标大范围内不再触发矿洞探索) 跨实例、跨会话记录【已探索完成的洞穴区域】,
+    // 探测(findNearbyCave)与目标选择(pickFarthestNaturalCaveAir)都排除这些区域 → 同一
+    // 大洞网络不会被反复进洞打转(日志 17:0x 同一洞反复触发实锤)。
+    //
+    // 粒度: 用户"不同世界不要共享" → key = 存档名 + ':' + 维度, 不同存档/维度独立维护
+    // (自挖隧道 selfDug 旧版只按维度, 此处更严)。持久化到游戏目录 altoclef_explored.log
+    // (每行 "存档:维度 x y z"), 启动后首次访问时加载。
+    // =========================================================================
+    private static final String EXPLORED_CAVE_FILE = "altoclef_explored.log";
+    // 已探索洞穴区域的禁入/禁探索半径(格)——区域圆心为探索结束时玩家所在/洞区中心。
+    // (2026-09-03 用户选定 32): 一个普通矿洞 1 次就能整体剔除; 超大洞网络靠"每个探索
+    // 结束标一个中心"逐步覆盖, 即使 90s 超时也能保证同一片不再被反复进。
+    private static final int EXPLORED_CAVE_RADIUS = 32;
+    // (2026-09-03 同心丢弃) 半径内已有中心时不再重复记(防密集记录同片洞区)。
+    private static final int EXPLORED_CAVE_MIN_SEP = 24;
+    private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _exploredCaveByKey
+            = new java.util.HashMap<>();
+    private static boolean _exploredCaveLoaded = false;
+    // (2026-09-03 探洞抑制日志节流) 记录上一次"cave scan suppressed"诊断日志时间,
+    // 10 秒节流避免每 tick 刷屏(见 findNearbyCave)。
+    private static long _exploredCaveScanLogMs = 0;
     // Check for caves every N steps.
     private static final int CAVE_SCAN_EVERY_STEPS = 3;
     // Horizontal direction of the staircase (dig east as we descend).
@@ -143,11 +166,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _caveExploreCooldownSteps = 0;
     // (2026-09-02 刷怪笼危险处理, 用户"先清怪再挖刷怪笼") 挖通道时【感知到】的
     // 刷怪笼是持续刷怪源, 不清掉会一直被怪打 (用户"bot 找到刷怪笼后被怪物一直
-    // 打")。流程: 感知(8 格, 看到就感知, 不需要 FOV/LOS — 危险源主动避让, 类似
+    // 打")。流程: 感知(4 格, 看到就感知, 不需要 FOV/LOS — 危险源主动避让, 类似
     // 床的无条件感知) → 有镐: 先清 16 格内敌对怪再挖掉刷怪笼 (粘性, 状态机驱动);
     // 无镐: 换向远离 + 记黑名单 (徒手挖不动 SPAWNER 硬度5, 硬挖会被刷怪打死)。
     // 挖掉的/避让的刷怪笼位置都记入黑名单, 防隧道反复挖回同一地牢。
-    private static final int SPAWNER_SCAN_RANGE = 8;          // 感知范围(格)
+    private static final int SPAWNER_SCAN_RANGE = 4;          // 感知范围(格)
     private static final int HOSTILE_CLEAN_RANGE = 16;        // 清怪范围=刷怪笼激活半径
     private static final long SPAWNER_SCAN_INTERVAL_MS = 500; // 近场扫描节流, 防每 tick 卡顿
     private int _spawnerPhase = 0;                            // 0=无/完成, 1=清怪, 2=挖刷怪笼
@@ -222,6 +245,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             }
             _inCave = false;
             _subTask = null;
+            // (2026-09-03 区域记忆) 探索结束(超时/完成): 以当前玩家位置标记这个洞穴
+            // 区域为"已探索", 半径 EXPLORED_CAVE_RADIUS 内不再触发探索 → 同一大洞网络
+            // 不会被打转第二次(用户"同一个矿洞打转10分钟")。
+            markExploredCaveRegion(mod, mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null);
             // (2026-09-02) 探索结束(超时/完成): 启动冷却防立刻重新探测同一洞;
             // 隧道模式下换一个水平方向继续挖, 避免原方向挖回刚探索过的洞区再次触发。
             _caveExploreCooldownSteps = CAVE_EXPLORE_COOLDOWN_STEPS;
@@ -470,7 +497,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-02 刷怪笼危险处理) 近场(SPAWNER_SCAN_RANGE=8)扫 SPAWNER 方块
+     * (2026-09-02 刷怪笼危险处理) 近场(SPAWNER_SCAN_RANGE=4)扫 SPAWNER 方块
      * (chunk 已加载即可, "看到就感知", 无需 FOV/LOS — 危险源主动识别, 类似床)。
      * 已避让/已挖掉的刷怪笼在黑名单中, 不再重复处理。
      */
@@ -630,6 +657,104 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
     }
 
+    // =========================================================================
+    // 已探索洞穴区域: key = "存档名:维度", 跨会话持久化到 altoclef_explored.log。
+    // =========================================================================
+
+    /**
+     * (2026-09-03 存档+维度隔离, 用户"不同世界不要共享") 区域 key = 存档名 + ':' + 维度。
+     * 存档名取集成服务器 LevelName("新的世界"), 与维度(overworld/nether/the_end)拼接,
+     * 不同存档/维度各自维护已探索区域。集成服务器不可用时(启动早期/主菜单)退化为维度。
+     */
+    private static String exploredCaveKey(AltoClef mod) {
+        String levelName = "?";
+        try {
+            var server = MinecraftClient.getInstance().getServer();
+            if (server != null && server.getSaveProperties() != null && server.getSaveProperties().getLevelName() != null) {
+                levelName = server.getSaveProperties().getLevelName();
+            }
+        } catch (Exception ignored) {
+        }
+        return levelName + ":" + mod.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    private static java.nio.file.Path exploredCaveFile() {
+        return MinecraftClient.getInstance().runDirectory.toPath().resolve(EXPLORED_CAVE_FILE);
+    }
+
+    private static void ensureExploredCaveLoaded() {
+        if (_exploredCaveLoaded) return;
+        _exploredCaveLoaded = true;
+        try {
+            java.nio.file.Path f = exploredCaveFile();
+            if (!java.nio.file.Files.exists(f)) return;
+            for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                String[] parts = line.trim().split(" ");
+                if (parts.length != 4) continue;
+                try {
+                    BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+                    _exploredCaveByKey.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>()).add(p);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            Debug.logMessage("[ExploredCave] loaded "
+                    + _exploredCaveByKey.values().stream().mapToInt(Set::size).sum()
+                    + " explored-cave regions from " + EXPLORED_CAVE_FILE);
+        } catch (Exception e) {
+            Debug.logMessage("[ExploredCave] failed to load " + EXPLORED_CAVE_FILE + ": " + e.getMessage());
+        }
+    }
+
+    private static void appendExploredCaveLine(String key, BlockPos pos) {
+        try {
+            java.nio.file.Files.write(exploredCaveFile(),
+                    (key + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception e) {
+            Debug.logMessage("[ExploredCave] failed to append: " + e.getMessage());
+        }
+    }
+
+    /**
+     * (2026-09-03 记录一个已探索洞穴区域) 探索结束(超时/完成)时以玩家位置为圆心,
+     * 记录 EXPLORED_CAVE_RADIUS 半径内的洞穴为"不再触发探索"。与已有中心距离不足
+     * EXPLORED_CAVE_MIN_SEP 则视为重复(同一片洞区)丢弃, 防密集堆点。
+     */
+    private static void markExploredCaveRegion(AltoClef mod, BlockPos center) {
+        if (mod == null || mod.getWorld() == null || center == null) return;
+        ensureExploredCaveLoaded();
+        String key = exploredCaveKey(mod);
+        java.util.LinkedHashSet<BlockPos> set = _exploredCaveByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>());
+        // 与已有中心过近 → 同片洞区已覆盖, 丢弃(防每 90s 超时在同一点重复追加)。
+        for (BlockPos existing : set) {
+            if (center.getSquaredDistance(existing) < EXPLORED_CAVE_MIN_SEP * EXPLORED_CAVE_MIN_SEP) {
+                return;
+            }
+        }
+        set.add(center.toImmutable());
+        appendExploredCaveLine(key, center);
+        Debug.logToFile("altoclef_diag.log",
+                "[ExploredCave] marked region center=" + center.toShortString()
+                        + " radius=" + EXPLORED_CAVE_RADIUS + " key=" + key
+                        + " totalCenters=" + set.size());
+    }
+
+    /**
+     * (2026-09-03 判定 pos 是否落在任一已探索洞穴区域内) 供探测/目标选择排除用。
+     */
+    private static boolean isInExploredCaveRegion(AltoClef mod, BlockPos pos) {
+        if (mod == null || mod.getWorld() == null || pos == null) return false;
+        ensureExploredCaveLoaded();
+        java.util.Set<BlockPos> set = _exploredCaveByKey.get(exploredCaveKey(mod));
+        if (set == null || set.isEmpty()) return false;
+        int rSq = EXPLORED_CAVE_RADIUS * EXPLORED_CAVE_RADIUS;
+        for (BlockPos center : set) {
+            if (pos.getSquaredDistance(center) <= rSq) return true;
+        }
+        return false;
+    }
+
     /**
      * 玩家当前连通空间里【离参考点 fromRef 最远的天然空气】(排除自挖位置、
      * y≤CAVE_NATURAL_AIR_MAX_Y、排除调用方已访问/已失败的点)。
@@ -655,6 +780,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (p.getY() > naturalMaxY) continue;
             if (isSelfDugAir(mod, p)) continue;
             if (exclude != null && exclude.contains(p)) continue;
+            // (2026-09-03 区域记忆) 探索目标也不落到已探索洞穴区域 → 不会导航回刚
+            // 探索完的洞区(用户"同一个矿洞打转", 双向排除: 探测 + 目标选择)。
+            if (isInExploredCaveRegion(mod, p)) continue;
             double d = p.getSquaredDistance(fromRef);
             if (d > bestDistSq) {
                 bestDistSq = d;
@@ -762,9 +890,23 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         for (BlockPos p : reachableAir) {
             if (p.getY() > naturalMaxY) continue;
             if (isSelfDugAir(mod, p)) continue;
+            // (2026-09-03 区域记忆) 排除已探索洞穴区域内的空气: 整片洞区上次已探索完,
+            // 本次连同 team 一起剔除 → 不再触发进洞 (用户"同一个矿洞打转", 防反复进)。
+            if (isInExploredCaveRegion(mod, p)) continue;
             naturalAir.add(p);
         }
         if (naturalAir.size() < MIN_NATURAL_CAVE_AIR) {
+            // (2026-09-03 诊断被清理/节流) 每 tick 打一行会疯狂刷屏(日志 19:16 起
+            // reachableAir 27-35 每 tick 一条实锤), 且 90s 探洞看门狗本就不依赖此线。
+            // 改为 10 秒节流: 只在"天然空气被已探索区域剔除导致不够"这一真正值得
+            // 观察的场景打印(否则单纯空气不足是常见/无碍状态, 无需天天见)。
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _exploredCaveScanLogMs >= 10000) {
+                _exploredCaveScanLogMs = nowMs;
+                Debug.logToFile("altoclef_diag.log",
+                        "[ExploredCave] cave scan suppressed filtering naturalAir." +
+                                " center=" + center.toShortString() + " reachableAir=" + reachableAir.size());
+            }
             return Optional.empty();
         }
         // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 天然洞与

@@ -112,7 +112,8 @@ public interface WorldHelper {
     }
 
 
-    static boolean isSolid(AltoClef mod, BlockPos pos) {
+    // (2026-09-03 提升为 public: 供跨包 ThrowCursorTask 主动挖开封闭空间用)
+    public static boolean isSolid(AltoClef mod, BlockPos pos) {
         return mod.getWorld().getBlockState(pos).isSolidBlock(mod.getWorld(), pos);
     }
 
@@ -414,7 +415,8 @@ public interface WorldHelper {
         return -1;
     }
 
-    static boolean canBreak(AltoClef mod, BlockPos pos) {
+    // (2026-09-03 提升为 public: 供跨包 ThrowCursorTask 主动挖开封闭空间用)
+    public static boolean canBreak(AltoClef mod, BlockPos pos) {
         // JANK: Temporarily check if we can break WITHOUT paused interactions.
         // Not doing this creates bugs where we loop back and forth through the nether portal and stuff.
         boolean prevInteractionPaused = mod.getExtraBaritoneSettings().isInteractionPaused();

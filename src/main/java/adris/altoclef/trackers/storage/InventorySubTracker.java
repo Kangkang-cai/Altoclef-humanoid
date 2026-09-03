@@ -105,10 +105,22 @@ public class InventorySubTracker extends Tracker {
 
     private List<Slot> getSlotsThatCanFit(HashMap<Item, List<Slot>> list, ItemStack item, boolean acceptPartial) {
         List<Slot> result = new ArrayList<>();
+        // (2026-09-03 本质修复) 只有在玩家 2x2 自带的合成界面 (PlayerScreenHandler) 下,
+        // 合成格(window 1-4)与输出槽(window 0)才会被 isSlotInPlayerInventory() 当成玩家槽
+        // 混进 _itemToSlotPlayer → getSlotThatCanFitInPlayerInventory 把合成格/输出槽当"真
+        // 背包可放位"。后果: 满背包时 Craft "CURSOR HAS MATERIAL→放回" / Receive "Making
+        // room→QUICK_MOVE" 都落到合成格/输出槽, 腾不出真背包位 → 2x2 合成横跳空转
+        // (日志 2026-09-03 10:46-47 TaskPingPong)。这类槽不是存储, 不参与"能否放下"判定。
+        // 门控只限 PlayerScreenHandler —— 在容器(箱子/熔炉)界面下窗口 0-4 是真实容器槽,
+        // getSlotsThatCanFitInOpenContainer 仍需用到, 绝不能排除。
+        boolean jumpingOutOfPlayer2x2 = MinecraftClient.getInstance().player != null
+                && MinecraftClient.getInstance().player.currentScreenHandler instanceof net.minecraft.screen.PlayerScreenHandler;
         // First add fillable slots
         for (Slot toCheckStackable : list.getOrDefault(item.getItem(), Collections.emptyList())) {
             // Ignore cursor slot.
             if (Slot.isCursor(toCheckStackable))
+                continue;
+            if (jumpingOutOfPlayer2x2 && toCheckStackable.getWindowSlot() <= 4)
                 continue;
             ItemStack stackToAddTo = StorageHelper.getItemStackInSlot(toCheckStackable);
             // We must have SOME room left, then we decide whether we care about having ENOUGH
@@ -127,8 +139,9 @@ public class InventorySubTracker extends Tracker {
                 if (airSlot.equals(CursorSlot.SLOT))
                     continue;
                 int windowCheck = airSlot.getWindowSlot();
-                // ignore 2x2 crafting grid -- it isn't meant for storage
-                if(windowCheck>=1 && windowCheck <=4){
+                // ignore 2x2 crafting grid + output when sitting in the player's own
+                // 2x2 screen -- it isn't meant for storage
+                if (jumpingOutOfPlayer2x2 && windowCheck >= 0 && windowCheck <= 4) {
                     continue;
                 }
                 // Special case: Armor/shield, we wish to ignore these slots our inventory is not open.

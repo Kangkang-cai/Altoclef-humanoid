@@ -4,7 +4,6 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.time.TimerGame;
-import adris.altoclef.util.helpers.StlHelper;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.mob.SkeletonEntity;
 import net.minecraft.entity.projectile.FireballEntity;
@@ -90,10 +89,21 @@ public class KillAura {
     }
 
     /**
-     * Pick the most dangerous nearby target instead of just the closest one.
+     * Pick the most dangerous nearby target, breaking ties by distance.
+     * (2026-09-03 用户"两只僵尸应优先打近的, 远近会交换") 旧实现只按威胁值
+     * max: 两只同类型僵尸威胁值完全相同(如都在 5 格内 factor=1.5) → Stream.max
+     * 保留遍历顺序里"最后一个", 顺序每 tick 抖动 → 挥击目标在两只之间来回换。
+     * 威胁值相等(或极度接近)时改选最近的, 让贴身近战稳定打在脸上那只。
      */
     private Optional<Entity> getMostThreateningTarget(AltoClef mod) {
-        return _targets.stream().max(StlHelper.compareValues(entity -> ThreatEvaluator.evaluate(mod, entity)));
+        return _targets.stream().max((a, b) -> {
+            int cmp = Double.compare(ThreatEvaluator.evaluate(mod, a), ThreatEvaluator.evaluate(mod, b));
+            if (cmp != 0) return cmp;
+            // 威胁相同时选更近的: 返回正表示 a 更大 → a 近(距离小)时返回正。
+            return -Double.compare(
+                    a.squaredDistanceTo(mod.getPlayer()),
+                    b.squaredDistanceTo(mod.getPlayer()));
+        });
     }
 
     private void performFastestAttack(AltoClef mod) {

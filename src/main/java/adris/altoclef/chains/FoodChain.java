@@ -161,6 +161,16 @@ public class FoodChain extends SingleTaskChain {
                         net.minecraft.screen.slot.SlotActionType.SWAP);
             }
         }
+        // (2026-09-03 背包满举盾卡死修复, 用户"要吃东西结果举盾卡住不动") 换盾
+        // 后【立即验证】副手是否真的不再是盾: 若仍是盾(背包满无空槽 → emptySlot
+        // null → 上面没换; 或 SWAP 网络包还没生效), 本 tick 绝不 hold 右键 —
+        // 否则右键 = 举盾, 而 interactionPaused 又把 baritone 导航暂停 → 原地
+        // 举盾卡死 (用户实锤: 背包满 + 副手盾 + 主手已装食物 → 持续举盾不动)。
+        // 放弃本次进食, 等背包腾出空位/下 tick 重试, 最多延迟 1 tick 不卡死。
+        if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) {
+            stopEat(mod);
+            return;
+        }
         mod.getSlotHandler().forceEquipItem(new Item[]{food}, true); //"true" because it's food
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         mod.getExtraBaritoneSettings().setInteractionPaused(true);

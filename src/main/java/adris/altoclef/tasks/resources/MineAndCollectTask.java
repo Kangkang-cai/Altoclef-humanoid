@@ -663,8 +663,17 @@ public class MineAndCollectTask extends ResourceTask {
             // "挖了几个还没挖完又转头" (tasks.log 11:36:57 t=16304-16748
             // "Trying out NEW pursuit"/"Retrying old heuristic" 交替 7 个
             // 不同目标)。粘住 _miningPos 直到它失效(挖掉/不可挖/黑名单)。
-            if (_miningPos != null && !_blacklist.contains(_miningPos) && isValid(mod, _miningPos)) {
-                return Optional.of(_miningPos);
+            if (_miningPos != null && !_blacklist.contains(_miningPos)) {
+                // (2026-09-03 兜底刷新, 用户"挖掉一个矿以为还在, 站原地傻等") 目标方块已
+                // 消失(世界验证为空气)时立即清空 _miningPos 刷新任务 — 不粘已挖掉的位置,
+                // 让后续逻辑重新锁最近目标/掉落物/探索。仅对已加载 chunk 判消失(未加载
+                // 的 getBlockState 恒 air, 直接判会误清远处合法目标)。
+                if (mod.getChunkTracker().isChunkLoaded(_miningPos)
+                        && mod.getWorld().getBlockState(_miningPos).isAir()) {
+                    _miningPos = null;
+                } else if (isValid(mod, _miningPos)) {
+                    return Optional.of(_miningPos);
+                }
             }
             // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它周围的 3x3x3:
             // 紧贴刚挖穿的连位矿下一 tick 就被看到并续挖 — 完全不需要缓存/节流,

@@ -80,6 +80,10 @@ public class EnsureFreeCursorSlotTask extends Task {
                 if (realFit != null) {
                     _lockTargetSlot = realFit;
                     Debug.logMessage("[CursorRealScan] placing cursor into real empty/mergeable slot " + realFit);
+                    // (2026-09-03 用户: 该验证标记走 logMessage 只进聊天栏, 不进日志
+                    // 文件, 导致"以为没生效"). 同步写一份到 runDirectory 的
+                    // altoclef_cursor.log, 便于以后日志核对达成情况。
+                    Debug.logToFile("altoclef_cursor.log", "[CursorRealScan] placing cursor into real empty/mergeable slot " + realFit);
                     setDebugState("Moving cursor stack back (real empty/mergeable slot)");
                     return new ClickSlotTask(realFit);
                 }

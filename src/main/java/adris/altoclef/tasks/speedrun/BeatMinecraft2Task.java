@@ -313,6 +313,20 @@ public class BeatMinecraft2Task extends Task {
     private Task _foodTask;
     private Task _gearTask;
     private Task _lootTask;
+    // (2026-09-03 钻石收集时间上限, 用户"31个钻石不好收集, 累积15分钟就再也不收集")
+    // 钻石探索/收集(挖钻石矿换剑/镐)耗尽太久时, 累积活跃 15 分钟后永久放弃钻石收集,
+    // 不再卡在"差几颗钻石"的死循环, 直接推进去下界。累计的是"钻石收集任务活跃运行"的
+    // 时间(被打断去食物/木柴等时不累加), 用墙上时钟。达标后 marked give up, 后续
+    // 两处钻石收集判定 (shouldForce(_gearTask) 与 !eyeGearSatisfied 分支) 都跳过。
+    private long _diamondCollectCumulativeMs = 0;
+    private long _diamondCollectSegmentStartMs = -1; // -1 = 当前未在连续活跃段
+    private boolean _diamondCollectGivenUp = false;
+    private static final long DIAMOND_COLLECT_LIMIT_MS = 5 * 60 * 1000L;
+    private long _lastDiamondGiveUpLogMs = 0;
+    // (2026-09-03 钻石时间限制辅助) _gearTask 被铁装/钻石复用, 只有钻石收集阶段
+    // 才受时间上限约束。赋值处置位: 铁装 getSquashedItemTask → false; 钻石
+    // COLLECT_EYE gear → true。计时只对钻石收集 (此类下 _gearTask) 生效。
+    private boolean _gearTaskIsDiamond = false;
     private final Task _buildMaterialsTask;
     private final PlaceBedAndSetSpawnTask _setBedSpawnTask = new PlaceBedAndSetSpawnTask();
     private final GoToStrongholdPortalTask _locateStrongholdTask;
@@ -1057,7 +1071,7 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * (2026-09-02 刷怪笼抑制开箱) 玩家近场 8 格内是否有 SPAWNER (500ms 节流缓存)。
+     * (2026-09-02 刷怪笼抑制开箱) 玩家近场 4 格内是否有 SPAWNER (500ms 节流缓存)。
      * 有刷怪笼时禁止就近搜刮 — 刷怪笼地牢先由 MineDownExploreTask 清源(先清怪再挖
      * 掉刷怪笼), 箱子等刷完再开, 避免搜刮抢走挖刷怪笼任务(用户"挖/打/开别打架")。
      */
@@ -1070,7 +1084,7 @@ public class BeatMinecraft2Task extends Task {
         boolean blocked = false;
         if (mod.getWorld() != null && mod.getPlayer() != null) {
             BlockPos player = mod.getPlayer().getBlockPos();
-            final int R = 8;
+            final int R = 4;
             outer:
             for (int dx = -R; dx <= R; dx++) {
                 for (int dy = -R; dy <= R; dy++) {
@@ -1451,6 +1465,15 @@ public class BeatMinecraft2Task extends Task {
                     }
                 }
                 if (shouldForce(mod, _gearTask) && !StorageHelper.isArmorEquippedAll(mod, COLLECT_EYE_ARMOR)) {
+                    // (2026-09-03 钻石时间上限) 钻石收集进行中: 累积活跃时间; 若已
+                    // 累计超限则永久放弃, 不再返回钻石收集任务 (落空往下走去下界)。
+                    if (_gearTaskIsDiamond) {
+                        recordDiamondCollectActive(mod);
+                        if (_diamondCollectGivenUp) {
+                            setDebugState("Giving up diamond gear, proceeding forward (limit reached)");
+                            return _goToNetherTask;
+                        }
+                    }
                     setDebugState("Getting gear for Ender Eye journey");
                     return _gearTask;
                 }
@@ -1526,6 +1549,7 @@ public class BeatMinecraft2Task extends Task {
                             "gearMinMet=" + gearMinMet
                                     + " (ironSwordHeld=" + ironSwordHeld(mod) + ")" );
                     _gearTask = TaskCatalogue.getSquashedItemTask(ironGearTargets(mod));
+                    _gearTaskIsDiamond = false; // 铁装阶段不受钻石时间上限约束
                     return _gearTask;
                 }
 
@@ -1558,7 +1582,16 @@ public class BeatMinecraft2Task extends Task {
 
                 // Then get diamond
                 if (!eyeGearSatisfied) {
+                    // (2026-09-03 钻石时间上限) 累积钻石收集活跃 ≥15 分钟则永久放弃,
+                    // 不再卡死在"差几颗钻石", 直接去下界。
+                    if (_diamondCollectGivenUp) {
+                        // 已给你再收集, 跳过往下去下界
+                        setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
+                        return _goToNetherTask;
+                    }
+                    recordDiamondCollectActive(mod); // 钻石收集进行中, 累积活跃时间
                     _gearTask = TaskCatalogue.getSquashedItemTask(Stream.concat(Arrays.stream(COLLECT_EYE_ARMOR).filter(item -> !mod.getItemStorage().hasItem(item) && !StorageHelper.isArmorEquipped(mod, item)).map(item -> new ItemTarget(item, 1)), Arrays.stream(COLLECT_EYE_GEAR)).toArray(ItemTarget[]::new));
+                    _gearTaskIsDiamond = true;
                     return _gearTask;
                 }
                 // Then go to the nether.
@@ -1628,6 +1661,12 @@ public class BeatMinecraft2Task extends Task {
      * (CataloguedResourceTask) 内部展开的挖矿/熔炼/收集树枝。
      */
     private boolean isMainLineBusy(AltoClef mod) {
+        // (2026-09-03 钻石 give up 后主线去下界) 钻石收集已永久放弃、已转入推进
+        // 下界 → 一律视为主链忙, 收工作台/熔炉等"顺路侧线"必须让位, 否则
+        // "Going to NETHER" 与 "Pick up crafting table" 每几秒互踩 (日志
+        // 15:19 t=25454~25819: give up→去下界→被打断收工作台→挖完又 give up→
+        // 循环 8 秒没进展)。
+        if (_diamondCollectGivenUp) return true;
         return thisOrChildSatisfies(task ->
                 task instanceof SmeltInFurnaceTask                      // 熔炼
                         || task instanceof CollectFoodTask               // 找食物
@@ -1804,30 +1843,19 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * (2026-09-03 option A, 用户"囤 25 原木徒手撸树慢") 囤木前若材料够就顺手先做把斧子
-     * 加速砍树, 不够就维持当前返回原任务(继续手撸/攒料)。只做明显便宜的两条路:
-     * 有台 USE → 直接合成石斧/木斧; 判定用真实背包(含 2x2 合成格)。绝不派发
-     * getItemTask("log") — 那会与收集原木 MineAndCollectTask 同构自我递归 (2026-09-02
-     * 修复回退点)。返回 null 等价于原任务。
+     * (2026-09-03 囤木前先确保斧子; 用户"他还是不做石斧——他需要先挖石头凑材料才能触发做斧")
+     * 囤一大把原木前若没有任何可用斧子, 就【无条件】先派 getItemTask(STONE_AXE,1), 让该
+     * 任务自己去挖 3 圆石、合台、合木棍、合成石斧 —— 而不是只在我们已摸到材料时才做, 否则
+     * 没圆石/没台就一直手撸树。石斧是 3x3 配方, 子任务内部会先挖石/做台/合棍, 不会递归回
+     * 本囤木任务(那是不同目标任务)。斧子一到位即放行真正的囤木任务。若已有石斧/铁/钻/下界
+     * 合金斧则直接用原任务。不做木斧: 木斧提升有限, 要就石斧(用户预期)。
      */
     private Task prependAxeForWood(AltoClef mod, Task woodTask) {
         for (Item axe : new Item[]{Items.STONE_AXE, Items.IRON_AXE, Items.DIAMOND_AXE, Items.NETHERITE_AXE}) {
             if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, axe)) return woodTask;
         }
-        boolean hasTableUse = StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, Items.CRAFTING_TABLE);
-        if (!hasTableUse) return woodTask;
-        int sticks = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.STICK);
-        int cobble = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.COBBLESTONE);
-        int planks = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS);
-        if (cobble >= 3 && sticks >= 2) {
-            setDebugState("Stockpiling wood: crafting stone axe first");
-            return TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
-        }
-        if (planks >= 3 && sticks >= 2) {
-            setDebugState("Stockpiling wood: crafting wooden axe first");
-            return TaskCatalogue.getItemTask(Items.WOODEN_AXE, 1);
-        }
-        return woodTask;
+        setDebugState("Stockpiling wood: crafting stone axe first (gather cobble/table/sticks)");
+        return TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
     }
 
     private Task getBlazeRodsTask(AltoClef mod, int count) {
@@ -1990,7 +2018,13 @@ public class BeatMinecraft2Task extends Task {
         // 这里 setDebugState 同一 tick 内就被覆盖, 只剩 diag-flow 两条变化行刷屏,
         // 掩盖真实任务横跳。返回 null 的分支一律不设状态, 地下信息由 diag 快照的
         // deep= 字段保留。
-        if (effectivelyDeep || belowSeaLevel || inWater || ridingVehicle) {
+        // (2026-09-03 过河去睡在床被 inWater 否决导致横跳, 用户) inWater 否决本意
+        // 是"水中航行(迁移/逃离)时别半路被叫回去睡觉"。但过河去【已锁定床】的
+        // 进行中睡觉任务(_sleepThroughNightTask.isActive())也被它掐断 → 在河道反复
+        // flip Sleeping↔收熟牛肉(日志 10:12 44s 不停)。故仅当无进行中睡觉任务时
+        // 才因水否决: 保过河抵达, 同时保留非睡觉时的水中航行保护。isNightSleepPriority
+        // 判定(L2090)须同步一致。
+        if (effectivelyDeep || belowSeaLevel || (inWater && !_sleepThroughNightTask.isActive()) || ridingVehicle) {
             return null;
         }
 
@@ -2098,7 +2132,9 @@ public class BeatMinecraft2Task extends Task {
         if (mod.getPlayer() == null) return false;
         boolean inWater = mod.getPlayer().isTouchingWater();
         if (mod.getPlayer().getVehicle() != null) return false;
-        if (inWater) return false;
+        // (2026-09-03 与 getNightSleepRouting L1982 口径一致, 用户"过河去床被 inWater
+        // 否决横跳") 仅当无进行中睡觉任务时才因水让位; 睡觉途中过河不被掐断。
+        if (inWater && !_sleepThroughNightTask.isActive()) return false;
         boolean effectivelyDeep = WorldHelper.isDeepUnderground(mod);
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         if (effectivelyDeep || belowSeaLevel) return false;
@@ -2288,6 +2324,34 @@ public class BeatMinecraft2Task extends Task {
     private static boolean shouldForce(AltoClef mod, Task task) {
         return task != null && task.isActive() && !task.isFinished(mod);
     }
+
+    /**
+     * (2026-09-03 钻石时间上限, 用户"31个钻石不好收集, 累积15分钟就再也不收集")
+     * 每 tick 钻石收集活跃时调用: 用墙上时钟累加两次调用间的真实时长 (被打断去
+     * 食物/木柴等时不调用, 天然暂停), 达到 DIAMOND_COLLECT_LIMIT_MS 后永久
+     * give up 并打印累计时间。打印节流: 放弃时打一次, 平时每 30s 打一次累计进度。
+     */
+    private void recordDiamondCollectActive(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (_diamondCollectSegmentStartMs == -1) {
+            _diamondCollectSegmentStartMs = now;
+            return;
+        }
+        _diamondCollectCumulativeMs += now - _diamondCollectSegmentStartMs;
+        _diamondCollectSegmentStartMs = now;
+        if (_diamondCollectCumulativeMs >= DIAMOND_COLLECT_LIMIT_MS && !_diamondCollectGivenUp) {
+            _diamondCollectGivenUp = true;
+            Debug.logMessage("(DiamondCollect) cumulative " + (_diamondCollectCumulativeMs / 1000)
+                    + "s >= 5min: giving up diamond gear, proceeding forward.");
+            Debug.logToFile("altoclef_diag.log", "[DiamondCollect] GAVE UP, cumulative="
+                    + _diamondCollectCumulativeMs + "ms");
+        } else if (now - _lastDiamondGiveUpLogMs > 30000) {
+            _lastDiamondGiveUpLogMs = now;
+            Debug.logToFile("altoclef_diag.log", "[DiamondCollect] cumulative active="
+                    + (_diamondCollectCumulativeMs / 1000) + "s so far (limit 300s)");
+        }
+    }
+
     private static ItemTarget[] toItemTargets(Item ...items) {
         return Arrays.stream(items).map(item -> new ItemTarget(item, 1)).toArray(ItemTarget[]::new);
     }

@@ -9,7 +9,7 @@ import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
-import adris.altoclef.tasks.movement.TimeoutWanderTask;
+import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.CraftingRecipe;
 import adris.altoclef.util.ItemTarget;
@@ -427,7 +427,23 @@ public class CollectFoodTask extends Task {
 
         // Look for food.
         setDebugState("Searching...");
-        return new TimeoutWanderTask(Float.POSITIVE_INFINITY);
+        // (2026-09-03 用户"收集食物又被导航到水里", 海问题第2次复发) 旧逻辑
+        // TimeoutWanderTask(30) 走 Baritone 原生随机探索(ExploreProcess), 落点
+        // 可能在海洋 → 直接一路游进大海(用户实测游荡下水)。改用
+        // BiasedExploreTask(foodExplore=true): 它自带海洋落点拒绝(isTargetOcean,
+        // 过河放行) + 平原生物群系偏置(动物/作物更集中, 找食物更快), 不再往
+        // 海洋方向探索。结合上方"跳过海洋 biome 的猎杀目标"双管齐下。
+        // (2026-09-03 修复"走一格就换线找食物", 用户) 此处必须粘性复用探索实例:
+        // BiasedExploreTask.isEqual 是 identity(other==this), 若直接 return new,
+        // 每 tick 都是新实例 → 框架判定不同 → 每 tick 重启、onStart 重置 _heading
+        // 为随机 → 每走一格就换方向, 永远走不出去找食物(日志 09:53 Biased
+        // exploration 每 tick STOP/START)。存入 _currentResourceTask 交由上方 L255
+        // 复用同一实例, 方向持续才真正走得动。旧 TimeoutWanderTask 因 isEqual
+        // 用 instanceof+距离 不存在此问题, 换 BiasedExploreTask 后必须显式保存。
+        if (_currentResourceTask == null) {
+            _currentResourceTask = new BiasedExploreTask(true);
+        }
+        return _currentResourceTask;
     }
 
     @Override
