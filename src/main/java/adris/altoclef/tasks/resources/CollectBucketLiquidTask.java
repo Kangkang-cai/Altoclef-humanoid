@@ -59,6 +59,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 失败状态; 溯源失败(gaveUp)时把起始流动水加入 _blacklist, 避免重试同一处。
     private TraceFlowingWaterToSourceTask _traceTask = null;
 
+    // (2026-09-04 海洋中转头找陆地, 用户"扫描时配合视角转动, 使得陆地满足fov")
+    // bot 上浮到海面后不能"透视"biome 直接知道陆地方向 — 像人类一样转头环顾,
+    // 让陆地进入视野(FOV) 再朝它导航。ScanLookBehavior: 静止时全景环顾、移动时
+    // 沿行进方向横扫。
+    private final ScanLookBehavior _scanLook = new ScanLookBehavior();
+
     private boolean wasWandering = false;
 
     public CollectBucketLiquidTask(String liquidName, Item filledBucket, int targetCount, Block toCollect) {
@@ -282,7 +288,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
         // 既无岩浆也无水源, 游过去浪费时间)。改: 先朝最近陆地 XZ 导航 (GoToXZTask),
         // 到陆地后再有界游荡。找最近陆地沿 8 方向扫描非海洋 biome, 每 16 格一档
         // 直到 128 格; 找不到 (全海) 才回退有界游荡。
+        // (2026-09-04 v2 用户"扫描时配合视角转动, 使得陆地满足fov") 扫描前先转头
+        // 环顾 (ScanLookBehavior 全景/横扫), 让陆地进入视野再导航 — 像人类转头确认
+        // "那边是陆地" 才游过去, 而非透视 biome 数据。
         if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && isPlayerInOcean(mod)) {
+            _scanLook.step(mod);
             BlockPos land = findNearestLand(mod);
             if (land != null) {
                 setDebugState("On ocean, heading to land to search " + _liquidName);
