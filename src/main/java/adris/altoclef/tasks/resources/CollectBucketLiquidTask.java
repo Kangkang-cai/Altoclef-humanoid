@@ -62,6 +62,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     private double _exploreHeading = Double.NaN;
     private static final int EXPLORE_STEP_DIST = 48;
     private static final double EXPLORE_JITTER_DEG = 25;
+    // (2026-09-04 v2 粘性修复, 用户"不对劲看最新日志") 持久的当前探索任务实例:
+    // ResourceTask.onTick 每 tick 调 onResourceTick, 子任务粘性靠 isEqual —— 若每次
+    // new GetToXZTask(不同 x,z) 则 isEqual false → 每 tick 重启换目标 (日志实锤
+    // heading 758→778→763→748deg 每 tick 变, 目标 222,493→210,504→220,496 每 tick
+    // 换)。缓存实例, active 且未完成时返回同一实例, 到达后才重算下一步。
+    private GetToXZTask _exploreTask = null;
 
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
@@ -346,6 +352,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
      * 下一步继续)。heading 首次随机, 之后只微调。
      */
     private Task getSurfaceExploreTask(AltoClef mod) {
+        // 粘性: 当前探索任务 active 且未完成 → 返回同一实例, 不每 tick 重算换目标
+        // (v2 修复, 见 _exploreTask 注释)。
+        if (_exploreTask != null && _exploreTask.isActive() && !_exploreTask.isFinished(mod)) {
+            return _exploreTask;
+        }
         Vec3d pos = mod.getPlayer().getPos();
         if (Double.isNaN(_exploreHeading)) {
             _exploreHeading = Math.random() * 2 * Math.PI;
@@ -355,8 +366,9 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
         int x = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_STEP_DIST);
         int z = (int) Math.floor(pos.z + Math.sin(_exploreHeading) * EXPLORE_STEP_DIST);
+        _exploreTask = new GetToXZTask(x, z);
         setDebugState("Exploring for " + _liquidName + " (heading " + (int) Math.toDegrees(_exploreHeading) + "deg) -> " + x + "," + z);
-        return new GetToXZTask(x, z);
+        return _exploreTask;
     }
 
     /** (2026-09-04) 玩家当前所在 biome 是否为海洋 (ocean 系)。 */
