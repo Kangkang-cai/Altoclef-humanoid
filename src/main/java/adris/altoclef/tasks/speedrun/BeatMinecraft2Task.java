@@ -2024,7 +2024,13 @@ public class BeatMinecraft2Task extends Task {
         // flip Sleeping↔收熟牛肉(日志 10:12 44s 不停)。故仅当无进行中睡觉任务时
         // 才因水否决: 保过河抵达, 同时保留非睡觉时的水中航行保护。isNightSleepPriority
         // 判定(L2090)须同步一致。
-        if (effectivelyDeep || belowSeaLevel || (inWater && !_sleepThroughNightTask.isActive()) || ridingVehicle) {
+        // (2026-09-04 水陆交界横跳, 用户"反复横跳") 刚游上岸在水陆交界 (y≈海平面,
+        // inWater 每 2 秒翻转), 即便 _nightBedFindInProgress 已 true (夜间找床流程)
+        // 也会被 inWater 否决切回收木头 → wood↔bed 每 2s 横跳 (13:59:49-55 日志实锤)。
+        // 补 _nightBedFindInProgress: 已进入夜间找床流程就稳定找床, 不被浅水翻转打断。
+        if (effectivelyDeep || belowSeaLevel
+                || (inWater && !_sleepThroughNightTask.isActive() && !_nightBedFindInProgress)
+                || ridingVehicle) {
             return null;
         }
 
@@ -2134,7 +2140,9 @@ public class BeatMinecraft2Task extends Task {
         if (mod.getPlayer().getVehicle() != null) return false;
         // (2026-09-03 与 getNightSleepRouting L1982 口径一致, 用户"过河去床被 inWater
         // 否决横跳") 仅当无进行中睡觉任务时才因水让位; 睡觉途中过河不被掐断。
-        if (inWater && !_sleepThroughNightTask.isActive()) return false;
+        // (2026-09-04 与 getNightSleepRouting 同步) 已进入夜间找床流程(_nightBedFindInProgress)
+        // 时 inWater 不让位, 避免水陆交界 wood↔bed 横跳。
+        if (inWater && !_sleepThroughNightTask.isActive() && !_nightBedFindInProgress) return false;
         boolean effectivelyDeep = WorldHelper.isDeepUnderground(mod);
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         if (effectivelyDeep || belowSeaLevel) return false;
