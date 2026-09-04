@@ -23,6 +23,7 @@ import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.slots.CursorSlot;
+import baritone.api.utils.input.Input;
 import java.util.*;
 import java.util.function.Supplier;
 import net.minecraft.entity.ItemEntity;
@@ -468,7 +469,10 @@ public class MineAndCollectTask extends ResourceTask {
         // 形成"挖床↔收集木头"横跳。3 次重试容忍 3 次站桩间歇。
         // (2026-08-22) 3→5: 挖岸边/垂直上岸(如水里挖向陆地圆石)耗时更长,
         // 3 次(18s)仍会"挖一半放弃换目标", 放宽到 5 次(30s)。
-        private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
+        // (2026-09-04 用户"6秒窗口太长×5太多, 1秒窗口×3") 卡住/挖不动判定收紧:
+        // 移动窗口 1s、挖掘窗口 1s、各容忍 3 次连续失败 → 约 3s 无进展即换目标。
+        // 卡在草/小方块时由失败处理先左键挥击清草(见 onTick), 不再直接放弃。
+        private final MovementProgressChecker _progressChecker = new MovementProgressChecker(1, 0.1, 1, 0.001, 3);
         private final Task _pickupTask;
         // (2026-08-22 修补) 挖矿掉落物横跳: 挖掉一个方块掉落物立即出现在脚下,
         // getClosestTo 里 dropSq 极小 → 每挖一块就切去捡 → "挖一个→捡一个"
@@ -480,6 +484,10 @@ public class MineAndCollectTask extends ResourceTask {
         private Task _explorationTask;
         private BlockPos _miningPos;
         private AltoClef _mod;
+        // (2026-09-04 用户"卡住时左键挥几tick清草, 会被草卡住") 挖不动(ProgressChecker
+        // 失败)先长按左键 SWING_TICKS 清掉挡路小草/藤蔓, 挥完仍失败才 blacklist 换目标。
+        private int _swingTicksLeft = 0;
+        private static final int SWING_TICKS = 4;
         // (2026-08-31) 掉落物导航诊断节流时间戳。
         private long _lastMinePickupDiagMs = 0;
         // (2026-08-23 近矿记忆, 替代被用户否决的 8 格透视) 最近【真正感知到】
@@ -1377,11 +1385,34 @@ public class MineAndCollectTask extends ResourceTask {
         protected Task onTick(AltoClef mod) {
             _mod = mod;
             if (_miningPos != null && !_progressChecker.check(mod)) {
-                Debug.logMessage("Failed to mine block. Suggesting it may be unreachable.");
-                mod.getBlockTracker().requestBlockUnreachable(_miningPos, 2);
-                _blacklist.add(_miningPos);
-                _miningPos = null;
-                _progressChecker.reset();
+                // (2026-09-04 用户"卡住先左键挥几tick清草") 挖不动先挥击清草, 不
+                // 立即 blacklist: 草/藤蔓/草丛等小方块挡路时 bot 挖不动目标, 先
+                // 长按左键 SWING_TICKS 清掉, 挥完仍失败才 requestBlockUnreachable
+                // + 换目标。避免"卡在草里 → 直接放弃目标"。
+                if (_swingTicksLeft > 0) {
+                    _swingTicksLeft--;
+                    if (_swingTicksLeft == 0) {
+                        mod.getInputControls().release(Input.CLICK_LEFT);
+                        Debug.logMessage("Still failed to mine after swing, blacklisting target.");
+                        mod.getBlockTracker().requestBlockUnreachable(_miningPos, 2);
+                        _blacklist.add(_miningPos);
+                        _miningPos = null;
+                        _progressChecker.reset();
+                    } else {
+                        mod.getInputControls().hold(Input.CLICK_LEFT);
+                    }
+                    return super.onTick(mod);
+                }
+                // 首次失败: 开始挥击 (长按左键清挡路小草)
+                _swingTicksLeft = SWING_TICKS;
+                Debug.logMessage("Failed to mine block, swinging to clear grass/foliage...");
+                mod.getInputControls().hold(Input.CLICK_LEFT);
+                return super.onTick(mod);
+            }
+            // 有进展/正常: 保险松开可能按住的左键
+            if (_swingTicksLeft > 0) {
+                _swingTicksLeft = 0;
+                mod.getInputControls().release(Input.CLICK_LEFT);
             }
             return super.onTick(mod);
         }
