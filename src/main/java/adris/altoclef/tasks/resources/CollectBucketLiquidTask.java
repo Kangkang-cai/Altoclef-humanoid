@@ -55,6 +55,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
 
+    // (2026-09-04 溯源任务实例, 用户"看到水流应定位水源") 持有当前溯源任务引用以读取
+    // 失败状态; 溯源失败(gaveUp)时把起始流动水加入 _blacklist, 避免重试同一处。
+    private TraceFlowingWaterToSourceTask _traceTask = null;
+
     private boolean wasWandering = false;
 
     public CollectBucketLiquidTask(String liquidName, Item filledBucket, int targetCount, Block toCollect) {
@@ -186,13 +190,20 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
-        // (2026-09-03 防溯源↔回地表打架, 用户实锤) 深地下(y<58)不回溯源: 回地表路上
-        // 一看到流动水就被溯源任务劫持横向走, 溯源无果又回到回地表 → 反复横跳。
-        // 溯源只在已到地表且无源时进行 (地表溪流沿上游找源是合理行为)。
-        if (!isBelowSurface(mod)
-                && !mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
-            setDebugState("No source found, tracing flowing water to source...");
-            // 找所有流动水位置
+        // (2026-09-04 用户"看到水流应定位水源": 地下看到流动水也应就地溯源到源再装桶,
+        // 而不是直接回地表) 放开原"深地下不溯源"闸门。防打架: 溯源失败(gaveUp)时把
+        // 该起点流动水加入黑名单, 下次不再溯源同一处; 全部失败后自然落到回地表。
+        // 流动水谓词已带 LOS 门控(只溯看得见的近处水流), BlockTracker 缓存已上限100。
+        if (!mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect) && _toCollect == Blocks.WATER) {
+            // 处理上次溯源任务的结果: 失败则黑名单其起点, 成功/失败都清理实例。
+            if (_traceTask != null && _traceTask.isFinished(mod)) {
+                if (_traceTask.gaveUp() && _traceTask.getStartPos() != null) {
+                    _blacklist.add(_traceTask.getStartPos());
+                    Debug.logMessage("[Diag-water] trace failed, blacklisting start "
+                            + _traceTask.getStartPos().toShortString());
+                }
+                _traceTask = null;
+            }
             Predicate<BlockPos> isFlowingWater = blockPos -> {
                 if (_blacklist.contains(blockPos)) return false;
                 // (2026-09-03 用户原则) 不满足 FOV/LOS 的不评估可达性。
@@ -203,13 +214,15 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 return state.getBlock() == Blocks.WATER && !state.getFluidState().isStill();
             };
 
-            if (mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)) {
+            if (_traceTask == null && mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)) {
                 // 找到流动水，追踪到源头
                 setDebugState("Found flowing water, tracing to source...");
-                return new TraceFlowingWaterToSourceTask(isFlowingWater);
-            } else {
-                Debug.logMessage("[Diag-water] No flowing water found in BlockTracker either");
+                _traceTask = new TraceFlowingWaterToSourceTask(isFlowingWater);
             }
+            if (_traceTask != null) {
+                return _traceTask;
+            }
+            Debug.logMessage("[Diag-water] No flowing water found in BlockTracker either");
         }
 
         // Find nearest water and right click it

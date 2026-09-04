@@ -22,6 +22,11 @@ public class TraceFlowingWaterToSourceTask extends Task {
 
     private final Predicate<BlockPos> _isFlowingWater;
     private BlockPos _currentTracePos;
+    // (2026-09-04 溯源失败黑名单, 用户"看到水流应定位水源") 记录本次溯源的起始流动水
+    // 位置与是否放弃。父任务(CollectBucketLiquidTask)在溯源失败后把该起点加入黑名单,
+    // 避免"溯源失败→重试同一处→溯源↔回地表打架"。
+    private BlockPos _startPos;
+    private boolean _gaveUp = false;
     private int _traceAttempts = 0;
     private static final int MAX_TRACE_ATTEMPTS = 50;
     private final Set<BlockPos> _visited = new HashSet<>();
@@ -33,8 +38,10 @@ public class TraceFlowingWaterToSourceTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         // 找一个流动水位置作为起点
-        _currentTracePos = findFlowingWater(mod);
+        _startPos = findFlowingWater(mod);
+        _currentTracePos = _startPos;
         _traceAttempts = 0;
+        _gaveUp = false;
         _visited.clear();
     }
 
@@ -42,6 +49,7 @@ public class TraceFlowingWaterToSourceTask extends Task {
     protected Task onTick(AltoClef mod) {
         if (_currentTracePos == null || _traceAttempts >= MAX_TRACE_ATTEMPTS) {
             Debug.logMessage("TraceFlowingWater: giving up after " + _traceAttempts + " attempts");
+            _gaveUp = true;
             return new TimeoutWanderTask(10f);
         }
 
@@ -57,6 +65,7 @@ public class TraceFlowingWaterToSourceTask extends Task {
             Debug.logMessage("TraceFlowingWater: no higher level neighbor found, wandering");
             _traceAttempts++;
             _currentTracePos = findFlowingWater(mod);
+            _gaveUp = true;
             return new TimeoutWanderTask(5f);
         }
 
@@ -67,6 +76,23 @@ public class TraceFlowingWaterToSourceTask extends Task {
 
         Debug.logMessage("TraceFlowingWater: tracing to " + higherLevel + " (attempt " + _traceAttempts + ")");
         return new GetCloseToBlockTask(higherLevel);
+    }
+
+    /** (2026-09-04) 溯源是否已失败放弃(找不到源)。供父任务黑名单起点用。 */
+    public boolean gaveUp() {
+        return _gaveUp;
+    }
+
+    /** (2026-09-04) 本次溯源的起始流动水位置(失败时父任务黑名单它)。 */
+    public BlockPos getStartPos() {
+        return _startPos;
+    }
+
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        // 失败放弃或已定位到源都算完成, 父任务据此清理 _traceTask。
+        if (_gaveUp) return true;
+        return _currentTracePos != null && isSource(mod, _currentTracePos);
     }
 
     @Override
