@@ -69,7 +69,11 @@ public class ConstructNetherPortalBucketTask extends Task {
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
     // Stored here to cache lava blacklist
-    private final Task _collectLavaTask = TaskCatalogue.getItemTask(Items.LAVA_BUCKET, 1);
+    // (2026-09-04 批量舀岩浆) 原 1 桶/轮: 每浇一块黑曜石都回池子舀一次; 且倒完
+    // 面朝 cast、池子常在身后, FOV/LOS 感知门控找不到源 → "Exploring for lava"
+    // 越走越远 (用户"池子里明明还有岩浆", 日志 23:08:33-48 heading 102→104° 走向
+    // 448,458)。改为一次囤 4 桶, 往返减 4 倍; 一趟在池边连续舀 4 个相邻源。
+    private final Task _collectLavaTask = TaskCatalogue.getItemTask(Items.LAVA_BUCKET, 4);
     private final TimerGame _refreshTimer = new TimerGame(11);
     private BlockPos _portalOrigin = null;
 
