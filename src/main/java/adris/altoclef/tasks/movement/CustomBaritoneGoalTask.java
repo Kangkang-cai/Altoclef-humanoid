@@ -165,13 +165,16 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                     }
                 }
                 // (2026-09-04 水下回地表, 用户"上方全是海洋, 但可以游泳上去")
-                // 水中 + 目标在上方(GoalYLevel 等) + baritone 无活动路径(水下无法
-                // 寻路) → 垂直上浮, 不依赖 _checker (水下卡住时 checker 可能一直
-                // 通过, 永不判卡 → 86s 卡死)。出水面后交还 baritone 正常导航。
+                // 水中 + 目标在上方(GoalYLevel 等) → 垂直上浮。不依赖 baritone
+                // 无活动路径 (水下无法寻路时 CustomGoalProcess.isActive() 可能恒
+                // true 反复重试 → 上浮永不触发, 日志实锤 y=50 卡死)。上浮状态机
+                // 自身有 5s 失速 + 出水 release 兜底, 不会误控失控。
                 if (inWater && !_directSwimControl) {
                     int ty = goalY();
-                    if (ty > 0 && ty > mod.getPlayer().getBlockPos().getY()
-                            && !mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+                    if (ty > 0 && ty > mod.getPlayer().getBlockPos().getY()) {
+                        Debug.logToFile("altoclef_diag.log", "[SwimUp] trigger player="
+                                + mod.getPlayer().getBlockPos() + " goalY=" + ty
+                                + " baritoneActive=" + mod.getClientBaritone().getCustomGoalProcess().isActive());
                         _directSwimUpMode = true;
                         _directSwimLastY = mod.getPlayer().getBlockPos().getY();
                         _directSwimStallTimer.reset();
