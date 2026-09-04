@@ -200,8 +200,13 @@ public class ConstructNetherPortalBucketTask extends Task {
             }
 
             if (!foundSpot) {
-                setDebugState("(timeout: Looking for lava lake)");
-                return new TimeoutWanderTask(100);
+                // (2026-09-04 用户"wander 100 无意义, 不是走过去的导航观察探索")
+                // 找不到岩浆湖时派 TimeoutWanderTask(100): 它不感知岩浆(感知靠
+                // BlockTracker), 只是随机游荡/explore, 对找岩浆毫无帮助。改为派
+                // _collectLavaTask (CollectLavaBucketTask) — 完整找岩浆策略(感知
+                // 岩浆源/地下回地表/有界游荡), 会真正移动探索+收集岩浆桶。
+                setDebugState("(timeout: Looking for lava lake, collecting lava instead)");
+                return _collectLavaTask;
             }
         }
 
