@@ -65,6 +65,13 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 沿行进方向横扫。
     private final ScanLookBehavior _scanLook = new ScanLookBehavior();
 
+    // (2026-09-04 v3 缓存陆地目标, 用户"一次性导航找不到dry point卡在原地")
+    // 日志实锤: findNearestLand 每 tick 从玩家位置重算 → 玩家在海上缓慢移动 →
+    // 返回的陆地 XZ 每 tick 变 (357→358) → GetToXZTask 每 tick 换目标 → baritone
+    // 永远重算路径到不了岸。修复: 缓存目标, 到达(<3格)才重算下一段, 逐段向陆地
+    // 推进; 不在海洋(已上岸)清除。目标稳定, 不会每 tick 抖动。
+    private BlockPos _landTarget = null;
+
     private boolean wasWandering = false;
 
     public CollectBucketLiquidTask(String liquidName, Item filledBucket, int targetCount, Block toCollect) {
@@ -286,19 +293,32 @@ public class CollectBucketLiquidTask extends ResourceTask {
         // (2026-09-04 海洋中朝陆地, 用户"上浮到海面后继续往海里导航, 转头能看到陆地")
         // 地表找液体时若玩家在海洋 biome 中, 随机/有界游荡只会越游越深进海 (海洋里
         // 既无岩浆也无水源, 游过去浪费时间)。改: 先朝最近陆地 XZ 导航 (GoToXZTask),
-        // 到陆地后再有界游荡。找最近陆地沿 8 方向扫描非海洋 biome, 每 16 格一档
-        // 直到 128 格; 找不到 (全海) 才回退有界游荡。
+        // 到陆地后再有界游荡。
         // (2026-09-04 v2 用户"扫描时配合视角转动, 使得陆地满足fov") 扫描前先转头
         // 环顾 (ScanLookBehavior 全景/横扫), 让陆地进入视野再导航 — 像人类转头确认
         // "那边是陆地" 才游过去, 而非透视 biome 数据。
+        // (2026-09-04 v3 用户"一次性导航找不到dry point卡在原地") 缓存陆地目标防
+        // 每 tick 抖动 (见 _landTarget 注释), 到达后重算下一段。
         if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && isPlayerInOcean(mod)) {
             _scanLook.step(mod);
-            BlockPos land = findNearestLand(mod);
-            if (land != null) {
-                setDebugState("On ocean, heading to land to search " + _liquidName);
-                return new GetToXZTask(land.getX(), land.getZ());
+            // 已到缓存目标附近 → 清除重新找 (目标逐段向陆地推进)
+            if (_landTarget != null
+                    && mod.getPlayer().getBlockPos().getSquaredDistance(_landTarget) < 9) {
+                _landTarget = null;
             }
+            if (_landTarget == null) {
+                _landTarget = findNearestLand(mod);
+            }
+            if (_landTarget != null) {
+                setDebugState("On ocean, heading to land to search " + _liquidName
+                        + " -> " + _landTarget.getX() + "," + _landTarget.getZ());
+                return new GetToXZTask(_landTarget.getX(), _landTarget.getZ());
+            }
+            // 全海无陆地: 有界游荡兜底
+            return new TimeoutWanderTask(SURFACE_SEARCH_WANDER_RANGE);
         }
+        // 不在海洋 (已上岸/内陆): 清除陆地缓存, 恢复有界游荡
+        _landTarget = null;
         // (2026-09-03 无限游荡 → 有界游荡) 地表探索用有界游荡: 每走完一段自动回到
         // 本分支重估 (有液体源就近收 / 无则换方向再走一段), 不再 TimeoutWanderTask(∞)
         // 一条路走到黑永不评估。游荡是探索手段, 不是目标。
