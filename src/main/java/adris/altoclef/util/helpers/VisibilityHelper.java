@@ -37,6 +37,9 @@ public final class VisibilityHelper {
     private static final Object _losCacheLock = new Object();
     private static final long LOS_CACHE_TTL_MS = 400;
     private static final int LOS_CACHE_MAX_ENTRIES = 4096;
+    // (2026-09-04) LOS 缓存按玩家位置失效: 玩家位移超过该距离(平方)即重算。
+    // 2 格 = 移动/挖洞后立即重新评估, 杜绝用旧位置的 LOS 结果造成短暂透视。
+    private static final long LOS_CACHE_MOVE_DRIFT_SQ = 4;
 
     // Human view parameters (tunable defaults) — used for ENTITIES.
     public static final double MAX_VIEW_DISTANCE = 64.0;
@@ -135,7 +138,18 @@ public final class VisibilityHelper {
         // 明明看到了却装不了水。改: 流体方块【自身 LOS 可见】(侧视直见) 或【表面
         // 暴露可见】任一满足即可感知 — 两者都带 LOS, 不会透视墙后/被岩石完全包围
         // 的流体。
+        // (2026-09-04 透视岩浆修复, 用户"隔着岩壁/被包裹的岩浆也感知+跳进岩浆")
+        // 仅"自身 LOS 可见"不够: 6面/边缘判定在薄岩壁、拐角等几何下可能对隔墙流体
+        // 误判可见 → 被岩石包裹/隔岩壁的岩浆也被感知 (透视)。加固: 流体感知必须
+        // 【先通过"表面暴露"前置】= 流体正上方是空气/洞穴空气。被岩石完全包裹或
+        // 隔岩壁的岩浆, 其上方必然是岩石(表面被封) → 前置失败 → 绝不感知。洞穴里
+        // 侧视可见的水池/岩浆 (上方是空气) 不受影响, 仍可感知收集。
         if (block == Blocks.WATER || block == Blocks.LAVA) {
+            BlockPos above = pos.up();
+            BlockState aboveState = mod.getWorld().getBlockState(above);
+            if (!aboveState.isAir() && aboveState.getBlock() != Blocks.CAVE_AIR) {
+                return false; // 表面未暴露 (被岩石封顶/被包裹) → 不感知, 防透视
+            }
             if (isBlockVisible(mod, pos)) return true;   // 侧视直见流体方块本身
             return isFluidSurfaceVisible(mod, pos);       // 或看到暴露的表面
         }
@@ -253,10 +267,19 @@ public final class VisibilityHelper {
         ClientPlayerEntity player = mod.getPlayer();
         if (player == null) return false;
         long now = System.currentTimeMillis();
+        // (2026-09-04 缓存跨位置漏洞修复) 缓存记录当时玩家坐标, 玩家位移超过
+        // LOS_CACHE_MOVE_DRIFT (方块级) 即失效重算 — 否则 bot 移动/挖洞后 400ms
+        // 内仍用旧位置的 LOS 结果, 可能把"曾经可见"判成当前可见 = 短暂透视。
+        BlockPos pPos = player.getBlockPos();
         synchronized (_losCacheLock) {
             long[] cached = _losCache.get(pos);
             if (cached != null && (now - cached[0]) < LOS_CACHE_TTL_MS) {
-                return cached[1] == 1L;
+                long dx = pPos.getX() - cached[2];
+                long dy = pPos.getY() - cached[3];
+                long dz = pPos.getZ() - cached[4];
+                if (dx * dx + dy * dy + dz * dz <= LOS_CACHE_MOVE_DRIFT_SQ) {
+                    return cached[1] == 1L;
+                }
             }
             if (_losCache.size() > LOS_CACHE_MAX_ENTRIES) {
                 _losCache.clear(); // 满则整体清空, 简单安全 (下一 tick 自然重建)
@@ -267,7 +290,7 @@ public final class VisibilityHelper {
         // target block as occluding itself (never visible).
         boolean visible = LookHelper.cleanLineOfSight(player, pos, BLOCK_RAY_MAX_DISTANCE);
         synchronized (_losCacheLock) {
-            _losCache.put(pos, new long[]{now, visible ? 1L : 0L});
+            _losCache.put(pos, new long[]{now, visible ? 1L : 0L, pPos.getX(), pPos.getY(), pPos.getZ()});
         }
         return visible;
     }
