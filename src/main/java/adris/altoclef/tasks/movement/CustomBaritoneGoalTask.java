@@ -12,6 +12,8 @@ import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalTwoBlocks;
 import baritone.api.pathing.goals.GoalXZ;
+import baritone.api.pathing.goals.GoalYLevel;
+import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
@@ -51,6 +53,16 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     // 关 baritone 疾跑 (allowSprint)。上/下水状态变化时切换一次。
     private boolean _wasInWater = false;
 
+    // ===== 水下垂直上浮 (2026-09-04) =====
+    // 用户"上方全是海洋, baritone 找不到落脚点但可游泳上去"。GetToYTask 的
+    // GoalYLevel 目标无 XZ → goalXZ() 返回 null → 原 direct-swim 不触发 → 水下
+    // 回地表(y<58 走 GoToSurfaceTask)卡死 (日志实锤: y=50 水下卡 86 秒无进展)。
+    // 垂直上浮: 瞄准正上方 + 前进 + 跳跃 + 疾跑(水下疾跑=游泳加速), 直到出水面
+    // 或 y 不再增长(失速 5s 交还 baritone)。与下潜 (DiveToGrabItemTask) 对称。
+    private boolean _directSwimUpMode = false;
+    private int _directSwimLastY = Integer.MIN_VALUE;
+    private static final int DIRECT_SWIM_UP_MIN_Y_GAIN = 1;
+
     public CustomBaritoneGoalTask(boolean wander) {
         _wander = wander;
     }
@@ -73,6 +85,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         _checker.reset();
         _failCount = 0;
         _directSwimControl = false;
+        _directSwimUpMode = false;
         _wasInWater = mod.getPlayer().isTouchingWater();
         // (2026-08-26 游泳疾跑) 上/下水状态统一由 onTick 切换 allowSprint。
         mod.getClientBaritoneSettings().allowSprint.value = !_wasInWater;
@@ -117,6 +130,21 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                 if (_directSwimControl) {
                     if (!mod.getPlayer().isTouchingWater()) {
                         releaseDirectSwim(mod);
+                    } else if (_directSwimUpMode) {
+                        // 垂直上浮: 以 y 是否增长判断推进 (XZ 不变, 不能用水平距离)。
+                        int y = mod.getPlayer().getBlockPos().getY();
+                        if (y - _directSwimLastY >= DIRECT_SWIM_UP_MIN_Y_GAIN) {
+                            _directSwimLastY = y;
+                            _directSwimStallTimer.reset();
+                        }
+                        if (_directSwimStallTimer.elapsed()) {
+                            Debug.logMessage("Direct swim-up stalled (no Y gain), handing back to baritone.");
+                            releaseDirectSwim(mod);
+                        } else {
+                            holdDirectSwimUp(mod);
+                            setDebugState("Swimming straight up");
+                            return null;
+                        }
                     } else {
                         BlockPos target = goalXZ();
                         double dist = target == null ? Double.MAX_VALUE : horizontalDist(mod, target);
@@ -134,6 +162,22 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                             setDebugState("Swimming directly to goal");
                             return null;
                         }
+                    }
+                }
+                // (2026-09-04 水下回地表, 用户"上方全是海洋, 但可以游泳上去")
+                // 水中 + 目标在上方(GoalYLevel 等) + baritone 无活动路径(水下无法
+                // 寻路) → 垂直上浮, 不依赖 _checker (水下卡住时 checker 可能一直
+                // 通过, 永不判卡 → 86s 卡死)。出水面后交还 baritone 正常导航。
+                if (inWater && !_directSwimControl) {
+                    int ty = goalY();
+                    if (ty > 0 && ty > mod.getPlayer().getBlockPos().getY()
+                            && !mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+                        _directSwimUpMode = true;
+                        _directSwimLastY = mod.getPlayer().getBlockPos().getY();
+                        _directSwimStallTimer.reset();
+                        holdDirectSwimUp(mod);
+                        setDebugState("Swimming straight up to y=" + ty);
+                        return null;
                     }
                 }
                 if (!_checker.check(mod)) {
@@ -212,7 +256,23 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getInputControls().release(Input.SNEAK);
         mod.getInputControls().release(Input.SPRINT);
         _directSwimControl = false;
+        _directSwimUpMode = false;
         _checker.reset();
+    }
+
+    /**
+     * (2026-09-04 水下垂直上浮) 瞄准正上方 + 前进 + 跳跃 + 疾跑 (水下疾跑 =
+     * 游泳加速, 用户要求 sprint+瞄准控制)。用于水下回地表 (GetToYTask /
+     * GoalYLevel 目标在上方, baritone 无法寻路时)。
+     */
+    private void holdDirectSwimUp(AltoClef mod) {
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        LookHelper.lookAt(mod, new Rotation(0, -90)); // 正上方
+        mod.getInputControls().hold(Input.MOVE_FORWARD);
+        mod.getInputControls().hold(Input.JUMP);
+        mod.getInputControls().hold(Input.SPRINT);
+        mod.getInputControls().release(Input.SNEAK);
+        _directSwimControl = true;
     }
 
     /** 从 baritone goal 提取目标 XZ, 不支持的类型返回 null (不启用直游)。 */
@@ -227,6 +287,19 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
             return new BlockPos(cp.getStartX(), 0, cp.getStartZ());
         }
         return null;
+    }
+
+    /**
+     * (2026-09-04) 提取 baritone goal 的目标 Y, 不支持的类型返回 -1。
+     * 供水下垂直上浮用 (GoalYLevel 无 XZ, goalXZ() 返回 null)。
+     */
+    private int goalY() {
+        Goal g = _cachedGoal;
+        if (g == null) return -1;
+        if (g instanceof GoalYLevel gyl) return gyl.level;
+        if (g instanceof GoalBlock gb) return gb.getGoalPos().getY();
+        if (g instanceof GoalTwoBlocks gtb) return gtb.getGoalPos().getY();
+        return -1;
     }
 
     private double horizontalDist(AltoClef mod, BlockPos target) {
