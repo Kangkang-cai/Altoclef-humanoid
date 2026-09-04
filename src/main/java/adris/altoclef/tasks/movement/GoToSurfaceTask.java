@@ -36,18 +36,6 @@ public class GoToSurfaceTask extends Task {
     private Integer _pitEscapeY = null;
     private final adris.altoclef.util.time.TimerGame _pitEscapeTimer = new adris.altoclef.util.time.TimerGame(1);
 
-    // ===== 向上挖掘开路 (2026-09-04) =====
-    // 用户"上方全是海洋, 导航找不到落脚点, 但可以游泳上去" (现场: y=50 干燥洞穴
-    // 地面, 上方是岩石/海洋)。baritone 的 GoalYLevel(58) 在"头顶上方是水/需要跨水
-    // 挖穿"时寻路失败 → 原地卡住 (日志实锤 y=50 卡 43s, 无任何进展)。修复: y 长
-    // 时间不涨且头顶是可挖方块 → 强制派 DestroyBlockTask 挖正上方, 逐格凿开洞穴顶;
-    // 一旦挖穿进入水, CustomBaritoneGoalTask 的水中上浮逻辑接管游出水面。
-    private int _lastSurfaceY = Integer.MIN_VALUE;
-    private int _surfaceStallTicks = 0;
-    private boolean _digUpActive = false;
-    // baritone 挖一格岩石约 1~2s, 超过该 tick 数 y 仍不涨即判卡住强制挖。
-    private static final int SURFACE_STALL_TICKS = 60;
-
     private boolean inPit(AltoClef mod) {
         if (_pitEscapeY == null || _pitEscapeTimer.elapsed()) {
             _pitEscapeY = WorldHelper.getPitEscapeY(mod);
@@ -60,7 +48,6 @@ public class GoToSurfaceTask extends Task {
     protected Task onTick(AltoClef mod) {
         boolean deep = WorldHelper.isDeepUnderground(mod);
         if (!deep) {
-            _digUpActive = false;
             // 峡谷/深坑判定 (仅地表资源前置场景使用本任务)。
             if (!inPit(mod)) {
                 return null; // 真正的地表, 等待 isFinished 结束
@@ -76,32 +63,16 @@ public class GoToSurfaceTask extends Task {
         }
         _pitEscapeY = null;
         BlockPos player = mod.getPlayer().getBlockPos();
-        // (2026-09-04 向上挖掘开路) 正在凿顶: 持续挖正上方直到打通 (进入水/空气)。
-        if (_digUpActive) {
-            BlockPos up = player.up();
-            if (WorldHelper.isSolid(mod, up) && WorldHelper.canBreak(mod, up)) {
-                setDebugState("Digging upward through cave ceiling");
-                return new DestroyBlockTask(up);
-            }
-            _digUpActive = false; // 头顶已非实心 (挖穿/是水/是空气), 交还 baritone
-        }
-        // 无进展检测: y 不涨累计超过阈值且头顶可挖 → 强制挖开 (baritone 卡住)。
-        if (player.getY() != _lastSurfaceY) {
-            _lastSurfaceY = player.getY();
-            _surfaceStallTicks = 0;
-        } else {
-            _surfaceStallTicks++;
-            if (_surfaceStallTicks >= SURFACE_STALL_TICKS) {
-                BlockPos up = player.up();
-                if (WorldHelper.isSolid(mod, up) && WorldHelper.canBreak(mod, up)) {
-                    Debug.logMessage("[GoToSurface] stuck at y=" + player.getY()
-                            + ", digging upward to escape cave");
-                    _digUpActive = true;
-                    setDebugState("Stuck, digging upward to escape cave");
-                    return new DestroyBlockTask(up);
-                }
-                _surfaceStallTicks = 0; // 头顶不可挖, 重置再等 (避免每 tick 重判)
-            }
+        // (2026-09-04 回地表直接向上挖, 用户"上方海洋 baritone 找不到落脚点" 现场:
+        // y=50 干燥洞穴顶低, 头顶 y=51 是岩石) baritone 的 GoalYLevel(58) 在"洞穴
+        // 顶上方是水/需跨水挖穿"时寻路失败原地卡死 (日志实锤 y=50 卡 43s)。修复:
+        // deep (y<58) 时只要头顶是可挖实心就【持续挖正上方】逐格凿穿洞穴顶 — 不
+        // 依赖 baritone 规划。挖穿进入空气/水后: 空气 → 交 GetToYTask (baritone
+        // 正常上); 水 → 交 CustomBaritoneGoalTask 的水中上浮 (sprint+瞄准) 游出水面。
+        BlockPos up = player.up();
+        if (WorldHelper.isSolid(mod, up) && WorldHelper.canBreak(mod, up)) {
+            setDebugState("Digging upward to surface");
+            return new DestroyBlockTask(up);
         }
         // (2026-08-27 表面目标高度 63→58, 用户改判) 旧版固定 63 (海平面), 卡死现场
         // (15:34): bot 已到 y≈63 但抬起头扫描仍判深地下, GetToYTask(63) 目标==当前位置
@@ -123,9 +94,6 @@ public class GoToSurfaceTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _pitEscapeY = null;
-        _lastSurfaceY = Integer.MIN_VALUE;
-        _surfaceStallTicks = 0;
-        _digUpActive = false;
     }
 
     @Override
