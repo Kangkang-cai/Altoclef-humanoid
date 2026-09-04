@@ -69,19 +69,27 @@ public class GoToSurfaceTask extends Task {
         // deep (y<58) 时只要头顶是可挖实心就【持续挖正上方】逐格凿穿洞穴顶 — 不
         // 依赖 baritone 规划。挖穿进入空气/水后: 空气 → 交 GetToYTask (baritone
         // 正常上); 水 → 交 CustomBaritoneGoalTask 的水中上浮 (sprint+瞄准) 游出水面。
-        // (2026-09-04 v2 修复) 不能用 WorldHelper.canBreak 判定可挖: 它在海洋下
-        // (avoidOcean: y<64 且 biome 是 ocean 且水下) 返回 false → 海洋下的洞穴顶
-        // 岩石被判"不可挖" → 挖顶永不触发 (日志实锤 canBreak 把 y=51 岩石判 false)。
-        // 改用不含 canReach/ocean 的判定: 硬度>=0 (排除基岩) + 非 avoidBreaking。
-        BlockPos up = player.up();
-        boolean solidUp = WorldHelper.isSolid(mod, up);
-        float hardness = mod.getWorld().getBlockState(up).getHardness(mod.getWorld(), up);
-        boolean avoidUp = mod.getExtraBaritoneSettings().shouldAvoidBreaking(up);
-        if (solidUp && hardness >= 0 && !avoidUp) {
+        // (2026-09-04 v3 修复) 前两版用 player.up() 挖顶是错的: up() 是玩家【身体所在
+        // 格】(通常空气, isSolid=false) → 挖顶永不触发 (日志实锤: jar 已最新、游戏
+        // 12:12:58 启动加载新 jar, 但 [GoToSurface] 从未出现)。正确目标 = 头顶第一格
+        // 实心方块: 从 up(1) 向上扫描 (脚+1 起, 越过身体格), 找第一个实心且可挖的挖。
+        // 挖开后 bot 跳上一格 (GetToYTask), 继续向上找下一格, 逐格凿穿洞穴顶。
+        BlockPos digTarget = null;
+        for (int dy = 1; dy <= 5; dy++) {
+            BlockPos cand = player.up(dy);
+            if (WorldHelper.isSolid(mod, cand)) {
+                float h = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
+                if (h >= 0 && !mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) {
+                    digTarget = cand;
+                }
+                break; // 遇到实心 (可挖或不可挖/基岩) 就停
+            }
+        }
+        if (digTarget != null) {
             Debug.logToFile("altoclef_diag.log", "[GoToSurface] digging up at "
-                    + up + " hardness=" + hardness + " avoid=" + avoidUp);
+                    + digTarget + " player=" + player);
             setDebugState("Digging upward to surface");
-            return new DestroyBlockTask(up);
+            return new DestroyBlockTask(digTarget);
         }
         // (2026-08-27 表面目标高度 63→58, 用户改判) 旧版固定 63 (海平面), 卡死现场
         // (15:34): bot 已到 y≈63 但抬起头扫描仍判深地下, GetToYTask(63) 目标==当前位置
