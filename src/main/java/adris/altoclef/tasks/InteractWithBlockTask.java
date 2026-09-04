@@ -23,6 +23,7 @@ import baritone.api.utils.input.Input;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
+import net.minecraft.item.Items;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -371,21 +372,47 @@ public class InteractWithBlockTask extends Task {
                 // (2026-09-01 WAIT_FOR_CLICK 兜底): reachable 已非空且每 tick lookAt() 过
                 // 但 isLookingAt 因方块面/角度/半块(床头床脚) 判错 → 1.5s 后强制一次交互;
                 // 若仍失败由 CLICK_ATTEMPTED 的 5s _clickTimer / 清上方卡死检测接手。
-                if (_toUse != null) {
-                    mod.getSlotHandler().forceEquipItem(_toUse, false);
+                // (2026-09-04 误触诊断+窄修) 新任务 _forceClickTimer 继承 BaseTimer
+                // _prevTime=0 → 首 tick elapsed()=true → 准星还没转到目标就盲点右键。
+                // 对倒岩浆/水是灾难: 液体倒错位置会流动毁掉 cast (实测 21:25:00 任务
+                // START 与 Click attempted 同秒 → Escaping lava)。流体桶【严禁盲点】,
+                // 落回 WAIT_FOR_CLICK 等准星跟上 (1-2 tick); 其余交互保留兜底但打
+                // 诊断日志 (准星实际指向 vs 目标)。
+                boolean pouringFluid = false;
+                if (_toUse != null && _toUse.getMatches() != null) {
+                    for (Item it : _toUse.getMatches()) {
+                        if (it == Items.LAVA_BUCKET || it == Items.WATER_BUCKET) {
+                            pouringFluid = true;
+                            break;
+                        }
+                    }
+                }
+                HitResult diagHit = MinecraftClient.getInstance().crosshairTarget;
+                String crosshairDesc = (diagHit instanceof BlockHitResult diagB)
+                        ? diagB.getBlockPos().toShortString() + "/" + diagB.getSide()
+                        : diagHit.getType().toString();
+                if (pouringFluid) {
+                    Debug.logInternal("(InteractWithBlockTask) SKIP force-click: pouring fluid bucket, crosshair="
+                            + crosshairDesc + " != target " + _target.toShortString() + ", waiting for precise aim");
                 } else {
-                    mod.getSlotHandler().forceDeequipRightClickableItem();
+                    Debug.logInternal("(InteractWithBlockTask) FORCE-CLICK crosshair=" + crosshairDesc
+                            + ", target=" + _target.toShortString() + ", dir=" + _direction);
+                    if (_toUse != null) {
+                        mod.getSlotHandler().forceEquipItem(_toUse, false);
+                    } else {
+                        mod.getSlotHandler().forceDeequipRightClickableItem();
+                    }
+                    if (!_shiftClick) {
+                        mod.getInputControls().release(Input.SNEAK);
+                        mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
+                    }
+                    // (2026-09-01 短按, 同上方分支) 见右侧分支注释。
+                    mod.getInputControls().forcePress(_interactInput);
+                    if (_shiftClick) {
+                        mod.getInputControls().hold(Input.SNEAK);
+                    }
+                    return ClickResponse.CLICK_ATTEMPTED;
                 }
-                if (!_shiftClick) {
-                    mod.getInputControls().release(Input.SNEAK);
-                    mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
-                }
-                // (2026-09-01 短按, 同上方分支) 见右侧分支注释。
-                mod.getInputControls().forcePress(_interactInput);
-                if (_shiftClick) {
-                    mod.getInputControls().hold(Input.SNEAK);
-                }
-                return ClickResponse.CLICK_ATTEMPTED;
             }
             _forceClickTimer.reset();
             return ClickResponse.WAIT_FOR_CLICK;

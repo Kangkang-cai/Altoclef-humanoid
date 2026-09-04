@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.construction;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
@@ -22,6 +23,8 @@ public class PlaceObsidianBucketTask extends Task {
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5, true); // This can get stuck forever, so we increase the range.
+    // (2026-09-04 误触诊断) 倒岩浆阶段诊断日志节流 (1s)。
+    private final adris.altoclef.util.time.TimerGame _pourDiagTimer = new adris.altoclef.util.time.TimerGame(1);
 
     public static final Vec3i[] CAST_FRAME = new Vec3i[]{
             new Vec3i(0, -1, 0),
@@ -154,6 +157,28 @@ public class PlaceObsidianBucketTask extends Task {
             }
 
             setDebugState("Placing lava for cast");
+
+            // (2026-09-04 误触诊断) 每秒一次: 目标块状态 + 周围 ±2 已漏岩浆位置 +
+            // 玩家位置。用于事后核对"岩浆到底倒哪了/流到哪了"。
+            if (_pourDiagTimer.elapsed()) {
+                _pourDiagTimer.reset();
+                StringBuilder lavaNear = new StringBuilder();
+                for (int dx = -2; dx <= 2; dx++) {
+                    for (int dy = -2; dy <= 2; dy++) {
+                        for (int dz = -2; dz <= 2; dz++) {
+                            BlockPos p = _pos.add(dx, dy, dz);
+                            if (mod.getWorld().getBlockState(p).getBlock() == Blocks.LAVA) {
+                                if (lavaNear.length() > 0) lavaNear.append(',');
+                                lavaNear.append(p.getX() - _pos.getX()).append(',').append(p.getY() - _pos.getY()).append(',').append(p.getZ() - _pos.getZ());
+                            }
+                        }
+                    }
+                }
+                Debug.logInternal("[PourDiag] pos=" + _pos.toShortString()
+                        + " blockAtPos=" + mod.getWorld().getBlockState(_pos).getBlock()
+                        + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                        + " lavaNearby(rel)=" + lavaNear);
+            }
 
             return new InteractWithBlockTask(new ItemTarget(Items.LAVA_BUCKET, 1), Direction.WEST, _pos.add(1, 0, 0), false);
         }
