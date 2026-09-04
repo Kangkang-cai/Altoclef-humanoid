@@ -313,8 +313,9 @@ public class BeatMinecraft2Task extends Task {
     private Task _foodTask;
     private Task _gearTask;
     private Task _lootTask;
-    // (2026-09-03 钻石收集时间上限, 用户"31个钻石不好收集, 累积15分钟就再也不收集")
-    // 钻石探索/收集(挖钻石矿换剑/镐)耗尽太久时, 累积活跃 15 分钟后永久放弃钻石收集,
+    // (2026-09-03 钻石收集时间上限, 用户确认以 5 分钟为准; 早期注释写 15 分钟与常量不符已修正)
+    // 钻石探索/收集(挖钻石矿换剑/镐)耗尽太久时, 累积活跃 5 分钟(DIAMOND_COLLECT_LIMIT_MS)后
+    // 永久放弃钻石收集,
     // 不再卡在"差几颗钻石"的死循环, 直接推进去下界。累计的是"钻石收集任务活跃运行"的
     // 时间(被打断去食物/木柴等时不累加), 用墙上时钟。达标后 marked give up, 后续
     // 两处钻石收集判定 (shouldForce(_gearTask) 与 !eyeGearSatisfied 分支) 都跳过。
@@ -327,6 +328,11 @@ public class BeatMinecraft2Task extends Task {
     // 才受时间上限约束。赋值处置位: 铁装 getSquashedItemTask → false; 钻石
     // COLLECT_EYE gear → true。计时只对钻石收集 (此类下 _gearTask) 生效。
     private boolean _gearTaskIsDiamond = false;
+    // (2026-09-04 钻石放弃后进下界前补金靴) 金靴和钻石件同在 COLLECT_EYE_ARMOR,
+    // 钻石超时放弃时金靴被一并放弃 → 裸脚下界, 到防火药水阶段前有猪灵敌对窗口。
+    // give up 后去下界前只补金靴 (4 金锭, 不碰钻石件): 没穿没持有 → 收集合成
+    // (粘性实例防每tick重启); 背包有 → 穿上; 已穿 → 放行 _goToNetherTask。
+    private Task _preNetherGoldenBootsTask = null;
     private final Task _buildMaterialsTask;
     private final PlaceBedAndSetSpawnTask _setBedSpawnTask = new PlaceBedAndSetSpawnTask();
     private final GoToStrongholdPortalTask _locateStrongholdTask;
@@ -1470,6 +1476,11 @@ public class BeatMinecraft2Task extends Task {
                     if (_gearTaskIsDiamond) {
                         recordDiamondCollectActive(mod);
                         if (_diamondCollectGivenUp) {
+                            // (2026-09-04 补金靴) 放弃钻石后进下界前只补金靴, 不碰钻石件
+                            Task bootsTask = getPreNetherGoldenBootsTask(mod);
+                            if (bootsTask != null) {
+                                return bootsTask;
+                            }
                             setDebugState("Giving up diamond gear, proceeding forward (limit reached)");
                             return _goToNetherTask;
                         }
@@ -1582,10 +1593,14 @@ public class BeatMinecraft2Task extends Task {
 
                 // Then get diamond
                 if (!eyeGearSatisfied) {
-                    // (2026-09-03 钻石时间上限) 累积钻石收集活跃 ≥15 分钟则永久放弃,
+                    // (2026-09-03 钻石时间上限) 累积钻石收集活跃 ≥5 分钟则永久放弃,
                     // 不再卡死在"差几颗钻石", 直接去下界。
                     if (_diamondCollectGivenUp) {
-                        // 已给你再收集, 跳过往下去下界
+                        // 已放弃钻石收集, 跳过往下去下界 (2026-09-04 途中先补金靴)
+                        Task bootsTask = getPreNetherGoldenBootsTask(mod);
+                        if (bootsTask != null) {
+                            return bootsTask;
+                        }
                         setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
                         return _goToNetherTask;
                     }
@@ -2340,7 +2355,7 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * (2026-09-03 钻石时间上限, 用户"31个钻石不好收集, 累积15分钟就再也不收集")
+     * (2026-09-03 钻石时间上限, 用户确认以 5 分钟为准, 常量 DIAMOND_COLLECT_LIMIT_MS=5min)
      * 每 tick 钻石收集活跃时调用: 用墙上时钟累加两次调用间的真实时长 (被打断去
      * 食物/木柴等时不调用, 天然暂停), 达到 DIAMOND_COLLECT_LIMIT_MS 后永久
      * give up 并打印累计时间。打印节流: 放弃时打一次, 平时每 30s 打一次累计进度。
@@ -2364,6 +2379,29 @@ public class BeatMinecraft2Task extends Task {
             Debug.logToFile("altoclef_diag.log", "[DiamondCollect] cumulative active="
                     + (_diamondCollectCumulativeMs / 1000) + "s so far (limit 300s)");
         }
+    }
+
+    /**
+     * (2026-09-04 钻石放弃后进下界前补金靴) 只在钻石 give up 分支调用:
+     * 已穿金靴 → null (放行 _goToNetherTask); 背包有 → EquipArmorTask 穿上;
+     * 没有 → 收集合成 (粘性实例: CataloguedResourceTask 每 tick 新建会重启
+     * 收集链, 用户实测教训)。金靴只耗 4 金锭, 与钻石件解耦, 钻石保持放弃态。
+     */
+    private Task getPreNetherGoldenBootsTask(AltoClef mod) {
+        if (StorageHelper.isArmorEquipped(mod, Items.GOLDEN_BOOTS)) {
+            _preNetherGoldenBootsTask = null;
+            return null;
+        }
+        if (mod.getItemStorage().hasItemInventoryOnly(Items.GOLDEN_BOOTS)) {
+            setDebugState("Equipping golden boots before Nether (diamond gear given up)");
+            return new EquipArmorTask(Items.GOLDEN_BOOTS);
+        }
+        if (_preNetherGoldenBootsTask == null || _preNetherGoldenBootsTask.isFinished(mod)) {
+            Debug.logMessage("(DiamondGiveUp) Golden boots missing before Nether — crafting (4 gold ingots), diamond gear stays abandoned.");
+            _preNetherGoldenBootsTask = TaskCatalogue.getItemTask(Items.GOLDEN_BOOTS, 1);
+        }
+        setDebugState("Crafting golden boots before Nether (diamond gear given up)");
+        return _preNetherGoldenBootsTask;
     }
 
     private static ItemTarget[] toItemTargets(Item ...items) {
