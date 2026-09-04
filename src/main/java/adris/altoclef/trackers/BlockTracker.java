@@ -372,6 +372,31 @@ public class BlockTracker extends Tracker {
         }
     }
 
+    /**
+     * (2026-09-04 人类式感知) getKnownLocations 的"可感知"版本。
+     *
+     * 核心原则: 方块缓存是"记忆", 可以当探索的方向感用, 但不允许当
+     * "已确认存在"用 —— 凡是拿缓存做"我确定那儿有 X, 走过去"这种硬决策
+     * 的调用方, 必须用本接口, 只拿到 VisibilityHelper.isBlockPerceivable
+     * (LOS + FOV + 近距豁免) 通过的位置。
+     *
+     * 注意: 内部会对每个候选做 LOS 射线, 候选多时开销大 (参见 KnowledgeMemory
+     * 2026-08-23 卡顿修复的教训)。调用方应只对少量关键方块 (spawner/门框等)
+     * 使用, 不要对海量方块 (矿石/岩浆) 全量过滤。
+     */
+    public List<BlockPos> getPerceivedLocations(Block... blocks) {
+        updateState();
+        synchronized (_scanMutex) {
+            List<BlockPos> result = new ArrayList<>();
+            for (BlockPos pos : currentCache().getKnownLocations(blocks)) {
+                if (VisibilityHelper.isBlockPerceivable(_mod, pos)) {
+                    result.add(pos);
+                }
+            }
+            return result;
+        }
+    }
+
     public Optional<BlockPos> getNearestWithinRange(BlockPos pos, double range, Block... blocks) {
         return getNearestWithinRange(new Vec3d(pos.getX(), pos.getY(), pos.getZ()), range, blocks);
     }
