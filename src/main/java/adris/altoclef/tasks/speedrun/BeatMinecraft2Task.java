@@ -2301,9 +2301,15 @@ public class BeatMinecraft2Task extends Task {
     }
 
     private BlockPos doSimpleSearchForEndPortal(AltoClef mod) {
-        List<BlockPos> frames = mod.getBlockTracker().getKnownLocations(Blocks.END_PORTAL_FRAME);
-        if (frames.size() >= END_PORTAL_FRAME_COUNT) {
-            // Get the center of the frames.
+        // (2026-09-04 人类式感知) 原实现直接数 BlockTracker 缓存里的门框
+        // (getKnownLocations, 隔墙也知道) —— 典型透视。改为 getPerceivedLocations:
+        // 只数"亲眼看见"(LOS+FOV, 近距豁免 6 格) 的门框。
+        // ≥12 个 → 按原逻辑取平均得门中心;
+        // ≥3 个但还没看全 → 先返回已见门框的重心, 人类行为: 看到几个门框就
+        // 知道门厅就在那, 走过去自然看全 (近距豁免生效后凑满 12, 中心收敛)。
+        List<BlockPos> frames = mod.getBlockTracker().getPerceivedLocations(Blocks.END_PORTAL_FRAME);
+        if (frames.size() >= 3) {
+            // Get the center of the (seen) frames.
             Vec3d average = frames.stream()
                     .reduce(Vec3d.ZERO, (accum, bpos) -> accum.add(bpos.getX() + 0.5, bpos.getY() + 0.5, bpos.getZ() + 0.5), Vec3d::add)
                     .multiply(1.0f / frames.size());

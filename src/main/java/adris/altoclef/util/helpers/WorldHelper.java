@@ -208,7 +208,9 @@ public interface WorldHelper {
     }
 
     static BlockPos getADesertTemple(AltoClef mod) {
-        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.STONE_PRESSURE_PLATE)) {
+        // (2026-09-04 人类式感知) 沙漠神殿定位是"硬决策"(确定那儿有神殿走过去),
+        // 改用 getPerceivedLocations: 只认亲眼看到的压力板, 不再隔沙透视。
+        for (BlockPos pos : mod.getBlockTracker().getPerceivedLocations(Blocks.STONE_PRESSURE_PLATE)) {
             if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.STONE_PRESSURE_PLATE && // Duct tape
                     mod.getWorld().getBlockState(pos.down()).getBlock() == Blocks.CUT_SANDSTONE &&
                     mod.getWorld().getBlockState(pos.down(2)).getBlock() == Blocks.TNT) {
