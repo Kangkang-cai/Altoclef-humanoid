@@ -202,7 +202,7 @@ public class BlockTracker extends Tracker {
                     }
                     if (targetSet.contains(b)) {
                         synchronized (_scanMutex) {
-                            currentCache().addBlock(b, pos);
+                            currentCache().addBlock(_mod, b, pos);
                         }
                     }
                 }
@@ -290,7 +290,7 @@ public class BlockTracker extends Tracker {
     public void addBlock(Block block, BlockPos pos) {
         if (blockIsValid(pos, block)) {
             synchronized (_scanMutex) {
-                currentCache().addBlock(block, pos);
+                currentCache().addBlock(_mod, block, pos);
             }
         } else {
             Debug.logInternal("INVALID SET: " + block + " " + pos);
@@ -497,7 +497,7 @@ public class BlockTracker extends Tracker {
                     synchronized (_trackingBlocks) {
                         if (_trackingBlocks.containsKey(block)) {
                             //Debug.logInternal("Good: " + block + " at " + pos);
-                            currentCache().addBlock(block, pos);
+                            currentCache().addBlock(_mod, block, pos);
                         }
                     }
                 }
@@ -630,7 +630,7 @@ public class BlockTracker extends Tracker {
             }
         }
 
-        public void addBlock(Block block, BlockPos pos) {
+        public void addBlock(AltoClef mod, Block block, BlockPos pos) {
             if (blockUnreachable(pos)) return;
             if (_cachedByPosition.containsKey(pos)) {
                 if (_cachedByPosition.get(pos) == block) {
@@ -641,11 +641,35 @@ public class BlockTracker extends Tracker {
                     removeBlock(pos, block);
                 }
             }
-            if (!anyFound(block)) {
-                _cachedBlocks.put(block, new ArrayList<>());
+            List<BlockPos> list = _cachedBlocks.computeIfAbsent(block, k -> new ArrayList<>());
+            // (2026-09-03 防海量方块撑爆缓存, 用户"海洋下缓存 24 万水方块 → 每 tick
+            // 遍历全量 → 200ms/帧") 单类型缓存达到上限 (maxCacheSizePerBlockType=100)
+            // 时先淘汰离玩家最远的一个再添加 — 像堆一样始终保留"最近的 100 个"。
+            // 水/岩浆这类"铺天盖地"型方块在扫描时每格都命中, 旧实现无添加时上限,
+            // 只有每 5s 的全量 smartPurge 才裁剪到 100, 期间可膨胀到 24 万 → 任何
+            // anyFound/getKnownLocations 每 tick 遍历全量。矿石稀疏所以从来没事,
+            // 这解释了"为什么只有找水/海洋下卡"。
+            if (list.size() >= _config.maxCacheSizePerBlockType
+                    && mod != null && mod.getPlayer() != null) {
+                BlockPos player = mod.getPlayer().getBlockPos();
+                BlockPos farthest = null;
+                double farthestSq = -1;
+                for (BlockPos p : list) {
+                    double d = p.getSquaredDistance(player);
+                    if (d > farthestSq) {
+                        farthestSq = d;
+                        farthest = p;
+                    }
+                }
+                if (farthest != null) {
+                    list.remove(farthest);
+                    _cachedByPosition.remove(farthest);
+                }
             }
-            _cachedBlocks.get(block).add(pos);
-            _cachedByPosition.put(pos, block);
+            if (!list.contains(pos)) {
+                list.add(pos);
+                _cachedByPosition.put(pos, block);
+            }
         }
 
 
