@@ -513,7 +513,7 @@ public interface WorldHelper {
         return !mod.getBlockTracker().unreachable(pos);
     }
 
-    static boolean isOcean(RegistryEntry<Biome> b){
+    public static boolean isOcean(RegistryEntry<Biome> b){
         return (b.matchesKey(BiomeKeys.OCEAN)
         || b.matchesKey(BiomeKeys.COLD_OCEAN)
         || b.matchesKey(BiomeKeys.DEEP_COLD_OCEAN)

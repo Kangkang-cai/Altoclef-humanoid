@@ -277,10 +277,46 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         setDebugState("Searching for liquid by wandering around aimlessly");
+        // (2026-09-04 海洋中朝陆地, 用户"上浮到海面后继续往海里导航, 转头能看到陆地")
+        // 地表找液体时若玩家在海洋 biome 中, 随机/有界游荡只会越游越深进海 (海洋里
+        // 既无岩浆也无水源, 游过去浪费时间)。改: 先朝最近陆地 XZ 导航 (GoToXZTask),
+        // 到陆地后再有界游荡。找最近陆地沿 8 方向扫描非海洋 biome, 每 16 格一档
+        // 直到 128 格; 找不到 (全海) 才回退有界游荡。
+        if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && isPlayerInOcean(mod)) {
+            BlockPos land = findNearestLand(mod);
+            if (land != null) {
+                setDebugState("On ocean, heading to land to search " + _liquidName);
+                return new GetToXZTask(land.getX(), land.getZ());
+            }
+        }
         // (2026-09-03 无限游荡 → 有界游荡) 地表探索用有界游荡: 每走完一段自动回到
         // 本分支重估 (有液体源就近收 / 无则换方向再走一段), 不再 TimeoutWanderTask(∞)
         // 一条路走到黑永不评估。游荡是探索手段, 不是目标。
         return new TimeoutWanderTask(SURFACE_SEARCH_WANDER_RANGE);
+    }
+
+    /** (2026-09-04) 玩家当前所在 biome 是否为海洋 (ocean 系)。 */
+    private boolean isPlayerInOcean(AltoClef mod) {
+        return WorldHelper.isOcean(mod.getWorld().getBiome(mod.getPlayer().getBlockPos()));
+    }
+
+    /** (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome"陆地 XZ; 全海返回 null。
+     * 距离档 16→32→...→128, 每档 8 个方向, 首个命中的非海洋坐标即返回 (最近优先)。 */
+    private BlockPos findNearestLand(AltoClef mod) {
+        BlockPos p = mod.getPlayer().getBlockPos();
+        for (int dist = 16; dist <= 128; dist += 16) {
+            for (int d = 0; d < 8; d++) {
+                double ang = Math.PI / 4.0 * d;
+                int x = p.getX() + (int) Math.round(Math.cos(ang) * dist);
+                int z = p.getZ() + (int) Math.round(Math.sin(ang) * dist);
+                BlockPos cand = new BlockPos(x, p.getY(), z);
+                if (mod.getChunkTracker().isChunkLoaded(cand)
+                        && !WorldHelper.isOcean(mod.getWorld().getBiome(cand))) {
+                    return cand;
+                }
+            }
+        }
+        return null;
     }
 
     @Override
