@@ -205,6 +205,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private BlockPos chooseNewTarget(AltoClef mod, Vec3d pos) {
+        // (2026-09-04 用户"在水里不需要什么高级导航") 玩家已在水里(海洋)时, 探索
+        // 应直接游向最近陆地, 而不是拒绝所有海洋方向 → 四周全海 → "no dry target"
+        // 每 5s 失败重试卡死 (日志实锤: [No-Ocean] ... refusing to swim + Explore found
+        // no dry target direction)。水里直接游出海洋即可, 不需要 baritone 的
+        // dry-point 高级寻路。
+        boolean swimming = isPlayerInWater(mod);
+
         Optional<BlockPos> biased = pickBiasedTarget(pos);
         if (biased.isEmpty() && _hadBiasOnce) {
             // We used to have bias targets but checked them all: done here.
@@ -215,7 +222,19 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         }
         for (int attempt = 0; attempt < MAX_PICK_ATTEMPTS; ++attempt) {
             double angle;
-            if (biased.isPresent() && Math.random() < P_BIASED) {
+            if (swimming) {
+                // 水里: 朝最近陆地游 (非海洋方向), 全海时随机方向兜底 (先动起来)。
+                BlockPos land = findNearestLand(mod);
+                if (land != null) {
+                    angle = Math.atan2(land.getZ() - pos.z, land.getX() - pos.x)
+                            + (Math.random() * 2 - 1) * Math.toRadians(BIAS_ANGLE_DEG);
+                } else {
+                    angle = nextRandomHeading();
+                }
+                _heading = angle;
+                _currentBiasTarget = null;
+                _lastWasBiased = false;
+            } else if (biased.isPresent() && Math.random() < P_BIASED) {
                 // Steer towards the target, with some randomness around its direction.
                 double toTarget = Math.atan2(biased.get().getZ() - pos.z, biased.get().getX() - pos.x);
                 double spread = Math.toRadians(BIAS_ANGLE_DEG);
@@ -254,11 +273,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // 既没有要找的目标(动物/作物/结构), 一路游过去还浪费时间与溺水风险
             // (用户实测: 随机探索跑进海里)。非随机(biased)也拦: 海洋不该被当成
             // "跨河目标"。
-            if (isTargetInWater(mod, candidate) && !_lastWasBiased) {
+            // (2026-09-04) 玩家已在水里时放行海洋方向 (直接游出海洋), 拒绝仅对
+            // 陆地上的探索生效 (不下海)。否则四周全海 → no dry target → 卡死。
+            if (isTargetInWater(mod, candidate) && !_lastWasBiased && !swimming) {
                 _failedTargets.add(candidate);
                 continue;
             }
-            if (isTargetInWater(mod, candidate)) {
+            if (isTargetInWater(mod, candidate) && !swimming) {
                 // 目标是海洋水域 → 拒绝(下海无意义); 河/湖 → 放行过河。
                 if (isTargetOcean(mod, candidate)) {
                     _failedTargets.add(candidate);
@@ -268,6 +289,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 }
                 Debug.logMessage("[River-cross] heading across water towards remembered target "
                         + _currentBiasTarget + " (swimming).");
+            }
+            if (swimming && isTargetOcean(mod, candidate)) {
+                Debug.logMessage("[Swim-out] already in water, heading towards " + candidate.toShortString());
             }
             return candidate;
         }
@@ -304,6 +328,40 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         if (mod.getWorld() == null) return false;
         if (!mod.getChunkTracker().isChunkLoaded(target)) return false;
         return WorldHelper.isOcean(mod.getWorld().getBiome(target));
+    }
+
+    /**
+     * (2026-09-04) 玩家是否已在水里 (游泳/泡水)。水里不需要"高级导航"——
+     * 直接游出海洋即可, 若仍拒绝所有海洋方向会无路可走卡死。
+     */
+    private boolean isPlayerInWater(AltoClef mod) {
+        if (mod.getWorld() == null || mod.getPlayer() == null) return false;
+        if (mod.getPlayer().isTouchingWater()) return true;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        return mod.getChunkTracker().isChunkLoaded(feet)
+                && mod.getWorld().getBlockState(feet).isOf(Blocks.WATER);
+    }
+
+    /**
+     * (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome"陆地 XZ; 全海返回 null。
+     * 玩家在水里时探索目标朝此方向游, 直接离开海洋。
+     */
+    private BlockPos findNearestLand(AltoClef mod) {
+        if (mod.getWorld() == null || mod.getPlayer() == null) return null;
+        BlockPos p = mod.getPlayer().getBlockPos();
+        for (int dist = 16; dist <= 128; dist += 16) {
+            for (int d = 0; d < 8; d++) {
+                double ang = Math.PI / 4.0 * d;
+                int x = p.getX() + (int) Math.round(Math.cos(ang) * dist);
+                int z = p.getZ() + (int) Math.round(Math.sin(ang) * dist);
+                BlockPos cand = new BlockPos(x, p.getY(), z);
+                if (mod.getChunkTracker().isChunkLoaded(cand)
+                        && !WorldHelper.isOcean(mod.getWorld().getBiome(cand))) {
+                    return cand;
+                }
+            }
+        }
+        return null;
     }
 
     private double nextRandomHeading() {
