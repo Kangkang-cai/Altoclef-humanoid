@@ -19,6 +19,7 @@ import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
@@ -90,10 +91,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     @SuppressWarnings("ConstantConditions")
     @Override
     protected void onResourceStart(AltoClef mod) {
-        // Track all water (source + flowing), not just sources
+        // Track the liquid we actually collect (water OR lava), not just water.
+        // (2026-09-04 修: 原无条件 trackBlock(WATER) — 找 lava 时没追踪 lava →
+        // lava 缓存恒空 → 永远感知不到岩浆 → 只能地表游荡/定位到水面)。
         mod.getBehaviour().push();
         mod.getBehaviour().setRayTracingFluidHandling(RaycastContext.FluidHandling.ANY);
-        mod.getBlockTracker().trackBlock(Blocks.WATER);
+        mod.getBlockTracker().trackBlock(_toCollect);
 
         // Avoid breaking / placing blocks at our liquid
         mod.getBehaviour().avoidBlockBreaking((pos) -> MinecraftClient.getInstance().world.getBlockState(pos).getBlock() == _toCollect);
@@ -330,8 +333,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
         return WorldHelper.isOcean(mod.getWorld().getBiome(mod.getPlayer().getBlockPos()));
     }
 
-    /** (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome"陆地 XZ; 全海返回 null。
-     * 距离档 16→32→...→128, 每档 8 个方向, 首个命中的非海洋坐标即返回 (最近优先)。 */
+    /** (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome 且列顶部非水"的干燥陆地
+     * XZ; 全海/全湿返回 null。
+     * (2026-09-04 v2 用户"寻找lava老是定位到水面上") 原只查 biome 非 ocean — biome
+     * 是陆地但该 XZ 实际是海面/浅水时, bot GetToXZTask 游到水面停住不上岸 (日志
+     * 14:19:28-38 On ocean heading to land -> (216,285)/(228,279) 反复到达水面)。
+     * 加 isColumnWater: 只有真正干燥 (列顶部非水) 的陆地才作为上岸目标。 */
     private BlockPos findNearestLand(AltoClef mod) {
         BlockPos p = mod.getPlayer().getBlockPos();
         for (int dist = 16; dist <= 128; dist += 16) {
@@ -341,12 +348,27 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 int z = p.getZ() + (int) Math.round(Math.sin(ang) * dist);
                 BlockPos cand = new BlockPos(x, p.getY(), z);
                 if (mod.getChunkTracker().isChunkLoaded(cand)
-                        && !WorldHelper.isOcean(mod.getWorld().getBiome(cand))) {
+                        && !WorldHelper.isOcean(mod.getWorld().getBiome(cand))
+                        && !isColumnWater(mod, cand)) {
                     return cand;
                 }
             }
         }
         return null;
+    }
+
+    /** (2026-09-04) 该 XZ 列的顶部 (最高非空气方块) 是否为水 (海面/浅水)。
+     * 列未加载视为非水 (不知道, 先信任 biome)。 */
+    private boolean isColumnWater(AltoClef mod, BlockPos target) {
+        if (mod.getWorld() == null) return false;
+        for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
+            BlockPos check = new BlockPos(target.getX(), y, target.getZ());
+            if (!mod.getChunkTracker().isChunkLoaded(check)) return false;
+            BlockState state = mod.getWorld().getBlockState(check);
+            if (state.isAir()) continue;
+            return state.getBlock() == Blocks.WATER;
+        }
+        return false;
     }
 
     @Override
