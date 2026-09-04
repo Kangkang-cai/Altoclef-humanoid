@@ -25,6 +25,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.world.RaycastContext;
 
@@ -49,10 +50,19 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 随机游荡找水几乎无果, 且持续探入未加载区块 → 地形生成 + 路径搜索把帧率拖到
     // 100ms+ (altoclef_jank.log 实锤 "Wander for Infinity blocks" 期间 frameMs=102~146)。
     // 地表河流/湖/海找水概率高, 地表也常有裸露岩浆池; 回地表路上 BlockTracker 近区
-    // 扫描会顺路发现液体源。到地表后以【有界游荡】(每段 SURFACE_SEARCH_WANDER_RANGE
-    // 自动返回重估, 顺路感知) 替代原先的无限游荡 (TimeoutWanderTask(∞) 永不结束)。
-    private static final int SURFACE_SEARCH_WANDER_RANGE = 50;
+    // 扫描会顺路发现液体源。到地表后用持久 heading 步进探索 (见 getSurfaceExploreTask,
+    // 2026-09-04 替代原无限/有界游荡, 坚持方向不原地打转)。
     private static final int BELOW_SURFACE_Y = 58;
+
+    // (2026-09-04 用户"找lava随机方向原地打转, 应坚持大致方向前进, 左右转不回头")
+    // 地表探索不再用 TimeoutWanderTask (每段重估可能换方向 → 原地打转)。改用
+    // 持久 heading: 每段沿当前方向走 EXPLORE_STEP_DIST 格 (GetToXZTask, 到达后
+    // 父任务重估, 有液体源就近收), 每段仅 ±EXPLORE_JITTER_DEG 小角度抖动 (左右
+    // 微调, 绝不回头/大角度转向), 持续朝大致方向推进不原地打转。
+    private double _exploreHeading = Double.NaN;
+    private static final int EXPLORE_STEP_DIST = 48;
+    private static final double EXPLORE_JITTER_DEG = 25;
+
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
 
@@ -317,15 +327,36 @@ public class CollectBucketLiquidTask extends ResourceTask {
                         + " -> " + _landTarget.getX() + "," + _landTarget.getZ());
                 return new GetToXZTask(_landTarget.getX(), _landTarget.getZ());
             }
-            // 全海无陆地: 有界游荡兜底
-            return new TimeoutWanderTask(SURFACE_SEARCH_WANDER_RANGE);
+            // 全海无陆地: 有界探索兜底 (持久方向, 不原地打转)
+            return getSurfaceExploreTask(mod);
         }
-        // 不在海洋 (已上岸/内陆): 清除陆地缓存, 恢复有界游荡
+        // 不在海洋 (已上岸/内陆): 清除陆地缓存, 恢复有界探索
         _landTarget = null;
-        // (2026-09-03 无限游荡 → 有界游荡) 地表探索用有界游荡: 每走完一段自动回到
-        // 本分支重估 (有液体源就近收 / 无则换方向再走一段), 不再 TimeoutWanderTask(∞)
-        // 一条路走到黑永不评估。游荡是探索手段, 不是目标。
-        return new TimeoutWanderTask(SURFACE_SEARCH_WANDER_RANGE);
+        // (2026-09-04 用户"找lava随机方向原地打转") 地表探索用持久 heading 步进
+        // 探索替代 TimeoutWanderTask: 每段沿当前方向走 48 格 (GetToXZTask, 到达后
+        // 父任务重估, 有液体源就近收 / 无则下一步), 每段仅 ±25° 小抖动不回头,
+        // 持续朝大致方向推进, 不再每段重估随机换方向原地打转。
+        return getSurfaceExploreTask(mod);
+    }
+
+    /**
+     * (2026-09-04 用户"坚持大致方向前进, 左右转可以, 不能回头") 计算下一步探索
+     * 目标: 沿持久 heading 走 EXPLORE_STEP_DIST 格, 每步 ±EXPLORE_JITTER_DEG 小
+     * 角度抖动 (绝不回头)。GetToXZTask 到达后父任务重估 (有液体源就近收 / 无则
+     * 下一步继续)。heading 首次随机, 之后只微调。
+     */
+    private Task getSurfaceExploreTask(AltoClef mod) {
+        Vec3d pos = mod.getPlayer().getPos();
+        if (Double.isNaN(_exploreHeading)) {
+            _exploreHeading = Math.random() * 2 * Math.PI;
+        } else {
+            // 左右小角度抖动 (保持大致方向, 不回头/不 180° 转向)
+            _exploreHeading += (Math.random() * 2 - 1) * Math.toRadians(EXPLORE_JITTER_DEG);
+        }
+        int x = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_STEP_DIST);
+        int z = (int) Math.floor(pos.z + Math.sin(_exploreHeading) * EXPLORE_STEP_DIST);
+        setDebugState("Exploring for " + _liquidName + " (heading " + (int) Math.toDegrees(_exploreHeading) + "deg) -> " + x + "," + z);
+        return new GetToXZTask(x, z);
     }
 
     /** (2026-09-04) 玩家当前所在 biome 是否为海洋 (ocean 系)。 */
