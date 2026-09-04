@@ -129,8 +129,15 @@ public final class VisibilityHelper {
         // 不可见; 但岩浆表面上方是空气, 只要能看到表面就能感知。比上一版
         // "暴露即感知"(任一邻位非实心) 更严格 (需要 LOS), 不会透视地下被包围
         // 的岩浆。
+        // (2026-09-03 洞穴侧视水修复, 用户"地下看到水却被回地面抢走") 旧实现只认
+        // "表面可见", 洞穴里从侧面直视图里的一汪水, 若其正上方贴着岩壁(上方非空气
+        // → isFluidSurfaceVisible=false) 就被判"不可感知" → 不收集 → 落到回地表。
+        // 明明看到了却装不了水。改: 流体方块【自身 LOS 可见】(侧视直见) 或【表面
+        // 暴露可见】任一满足即可感知 — 两者都带 LOS, 不会透视墙后/被岩石完全包围
+        // 的流体。
         if (block == Blocks.WATER || block == Blocks.LAVA) {
-            return isFluidSurfaceVisible(mod, pos);
+            if (isBlockVisible(mod, pos)) return true;   // 侧视直见流体方块本身
+            return isFluidSurfaceVisible(mod, pos);       // 或看到暴露的表面
         }
         // (2026-08-23 传送门持续可感知) 下界/主世界传送门无视 FOV/距离/LOS,
         // 持续可感知 (用户设计: "传送门的位置无视FOV, 持续可感知")。传送门是
