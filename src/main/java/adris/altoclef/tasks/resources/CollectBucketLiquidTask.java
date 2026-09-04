@@ -192,7 +192,13 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // (2026-09-03 用户原则: 不满足 FOV/LOS 的不评估可达性, 且不限制距离)
             // 看不到的水(墙后/未暴露表面)直接排除, 不进入后续 canReach。
             // LOS 射线已有 400ms 短缓存 (VisibilityHelper), 不会每 tick 重打。
-            if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)) return false;
+            // (2026-09-04 见过即记忆, 用户"岩浆等重要物资见过就该一直感知") 倒完
+            // 岩浆面朝 cast、池子在身后 → 此刻 FOV/LOS 找不到刚舀过的池子 →
+            // "Exploring for lava" 越走越远。真感知过一次的源进长期记忆表,
+            // 此刻看不见也凭记忆走回去舀 (人记得池子在哪)。当前不可见且无记忆
+            // 的 (没见过的/被岩石包裹的) 仍然拒绝 — 反透视边界不变。
+            if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)
+                    && !VisibilityHelper.isValuableRemembered(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos.up())) return false; // We may try reaching the block above.
             assert MinecraftClient.getInstance().world != null;

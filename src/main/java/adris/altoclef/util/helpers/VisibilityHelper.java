@@ -13,6 +13,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -114,6 +115,46 @@ public final class VisibilityHelper {
 
     private VisibilityHelper() {}
 
+    // (2026-09-04 贵重物资"见过即记忆", 用户"岩浆/床/重要矿石见过之后就应存在
+    // 记忆中, 可以一直感知, 不用管限制") 真正感知过 (isBlockPerceivable 通过 =
+    // 有真视线/表面暴露, 非透视) 一次的贵重方块进长期记忆; 之后即使背对/被
+    // 自己搭的建筑挡住, 也可凭记忆导航回取 — 人看到过岩浆池就记得它在哪。
+    // 反透视边界不变: 记忆只收【真感知过】的坐标, 没见过的绝不进表。
+    // 按维度分表 (同名坐标不同维度不冲突); 上限截断防大岩浆湖刷爆内存。
+    private static final Map<String, Set<BlockPos>> _valuableMemory = new HashMap<>();
+    private static final Object _valuableMemoryLock = new Object();
+    private static final int VALUABLE_MEMORY_CAP_PER_DIM = 512;
+
+    private static boolean isValuableBlock(Block block) {
+        return block == Blocks.LAVA || block == Blocks.WATER
+                || block == Blocks.ANCIENT_DEBRIS || block == Blocks.SPAWNER
+                || block instanceof BedBlock
+                || isOreBlock(block);
+    }
+
+    private static void rememberValuable(AltoClef mod, BlockPos pos) {
+        String dim = WorldHelper.getCurrentDimension().name();
+        synchronized (_valuableMemoryLock) {
+            Set<BlockPos> set = _valuableMemory.computeIfAbsent(dim, k -> new HashSet<>());
+            if (set.size() >= VALUABLE_MEMORY_CAP_PER_DIM) {
+                set.clear(); // 粗暴截断: 最坏情况丢记忆重新学, 换内存有界
+            }
+            set.add(pos.toImmutable());
+        }
+    }
+
+    /**
+     * (2026-09-04) 该坐标的贵重方块是否曾被真正感知过 (进过"见过即记忆"表)。
+     * 供收集类任务放宽 FOV/LOS 门控: 凭记忆走回去, 不要求此刻可见。
+     */
+    public static boolean isValuableRemembered(AltoClef mod, BlockPos pos) {
+        String dim = WorldHelper.getCurrentDimension().name();
+        synchronized (_valuableMemoryLock) {
+            Set<BlockPos> set = _valuableMemory.get(dim);
+            return set != null && set.contains(pos.toImmutable());
+        }
+    }
+
     /**
      * Whether a block is perceivable: visible (LOS), a bed (structure
      * insurance — through walls OK, "一墙之隔的床" 2026-08-21), a container
@@ -123,8 +164,19 @@ public final class VisibilityHelper {
      * 2026-08-21 revision 2 (地下遗迹透视修复): structure blocks no longer
      * bypass the occlusion raycast — a dungeon spawner/chest buried under
      * rock is NOT perceivable until the bot actually has a sightline to it.
+     *
+     * (2026-09-04 见过即记忆) 判定通过时, 贵重方块 (岩浆/水/矿/床/刷怪笼/
+     * 远古残骸) 自动记入长期记忆表 — 供后续"此刻看不见但见过"的场景使用。
      */
     public static boolean isBlockPerceivable(AltoClef mod, BlockPos pos) {
+        boolean ok = isBlockPerceivableInner(mod, pos);
+        if (ok && isValuableBlock(mod.getWorld().getBlockState(pos).getBlock())) {
+            rememberValuable(mod, pos);
+        }
+        return ok;
+    }
+
+    private static boolean isBlockPerceivableInner(AltoClef mod, BlockPos pos) {
         Block block = mod.getWorld().getBlockState(pos).getBlock();
         // (2026-08-23 流体表面可见感知) 水/岩浆: 流体正上方是空气 (表面暴露)
         // 且玩家能看到该空气位置 (LOS 无遮挡) 即感知。用户实测侧面看平坦岩浆
