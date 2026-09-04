@@ -62,6 +62,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     private double _exploreHeading = Double.NaN;
     private static final int EXPLORE_STEP_DIST = 48;
     private static final double EXPLORE_JITTER_DEG = 25;
+    // (2026-09-04 v3 遇海丝滑转向) 前方水域探测: 正前方这个距离是水/海则偏航绕开。
+    private static final int EXPLORE_WATER_PROBE = 24;
+    // 每档偏航角度 (度): 小幅转向, 丝滑不突兀。
+    private static final double EXPLORE_TURN_STEP_DEG = 30;
+    // 最大连续偏航档数: 6×30°=180°, 足以绕开半岛/海湾, 不会无限转圈。
+    private static final int MAX_TURNS = 6;
     // (2026-09-04 v2 粘性修复, 用户"不对劲看最新日志") 持久的当前探索任务实例:
     // ResourceTask.onTick 每 tick 调 onResourceTick, 子任务粘性靠 isEqual —— 若每次
     // new GetToXZTask(不同 x,z) 则 isEqual false → 每 tick 重启换目标 (日志实锤
@@ -350,6 +356,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
      * 目标: 沿持久 heading 走 EXPLORE_STEP_DIST 格, 每步 ±EXPLORE_JITTER_DEG 小
      * 角度抖动 (绝不回头)。GetToXZTask 到达后父任务重估 (有液体源就近收 / 无则
      * 下一步继续)。heading 首次随机, 之后只微调。
+     * (2026-09-04 v3 用户"遇海洋转向丝滑一点") 计算目标前先探测正前方一段距离
+     * 是否大片水域(海/湖面), 是则往一个方向【逐档平滑偏航】(每次向同侧转
+     * EXPLORE_TURN_STEP_DEG, 最多 MAX_TURNS 次) 直到前方不再是水域 — 提前绕开
+     * 海洋, 不再走到海边/海里才急停折返 (旧行为: 冲进海 → On ocean → findNearest
+     * Land 僵硬转向, heading 大跳 + 反复寻路停滞)。
      */
     private Task getSurfaceExploreTask(AltoClef mod) {
         // 粘性: 当前探索任务 active 且未完成 → 返回同一实例, 不每 tick 重算换目标
@@ -364,6 +375,15 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // 左右小角度抖动 (保持大致方向, 不回头/不 180° 转向)
             _exploreHeading += (Math.random() * 2 - 1) * Math.toRadians(EXPLORE_JITTER_DEG);
         }
+        // 前方水域探测: 正前方 PROBE 处是水/海则向一侧平滑偏航, 直到前方干燥。
+        // 转向方向固定一侧(顺时针), 连续转最多 MAX_TURNS 次; 每次仅小幅, 丝滑绕行。
+        for (int t = 0; t < MAX_TURNS; t++) {
+            int fx = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_WATER_PROBE);
+            int fz = (int) Math.floor(pos.z + Math.sin(_exploreHeading) * EXPLORE_WATER_PROBE);
+            BlockPos fp = new BlockPos(fx, pos.getY(), fz);
+            if (!isWaterAt(mod, fp)) break; // 前方干燥/未加载 → 该方向可行
+            _exploreHeading += Math.toRadians(EXPLORE_TURN_STEP_DEG);
+        }
         int x = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_STEP_DIST);
         int z = (int) Math.floor(pos.z + Math.sin(_exploreHeading) * EXPLORE_STEP_DIST);
         _exploreTask = new GetToXZTask(x, z);
@@ -371,9 +391,39 @@ public class CollectBucketLiquidTask extends ResourceTask {
         return _exploreTask;
     }
 
-    /** (2026-09-04) 玩家当前所在 biome 是否为海洋 (ocean 系)。 */
+    /**
+     * (2026-09-04 v3) 该 XZ 列顶部是否为水(海面/湖面)。用于前方水域探测: 避免
+     * bot 朝大片水域直冲后急停折返。列未加载视为非水(不知道, 信任当前 heading)。
+     */
+    private boolean isWaterAt(AltoClef mod, BlockPos target) {
+        if (mod.getWorld() == null) return false;
+        for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
+            BlockPos check = new BlockPos(target.getX(), y, target.getZ());
+            if (!mod.getChunkTracker().isChunkLoaded(check)) return false;
+            BlockState state = mod.getWorld().getBlockState(check);
+            if (state.isAir()) continue;
+            return state.getBlock() == Blocks.WATER;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-04) 玩家是否"在海洋里需要回岸": 海洋 biome 且【真泡在水里】。
+     * (2026-09-04 v2 用户"遇到海洋转向不丝滑思考很久") 原只看 biome — bot 走
+     * 在海边陆地/沙滩但 biome 采样为 ocean 时误判"在海洋" → 反复 On ocean →
+     * findNearestLand(近处陆地) 与探索分支打架, heading 每段大跳 + 反复寻路停滞
+     * (日志 15:16:49-15:17:09 On ocean→land ↔ Exploring 每 1-7s 切, heading
+     * 262→299→353)。收紧为真泡水: 岸上(biome ocean 但没泡水)走正常探索, 由
+     * getSurfaceExploreTask 前方探测平滑绕海, 不再僵硬折返。
+     */
     private boolean isPlayerInOcean(AltoClef mod) {
-        return WorldHelper.isOcean(mod.getWorld().getBiome(mod.getPlayer().getBlockPos()));
+        if (mod.getPlayer() == null || !WorldHelper.isOcean(mod.getWorld().getBiome(mod.getPlayer().getBlockPos()))) {
+            return false;
+        }
+        if (mod.getPlayer().isTouchingWater()) return true;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        return mod.getChunkTracker().isChunkLoaded(feet)
+                && mod.getWorld().getBlockState(feet).isOf(Blocks.WATER);
     }
 
     /** (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome 且列顶部非水"的干燥陆地
