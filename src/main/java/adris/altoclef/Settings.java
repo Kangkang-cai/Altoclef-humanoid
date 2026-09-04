@@ -262,6 +262,16 @@ public class Settings implements IFailableConfigFile {
     private boolean cheatScan = false;
 
     /**
+     * (2026-09-04 人类式找要塞) 下界找烈焰人要塞/刷怪笼走人类式探索
+     * (FortressExploreTask: 循声 + 看见下界砖 + 要塞地面走廊巡逻)。
+     * 人类式探索持续超过该秒数仍未找到时, 降级回旧的 chunk 全方块扫描
+     * (SearchChunkForBlockTask) 兜底, 保通关效率下限。
+     * <p>
+     * 设为 0 表示永不降级 (严格人类式, 极端情况下可能长时间找不到)。
+     */
+    private int fortressSearchFallbackSeconds = 480;
+
+    /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
      */
     private boolean autoMLGBucket = true;
@@ -618,6 +628,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean isCheatScan() {
         return cheatScan;
+    }
+
+    public int getFortressSearchFallbackSeconds() {
+        return fortressSearchFallbackSeconds;
     }
 
     public boolean isAutoReconnect() {

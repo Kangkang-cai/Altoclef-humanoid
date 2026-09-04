@@ -6,6 +6,7 @@ import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
+import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.SearchChunkForBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -14,6 +15,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.WorldHelper;
+import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
@@ -33,7 +35,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final int TOO_MANY_BLAZES = 5;
     private static final double TOO_LITTLE_HEALTH_BLAZE = 5;
     private final int _count;
+    // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
+    // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
+    private final Task _fortressSearcher = new FortressExploreTask();
+    // 超时兜底: 人类式探索太久没找到时, 降级回旧的 chunk 扫描 (Settings 开关)。
     private final Task _searcher = new SearchChunkForBlockTask(Blocks.NETHER_BRICKS);
+    private final TimerGame _searchTimer = new TimerGame(Integer.MAX_VALUE);
+    private boolean _fallbackEngaged = false;
 
     // Why was this here???
     //private Entity _toKill;
@@ -56,6 +64,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
     @Override
     protected void onResourceStart(AltoClef mod) {
         mod.getBlockTracker().trackBlock(Blocks.SPAWNER);
+        // (2026-09-04) 人类式找要塞: 计时器从进下界找要塞开始算, 触发超时兜底。
+        _searchTimer.reset();
+        _fallbackEngaged = false;
     }
 
     @Override
@@ -134,7 +145,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
             }
         } else {
             // Search for blaze
-            for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.SPAWNER)) {
+            // (2026-09-04 人类式感知) 原来 getKnownLocations(SPAWNER) 绕过了
+            // 感知过滤 —— 岩石后面的刷怪笼也会被"知道"。改为 getPerceivedLocations:
+            // 只有 LOS+FOV 亲眼看见的刷怪笼才能确立目标; 走廊巡逻自然会看见它。
+            for (BlockPos pos : mod.getBlockTracker().getPerceivedLocations(Blocks.SPAWNER)) {
                 if (isValidBlazeSpawner(mod, pos)) {
                     _foundBlazeSpawner = pos;
                     break;
@@ -143,8 +157,20 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
 
         // We need to find our fortress.
-        setDebugState("Searching for fortress/Traveling around fortress");
-        return _searcher;
+        // (2026-09-04 人类式探索) 默认 FortressExploreTask (循声+走廊地面);
+        // 超过 fortressSearchFallbackSeconds 仍未找到时降级回旧 chunk 扫描兜底。
+        int fallbackSeconds = mod.getModSettings().getFortressSearchFallbackSeconds();
+        if (fallbackSeconds > 0 && _searchTimer.getDuration() > fallbackSeconds) {
+            if (!_fallbackEngaged) {
+                _fallbackEngaged = true;
+                Debug.logMessage("[FortressSearch] human-like explore timed out (" + fallbackSeconds
+                        + "s), falling back to privileged chunk scan.");
+            }
+            setDebugState("Searching for fortress (fallback chunk scan)");
+            return _searcher;
+        }
+        setDebugState("Searching for fortress (human-like explore)");
+        return _fortressSearcher;
     }
 
     private boolean isValidBlazeSpawner(AltoClef mod, BlockPos pos) {
