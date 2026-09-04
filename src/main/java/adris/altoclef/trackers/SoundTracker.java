@@ -6,6 +6,7 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Remembers recent positioned sounds that the player heard.
@@ -29,7 +30,10 @@ public class SoundTracker {
     }
 
     private synchronized void onSound(SoundEventHappenedEvent evt) {
-        _recentSounds.add(new RecentSound(evt.x, evt.y, evt.z, System.currentTimeMillis()));
+        _recentSounds.add(new RecentSound(
+                evt.x, evt.y, evt.z,
+                evt.sound != null ? evt.sound.getId().getPath() : "",
+                System.currentTimeMillis()));
         prune();
     }
 
@@ -51,12 +55,37 @@ public class SoundTracker {
         return false;
     }
 
+    /**
+     * (2026-09-04 人类式听觉定位) 返回最近 N 秒内听到的、声音 id 以
+     * {@code idPathPrefix} 开头 (如 "entity.blaze." 匹配烈焰人全系音效)
+     * 且在 {@code maxDistance} 格以内的最近声源位置。
+     *
+     * 人类在 Minecraft 里能听到约 16 格内的音效并大致判断方向; 本方法
+     * 把这条线索暴露给探索任务 (例如循声找烈焰人刷怪笼)。
+     */
+    public synchronized Optional<Vec3d> getNearestRecentSoundPos(String idPathPrefix, Vec3d fromPos, double maxDistance) {
+        prune();
+        Vec3d best = null;
+        double bestSq = maxDistance * maxDistance;
+        for (RecentSound s : _recentSounds) {
+            if (s.soundIdPath == null || !s.soundIdPath.startsWith(idPathPrefix)) continue;
+            double sq = s.pos.squaredDistanceTo(fromPos);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = s.pos;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
     private static class RecentSound {
         final Vec3d pos;
+        final String soundIdPath;
         final long timeMs;
 
-        RecentSound(double x, double y, double z, long timeMs) {
+        RecentSound(double x, double y, double z, String soundIdPath, long timeMs) {
             this.pos = new Vec3d(x, y, z);
+            this.soundIdPath = soundIdPath;
             this.timeMs = timeMs;
         }
     }
