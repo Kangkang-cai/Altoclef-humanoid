@@ -271,6 +271,15 @@ public class ConstructNetherPortalBucketTask extends Task {
     }
 
     private BlockPos findLavaLake(AltoClef mod, BlockPos playerPos) {
+        // (2026-09-04 现场修复) 先字面扫描玩家附近: 用户实测 bot 站在地表池子旁,
+        // 池子却不在 BlockTracker 记忆里 (刚舀掉源/区块未重扫), 记忆里最近的
+        // 反而是 y=17 深洞岩浆 → 跑 47 格深的洞里搭门。眼前的世界比记忆优先:
+        // 人在池子旁, 脚边字面扫描一扫即中, 锚点就地落在池边 ±10 格。
+        BlockPos literal = findNearestLavaSourceAround(mod, playerPos, 16, 8);
+        if (literal != null) {
+            Debug.logMessage("(Lava anchor: literal scan found source near player at " + literal.toShortString() + ")");
+            return literal;
+        }
         double nearestSqDistance = Double.POSITIVE_INFINITY;
         BlockPos nearestLake = null;
         // 限制搜索距离，避免导航到过远的地方（2026-08-23）
@@ -284,6 +293,14 @@ public class ConstructNetherPortalBucketTask extends Task {
                 Debug.logMessage("Skipping lava at " + pos + " (distance=" + Math.sqrt(sqDist) + " > " + MAX_SEARCH_DISTANCE + ")");
                 continue;
             }
+            // (2026-09-04 高度差约束) 记忆兜底不选与玩家高度差过大的岩浆:
+            // 深洞岩浆 (Δy=47) 被选为锚点后 bot 会钻深洞搭门, 清障不可达 →
+            // 黑名单 RESET 死循环 (2026-09-04 实测 420,17,341)。
+            // 锚点应在玩家 ±16 格内; 真要下洞时 bot 走进洞后 Δy 自然变小。
+            if (Math.abs(pos.getY() - playerPos.getY()) > 16) {
+                Debug.logMessage("Skipping lava at " + pos + " (height diff " + Math.abs(pos.getY() - playerPos.getY()) + " > 16)");
+                continue;
+            }
             if (sqDist < nearestSqDistance) {
                 // (2026-08-23 不要求深度) 用户设计: 去掉深度要求, 只要有岩浆
                 // 就选为传送门锚点 (CAST_FRAME 造墙机制支持单格岩浆源, 不依赖
@@ -294,6 +311,32 @@ public class ConstructNetherPortalBucketTask extends Task {
         }
 
         return nearestLake;
+    }
+
+    /**
+     * (2026-09-04) 字面扫描玩家周围找最近岩浆【源】方块 (不依赖 BlockTracker
+     * 记忆, 直接查世界)。只认 still 源 (level 8), 与 getNumberOfBlocksAdjacent
+     * 的源判定一致。扫描量 ~1.9 万格, 仅锚点搜索 (每 5s 一次) 时调用, 开销可接受。
+     */
+    private BlockPos findNearestLavaSourceAround(AltoClef mod, BlockPos center, int hRadius, int vRadius) {
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (int dx = -hRadius; dx <= hRadius; dx++) {
+            for (int dz = -hRadius; dz <= hRadius; dz++) {
+                for (int dy = -vRadius; dy <= vRadius; dy++) {
+                    BlockPos p = center.add(dx, dy, dz);
+                    BlockState s = MinecraftClient.getInstance().world.getBlockState(p);
+                    if (s.getBlock() != Blocks.LAVA) continue;
+                    if (!s.getFluidState().isStill() || s.getFluidState().getLevel() != 8) continue;
+                    double sq = p.getSquaredDistance(center);
+                    if (sq < bestSq) {
+                        bestSq = sq;
+                        best = p;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     // Used to flood-scan for blocks of lava.
