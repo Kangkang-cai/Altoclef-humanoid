@@ -21,6 +21,7 @@ import baritone.api.process.ICustomGoalProcess;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
@@ -157,6 +158,12 @@ public class InteractWithBlockTask extends Task {
     protected void onStart(AltoClef mod) {
         _moveChecker.reset();
         _wanderTask.resetWander();
+        // (2026-09-04 首tick盲点修复) BaseTimer._prevTime 初始 0 → 新任务实例首 tick
+        // _forceClickTimer.elapsed()=true → 准星还没转到目标就盲点右键。日志实锤
+        // (2026-09-04 21:44): 6 次 FORCE-CLICK 全部 START 同秒, crosshair 与 target
+        // 差 1-3 格 (舀岩浆点在自己搭的路/旁边地形上)。onStart 重置后, "1.5s 兜底"
+        // 才是真正"等了 1.5s 仍瞄不准"才触发。
+        _forceClickTimer.reset();
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -434,6 +441,15 @@ public class InteractWithBlockTask extends Task {
      * _target — 真命中才可右键。
      */
     private boolean isPreciselyAiming(AltoClef mod) {
+        // (2026-09-04 流体目标特殊处理) MC crosshairTarget 射线默认忽略流体 →
+        // 舀岩浆/水时 _target 是液体方块, 准星永远"命中"不了它 (只会命中后面的
+        // 固体/上方的搭路方块) → isPreciselyAiming 恒 false → 永远落到盲点兜底。
+        // 流体目标改用 baritone isLookingAt (朝向判定): 空桶的 use() 自己按
+        // SOURCE_ONLY 射线找源, 朝向对即可舀到, 不需要准星命中流体方块。
+        BlockState targetState = mod.getWorld().getBlockState(_target);
+        if (targetState.getBlock() == Blocks.LAVA || targetState.getBlock() == Blocks.WATER) {
+            return mod.getClientBaritone().getPlayerContext().isLookingAt(_target);
+        }
         HitResult hr = MinecraftClient.getInstance().crosshairTarget;
         return hr instanceof BlockHitResult bhr
                 && bhr.getType() == HitResult.Type.BLOCK
