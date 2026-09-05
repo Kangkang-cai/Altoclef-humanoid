@@ -120,6 +120,8 @@ public final class WorldMemory {
     private final Map<Dimension, Map<Block, Set<BlockPos>>> _oreMemory = new HashMap<>();
     private final Map<Dimension, Map<Class<?>, Set<BlockPos>>> _animalMemory = new HashMap<>();
     private final Map<Dimension, Set<BlockPos>> _portalMemory = new HashMap<>();
+    // (2026-09-05) 落盘回填只做一次: 见过的门从 altoclef_portals.log 读回内存。
+    private boolean _portalSeeded = false;
     private final Map<Dimension, Set<BlockPos>> _bedMemory = new HashMap<>();
 
     // Death grave memory: the most recent death point per dimension.
@@ -232,6 +234,12 @@ public final class WorldMemory {
 
     public List<BlockPos> getPortalLocations() {
         Dimension dim = WorldHelper.getCurrentDimension();
+        // (2026-09-05 跨会话回填) 游戏重启后从 altoclef_portals.log 读回本维度见过的门。
+        if (!_portalSeeded) {
+            _portalSeeded = true;
+            _portalMemory.computeIfAbsent(dim, d -> new HashSet<>())
+                    .addAll(PortalMemoryStore.loadSeen(_mod, dim));
+        }
         Set<BlockPos> raw = _portalMemory.getOrDefault(dim, Collections.emptySet());
         if (raw.isEmpty()) return new ArrayList<>();
         // Validate portals we can actually see right now (chunk loaded).
@@ -246,6 +254,8 @@ public final class WorldMemory {
                     out.add(p);
                 } else {
                     it.remove();
+                    // 门已不存在: 同步清掉落盘记录, 防止重启后又回填死位置。
+                    PortalMemoryStore.removeSeen(_mod, dim, p);
                     changed = true;
                 }
             } else {
@@ -314,7 +324,11 @@ public final class WorldMemory {
 
     private void rememberPortal(Dimension dim, BlockPos pos) {
         Set<BlockPos> set = _portalMemory.computeIfAbsent(dim, d -> new HashSet<>());
-        if (set.size() < MAX_PER_CATEGORY) set.add(pos);
+        if (set.size() < MAX_PER_CATEGORY) {
+            set.add(pos);
+            // (2026-09-05 传送门记忆跨会话持久化) 见过的门落盘, 重启游戏不丢。
+            PortalMemoryStore.recordSeen(_mod, dim, pos);
+        }
     }
 
     private List<BlockPos> getBlockLocations(Map<Dimension, Map<Block, Set<BlockPos>>> memory, Block... blocks) {

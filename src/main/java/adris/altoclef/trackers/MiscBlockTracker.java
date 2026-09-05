@@ -50,6 +50,9 @@ public class MiscBlockTracker {
                     BlockPos below = check.down();
                     if (WorldHelper.isSolid(_mod, below)) {
                         _lastNetherPortalsUsed.put(WorldHelper.getCurrentDimension(), check);
+                        // (2026-09-05 传送门记忆跨会话持久化, 用户"重启游戏后回家的门
+                        // 就忘了, 下界再弄黑曜石太贵") 亲手穿过的门落盘, 重启游戏不丢。
+                        PortalMemoryStore.recordUsed(_mod, WorldHelper.getCurrentDimension(), check);
                         _newDimensionTriggered = false;
                     }
                     break;
@@ -63,12 +66,20 @@ public class MiscBlockTracker {
     }
 
     public Optional<BlockPos> getLastUsedNetherPortal(Dimension dimension) {
+        // (2026-09-05 跨会话回填) 游戏重启后内存为空, 从 altoclef_portals.log
+        // 回填该维度最近一次亲手穿过的门。人类穿过一扇门就不会忘。
+        if (!_lastNetherPortalsUsed.containsKey(dimension)) {
+            PortalMemoryStore.loadLatestUsed(_mod, dimension)
+                    .ifPresent(pos -> _lastNetherPortalsUsed.put(dimension, pos));
+        }
         if (_lastNetherPortalsUsed.containsKey(dimension)) {
             BlockPos portalPos = _lastNetherPortalsUsed.get(dimension);
             // Check whether our nether portal pos is invalid.
             if (_mod.getChunkTracker().isChunkLoaded(portalPos)) {
                 if (!_mod.getBlockTracker().blockIsValid(portalPos, Blocks.NETHER_PORTAL)) {
                     _lastNetherPortalsUsed.remove(dimension);
+                    // 门已被拆/失效: 同步清掉落盘记录, 防止重启后又回填死位置。
+                    PortalMemoryStore.removeUsed(_mod, dimension, portalPos);
                     return Optional.empty();
                 }
             }
