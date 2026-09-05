@@ -882,8 +882,10 @@ public class MineAndCollectTask extends ResourceTask {
          * useMemory=true (近场 16 格扫尾): 带"近矿记忆"(5s 内真正感知过, 中心点
          * LOS 抖动的只露一面矿), 感知逻辑与主线一致 (LOS 必过), 仅多 5s 记忆宽限。
          */
-        private static final long CACHE_BLOCK_REVALIDATE_MS = 500;
-        private long _lastCacheRevalidateMs = 0;
+        // (2026-09-05 移除 CACHE_BLOCK_REVALIDATE_MS 500ms 节流) 方块状态重校验
+        // 改为每 tick 必做 (见 pickNearestCacheOre 两处注释): 节流窗口内已挖掉的
+        // 空气位会绕过校验被选中, 是"挖完仍挖卡几秒"的源头之一。getBlockState
+        // 廉价, 性能护栏保留在 LOS 射线侧不变。
         // (2026-09-01 LOS 护栏) 见上方法注释: 失败缓存 TTL / 每次射线上限 / 缓存体积上限。
         private static final long LOS_FAIL_CACHE_MS = 500;
         private static final int MAX_LOS_RAYCASTS_PER_CALL = 16;
@@ -896,8 +898,6 @@ public class MineAndCollectTask extends ResourceTask {
             double maxSq = maxRange * maxRange;
             long nowTick = WorldHelper.getTicks();
             long nowMs = System.currentTimeMillis();
-            boolean needRevalidate = (nowMs - _lastCacheRevalidateMs >= CACHE_BLOCK_REVALIDATE_MS);
-            if (needRevalidate) _lastCacheRevalidateMs = nowMs;
 
             // ---- 近场记忆分支: 感知(LOS) + 5s 记忆宽限, 判定语义与原实现一致 ----
             if (useMemory) {
@@ -918,7 +918,11 @@ public class MineAndCollectTask extends ResourceTask {
                     if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                     if (!WorldHelper.canBreak(mod, p)) continue;
                     if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
-                    if (needRevalidate && mod.getChunkTracker().isChunkLoaded(p)) {
+                    // (2026-09-05 真因②) 方块状态重校验不再 500ms 节流: 原节流让
+                    // "缓存里已挖掉(空气)的矿位"在节流窗口内绕过真实世界校验被选中
+                    // → 上层派 DestroyBlockTask 对着空气卡几秒。getBlockState 是
+                    // 廉价查询 (昂贵的 LOS 射线仍走三重护栏), 每 tick 校验无回归风险。
+                    if (mod.getChunkTracker().isChunkLoaded(p)) {
                         Block actual = mod.getWorld().getBlockState(p).getBlock();
                         boolean matches = false;
                         for (Block target : _blocks) {
@@ -946,7 +950,9 @@ public class MineAndCollectTask extends ResourceTask {
                 if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                 if (!WorldHelper.canBreak(mod, p)) continue;
                 if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
-                if (needRevalidate && mod.getChunkTracker().isChunkLoaded(p)) {
+                // (2026-09-05 真因②) 同上: 方块状态每 tick 必校验, 不再 500ms 节流,
+                // 已挖掉的空气位当场淘汰, 不再派 DestroyBlockTask 对着空气卡秒。
+                if (mod.getChunkTracker().isChunkLoaded(p)) {
                     Block actual = mod.getWorld().getBlockState(p).getBlock();
                     boolean matches = false;
                     for (Block target : _blocks) {
