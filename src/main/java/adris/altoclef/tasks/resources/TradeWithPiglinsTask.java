@@ -5,8 +5,8 @@ import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.AbstractDoToEntityTask;
+import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
-import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasks.resources.TradeWithPiglinsTask.PerformTradeWithPiglin;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -37,6 +37,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
     private final int _goldBuffer;
     private final Task _tradeTask = new PerformTradeWithPiglin();
     private Task _goldTask = null;
+    // (2026-09-05 找猪灵真探索) 无猪灵时不再用 TimeoutWanderTask 假探索 —
+    // 那玩意进度检查器一失败就切 GoalRunAway 随机向, 表现为"选个目的地走
+    // 几步就换路线" (用户实测)。改用与找要塞同款的人类式探索: 循猪灵音效
+    // / 亲眼看见的堡垒黑石砖/绯红菌岩, 持久朝向游走, 目标走到头再换方向。
+    // 缓存实例保状态 (朝向不丢)。
+    private final Task _piglinSearcher = FortressExploreTask.forPiglins();
     // (2026-08-24 交易预算判定) 是否已开始交易。未开始交易时先确保金锭达到
     // _goldBuffer (熔炼生金矿等); 一旦开始交易, 金锭会随每次丢出而消耗,
     // 只要还剩金锭就继续交易, 不因少于预算而中途回去收集 (否则交易中少 1
@@ -101,8 +107,8 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
         // If we have no piglin nearby, explore until we find piglin.
         if (!mod.getEntityTracker().entityFound(PiglinEntity.class)) {
-            setDebugState("Wandering");
-            return new TimeoutWanderTask(false);
+            setDebugState("Exploring for piglins (human-like)");
+            return _piglinSearcher;
         }
 
         // If we have a trading piglin that's too far away, get closer to it.

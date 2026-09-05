@@ -46,6 +46,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final String BLAZE_SOUND_PREFIX = "entity.blaze.";
     // 人类听觉放宽: MC 音效衰减约 16 格, 稍放宽到 24 用于定位方向。
     private static final double BLAZE_HEARING_RANGE = 24;
+    // (2026-09-05 通用化: 找猪灵) 猪灵音效前缀 (ambient/jealous/admiring 等,
+    // 不含 piglin_brute — 猪灵蛮兵不交易, 循它的声会带偏)。前缀带 '.' 不会
+    // 误匹配 "entity.piglin_brute.*"。
+    private static final String PIGLIN_SOUND_PREFIX = "entity.piglin.";
+    private static final double PIGLIN_HEARING_RANGE = 32;
 
     // 要塞地面格子扫描: 半径 / 步长 / 玩家 Y 上下扩展 / 周期 (tick)。
     private static final int FLOOR_SCAN_RADIUS = 48;
@@ -83,10 +88,48 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 本次到达目标是否走过 (用于日志)。
     private long _tickId = 0;
 
+    // =========================================================================
+    // (2026-09-05 通用化) 同一套人类式探索复用于不同下界目标: 音效线索前缀 /
+    // 听觉范围 / 视觉线索方块 / 是否启用走廊地面模式。默认构造 = 找要塞
+    // (行为与 2026-09-04 版本完全一致); forPiglins() = 找猪灵。
+    // =========================================================================
+    private final String _soundPrefix;
+    private final double _hearingRange;
+    private final Block[] _clueBlocks;
+    private final boolean _corridorEnabled;
+
+    /** 默认: 人类式找烈焰人要塞 (循声 + 可见下界砖 + 走廊地面巡逻)。 */
+    public FortressExploreTask() {
+        this(BLAZE_SOUND_PREFIX, BLAZE_HEARING_RANGE,
+                new Block[]{Blocks.NETHER_BRICKS}, true);
+    }
+
+    /**
+     * (2026-09-05 找猪灵真探索) 循猪灵音效 + 亲眼看见的堡垒黑石砖/绯红森林
+     * 地形 (猪灵生成地), 无走廊模式 — 看见猪灵本体由上层 (TradeWithPiglinsTask)
+     * 切交易任务。绯红菌岩是大面积地表方块, "看到就往那走"符合人类直觉。
+     */
+    public static FortressExploreTask forPiglins() {
+        return new FortressExploreTask(PIGLIN_SOUND_PREFIX, PIGLIN_HEARING_RANGE,
+                new Block[]{Blocks.GILDED_BLACKSTONE, Blocks.POLISHED_BLACKSTONE_BRICKS,
+                        Blocks.CRIMSON_NYLIUM},
+                false);
+    }
+
+    private FortressExploreTask(String soundPrefix, double hearingRange,
+                                Block[] clueBlocks, boolean corridorEnabled) {
+        _soundPrefix = soundPrefix;
+        _hearingRange = hearingRange;
+        _clueBlocks = clueBlocks;
+        _corridorEnabled = corridorEnabled;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
-        // 跟踪下界砖, 供"看见要塞"的视觉线索 (getPerceivedLocations 用)。
-        mod.getBlockTracker().trackBlock(Blocks.NETHER_BRICKS);
+        // 跟踪线索方块, 供"亲眼看见"的视觉线索 (getPerceivedLocations 用)。
+        for (Block clue : _clueBlocks) {
+            mod.getBlockTracker().trackBlock(clue);
+        }
         _progress.reset();
         _scanTicker = 0;
         _failCounter = 0;
@@ -98,7 +141,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-        mod.getBlockTracker().stopTracking(Blocks.NETHER_BRICKS);
+        for (Block clue : _clueBlocks) {
+            mod.getBlockTracker().stopTracking(clue);
+        }
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
     }
 
@@ -212,9 +257,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * 扫描玩家周围已加载区块里的"要塞可行走地面"格子:
      * 地面是下界砖 (砖/楼梯/台阶), 格子本身与上两格为空气 —— 即走廊/桥面/
      * 房间里人类真正会走的地方。
+     * (2026-09-05 通用化) 非走廊模式 (找猪灵等) 直接跳过这个 48x48x20 的
+     * 周期扫描 — 猪灵不绑定走廊地面, 省掉无谓开销。
      */
     private List<BlockPos> scanFortressFloorCells(AltoClef mod) {
         List<BlockPos> out = new ArrayList<>();
+        if (!_corridorEnabled) return out;
         BlockPos player = mod.getPlayer().getBlockPos();
         int yMin = player.getY() - FLOOR_SCAN_Y_RANGE;
         int yMax = player.getY() + FLOOR_SCAN_Y_RANGE;
@@ -275,7 +323,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
             mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_currentTarget, 2));
         }
-        setDebugState("Exploring the nether for a fortress");
+        setDebugState("Exploring the nether (human-like)");
         return null;
     }
 
@@ -283,11 +331,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * 外围目标: 循声 (烈焰人音效) > 看见的下界砖 > 记忆推断 > 持久朝向随机。
      */
     private BlockPos pickOutsideTarget(AltoClef mod, Vec3d pos) {
-        // 1. 听觉: 烈焰人音效, 人类能听到并大致辨向。
+        // 1. 听觉: 目标生物音效 (烈焰人/猪灵), 人类能听到并大致辨向。
         Optional<Vec3d> heard = mod.getSoundTracker()
-                .getNearestRecentSoundPos(BLAZE_SOUND_PREFIX, pos, BLAZE_HEARING_RANGE);
+                .getNearestRecentSoundPos(_soundPrefix, pos, _hearingRange);
         if (heard.isPresent()) {
-            setDebugState("Heading towards heard blaze sounds");
+            setDebugState("Heading towards heard sounds (" + _soundPrefix + ")");
             return stepTowards(pos, heard.get().x, heard.get().z, heard.get().y);
         }
 
@@ -353,17 +401,20 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * 找"亲眼看见"的最近下界砖: 缓存候选按距离排序, 只逐个做感知判定到
-     * 第一个命中为止 (控制 LOS 射线开销, 参见 KnowledgeMemory 卡顿教训)。
+     * 找"亲眼看见"的最近线索方块 (要塞=下界砖, 猪灵=堡垒黑石砖/绯红菌岩):
+     * 缓存候选按距离排序, 只逐个做感知判定到第一个命中为止 (控制 LOS 射线
+     * 开销, 参见 KnowledgeMemory 卡顿教训)。
      */
     private Optional<BlockPos> findNearestPerceivedBrick(AltoClef mod) {
-        List<BlockPos> bricks = mod.getBlockTracker().getKnownLocations(Blocks.NETHER_BRICKS);
-        if (bricks.isEmpty()) return Optional.empty();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (Block clue : _clueBlocks) {
+            candidates.addAll(mod.getBlockTracker().getKnownLocations(clue));
+        }
+        if (candidates.isEmpty()) return Optional.empty();
         Vec3d from = mod.getPlayer().getPos();
-        List<BlockPos> sorted = new ArrayList<>(bricks);
-        sorted.sort((a, b) -> Double.compare(a.getSquaredDistance(from), b.getSquaredDistance(from)));
+        candidates.sort((a, b) -> Double.compare(a.getSquaredDistance(from), b.getSquaredDistance(from)));
         int checks = 0;
-        for (BlockPos pos : sorted) {
+        for (BlockPos pos : candidates) {
             // 只做有限次射线: 最近的几个都看不见 (背对着) 就等下一轮。
             if (++checks > 12) break;
             if (VisibilityHelper.isBlockPerceivable(mod, pos)) {
@@ -388,6 +439,6 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected String toDebugString() {
-        return "Fortress explore (human-like)";
+        return _corridorEnabled ? "Fortress explore (human-like)" : "Nether explore (human-like)";
     }
 }
