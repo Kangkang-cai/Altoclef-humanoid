@@ -841,12 +841,16 @@ public class MineAndCollectTask extends ResourceTask {
             double maxSq = MEMORY_NAV_RANGE * MEMORY_NAV_RANGE;
             BlockPos best = null;
             double bestSq = Double.POSITIVE_INFINITY;
-            boolean pruned = false;
-            for (java.util.Map.Entry<BlockPos, Long> e : _seenOreTick.entrySet()) {
+            // (2026-09-05 崩溃修复, 19:29 ConcurrentModificationException 实锤) 上一版
+            // 在本循环体内直接 _seenOreTick.remove(p) —— 边遍历 HashMap 边改结构必崩。
+            // 改用显式 iterator, 删除走 it.remove(), 遍历/删改同源安全。
+            for (java.util.Iterator<java.util.Map.Entry<BlockPos, Long>> it =
+                 _seenOreTick.entrySet().iterator(); it.hasNext(); ) {
+                java.util.Map.Entry<BlockPos, Long> e = it.next();
                 BlockPos p = e.getKey();
                 long seen = e.getValue();
                 if (nowTick - seen >= MEMORY_NAV_LIFETIME_TICKS) {
-                    pruned = true;
+                    it.remove(); // 过期记忆当场清, 不再攒 pruned 标记延迟删
                     continue;
                 }
                 if (_blacklist.contains(p)) continue;
@@ -864,8 +868,8 @@ public class MineAndCollectTask extends ResourceTask {
                         if (actual == target) { matches = true; break; }
                     }
                     if (!matches) {
-                        // 已挖掉: 连记忆一起清掉, 不再回头。
-                        _seenOreTick.remove(p);
+                        // 已挖掉: 连记忆一起清掉 (iterator.remove, 遍历中安全), 不再回头。
+                        it.remove();
                         continue;
                     }
                 }
@@ -873,7 +877,8 @@ public class MineAndCollectTask extends ResourceTask {
                 if (sq >= maxSq) continue;
                 if (sq < bestSq) { bestSq = sq; best = p; }
             }
-            if (pruned && _seenOreTick.size() > 128) {
+            if (_seenOreTick.size() > 128) {
+                // (2026-09-05) 过期项已在上面 iterator 遍历时清掉; 这里仅保底防膨胀。
                 _seenOreTick.entrySet().removeIf(x -> nowTick - x.getValue() >= MEMORY_NAV_LIFETIME_TICKS);
             }
             return Optional.ofNullable(best);
