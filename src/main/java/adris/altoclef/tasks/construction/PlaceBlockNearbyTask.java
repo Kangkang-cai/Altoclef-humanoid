@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.BlockPlaceEvent;
+import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -17,6 +18,7 @@ import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
 import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
@@ -72,6 +74,17 @@ public class PlaceBlockNearbyTask extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-05 进门先出门, 用户"到地狱后必须先走出传送门才能放置")
+        // 脚下还踩在门内方块(刚传送落地)时不做任何放置: ①站门里放方块,
+        // Baritone 觉得"原地就够得着", bot 会长时间站在门内不动 (实测卡十几秒,
+        // 还有 4 秒后被再次传送回程的风险); ②门内/门框现在是放置禁区, 眼前
+        // 最优点位全被拦, 任务原地空转。先主动走出传送门再回来放。
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        if (mod.getWorld().getBlockState(feet).getBlock() == Blocks.NETHER_PORTAL) {
+            setDebugState("Stepping out of nether portal before placing");
+            return new RunAwayFromPositionTask(4, feet.getY(), feet);
+        }
+
         // Method:
         // - If looking at placable block
         //      Place immediately
