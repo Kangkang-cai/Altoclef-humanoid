@@ -1627,6 +1627,38 @@ public class BeatMinecraft2Task extends Task {
                 if (greedyEnderman != null) {
                     return greedyEnderman;
                 }
+                // (2026-09-05 下界就近搜刮, 用户"要塞上近处有箱子不顺便开, 矿洞时是实现的")
+                // 主世界 NEARBY LOOT SWEEP 的下界版: 要塞走廊里的箱子/木桶/陷阱箱
+                // 可感知 (LOS, 防透视) 且未开过时优先拿空。8 格内刷怪笼仍抑制
+                // (先清怪再挖刷怪笼的老规矩, 烈焰人刷怪笼旁的箱子等清完再开)。
+                // 物品清单复用 lootableItems (金锭/黑曜石/打火石/钻石等下界刚需)。
+                {
+                    mod.getBlockTracker().trackBlock(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL);
+                    if (!nearbySpawnerBlocked(mod)) {
+                        if (shouldForce(mod, _nearbySweepTask)) {
+                            return _nearbySweepTask;
+                        }
+                        _nearbySweepTask = null;
+                        BlockPos nearestContainer = null;
+                        double bestSq = NEARBY_LOOT_RANGE * NEARBY_LOOT_RANGE;
+                        BlockPos playerPos = mod.getPlayer().getBlockPos();
+                        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL)) {
+                            if (_sweptContainers.contains(pos)) continue;
+                            if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
+                            double sq = pos.getSquaredDistance(playerPos);
+                            if (sq < bestSq) {
+                                bestSq = sq;
+                                nearestContainer = pos;
+                            }
+                        }
+                        if (nearestContainer != null) {
+                            _sweptContainers.add(nearestContainer);
+                            setDebugState("Sweeping nearby nether loot: " + nearestContainer.toShortString());
+                            _nearbySweepTask = new LootContainerTask(nearestContainer, lootableItems(mod), _noCurseOfBinding);
+                            return _nearbySweepTask;
+                        }
+                    }
+                }
                 if (needsBlazeRods) {
                     // (2026-08-23 防火药水保命) 打烈焰人前先搞 ≥1 瓶防火药水
                     // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。只尝试

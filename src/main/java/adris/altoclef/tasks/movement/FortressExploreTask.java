@@ -9,6 +9,7 @@ import adris.altoclef.util.helpers.VisibilityHelper;
 import baritone.api.pathing.goals.GoalNear;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -61,6 +62,26 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double FORTRESS_NEARBY_RANGE = 32;
     // 走廊格子到达判定距离。
     private static final double CORRIDOR_ARRIVED_DISTANCE = 3;
+
+    // =========================================================================
+    // (2026-09-05 走廊记忆稳定性 + 跨会话持久化, 用户"探索 fortress 没有矿洞
+    // 类似的记忆机制, 一直小区域打转") 两个问题一起修:
+    //
+    // 1. 【打转根因】扫描网格以玩家坐标为原点 (x = player.getX() + dx, 步长 2),
+    //    玩家移动后采样点奇偶随之漂移 —— 同一块物理地板会以相邻的 BlockPos 重新
+    //    出现在"没走过"集合里, frontier 永远有"新"目标, 实际是在已走过的走廊
+    //    来回打转。修法: 归一到【世界原点锚定】的 2 格网格 (floorDiv), 与玩家
+    //    位置彻底无关。
+    // 2. 【跨会话记忆】走过的走廊格子持久化到游戏目录 altoclef_fortress_visited.log
+    //    (每行 "存档:维度 x y z"), key 与矿洞 altoclef_explored.log 同款
+    //    (存档名+维度, 不同世界不共享)。任务重启/游戏重开都不再重走已探索走廊。
+    // =========================================================================
+    private static final String FORTRESS_VISITED_FILE = "altoclef_fortress_visited.log";
+    // 单 key (存档:维度) 的走廊格子记忆上限, 防文件/内存无限增长。
+    private static final int MAX_PERSISTED_CELLS = 8192;
+    private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _visitedCellsByKey
+            = new java.util.HashMap<>();
+    private static boolean _visitedCellsLoaded = false;
 
     // 外围探索一步多远, 偏置锥角 (仿 BiasedExploreTask)。
     private static final double EXPLORE_STEP = 48;
@@ -137,6 +158,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _corridorMode = false;
         // 注意: _visitedCells / _lastVisitTicks 故意不清空 —— 上层在超时兜底
         // 与人类式探索间切换重跑本任务时, "走过的路"是人类式记忆, 不该失忆。
+        // (2026-09-05 跨会话) 走廊模式再把上次会话走过的格子从文件里读回来
+        // —— 重启任务/重开游戏也不重走老走廊。
+        if (_corridorEnabled) {
+            _persistKey = fortressVisitedKey(mod);
+            seedVisitedCellsFromDisk(_persistKey);
+        }
     }
 
     @Override
@@ -223,8 +250,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * 走廊目标选择 (人类式): 先走"没走过的" (前沿, 优先远的——把走廊走穿),
      * 全走过后按"最久没走"轮换巡逻 —— 像人在城堡里反复巡查各条路等刷怪。
      */
-    private BlockPos pickCorridorTarget(AltoClef mod, BlockPos player) {
-        BlockPos frontier = null;
+    private BlockPos pickCorridorTarget(AltoClef mod, BlockPos player) {        BlockPos frontier = null;
         double bestFrontierSq = -1;
         BlockPos oldest = null;
         long oldestTick = Long.MAX_VALUE;
@@ -249,8 +275,98 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private void markVisited(BlockPos cell) {
-        _visitedCells.add(cell);
-        _lastVisitTicks.put(cell, _tickId);
+        BlockPos canonical = canonCell(cell);
+        _visitedCells.add(canonical);
+        _lastVisitTicks.put(canonical, _tickId);
+        persistVisitedCell(_persistKey, canonical);
+    }
+
+    // 当前存档:维度 的持久化 key (onStart 缓存; 维度内本任务不换世界)。
+    private String _persistKey;
+
+    /**
+     * (2026-09-05 走廊格子归一) 归一到世界原点锚定的 2 格网格: 旧版扫描网格
+     * 以玩家坐标为原点, 玩家移动后同一块地板会以相邻 BlockPos 重新出现在
+     * "没走过"集合 → 在已走过的走廊来回打转。floorDiv 后与玩家位置无关。
+     */
+    private static BlockPos canonCell(BlockPos p) {
+        return new BlockPos(Math.floorDiv(p.getX(), 2), p.getY(), Math.floorDiv(p.getZ(), 2));
+    }
+
+    // ------------------------------------------------------------------ //
+    // 走廊记忆跨会话持久化 (altoclef_fortress_visited.log, 每行 "存档:维度 x y z")
+    // ------------------------------------------------------------------ //
+
+    private static String fortressVisitedKey(AltoClef mod) {
+        String levelName = "?";
+        try {
+            var server = MinecraftClient.getInstance().getServer();
+            if (server != null && server.getSaveProperties() != null && server.getSaveProperties().getLevelName() != null) {
+                levelName = server.getSaveProperties().getLevelName();
+            }
+        } catch (Exception ignored) {
+        }
+        return levelName + ":" + mod.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    private static java.nio.file.Path fortressVisitedFile() {
+        return MinecraftClient.getInstance().runDirectory.toPath().resolve(FORTRESS_VISITED_FILE);
+    }
+
+    private static void ensureVisitedCellsLoaded() {
+        if (_visitedCellsLoaded) return;
+        _visitedCellsLoaded = true;
+        try {
+            java.nio.file.Path f = fortressVisitedFile();
+            if (!java.nio.file.Files.exists(f)) return;
+            for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                String[] parts = line.trim().split(" ");
+                if (parts.length != 4) continue;
+                try {
+                    BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+                    java.util.LinkedHashSet<BlockPos> set = _visitedCellsByKey.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>());
+                    if (set.size() < MAX_PERSISTED_CELLS) set.add(p);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            Debug.logMessage("[FortressExplore] loaded "
+                    + _visitedCellsByKey.values().stream().mapToInt(Set::size).sum()
+                    + " visited corridor cells from " + FORTRESS_VISITED_FILE);
+        } catch (Exception e) {
+            Debug.logMessage("[FortressExplore] failed to load " + FORTRESS_VISITED_FILE + ": " + e.getMessage());
+        }
+    }
+
+    private static void appendVisitedCellLine(String key, BlockPos pos) {
+        try {
+            java.nio.file.Files.write(fortressVisitedFile(),
+                    (key + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception e) {
+            Debug.logMessage("[FortressExplore] failed to append visited cell: " + e.getMessage());
+        }
+    }
+
+    /** onStart 时把上次会话走过的格子读回内存 (只针对当前 存档:维度)。 */
+    private void seedVisitedCellsFromDisk(String key) {
+        ensureVisitedCellsLoaded();
+        java.util.Set<BlockPos> persisted = _visitedCellsByKey.get(key);
+        if (persisted == null || persisted.isEmpty()) return;
+        _visitedCells.addAll(persisted);
+        Debug.logMessage("[FortressExplore] seeded " + persisted.size()
+                + " previously visited corridor cells (key=" + key + ")");
+    }
+
+    /** 到达/跳过一个走廊格子时持久化 (追加一行, 与矿洞 altoclef_explored.log 同款)。 */
+    private void persistVisitedCell(String key, BlockPos canonical) {
+        if (key == null || canonical == null) return;
+        ensureVisitedCellsLoaded();
+        java.util.LinkedHashSet<BlockPos> set = _visitedCellsByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>());
+        if (set.contains(canonical)) return; // 已记过, 不重复追加
+        if (set.size() >= MAX_PERSISTED_CELLS) return;
+        set.add(canonical);
+        appendVisitedCellLine(key, canonical);
     }
 
     /**
@@ -274,7 +390,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                     BlockPos pos = new BlockPos(x, y, z);
                     if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
                     if (isFortressFloorCell(mod, pos)) {
-                        out.add(pos);
+                        // (2026-09-05) 立刻归一到 2 格网格: 与 _visitedCells 的 key
+                        // 同一坐标系, 否则 frontier 比对永远失配 (见 canonCell 注释)。
+                        out.add(canonCell(pos));
                     }
                 }
             }
