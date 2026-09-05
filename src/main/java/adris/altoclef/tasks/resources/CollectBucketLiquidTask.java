@@ -78,6 +78,8 @@ public class CollectBucketLiquidTask extends ResourceTask {
 
     // 找水诊断日志节流 (原每 tick 一条刷屏聊天栏, 影响性能也难读)。
     private final TimerGame _liquidDiagTimer = new TimerGame(2);
+    // (2026-09-05 记忆回舀日志节流, 原 [LavaMemory] 每 tick 一条 CHAT 一秒 16 条)
+    private final TimerGame _memoryLogTimer = new TimerGame(5);
 
     // (2026-09-04 溯源任务实例, 用户"看到水流应定位水源") 持有当前溯源任务引用以读取
     // 失败状态; 溯源失败(gaveUp)时把起始流动水加入 _blacklist, 避免重试同一处。
@@ -294,8 +296,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // We want to MINIMIZE this distance to liquid.
             setDebugState("Trying to collect...");
             //Debug.logMessage("TEST: " + RayTraceUtils.fluidHandling);
-            if (rememberedBest != null) {
-                Debug.logMessage("[LavaMemory]感知列表空, 凭记忆回舀 " + rememberedBest.toShortString());
+            // (2026-09-05 节流) 记忆回舀激活期间每 tick 一条 CHAT 会刷屏掉帧
+            // (实测 11:38:41 一秒 16 条), 节流到 5s 一条。
+            if (rememberedBest != null && _memoryLogTimer.elapsed()) {
+                _memoryLogTimer.reset();
+                Debug.logMessage("[LavaMemory] 感知列表空, 凭记忆回舀 " + rememberedBest.toShortString());
             }
 
             return new DoToClosestBlockTask(blockPos -> {
@@ -324,16 +329,20 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 }
                 return new GetCloseToBlockTask(blockPos.up());
             }, (Vec3d closestPos) -> {
-                // (2026-09-05) 候选合并: 感知列表优先, 空则回落"见过即记忆"表。
-                // 否则重扫把池子挤出列表的瞬间, 追踪目标全部失效 → 走人。
-                Optional<BlockPos> known = mod.getBlockTracker().getNearestTracking(closestPos, isSourceLiquid, _toCollect);
-                if (known.isPresent()) return known;
+                // (2026-09-05) 候选合并: 感知列表与"见过即记忆"表【统一取最近】,
+                // 消除"感知列表空→记忆源 / 重扫恢复→感知源"来回切目标造成的
+                // 走开又折返 (用户实测"走开一下马上回来, 任务不稳定")。
                 BlockPos best = null;
                 double bestSq = Double.POSITIVE_INFINITY;
+                Optional<BlockPos> known = mod.getBlockTracker().getNearestTracking(closestPos, isSourceLiquid, _toCollect);
+                if (known.isPresent()) {
+                    best = known.get();
+                    bestSq = best.getSquaredDistance(closestPos);
+                }
                 for (BlockPos remembered : VisibilityHelper.getRememberedValuable(mod, _toCollect)) {
                     if (!isSourceLiquid.test(remembered)) continue;
                     double sq = remembered.getSquaredDistance(closestPos);
-                    if (best == null || sq < bestSq) {
+                    if (sq < bestSq) {
                         bestSq = sq;
                         best = remembered;
                     }
