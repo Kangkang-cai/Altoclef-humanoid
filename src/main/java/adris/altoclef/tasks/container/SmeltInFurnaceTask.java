@@ -346,9 +346,14 @@ public class SmeltInFurnaceTask extends ResourceTask {
                         return new ThrowCursorTask();
                     }
                 }
-                // Pick up
-                return new ClickSlotTask(FurnaceSlot.OUTPUT_SLOT, SlotActionType.PICKUP);
-                // return new MoveItemToSlotTask(new ItemTarget(output.getItem(), output.getCount()), toMoveTo.get(), mod -> FurnaceSlot.OUTPUT_SLOT);
+                // (2026-09-05 收产物改 QUICK_MOVE, 用户"金子拿起又放下4次") 原来用
+                // PICKUP 把产物拿到光标 → 下一 tick 本任务的 Dumping 光标守卫
+                // (movingTarget 只豁免材料/燃料, 产物不在豁免列) 立刻把它放回背包
+                // → 每块金锭烧好都"拿起→放下"一轮 (18:14:22 / 18:14:32 日志各一轮,
+                // 槽位点击 8(输出槽拿起) ↔ 11(背包放下))。改 QUICK_MOVE(shift-click)
+                // 直接入包, 光标全程不经手产物, 一滴	clicks 都省; 光标腾位守卫保留
+                // (QUICK_MOVE 不碰光标, 但光标有杂物时仍先清走更稳)。
+                return new ClickSlotTask(FurnaceSlot.OUTPUT_SLOT, SlotActionType.QUICK_MOVE);
             }
 
             // Fill in input if needed
