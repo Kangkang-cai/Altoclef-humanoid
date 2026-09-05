@@ -87,9 +87,19 @@ public class CommandStatusOverlay {
         // (2026-09-05 停止残留修复, 用户"终止任务后鼠标转向变慢动作")
         // 任务被打断时, 最后一次 lookAt 的旋转覆盖目标留在 Baritone LookBehavior,
         // 它每 tick 把镜头往旧目标方向拽 → 画面流畅但转向"黏滞/慢动作"(与鼠标
-        // 对抗), 且不随重进世界消失。反编译确认 updateTarget(null,..) 置空 target
-        // 且 LookBehavior 对 null 直接跳过 → 安全。顺带清强制按键与路径目标。
-        mod.getClientBaritone().getLookBehavior().updateTarget(null, false);
+        // 对抗), 且不随重进世界消失。
+        // (2026-09-05 崩溃修复) 此版本 baritone 的 updateTarget 内部【无条件】
+        // target.getYaw(), 传 null 直接 NPE 崩溃 (crash 14:05 实锤)。改为反射
+        // 置空 target 字段: onPlayerUpdate 开头 ifnonnull-null 即 return,
+        // onPlayerRotationMove 开头 ifnull 跳过, 均对 null 安全 (字节码确认)。
+        try {
+            Object lookBehavior = mod.getClientBaritone().getLookBehavior();
+            java.lang.reflect.Field targetField = lookBehavior.getClass().getDeclaredField("target");
+            targetField.setAccessible(true);
+            targetField.set(lookBehavior, null);
+        } catch (Exception e) {
+            Debug.logMessage("(stopGamer) clear look target failed: " + e);
+        }
         mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
     }

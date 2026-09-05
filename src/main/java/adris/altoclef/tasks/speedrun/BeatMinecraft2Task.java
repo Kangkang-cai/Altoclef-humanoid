@@ -501,6 +501,8 @@ public class BeatMinecraft2Task extends Task {
 
         mod.getBlockTracker().trackBlock(TRACK_BLOCKS);
         mod.getBlockTracker().trackBlock(ItemHelper.itemsToBlocks(ItemHelper.BED));
+        // (2026-09-05 睡觉跳过判定用) 门建好后感知到 NETHER_PORTAL → 跳过夜里睡觉
+        mod.getBlockTracker().trackBlock(Blocks.NETHER_PORTAL);
         mod.getBehaviour().push();
         mod.getBehaviour().addProtectedItems(Items.ENDER_EYE, Items.BLAZE_ROD, Items.ENDER_PEARL, Items.CRAFTING_TABLE);
         mod.getBehaviour().addProtectedItems(ItemHelper.BED);
@@ -2022,6 +2024,12 @@ public class BeatMinecraft2Task extends Task {
         if (!(_config.sleepThroughNight && !_endPortalOpened && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && !locatingStronghold)) {
             return null;
         }
+        // (2026-09-05 低风险改善, 用户) 传送门已建成(感知到下界门方块) 且 装备达标
+        // (eyeGear 齐 或 钻石已超时放弃) → 马上就要进下界, 夜里不再睡觉/找床:
+        // 下界没有昼夜循环, 睡觉对主线纯属延误。
+        if (shouldSkipSleepForNether(mod)) {
+            return null;
+        }
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         boolean inWater = mod.getPlayer() != null && mod.getPlayer().isTouchingWater();
         boolean ridingVehicle = mod.getPlayer() != null && mod.getPlayer().getVehicle() != null;
@@ -2162,6 +2170,19 @@ public class BeatMinecraft2Task extends Task {
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         if (effectivelyDeep || belowSeaLevel) return false;
         return WorldHelper.canSleep();
+    }
+
+    /**
+     * (2026-09-05 低风险改善, 用户"有传送门且装备齐全要进地狱时跳过睡觉")
+     * 传送门已建成(感知到下界门方块——门是 bot 自己建的, 就立在旁边, 扫描
+     * 可见非透视) 且 装备达标(eyeGear 齐或钻石已超时放弃) → 马上要进下界,
+     * 夜里不再睡觉/找床: 下界没有昼夜循环, 睡觉对主线纯属延误。
+     */
+    private boolean shouldSkipSleepForNether(AltoClef mod) {
+        if (mod.getBlockTracker().getKnownLocations(Blocks.NETHER_PORTAL).isEmpty()) return false;
+        boolean eyeGearSatisfied = StorageHelper.itemTargetsMet(mod, COLLECT_EYE_GEAR_MIN)
+                && StorageHelper.isArmorEquippedAll(mod, COLLECT_EYE_ARMOR);
+        return eyeGearSatisfied || _diamondCollectGivenUp;
     }
 
     /**
