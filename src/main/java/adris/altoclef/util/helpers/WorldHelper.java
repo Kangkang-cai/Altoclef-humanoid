@@ -538,8 +538,24 @@ public interface WorldHelper {
     }
 
     static boolean isAir(AltoClef mod, BlockPos pos) {
-        return mod.getBlockTracker().blockIsValid(pos, Blocks.AIR, Blocks.CAVE_AIR, Blocks.VOID_AIR);
-        //return state.isAir() || isAir(state.getBlock());
+        // (2026-09-05 真实世界直查, 用户"挖掉之后任务还是那个方块, 卡住不动")
+        // 原实现走 BlockTracker.blockIsValid(AIR/CAVE_AIR/VOID_AIR), 但
+        // blockIsValid 的第一道闸门是 blockUnreachable 黑名单: 位置一旦被标
+        // "不可达", 哪怕真实世界已经是空气也返回 false。恶果成环 (17:36 日志实锤):
+        //   挖掉方块 → isAir 被黑名单否决=false → MovementProgressChecker 不认
+        //   "已挖开" → 判无进展 → DestroyBlockTask 把位置 requestBlockUnreachable
+        //   (坐实黑名单) → isFinished 永远 false → 对着空气 "Getting to block..."
+        //   卡死, 悬空时反复重启 builder → "Done building" 刷屏。
+        // isAir 的语义是"这格现在是不是空气", 与"值不值得走过去"无关, 改为直查
+        // 真实世界; 无世界/区块未加载时维持旧语义 (视为空气)。
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null) {
+            return true;
+        }
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) {
+            return true;
+        }
+        return world.getBlockState(pos).isAir();
     }
 
     static boolean isAir(Block block) {

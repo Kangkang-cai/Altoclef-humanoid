@@ -14,6 +14,7 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
+import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
@@ -22,6 +23,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -79,9 +81,19 @@ public class PlaceBlockNearbyTask extends Task {
         // Baritone 觉得"原地就够得着", bot 会长时间站在门内不动 (实测卡十几秒,
         // 还有 4 秒后被再次传送回程的风险); ②门内/门框现在是放置禁区, 眼前
         // 最优点位全被拦, 任务原地空转。先主动走出传送门再回来放。
+        // (rev2, 用户"根本没有跑离四格, 卡住我手推才走开") GoalRunAway 实测
+        // 不动 (17:35:27/31 两次 Running away 都没挪窝, 疑似刚切维度 Baritone
+        // 寻路没就绪/远目标不吸引)。改为直接找可站立邻位, 用 CustomGoalProcess
+        // 走一步出门; 找不到邻位才兜底 RunAway。
         BlockPos feet = mod.getPlayer().getBlockPos();
         if (mod.getWorld().getBlockState(feet).getBlock() == Blocks.NETHER_PORTAL) {
             setDebugState("Stepping out of nether portal before placing");
+            BlockPos exit = findPortalExitNeighbor(mod, feet);
+            if (exit != null) {
+                mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalBlock(exit));
+                return null;
+            }
             return new RunAwayFromPositionTask(4, feet.getY(), feet);
         }
 
@@ -176,6 +188,29 @@ public class PlaceBlockNearbyTask extends Task {
 
     public BlockPos getPlaced() {
         return _justPlaced;
+    }
+
+    /**
+     * (2026-09-05 出门邻位搜索) 从门内脚位出发, 找一个"能直接迈过去站住"的水平
+     * 邻位: 目标格可通行(非实心/非门/非门框), 头顶有空间, 脚下有支撑。
+     * 返回 null 表示四面都被堵(罕见)。
+     */
+    private BlockPos findPortalExitNeighbor(AltoClef mod, BlockPos feet) {
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockPos n = feet.offset(dir);
+            Block nBlock = mod.getWorld().getBlockState(n).getBlock();
+            if (nBlock == Blocks.NETHER_PORTAL || nBlock == Blocks.OBSIDIAN || nBlock == Blocks.CRYING_OBSIDIAN) {
+                continue;
+            }
+            if (WorldHelper.isSolid(mod, n) || WorldHelper.isSolid(mod, n.up())) {
+                continue;
+            }
+            if (!WorldHelper.isSolid(mod, n.down())) {
+                continue;
+            }
+            return n;
+        }
+        return null;
     }
 
     private BlockPos getCurrentlyLookingBlockPlace(AltoClef mod) {

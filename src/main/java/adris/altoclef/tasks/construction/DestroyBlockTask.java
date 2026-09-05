@@ -45,16 +45,6 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // For vines and stuff
     private boolean _wasClose = false;
 
-    // (2026-09-05 builder 秒完成死循环, 用户"挖金矿挖停循环+聊天栏疯狂打印
-    // Restarting builder process / Done building") builder 启动后 Baritone 立刻
-    // "Done building" (缓存世界误判目标已是空气/点位无活可干), 本任务看到真实
-    // 世界还没挖开又重启 builder → 每 tick 一轮刷屏, 挖矿走走停停。连续快速
-    // 重启达阈值且明明够得着(reach 在) → 强制直挖(悬空也直挖: 瞄准修正后
-    // 长按左键是安全的), 摆脱对 builder 的依赖。
-    private int _builderRestartCount = 0;
-    private final TimerGame _builderRestartWindow = new TimerGame(2);
-    private boolean _forceDirectBreak = false;
-
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
     // 记录进 MineDownExploreTask 的持久化自挖记忆, 供矿洞检测区分天然空气。
@@ -109,7 +99,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             _gettingToBlockTick = 0;
         }
         if (!_tryToMineTimer.elapsed()) {
-            if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround() || _forceDirectBreak)) {
+            if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround())) {
                 setDebugState("Block in range, mining...");
                 // Break the block, force it.
                 mod.getClientBaritone().getCustomGoalProcess().onLostControl();
@@ -124,24 +114,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             } else {
                 setDebugState("Breaking the normal way.");
                 if (!mod.getClientBaritone().getBuilderProcess().isActive()) {
-                    // (2026-09-05 builder 秒完成死循环) 统计 2 秒窗口内的重启次数,
-                    // 达 3 次且 reach 在场 → 强制直挖, 不再喂 builder。
-                    if (_builderRestartWindow.elapsed()) {
-                        _builderRestartCount = 0;
-                    }
-                    _builderRestartWindow.reset();
-                    _builderRestartCount++;
-                    if (_builderRestartCount >= 3 && reach.isPresent() && !_forceDirectBreak) {
-                        _forceDirectBreak = true;
-                        Debug.logMessage("(DestroyBlockTask) builder 完成却没挖开, 连续重启 "
-                                + _builderRestartCount + " 次, 强制直挖 " + _pos.toShortString());
-                    }
-                    if (!_forceDirectBreak) {
-                        Debug.logMessage("Break Block: Restarting builder process");
-                        // Try breaking normally.
-                        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
-                        mod.getClientBaritone().getBuilderProcess().build("destroy block", new PlaceBlockSchematic(Blocks.AIR), _pos);
-                    }
+                    // Try breaking normally.
+                    mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+                    Debug.logMessage("Break Block: Restarting builder process");
+                    mod.getClientBaritone().getBuilderProcess().build("destroy block", new PlaceBlockSchematic(Blocks.AIR), _pos);
                 }
             }
         } else {
