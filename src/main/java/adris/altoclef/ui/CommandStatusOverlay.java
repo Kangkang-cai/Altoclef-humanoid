@@ -81,27 +81,15 @@ public class CommandStatusOverlay {
     }
 
     // Alt+U: 停止当前用户任务 (等价于 @stop)。
+    // (2026-09-05 复盘) 曾在此追加"清 LookBehavior.target / clearAllKeys /
+    // onLostControl"三步清理, 用于治"终止任务后镜头慢动作"。实为误诊:
+    // 真凶是用户把 MC 自带【电影模式】(平滑镜头) 绑在了 U 键上, Alt+U 顺手
+    // 触发。且 force=true 的 lookAt target 在下一个 PlayerUpdateEvent PRE
+    // 就被 LookBehavior 自己置空 (字节码 267-269), 根本不会残留。
+    // 三步清理已全部移除; cancel() 内部 onTaskFinish 本就会 clearAllKeys。
     private static void stopGamer(AltoClef mod) {
         Debug.logMessage("Gamer keybind: stopping gamer task");
         mod.getUserTaskChain().cancel(mod);
-        // (2026-09-05 停止残留修复, 用户"终止任务后鼠标转向变慢动作")
-        // 任务被打断时, 最后一次 lookAt 的旋转覆盖目标留在 Baritone LookBehavior,
-        // 它每 tick 把镜头往旧目标方向拽 → 画面流畅但转向"黏滞/慢动作"(与鼠标
-        // 对抗), 且不随重进世界消失。
-        // (2026-09-05 崩溃修复) 此版本 baritone 的 updateTarget 内部【无条件】
-        // target.getYaw(), 传 null 直接 NPE 崩溃 (crash 14:05 实锤)。改为反射
-        // 置空 target 字段: onPlayerUpdate 开头 ifnonnull-null 即 return,
-        // onPlayerRotationMove 开头 ifnull 跳过, 均对 null 安全 (字节码确认)。
-        try {
-            Object lookBehavior = mod.getClientBaritone().getLookBehavior();
-            java.lang.reflect.Field targetField = lookBehavior.getClass().getDeclaredField("target");
-            targetField.setAccessible(true);
-            targetField.set(lookBehavior, null);
-        } catch (Exception e) {
-            Debug.logMessage("(stopGamer) clear look target failed: " + e);
-        }
-        mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
-        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
     }
 
     private DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.from(ZoneOffset.of("+00:00"))); // The date formatter
