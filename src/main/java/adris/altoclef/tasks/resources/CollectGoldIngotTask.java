@@ -14,8 +14,11 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import adris.altoclef.util.slots.CraftingTableSlot;
+import adris.altoclef.util.slots.Slot;
 
 public class CollectGoldIngotTask extends ResourceTask {
 
@@ -122,7 +125,6 @@ public class CollectGoldIngotTask extends ResourceTask {
             // 的跨维度老问题。
             int ingots = StorageHelper.countItemInInventoryReal(mod, Items.GOLD_INGOT);
             int rawGold = StorageHelper.countItemInInventoryReal(mod, Items.RAW_GOLD);
-            int nuggs = StorageHelper.countItemInInventoryReal(mod, Items.GOLD_NUGGET);
             if (ingots >= _count) {
                 return null; // 真·金锭已够
             }
@@ -147,12 +149,23 @@ public class CollectGoldIngotTask extends ResourceTask {
             // 还差多少锭
             int missingIngots = _count - ingots;
             // ② 金粒够合成 → 合成金锭 (9 粒 = 1 锭)
-            if (nuggs >= missingIngots * 9) {
+            // (2026-09-05 合成乒乓修复) 金粒计数必须含【合成格里的金粒】: 摆进
+            // 3x3/2x2 的材料是已投入合成的, 只数背包会在合成期间看到"金粒骤减"
+            // → 误判不足切去挖矿 → 打断合成 → 下 tick 又切回 → TaskPingPong
+            // (2026-09-05 20:12 实锤 6x/5s, 用户观感"制作失败")。
+            int nuggsTotal = countNuggetsIncludingCraftGrids(mod);
+            if (nuggsTotal >= missingIngots * 9) {
                 ItemTarget n = new ItemTarget(Items.GOLD_NUGGET);
                 CraftingRecipe recipe = CraftingRecipe.newShapedRecipe("gold_ingot", new ItemTarget[]{
                         n, n, n, n, n, n, n, n, n
                 }, 1);
-                return new CraftInTableTask(new RecipeTarget(Items.GOLD_INGOT, missingIngots, recipe));
+                // (2026-09-05 站死修复) RecipeTarget 数量必须用【绝对持有目标】_count,
+                // 不能传差值 missingIngots: DoCraftInTableTask.containerSubTask 把
+                // target 数量当"背包已有多少"判定 (realHave >= targetCount → 全部
+                // 完成)。传差值时 bot 已有的锭数就 ≥ 差值 → 合成任务开局即
+                // "DONE? Shouldn't be here" 空转, 父任务 isEqual 又不换子任务
+                // → 工作台前永久呆住 (2026-09-05 20:12:16 实锤)。
+                return new CraftInTableTask(new RecipeTarget(Items.GOLD_INGOT, _count, recipe));
             }
             // ③ 否则挖下界金矿出金粒 (石镐: 耐久 131 vs 木镐 59, 减少损坏
             // 中断; 下界金矿只掉金粒, 用什么镐都掉)
@@ -177,6 +190,25 @@ public class CollectGoldIngotTask extends ResourceTask {
             return false;
         }
         return super.isFinished(mod);
+    }
+
+    /**
+     * (2026-09-05 合成乒乓修复) 金粒计数 = 真实背包(含光标) + 2x2 随身合成格
+     * + 3x3 工作台合成格(界面开着才有效)。摆进合成格的材料是"已投入合成"的,
+     * 不计入会让父任务在合成进行中误判"金粒不足"而切去挖矿、打断合成。
+     */
+    private static int countNuggetsIncludingCraftGrids(AltoClef mod) {
+        int count = StorageHelper.countItemInInventoryReal(mod, Items.GOLD_NUGGET);
+        count += StorageHelper.countItemsInCraftGrid(mod, Items.GOLD_NUGGET);
+        if (StorageHelper.isBigCraftingOpen()) {
+            for (Slot slot : CraftingTableSlot.INPUT_SLOTS) {
+                ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+                if (!stack.isEmpty() && stack.getItem() == Items.GOLD_NUGGET) {
+                    count += stack.getCount();
+                }
+            }
+        }
+        return count;
     }
 
     @Override

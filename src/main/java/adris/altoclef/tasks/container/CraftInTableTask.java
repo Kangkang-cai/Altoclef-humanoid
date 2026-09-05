@@ -330,6 +330,11 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         }
 
         setDebugState("DONE? Shouldn't be here");
+        // (2026-09-05 金锭合成站死修复) 全目标已满足时必须标记完成: _craftCount 自
+        // 上游整理 (8c30fd7c) 起从未被自增, isFinished 恒 false。此处不标, 任务
+        // return null 后父任务 isEqual 判同实例不换子任务 → bot 在工作台前永久
+        // 呆住 (2026-09-05 金锭合成 12s 静止实锤, 用户手动停止)。
+        _craftCount = _targets.length;
         return null;
     }
 
