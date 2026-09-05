@@ -32,6 +32,8 @@ public class CollectObsidianTask extends ResourceTask {
     private BlockPos _lavaWaitCurrentPos;
 
     private PlaceObsidianBucketTask _placeObsidianTask;
+    // (2026-09-05 下界猪灵交易凑黑曜石) 缓存实例, 子任务状态 (挖金进度/朝向) 不丢
+    private CollectObsidianByBarterTask _netherBarterTask;
 
     public CollectObsidianTask(int count) {
         super(Items.OBSIDIAN, count);
@@ -89,6 +91,19 @@ public class CollectObsidianTask extends ResourceTask {
 
     @Override
     protected adris.altoclef.tasksystem.Task onResourceTick(AltoClef mod) {
+
+        // (2026-09-05 下界黑曜石改猪灵交易, 用户"文件里没有传送门坐标时触发
+        // 和猪灵交易换黑曜石") 下界没有天然黑曜石, 旧版在 isUltrawarm 下永远
+        // TimeoutWander 打转。改走 CollectFireResPotionsTask 同款人类式路线:
+        // 下界挖金 → 穿金靴 → 猪灵交易, 交易黑曜石掉率 ~8.7%/锭。搭门本身由
+        // ConstructNetherPortalObsidianTask 负责, 这里只凑料。
+        if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) {
+            if (_netherBarterTask == null) {
+                _netherBarterTask = new CollectObsidianByBarterTask(_count);
+            }
+            setDebugState("Nether: bartering piglins for obsidian");
+            return _netherBarterTask;
+        }
 
         // Clear the current waiting lava pos if it's no longer lava.
         if (_lavaWaitCurrentPos != null && mod.getChunkTracker().isChunkLoaded(_lavaWaitCurrentPos) && mod.getWorld().getBlockState(_lavaWaitCurrentPos).getBlock() != Blocks.LAVA) {
@@ -182,6 +197,7 @@ public class CollectObsidianTask extends ResourceTask {
         //mod.getBlockTracker().stopTracking(Blocks.LAVA);
         //mod.getBlockTracker().stopTracking(Blocks.WATER);
         mod.getBlockTracker().stopTracking(Blocks.OBSIDIAN);
+        _netherBarterTask = null;
         mod.getBehaviour().pop();
     }
 
