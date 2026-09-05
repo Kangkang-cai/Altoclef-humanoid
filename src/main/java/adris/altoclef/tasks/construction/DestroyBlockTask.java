@@ -72,6 +72,26 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected Task onTick(AltoClef mod) {
 
+        // (2026-09-05 挖完仍挖真因, 用户"挖掉一块金矿不到一秒, 但任务还挖它卡几秒"):
+        // 任务框架 (Task.tickInternal) 从不调用子任务 isFinished —— 子任务只在父任务
+        // 换目标时才被替换。而 BlockTracker 缓存的重扫清理有周期, 已挖掉的空气位在
+        // 清理前仍可能被上层选中 (pickNearestCacheOre 的方块状态重校验还有 500ms 节流),
+        // 于是本任务对着空气 builder 重建/左键空挥, 卡到 MovementProgressChecker
+        // 超时 (~6s) 才脱身 —— 正是"挖完的方块任务还在挖、卡几秒"的来源。
+        // 修复: onTick 最顶上直查真实世界, 已是空气 → 立即收工 (记自挖、停输入、
+        // 不再喂 builder)。下一 tick 父任务 isValid(空气位)=false 自然换目标。
+        if (WorldHelper.isAir(mod, _pos)) {
+            if (_wasSolidAtStart && !_selfDugRecorded) {
+                _selfDugRecorded = true;
+                MineDownExploreTask.recordBrokenBlock(mod, _pos);
+            }
+            setDebugState("Target already air, nothing to break");
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+            return null;
+        }
+
         // Wander and check
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
             _moveChecker.reset();
