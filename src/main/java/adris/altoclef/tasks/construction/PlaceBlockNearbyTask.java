@@ -111,7 +111,10 @@ public class PlaceBlockNearbyTask extends Task {
         }
 
         // Try to place at a particular spot.
-        if (_tryPlace == null || !WorldHelper.canReach(mod, _tryPlace)) {
+        // (2026-09-05 传送门放置硬守卫) 复用缓存选点时补 canPlace 复查: 点位可能
+        // 在选中后变成受保护位置 (如新发现门体/任务栈放置避让生效), 不复查会拿着
+        // 过期点位反复重建被 [PortalGuard] 拒绝的 PlaceBlockTask 死循环。
+        if (_tryPlace == null || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
             _tryPlace = locateClosePlacePos(mod);
         }
         if (_tryPlace != null) {

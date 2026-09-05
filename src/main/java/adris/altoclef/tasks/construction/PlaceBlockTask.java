@@ -41,6 +41,8 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(3, true); // This can get stuck forever, so we increase the range.
     private Task _materialTask;
     private int _failCount = 0;
+    // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
+    private boolean _protectedRefusalLogged = false;
 
     public PlaceBlockTask(BlockPos target, Block[] toPlace, boolean useThrowaways, boolean autoCollectStructureBlocks) {
         _target = target;
@@ -108,6 +110,16 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (2026-09-05 传送门放置硬守卫, 用户"bot 想把熔炉放进下界门内") 放置前
+        // 兜底检查: 目标位命中放置保护 (含门体黑名单) → 拒绝交给 Baritone builder。
+        // 根因: builder 放置前会"清场"——目标位方块状态不匹配就挖掉, 门内紫色方块
+        // 被替换/门框被挖, 门就熄了。选点端 canPlace 已过滤, 此处防"选点后现场变化"
+        // 与"被其他任务直接构造"两种绕过路径。
+        if (refuseIfProtected(mod)) {
+            setDebugState("Refusing to place at protected position");
+            return null;
+        }
 
         // Perform timeout wander
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
@@ -184,6 +196,12 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     @Override
     public boolean isFinished(AltoClef mod) {
         assert MinecraftClient.getInstance().world != null;
+        // (2026-09-05 传送门放置硬守卫) 目标位受放置保护 → 直接放弃 (视作完成,
+        // 让上层另选点位)。否则上层 (如 DoStuffInContainerTask) 会因本任务"永远
+        // 未完成"而卡死在放置分支。
+        if (refuseIfProtected(mod)) {
+            return true;
+        }
         if (_useThrowaways) {
             return WorldHelper.isSolid(mod, _target);
         }
@@ -198,6 +216,22 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
 
     private boolean tryingAlternativeWay() {
         return _failCount % 4 == 3;
+    }
+
+    /**
+     * (2026-09-05 传送门放置硬守卫) 目标位命中放置保护 (门体黑名单/显式保护区/
+     * 任务栈放置避让) → 记一次 [PortalGuard] 日志并返回 true。onTick 与 isFinished
+     * 共用, 保证无论从哪条路进都能留下拒绝痕迹且只记一次。
+     */
+    private boolean refuseIfProtected(AltoClef mod) {
+        if (mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(_target)) {
+            if (!_protectedRefusalLogged) {
+                _protectedRefusalLogged = true;
+                Debug.logMessage("[PortalGuard] 拒绝在受保护位置放置: " + _target.toShortString() + " (门体/显式保护区), 放弃该点位");
+            }
+            return true;
+        }
+        return false;
     }
 
     private class PlaceStructureSchematic extends AbstractSchematic {

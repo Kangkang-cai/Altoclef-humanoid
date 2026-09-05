@@ -40,23 +40,38 @@ public class BotBehaviour {
         push();
 
         // (2026-09-05 传送门保护, 用户"下界挖通道经过门把门挖塌了", 门框+门内全保护)
-        // 全局永不破坏: ① 门内/门框本体 (下界门方块/末地门/门框架); ② 与下界门方块
-        // 6 面相邻的黑曜石/哭泣黑曜石 = 门框主体 (挖任何一块门框门就熄灭)。
+        // 全局永不破坏/永不放置: ① 门内/门框本体 (下界门方块/末地门/门框架);
+        // ② 与下界门方块 6 面相邻的黑曜石/哭泣黑曜石 = 门框主体 (挖任何一块门框门就熄灭)。
         // 与门块不相邻的角落黑曜石不受保护 (挖角不会熄灭门)。注册在栈底状态, 全局生效。
-        avoidBlockBreaking(pos -> {
-            Block block = _mod.getWorld().getBlockState(pos).getBlock();
-            if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_PORTAL_FRAME) {
-                return true;
-            }
-            if (block == Blocks.OBSIDIAN || block == Blocks.CRYING_OBSIDIAN) {
-                for (Direction dir : Direction.values()) {
-                    if (_mod.getWorld().getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
-                        return true;
-                    }
+        // (2026-09-05 放置路径同保护, 用户"bot 想把熔炉放进门内, 放置清场=挖门")
+        // 原来只注册了 avoidBlockBreaking, 放置路径 (PlaceBlockNearbyTask 选点 /
+        // PlaceBlockTask builder 清场) 完全不设防: 门内紫色方块非实心, 选点评分里
+        // "非实心+下方有支撑"反而是最优位 → bot 把熔炉往门里放, builder 清场先挖门。
+        // 现在门体位置同时进放置黑名单 (canPlace/shouldAvoidPlacingAt 消费),
+        // 贴着门框放 (目标位是门框旁空气) 不受影响。
+        Predicate<BlockPos> portalBody = this::isPortalBodyBlock;
+        avoidBlockBreaking(portalBody);
+        avoidBlockPlacing(portalBody);
+    }
+
+    /**
+     * (2026-09-05 传送门保护) 门体方块判定: 门内传送门方块 / 末地门 / 门框架,
+     * 以及与下界门方块 6 面相邻的黑曜石/哭泣黑曜石 (门框主体)。
+     * 挖掘与放置两条路径共用同一判定, 避免"挖有保护、放没保护"的单边缺口。
+     */
+    private boolean isPortalBodyBlock(BlockPos pos) {
+        Block block = _mod.getWorld().getBlockState(pos).getBlock();
+        if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_PORTAL_FRAME) {
+            return true;
+        }
+        if (block == Blocks.OBSIDIAN || block == Blocks.CRYING_OBSIDIAN) {
+            for (Direction dir : Direction.values()) {
+                if (_mod.getWorld().getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
+                    return true;
                 }
             }
-            return false;
-        });
+        }
+        return false;
     }
 
     // Getter(s)
