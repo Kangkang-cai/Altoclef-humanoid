@@ -81,7 +81,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 超时 (~6s) 才脱身 —— 正是"挖完的方块任务还在挖、卡几秒"的来源。
         // 修复: onTick 最顶上直查真实世界, 已是空气 → 立即收工 (记自挖、停输入、
         // 不再喂 builder)。下一 tick 父任务 isValid(空气位)=false 自然换目标。
-        if (WorldHelper.isAir(mod, _pos)) {
+        // (2026-09-05 rev2 冻结修复) 两处收紧:
+        // ① 区块未加载时 isAir 语义为 true (isAir 对未加载返回 true), 而"凭记忆
+        //    导航回未加载区"是合法场景, 不能早退 —— 只对【已加载】的空气位生效。
+        // ② 同时把该位置 requestBlockUnreachable 拉黑, 所有候选选择器当场跳过
+        //    (空气位拉黑无副作用; 之前不拉黑导致记忆导航反复重选同一位 → 站死)。
+        if (mod.getChunkTracker().isChunkLoaded(_pos) && WorldHelper.isAir(mod, _pos)) {
             if (_wasSolidAtStart && !_selfDugRecorded) {
                 _selfDugRecorded = true;
                 MineDownExploreTask.recordBrokenBlock(mod, _pos);
@@ -90,6 +95,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
             mod.getClientBaritone().getBuilderProcess().onLostControl();
             mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
             return null;
         }
 

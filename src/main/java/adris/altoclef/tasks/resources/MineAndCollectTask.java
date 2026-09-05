@@ -851,6 +851,24 @@ public class MineAndCollectTask extends ResourceTask {
                 }
                 if (_blacklist.contains(p)) continue;
                 if (!WorldHelper.canBreak(mod, p)) continue;
+                // (2026-09-05 冻结真因) 记忆导航此前不校验方块还在不在 —— canBreak
+                // 对空气(硬度0)照样通过, 已挖掉的空气位被当"记忆中的矿"反复选中;
+                // 以前靠 DestroyBlockTask 挖 6 秒超时进黑名单才能逃出, 自空气早退
+                // (e3087744)后不再超时 → 父任务 isValid 否决 → 重选 → 还是它 → 永久
+                // 站死 (19:17 实测)。补上与其他选择器一致的方块状态校验: 区块已加载
+                // 时必须仍是目标方块; 未加载才允许凭记忆导航过去。
+                if (mod.getChunkTracker().isChunkLoaded(p)) {
+                    Block actual = mod.getWorld().getBlockState(p).getBlock();
+                    boolean matches = false;
+                    for (Block target : _blocks) {
+                        if (actual == target) { matches = true; break; }
+                    }
+                    if (!matches) {
+                        // 已挖掉: 连记忆一起清掉, 不再回头。
+                        _seenOreTick.remove(p);
+                        continue;
+                    }
+                }
                 double sq = p.getSquaredDistance(fromPos);
                 if (sq >= maxSq) continue;
                 if (sq < bestSq) { bestSq = sq; best = p; }
