@@ -11,6 +11,7 @@ import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.container.DoStuffInContainerTask;
 import adris.altoclef.tasks.container.EmptyFurnaceTask;
 import adris.altoclef.tasks.container.LootContainerTask;
+import adris.altoclef.tasks.container.PickupFromContainerTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.misc.EquipArmorTask;
 import adris.altoclef.tasks.misc.LootDesertTempleTask;
@@ -1686,6 +1687,7 @@ public class BeatMinecraft2Task extends Task {
         if (_diamondCollectGivenUp) return true;
         return thisOrChildSatisfies(task ->
                 task instanceof SmeltInFurnaceTask                      // 熔炼
+                        || task instanceof PickupFromContainerTask      // (2026-09-05) 从容器收产物/物资也是正事
                         || task instanceof CollectFoodTask               // 找食物
                         || task instanceof MineAndCollectTask            // 挖矿/收矿
                         || task instanceof CollectVisibleOresTask        // 贪心收矿

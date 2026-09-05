@@ -10,6 +10,7 @@ import adris.altoclef.tasksystem.ITaskCanForce;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.trackers.storage.ContainerCache;
+import adris.altoclef.trackers.storage.ContainerType;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
@@ -178,6 +179,16 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
         // Check for chests and grab resources from them.
         if (_currentContainer == null) {
             List<ContainerCache> containersWithItem = mod.getItemStorage().getContainersWithItem(Arrays.stream(_itemTargets).reduce(new Item[0], (items, target) -> ArrayUtils.addAll(items, target.getMatches()), ArrayUtils::addAll));
+            // (2026-09-05 熔炉不是资源箱子, 用户"烧金子到一半被打断拆炉") 熔炉一烧出
+            // 1 个产物, 这里的"附近容器有货就去拿"就会把正在 Waiting 等烧完的
+            // SmeltInFurnaceTask 子任务拦腰打断 (日志 15:20:28: <Collecting 32 gold>
+            // 从 <Doing stuff in [furnace]> Waiting 切到 <Picking up from container>,
+            // 第一块金锭烧好正好 10 秒)。链上熔炼任务一断, isMainLineBusy 误判空闲 →
+            // 顶部"熔炉即收"侧线点火 → EmptyFurnaceTask 把刚放好正在烧的炉子取空
+            // 拆掉, 生金/煤丢一地 → 主线再造炉重熔, 死循环。炉内物品归
+            // SmeltInFurnaceTask(烧炼收产物)/EmptyFurnaceTask(取空拆炉) 专属管理,
+            // ResourceTask 的容器拾取只认纯存储容器, 熔炉类 (熔炉/高炉/烟熏炉) 排除。
+            containersWithItem.removeIf(cache -> cache.getContainerType() == ContainerType.FURNACE);
             if (!containersWithItem.isEmpty()) {
                 ContainerCache closest = containersWithItem.stream().min(StlHelper.compareValues(container -> container.getBlockPos().getSquaredDistance(mod.getPlayer().getPos()))).get();
                 if (closest.getBlockPos().isWithinDistance(mod.getPlayer().getPos(), mod.getModSettings().getResourceChestLocateRange())) {
