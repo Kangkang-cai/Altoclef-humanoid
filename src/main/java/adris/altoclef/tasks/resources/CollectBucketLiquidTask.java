@@ -30,6 +30,7 @@ import net.minecraft.util.math.Vec3i;
 import net.minecraft.world.RaycastContext;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.function.Predicate;
 
 public class CollectBucketLiquidTask extends ResourceTask {
@@ -198,7 +199,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // 此刻看不见也凭记忆走回去舀 (人记得池子在哪)。当前不可见且无记忆
             // 的 (没见过的/被岩石包裹的) 仍然拒绝 — 反透视边界不变。
             if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)
-                    && !VisibilityHelper.isValuableRemembered(mod, blockPos)) return false;
+                    && !VisibilityHelper.isValuableRemembered(mod, _toCollect, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos)) return false;
             if (!WorldHelper.canReach(mod, blockPos.up())) return false; // We may try reaching the block above.
             assert MinecraftClient.getInstance().world != null;
@@ -270,10 +271,32 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         // Find nearest water and right click it
-        if (mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect)) {
+        // (2026-09-05 记忆候选合并, "造门到一半走人"修复) 感知列表 (getKnownLocations)
+        // 有重扫周期/上限: 实测 11:28:38 重扫瞬间池子被挤出列表 → anyFound 突然 false
+        // → "Exploring for lava" 越走越远, 即便"见过即记忆"表里有池子 —— 因为原逻辑
+        // 只对【感知列表里的坐标】查记忆, 列表空了记忆根本没机会被查询。
+        // 现在: 门外层合并评估; DoToClosestBlockTask 候选也合并记忆坐标。
+        boolean knownFound = mod.getBlockTracker().anyFound(isSourceLiquid, _toCollect);
+        BlockPos rememberedBest = null;
+        double rememberedBestSq = Double.POSITIVE_INFINITY;
+        if (!knownFound) {
+            Vec3d playerPos = mod.getPlayer().getPos();
+            for (BlockPos remembered : VisibilityHelper.getRememberedValuable(mod, _toCollect)) {
+                if (!isSourceLiquid.test(remembered)) continue;
+                double sq = remembered.getSquaredDistance(playerPos);
+                if (sq < rememberedBestSq) {
+                    rememberedBestSq = sq;
+                    rememberedBest = remembered;
+                }
+            }
+        }
+        if (knownFound || rememberedBest != null) {
             // We want to MINIMIZE this distance to liquid.
             setDebugState("Trying to collect...");
             //Debug.logMessage("TEST: " + RayTraceUtils.fluidHandling);
+            if (rememberedBest != null) {
+                Debug.logMessage("[LavaMemory]感知列表空, 凭记忆回舀 " + rememberedBest.toShortString());
+            }
 
             return new DoToClosestBlockTask(blockPos -> {
                 // Clear above if lava because we can't enter.
@@ -300,6 +323,22 @@ public class CollectBucketLiquidTask extends ResourceTask {
                     wasWandering = true;
                 }
                 return new GetCloseToBlockTask(blockPos.up());
+            }, (Vec3d closestPos) -> {
+                // (2026-09-05) 候选合并: 感知列表优先, 空则回落"见过即记忆"表。
+                // 否则重扫把池子挤出列表的瞬间, 追踪目标全部失效 → 走人。
+                Optional<BlockPos> known = mod.getBlockTracker().getNearestTracking(closestPos, isSourceLiquid, _toCollect);
+                if (known.isPresent()) return known;
+                BlockPos best = null;
+                double bestSq = Double.POSITIVE_INFINITY;
+                for (BlockPos remembered : VisibilityHelper.getRememberedValuable(mod, _toCollect)) {
+                    if (!isSourceLiquid.test(remembered)) continue;
+                    double sq = remembered.getSquaredDistance(closestPos);
+                    if (best == null || sq < bestSq) {
+                        bestSq = sq;
+                        best = remembered;
+                    }
+                }
+                return Optional.ofNullable(best);
             }, isSourceLiquid, _toCollect);
         }
 

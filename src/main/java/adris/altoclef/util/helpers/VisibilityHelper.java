@@ -120,8 +120,8 @@ public final class VisibilityHelper {
     // 有真视线/表面暴露, 非透视) 一次的贵重方块进长期记忆; 之后即使背对/被
     // 自己搭的建筑挡住, 也可凭记忆导航回取 — 人看到过岩浆池就记得它在哪。
     // 反透视边界不变: 记忆只收【真感知过】的坐标, 没见过的绝不进表。
-    // 按维度分表 (同名坐标不同维度不冲突); 上限截断防大岩浆湖刷爆内存。
-    private static final Map<String, Set<BlockPos>> _valuableMemory = new HashMap<>();
+    // 按维度+方块类型分表 (同名坐标不同维度不冲突); 上限截断防大岩浆湖刷爆内存。
+    private static final Map<String, Map<Block, Set<BlockPos>>> _valuableMemory = new HashMap<>();
     private static final Object _valuableMemoryLock = new Object();
     private static final int VALUABLE_MEMORY_CAP_PER_DIM = 512;
 
@@ -132,12 +132,15 @@ public final class VisibilityHelper {
                 || isOreBlock(block);
     }
 
-    private static void rememberValuable(AltoClef mod, BlockPos pos) {
+    private static void rememberValuable(AltoClef mod, Block block, BlockPos pos) {
         String dim = WorldHelper.getCurrentDimension().name();
         synchronized (_valuableMemoryLock) {
-            Set<BlockPos> set = _valuableMemory.computeIfAbsent(dim, k -> new HashSet<>());
-            if (set.size() >= VALUABLE_MEMORY_CAP_PER_DIM) {
-                set.clear(); // 粗暴截断: 最坏情况丢记忆重新学, 换内存有界
+            Map<Block, Set<BlockPos>> byBlock = _valuableMemory.computeIfAbsent(dim, k -> new HashMap<>());
+            Set<BlockPos> set = byBlock.computeIfAbsent(block, k -> new HashSet<>());
+            int total = 0;
+            for (Set<BlockPos> s : byBlock.values()) total += s.size();
+            if (total >= VALUABLE_MEMORY_CAP_PER_DIM) {
+                byBlock.clear(); // 粗暴截断: 最坏情况丢记忆重新学, 换内存有界
             }
             set.add(pos.toImmutable());
         }
@@ -147,11 +150,29 @@ public final class VisibilityHelper {
      * (2026-09-04) 该坐标的贵重方块是否曾被真正感知过 (进过"见过即记忆"表)。
      * 供收集类任务放宽 FOV/LOS 门控: 凭记忆走回去, 不要求此刻可见。
      */
-    public static boolean isValuableRemembered(AltoClef mod, BlockPos pos) {
+    public static boolean isValuableRemembered(AltoClef mod, Block block, BlockPos pos) {
         String dim = WorldHelper.getCurrentDimension().name();
         synchronized (_valuableMemoryLock) {
-            Set<BlockPos> set = _valuableMemory.get(dim);
+            Map<Block, Set<BlockPos>> byBlock = _valuableMemory.get(dim);
+            if (byBlock == null) return false;
+            Set<BlockPos> set = byBlock.get(block);
             return set != null && set.contains(pos.toImmutable());
+        }
+    }
+
+    /**
+     * (2026-09-05) 取该维度该方块类型的全部"见过即记忆"坐标快照。
+     * 感知列表 (BlockTracker) 有重扫周期/LRU, 池子可能被挤出列表 —— 记忆表
+     * 必须能独立提供候选, 否则"见过"的池子在重扫间隙一样会"失忆"乱跑
+     * (实测 2026-09-05 11:28:38: 重扫瞬间 found→lost, 触发 Exploring)。
+     */
+    public static Set<BlockPos> getRememberedValuable(AltoClef mod, Block block) {
+        String dim = WorldHelper.getCurrentDimension().name();
+        synchronized (_valuableMemoryLock) {
+            Map<Block, Set<BlockPos>> byBlock = _valuableMemory.get(dim);
+            if (byBlock == null) return Set.of();
+            Set<BlockPos> set = byBlock.get(block);
+            return set != null ? Set.copyOf(set) : Set.of();
         }
     }
 
@@ -170,8 +191,11 @@ public final class VisibilityHelper {
      */
     public static boolean isBlockPerceivable(AltoClef mod, BlockPos pos) {
         boolean ok = isBlockPerceivableInner(mod, pos);
-        if (ok && isValuableBlock(mod.getWorld().getBlockState(pos).getBlock())) {
-            rememberValuable(mod, pos);
+        if (ok) {
+            Block seen = mod.getWorld().getBlockState(pos).getBlock();
+            if (isValuableBlock(seen)) {
+                rememberValuable(mod, seen, pos);
+            }
         }
         return ok;
     }
