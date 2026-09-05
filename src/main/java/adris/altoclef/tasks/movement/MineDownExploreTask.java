@@ -130,7 +130,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // Tunnels never descend below this Y — at the floor they run flat, which is
     // exactly how humans branch-mine for diamonds. 1.18 diamond band: stop
     // sinking around y=-24 and branch-mine flat from there.
+    // (2026-09-05 下界高度概念) 此下限只适用于主世界: 下界基岩在 y=0~4, 照搬会把
+    // bot 一路缓降到 y≈5 被基岩挡死 (实测)。下界隧道不再缓降 (floor=目标高度, 平挖)。
     private static final int TUNNEL_MIN_Y = -24;
+    // (2026-09-05 下界基岩层逃生, 用户"挖到基岩挡住应向上挖矿洞回到Y=70再随便探索")
+    // 下界玩家 y 低于此值 → 紧急进入上行模式: 45° 楼梯向上挖回目标高度。
+    // 基岩顶面 y=4, 取 10 留出安全缓冲。
+    private static final int NETHER_ESCAPE_Y = 10;
+    // 上行模式的最大楼梯步数 (从 y≈5 爬回 y=70 需约 66 步, 80 留余量;
+    // 普通下挖 MAX_DIG_STEPS=40 不变)。
+    private static final int MAX_ASCEND_DIG_STEPS = 80;
+    // (上行触发缓冲) 下界任务开始时, 玩家低于 目标高度-16 才进入上行模式:
+    // 避免 y=69 这种贴着目标高度的位置反复触发"上爬1格"的抖动。
+    private static final int NETHER_ASCEND_BUFFER = 16;
     // How long we may spend exploring a cave before resuming the dig.
     // (2026-09-01 用户"矿洞探索超时太短") 25s 对大洞穴偏短: 纯走路就能
     // 掐断一次探索。提到 90s; 且挖到矿会重置计时 (markOreMined), 有产出的
@@ -148,6 +160,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private Task _subTask;
     // Tunnel mode: we're already at the target depth, dig horizontally instead.
     private boolean _tunnelMode = false;
+    // (2026-09-05 下界维度感知) onStart 时缓存是否在下界, 供隧道下限/上行模式判断。
+    private boolean _nether = false;
+    // (2026-09-05 下界基岩层逃生) true = 45° 楼梯【向上】挖回目标高度。
+    private boolean _ascendMode = false;
     private int _dirX = STAIR_DIR_X;
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
@@ -204,17 +220,30 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _waterSkipped = 0;
         _liquidRetreats = 0;
         _digQueue.clear();
+        // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
+        _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
+        // (2026-09-05 下界基岩层逃生) 任务开始时已被压到目标高度之下很深 (如上一轮
+        // 挖到 y≈5 被基岩挡) → 直接上行模式, 45° 楼梯挖回目标高度, 不再向下。
+        _ascendMode = _nether && _digStart.getY() <= _targetY - NETHER_ASCEND_BUFFER;
         // Already at mining depth? Don't dig a pointless 1-block "shaft" that
         // finishes instantly and leaves the bot wandering — dig a tunnel instead.
-        _tunnelMode = _digStart.getY() <= _targetY;
-        if (_tunnelMode) {
+        _tunnelMode = !_ascendMode && _digStart.getY() <= _targetY;
+        if (_ascendMode) {
+            int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+            _dirX = dir[0];
+            _dirZ = dir[1];
+            Debug.logMessage("[MineDown] nether: below target depth (y=" + _digStart.getY()
+                    + ", target " + _targetY + "), climbing back up with an ascending staircase.");
+            Debug.logToFile("altoclef_diag.log", "[MineDown] nether ascend mode engaged at "
+                    + _digStart.toShortString() + " (target y=" + _targetY + ").");
+        } else if (_tunnelMode) {
             // Pick a random cardinal direction so consecutive tunnels don't
             // forever dig the same way through the same rock.
             int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
             _dirX = dir[0];
             _dirZ = dir[1];
             Debug.logMessage("Already at depth " + _digStart.getY() + " (target " + _targetY
-                    + "), digging a slowly-descending tunnel (floor y=" + TUNNEL_MIN_Y + ") instead.");
+                    + "), digging a " + (_nether ? "flat" : "slowly-descending") + " tunnel instead.");
         } else {
             _dirX = STAIR_DIR_X;
             _dirZ = STAIR_DIR_Z;
@@ -223,6 +252,23 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (2026-09-05 下界基岩层逃生, 用户"挖下界金矿一路往下挖被基岩挡在 y≈5") 任务
+        // 进行中若玩家已压到基岩层附近 (下界基岩顶面 y=4), 立即切上行模式: 清空当前
+        // 向下队列, 换随机水平方向, 45° 楼梯向上挖回目标高度, 然后任务自然结束,
+        // 由父任务以隧道平挖模式继续在目标高度探索。
+        if (_nether && !_ascendMode && mod.getPlayer().getBlockPos().getY() <= NETHER_ESCAPE_Y) {
+            _ascendMode = true;
+            _tunnelMode = false;
+            _inCave = false;
+            _subTask = null;
+            _caveExploreCooldownSteps = 0;
+            retreatAndRedig(mod);
+            Debug.logMessage("[MineDown] nether: hit bedrock floor zone (y="
+                    + mod.getPlayer().getBlockPos().getY() + "), switching to ascending staircase back to y=" + _targetY + ".");
+            Debug.logToFile("altoclef_diag.log", "[MineDown] nether bedrock escape: ascending from "
+                    + mod.getPlayer().getBlockPos().toShortString() + " to target y=" + _targetY + ".");
+        }
 
         if (_caveExploreCooldownSteps > 0) {
             _caveExploreCooldownSteps--;
@@ -424,7 +470,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             return new SatisfyMiningRequirementTask(MiningRequirement.WOOD);
         }
 
-        setDebugState((_tunnelMode ? "Digging a tunnel to find ores (step " : "Digging down to find ores (step ") + _step + "/" + MAX_DIG_STEPS + ")");
+        setDebugState((_ascendMode ? "Climbing back up to target Y (step "
+                : _tunnelMode ? "Digging a tunnel to find ores (step "
+                : "Digging down to find ores (step ") + _step + "/" + (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) + ")");
         return new DestroyBlockTask(_digQueue.peek());
     }
 
@@ -456,17 +504,21 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private void enqueueNextStep() {
-        // Each step: the block forward(-down for stairs) + the block above it (headroom).
+        // Each step: the block forward(-up for ascend stairs) + the block above it (headroom).
         // (自挖记录不在此做: 入队≠挖开, 废弃队列会误标真洞空气。真实挖开由
         //  DestroyBlockTask.isFinished 中央记录, 见 recordBrokenBlock。)
         int k = _step;
         BlockPos ground;
-        if (_tunnelMode) {
+        if (_ascendMode) {
+            // (2026-09-05 下界基岩层逃生) 45° 楼梯【向上】挖回目标高度, 可步行走下。
+            ground = _digStart.add(k * _dirX, k, k * _dirZ);
+        } else if (_tunnelMode) {
             // Descend 1 block every TUNNEL_DESCEND_EVERY steps (walkable slope),
-            // clamped at TUNNEL_MIN_Y so we sink toward diamond depth and then
-            // branch-mine flat — repeated tunnel runs keep getting deeper, which
-            // sets up later diamond tasks.
-            int drop = Math.max(0, Math.min(_digStart.getY() - TUNNEL_MIN_Y, k / TUNNEL_DESCEND_EVERY));
+            // clamped at the floor so we sink toward the target band and then
+            // branch-mine flat. (2026-09-05 下界高度概念) 下界 floor=目标高度 → 不缓降,
+            // 平挖 — 主世界 TUNNEL_MIN_Y=-24 是钻石层逻辑, 下界照搬会一路挖到基岩。
+            int floorY = _nether ? _targetY : TUNNEL_MIN_Y;
+            int drop = Math.max(0, Math.min(_digStart.getY() - floorY, k / TUNNEL_DESCEND_EVERY));
             ground = _digStart.add(k * _dirX, -drop, k * _dirZ);
         } else {
             ground = _digStart.add(k * _dirX, -k, k * _dirZ);
@@ -551,9 +603,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // swap is blocked by canBeInterrupted, the task sits unstarted). An
         // unstarted shaft is by definition not at the bottom yet.
         if (_digStart == null) return false;
-        if (_step >= MAX_DIG_STEPS) return true;
+        // (2026-09-05 上行模式步数上限更宽: 从 y≈5 爬回 y=70 需约 66 步)
+        if (_step >= (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS)) return true;
         // Tunnel mode: only the step limit applies (we're already at depth).
         if (_tunnelMode) return false;
+        // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成。
+        if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _targetY;
         // FIX (task ping-pong): use the player's ACTUAL Y, not the old
         // `_digStart.getY() - _step` formula. The step counter increments even
         // when the step's blocks were ALREADY air (re-entering a previously dug
@@ -1007,6 +1062,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected String toDebugString() {
-        return _tunnelMode ? "Digging a tunnel to find ores" : "Digging down to find ores";
+        return _ascendMode ? "Climbing back up (staircase up)"
+                : _tunnelMode ? "Digging a tunnel to find ores" : "Digging down to find ores";
     }
 }

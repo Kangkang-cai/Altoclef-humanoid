@@ -1398,6 +1398,18 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         private int targetShaftDepth() {
+            // (2026-09-05 下界高度概念, 用户"挖下界金矿没高度概念一路挖到基岩 y≈5")
+            // 下界矿石给专门的开采高度, 旧版一律 50 + 隧道缓降到 -24 (主世界钻石层
+            // 逻辑), 下界基岩在 y=0~4 → 一路挖到基岩挡死。下界金矿/镶金黑石 → 70
+            // (用户指定); 古代残骸生成带 y≈15。
+            for (Block block : _blocks) {
+                if (block == Blocks.NETHER_GOLD_ORE || block == Blocks.GILDED_BLACKSTONE) {
+                    return 70;
+                }
+                if (block == Blocks.ANCIENT_DEBRIS) {
+                    return 15;
+                }
+            }
             for (Block block : _blocks) {
                 if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
                     // 1.18 diamond band: dig down to y=-24, then MineDownExploreTask
