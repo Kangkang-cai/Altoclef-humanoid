@@ -143,6 +143,20 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (上行触发缓冲) 下界任务开始时, 玩家低于 目标高度-16 才进入上行模式:
     // 避免 y=69 这种贴着目标高度的位置反复触发"上爬1格"的抖动。
     private static final int NETHER_ASCEND_BUFFER = 16;
+    // =========================================================================
+    // (2026-09-05 下界目标带, 用户"高度无法确定, 只要在一个合适范围内, 适用于
+    //  不同下界任务") 单点目标高度 (70) 改为【生成带】: 调用方给 [min,max], 每个
+    //  MineDownExploreTask 实例 onStart 在带内随机取目标高度 —— 人类不会每次卡
+    //  同一个 y, 也天然避免所有隧道挖成同一条水平线。
+    //
+    //  下界通用开采带 [32, 96]:
+    //  - 下限 32 = 熔岩海面 (y=31) 之上: 更深的隧道到处开岩浆口, 且逼近基岩;
+    //  - 上限 96 = 远离下界基岩顶盖 (y=127), 大部分下界实心地形都在此带内。
+    //  特殊矿石 (如古代残骸生成带 y≈8~22) 由调用方给专属带, 但必须整体位于
+    //  NETHER_ESCAPE_Y=10 危险线之上, 否则会被紧急上行逻辑反复拽回。
+    // =========================================================================
+    public static final int NETHER_MINING_MIN_Y = 32;
+    public static final int NETHER_MINING_MAX_Y = 96;
     // How long we may spend exploring a cave before resuming the dig.
     // (2026-09-01 用户"矿洞探索超时太短") 25s 对大洞穴偏短: 纯走路就能
     // 掐断一次探索。提到 90s; 且挖到矿会重置计时 (markOreMined), 有产出的
@@ -150,7 +164,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double CAVE_EXPLORE_TIMEOUT = 90;
 
     // How deep we're willing to dig for this run (differs by target ore).
-    private final int _targetY;
+    // (2026-09-05 目标带) 单点改带 [_targetYMin, _targetYMax]: onStart 随机取
+    // 一点作本轮目标。_targetY 不再是 final (每实例 onStart 赋值一次)。
+    private final int _targetYMin;
+    private final int _targetYMax;
+    private int _targetY;
 
     private final Deque<BlockPos> _digQueue = new ArrayDeque<>();
 
@@ -199,7 +217,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     public MineDownExploreTask(int targetY) {
-        _targetY = targetY;
+        this(targetY, targetY);
+    }
+
+    /**
+     * (2026-09-05 目标带, 用户"高度无法确定, 合适范围即可") 给 [min, max] 生成带,
+     * onStart 在带内随机取本轮目标高度; min==max 时等价单点。
+     */
+    public MineDownExploreTask(int targetYMin, int targetYMax) {
+        _targetYMin = Math.min(targetYMin, targetYMax);
+        _targetYMax = Math.max(targetYMin, targetYMax);
+        _targetY = _targetYMin;
     }
 
     /**
@@ -214,6 +242,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStart(AltoClef mod) {
+        // (2026-09-05 目标带) 本轮目标高度: 生成带内随机取一点 (含两端)。
+        _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
         _digStart = mod.getPlayer().getBlockPos().down();
         _step = 0;
         _inCave = false;

@@ -1371,7 +1371,9 @@ public class MineAndCollectTask extends ResourceTask {
             // 统一用 MineDownExploreTask (挖梯/隧道, 内部会自动探测并进入洞穴)。
             // 移除原来的"矿洞内随机走"BiasedExplore 分支: 它只走不挖, 困在封闭
             // 空腔里永远走不出、只能原地反复寻路 → 站死 (用户实测站定不动)。
-            return new MineDownExploreTask(targetShaftDepth());
+            // (2026-09-05 目标带) 传 [min, max] 生成带, 每实例带内随机取目标高度。
+            int[] band = targetShaftBand();
+            return new MineDownExploreTask(band[0], band[1]);
         }
 
         /**
@@ -1397,18 +1399,30 @@ public class MineAndCollectTask extends ResourceTask {
             return new int[]{caveAir, air};
         }
 
-        private int targetShaftDepth() {
-            // (2026-09-05 下界高度概念, 用户"挖下界金矿没高度概念一路挖到基岩 y≈5")
-            // 下界矿石给专门的开采高度, 旧版一律 50 + 隧道缓降到 -24 (主世界钻石层
-            // 逻辑), 下界基岩在 y=0~4 → 一路挖到基岩挡死。下界金矿/镶金黑石 → 70
-            // (用户指定); 古代残骸生成带 y≈15。
+        /**
+         * (2026-09-05 目标带, 用户"高度无法确定, 只要在一个合适范围内, 适用于不同
+         * 下界任务") 单点目标深度改为【生成带】[min, max]: 每个探索实例在带内随机
+         * 取目标高度, 人类不会每次卡同一个 y。下界带见 MineDownExploreTask
+         * NETHER_MINING_MIN/MAX_Y (32~96, 熔岩海之上/基岩顶盖之下)。
+         */
+        private int[] targetShaftBand() {
             for (Block block : _blocks) {
-                if (block == Blocks.NETHER_GOLD_ORE || block == Blocks.GILDED_BLACKSTONE) {
-                    return 70;
+                // 下界金矿/镶金黑石/下界石英: 全下界分布 → 通用安全带 (用户原定
+                // 70 换成带内随机, "合适范围即可")。
+                if (block == Blocks.NETHER_GOLD_ORE || block == Blocks.GILDED_BLACKSTONE
+                        || block == Blocks.NETHER_QUARTZ_ORE) {
+                    return new int[]{MineDownExploreTask.NETHER_MINING_MIN_Y, MineDownExploreTask.NETHER_MINING_MAX_Y};
                 }
+                // 古代残骸生成带 y≈8~22: 取 [12, 22] — 整体在紧急上行危险线
+                // (NETHER_ESCAPE_Y=10) 之上, 又贴近残骸富集层。
                 if (block == Blocks.ANCIENT_DEBRIS) {
-                    return 15;
+                    return new int[]{12, 22};
                 }
+            }
+            // 兜底: 若当前就在下界但矿石没被上面分支覆盖 (新增下界任务/模组矿),
+            // 也给通用下界带, 不再落回主世界深度。
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) {
+                return new int[]{MineDownExploreTask.NETHER_MINING_MIN_Y, MineDownExploreTask.NETHER_MINING_MAX_Y};
             }
             for (Block block : _blocks) {
                 if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
@@ -1416,10 +1430,10 @@ public class MineAndCollectTask extends ResourceTask {
                     // switches to horizontal branch-mining at that depth
                     // (TUNNEL_MIN_Y matches). Starting higher wastes the run
                     // above the diamond band.
-                    return -24;
+                    return new int[]{-24, -24};
                 }
             }
-            return 50; // Iron/coal/stone don't need deep shafts.
+            return new int[]{50, 50}; // Iron/coal/stone don't need deep shafts.
         }
 
         @Override
