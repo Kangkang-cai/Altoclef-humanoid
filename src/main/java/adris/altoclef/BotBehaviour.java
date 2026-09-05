@@ -4,13 +4,16 @@ import adris.altoclef.util.slots.Slot;
 import baritone.altoclef.AltoClefSettings;
 import baritone.api.Settings;
 import baritone.api.utils.RayTraceUtils;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.Pair;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.RaycastContext;
 
 import java.util.*;
@@ -35,6 +38,25 @@ public class BotBehaviour {
 
         // Start with one state.
         push();
+
+        // (2026-09-05 传送门保护, 用户"下界挖通道经过门把门挖塌了", 门框+门内全保护)
+        // 全局永不破坏: ① 门内/门框本体 (下界门方块/末地门/门框架); ② 与下界门方块
+        // 6 面相邻的黑曜石/哭泣黑曜石 = 门框主体 (挖任何一块门框门就熄灭)。
+        // 与门块不相邻的角落黑曜石不受保护 (挖角不会熄灭门)。注册在栈底状态, 全局生效。
+        avoidBlockBreaking(pos -> {
+            Block block = _mod.getWorld().getBlockState(pos).getBlock();
+            if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_PORTAL_FRAME) {
+                return true;
+            }
+            if (block == Blocks.OBSIDIAN || block == Blocks.CRYING_OBSIDIAN) {
+                for (Direction dir : Direction.values()) {
+                    if (_mod.getWorld().getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        });
     }
 
     // Getter(s)

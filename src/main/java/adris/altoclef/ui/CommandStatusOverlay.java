@@ -84,6 +84,14 @@ public class CommandStatusOverlay {
     private static void stopGamer(AltoClef mod) {
         Debug.logMessage("Gamer keybind: stopping gamer task");
         mod.getUserTaskChain().cancel(mod);
+        // (2026-09-05 停止残留修复, 用户"终止任务后鼠标转向变慢动作")
+        // 任务被打断时, 最后一次 lookAt 的旋转覆盖目标留在 Baritone LookBehavior,
+        // 它每 tick 把镜头往旧目标方向拽 → 画面流畅但转向"黏滞/慢动作"(与鼠标
+        // 对抗), 且不随重进世界消失。反编译确认 updateTarget(null,..) 置空 target
+        // 且 LookBehavior 对 null 直接跳过 → 安全。顺带清强制按键与路径目标。
+        mod.getClientBaritone().getLookBehavior().updateTarget(null, false);
+        mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
     }
 
     private DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.from(ZoneOffset.of("+00:00"))); // The date formatter
