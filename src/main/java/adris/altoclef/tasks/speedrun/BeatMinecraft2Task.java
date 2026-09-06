@@ -1638,9 +1638,14 @@ public class BeatMinecraft2Task extends Task {
                 // 可感知 (LOS, 防透视) 且未开过时优先拿空。8 格内刷怪笼仍抑制
                 // (先清怪再挖刷怪笼的老规矩, 烈焰人刷怪笼旁的箱子等清完再开)。
                 // 物品清单复用 lootableItems (金锭/黑曜石/打火石/钻石等下界刚需)。
+                // (2026-09-06 搜刮让位捡烈焰棒, 用户"没把烈焰棒捡起来就继续探索了")
+                // 地上有烈焰棒掉落物 (已感知) 时不开箱: 棒是本阶段目标, 开箱抢跑
+                // 只会把棒晾在地上 (日志 11:40:59: Killing blaze 被搜刮打断, 此后
+                // Mob Defense 连环打断, 棒一直没人捡)。满背包捡棒时 PickupDroppedItemTask
+                // 靠近后会自动触发 EnsureFreeInventorySlotTask 丢垃圾腾位。
                 {
                     mod.getBlockTracker().trackBlock(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL);
-                    if (!nearbySpawnerBlocked(mod)) {
+                    if (!mod.getEntityTracker().itemDropped(Items.BLAZE_ROD) && !nearbySpawnerBlocked(mod)) {
                         if (shouldForce(mod, _nearbySweepTask)) {
                             return _nearbySweepTask;
                         }
