@@ -210,25 +210,45 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         }
 
         if (_collect) {
-            // (2026-09-01 回归原版简洁, 用户"有木棍仍造木棍 + 制作放置反复")
-            // 原版语义: 只有 _collectTask 尚未完成 且 确实缺配方材料 时, 才滞留
-            // 在材料收集任务上; 一旦收集完成(_collectTask.isFinished, 背包已备齐
-            // 材料)就自然放行到下面正常合成。恢复此结构为唯一闸门。
-            // 旧版(2026-08-27 我们加的)把 isFinished 放进材料判断内, 并在材料不足
-            // 时对 _collectTask.reset() 强制重来 —— 背包明明已备齐木棍/木板, 收集
-            // 任务一 isFinished 就被重置重建, 下一 tick 又判定"缺材料" → 反复进入
-            // 收集链, 表现为"有木棍仍造木棍 / 制作放置反复"(对照原版 CraftInTable
-            // 原始实现, 这是原版没有的 reintroduced 行为)。
-            // (2026-09-01 二次修订: 撤销"木板当量"兜底旁路)
-            // 该兜底是修0(itemTargetOwnedIncludingCraftGrid 数量BUG)存在期间的
-            // 权宜之计: 当时 _collectTask(材料收集)有1件木板就误判齐、永远不再
-            // 合成木板, 只能靠当量旁路放行。但修0已让 _collectTask 恢复正确:
-            // 缺3木板时会主动派 CraftInInventory 把原木合成木板。此时当量旁路
-            // 反而有害 — 用户实测(15:54): 台子放好后做木斧, 旁路判"原木×4当量够"
-            // 直接放行上台合成, 但真实木板≤1块填不满3x3格 → 台前 Waiting 空转
-            // ↔ Doing-something-to-closest-block 每2秒乒乓。
-            // 恢复原版语义: 材料未真实齐 → 回 _collectTask 合成/收集缺失材料。
-            if (!_collectTask.isFinished(mod) && !StorageHelper.hasRecipeMaterialsOrTarget(mod, _targets)) {
+            // (2026-09-06 木镐差1木板死锁修复, 同时防 09-01"有木棍仍造木棍"横跳复发)
+            //
+            // 死锁实锤(2026-09-06 12:37:58 trace): _collectTask 判"集齐放行 wooden_pickaxe"
+            // 时 4 块木板还在 2x2 合成格; 0.25s 后同链兄弟步骤(Craft 2x2 Task 造工作台)
+            // 把木板全部消费 → 真实背包只剩 2 块(配方要 3)。旧闸门
+            // `!_collectTask.isFinished() && !hasRecipeMaterialsOrTarget` 中 isFinished 是
+            // 单向闩锁(见 CollectRecipeCataloguedResourcesTask.isFinished 注释), 闩死后
+            // 闸门永久放行 → 台前 "Crafting" 空转, 配方书填不满 3x3, 12s 超时刷新无限循环。
+            //
+            // 新闸门语义:
+            //  1. 以【每 tick 实时】hasRecipeMaterialsOrTarget 为唯一权威 —— 材料缺就回
+            //     收集任务, 闩锁过期时 reset 一次让它重新盘点。
+            //  2. 防横跳三道护栏(08-27 版"缺料就 reset"会横跳的根因逐一排除):
+            //     a. 只在闩锁已置 true 时才 reset —— 收集任务进行中(其内部
+            //        _activeCollectTask 正在做中间合成, 材料在 2x2 格/光标上)时 _finished
+            //        必为 false, 外层绝不打断, 由其内部粘滞逻辑自己走完;
+            //     b. 输出格已有本配方成品待收 → 材料已投入, 放行给下方 super.onTick 的
+            //        Getting output 流程, 不误判"缺料"回收集;
+            //     c. 光标上持有本配方物品(合成流程进行中) → 同样不打断。
+            //     护栏 b/c 使"材料在合成流程中(格/输出/光标)"永不判缺; 护栏 a 使 reset
+            //     只发生在收集任务确认闲置(闩死)且材料被外部真实消费的场景。
+            boolean materialsReady = StorageHelper.hasRecipeMaterialsOrTarget(mod, _targets);
+            if (!materialsReady) {
+                boolean bigCraftingNow = (mod.getPlayer().currentScreenHandler instanceof CraftingScreenHandler);
+                Slot outSlotId = bigCraftingNow ? CraftingTableSlot.OUTPUT_SLOT : PlayerSlot.CRAFT_OUTPUT_SLOT;
+                ItemStack outNow = StorageHelper.getItemStackInSlot(outSlotId);
+                ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
+                boolean craftInFlight = (!outNow.isEmpty() && isCursorPartOfCraftOrOutput(outNow.getItem()))
+                        || (!cursorNow.isEmpty() && isCursorPartOfCraft(cursorNow));
+                if (craftInFlight) {
+                    materialsReady = true;
+                }
+            }
+            if (!materialsReady) {
+                if (_collectTask.isFinished(mod)) {
+                    _collectTask.reset();
+                    Debug.logMessage("[CraftTable] 材料被同链步骤消费(收集闩锁过期), 重新盘点: "
+                            + Arrays.toString(_targets));
+                }
                 setDebugState("craft does NOT have RECIPE MATERIALS: " + Arrays.toString(_targets));
                 return _collectTask;
             }
@@ -273,6 +293,16 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                 ItemTarget slotTarget = target.getRecipe().getSlot(slot);
                 if (slotTarget != null && !slotTarget.isEmpty() && slotTarget.matches(item)) return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * [2026-09-06 死锁修复护栏b] 物品是否为任一目标的成品(输出格待收判定用)。
+     */
+    private boolean isCursorPartOfCraftOrOutput(Item item) {
+        for (RecipeTarget target : _targets) {
+            if (target.getOutputItem() == item) return true;
         }
         return false;
     }
