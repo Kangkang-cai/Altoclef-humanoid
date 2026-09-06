@@ -250,6 +250,25 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
             //     c. 光标上持有本配方物品(合成流程进行中) → 同样不打断。
             //     护栏 b/c 使"材料在合成流程中(格/输出/光标)"永不判缺; 护栏 a 使 reset
             //     只发生在收集任务确认闲置(闩死)且材料被外部真实消费的场景。
+            //  3. (2026-09-06 2x2 中间合成与放台互拆修复, 用户实测 19:39:07-21 三轮
+            //     ~15s 颠簸) 子链有活跃 CraftInInventoryTask (2x2 随身格中间配方,
+            //     如木棍/木板) 且【已持有工作台物品】时, 保持返回 _collectTask 不翻面:
+            //     此时中间材料在 2x2 格里会被 hasRecipeMaterialsOrTarget 计入 →
+            //     materialsReady 误翻 true → super.onTick 走"放工作台"分支 →
+            //     ResourceTask 网格清理器(EnsureFreePlayerCraftingGridTask)把进行中的
+            //     2x2 合成清掉 → 中间产物没做出、材料回背包 → 又判缺料重新收集再占格
+            //     → 再清, "Place crafting_table ↔ Breaking the crafting grid" 三轮。
+            //     边界①: 工作台未持有时【不粘】—— super.onTick 的 "Getting container
+            //     item" 本身就要用 2x2 合成工作台, 粘住会死锁。isItemOwned(USE) 同时
+            //     认"世界里已有放置好的台子", 台子已在世界时也不急着翻面放台。
+            //     边界②: 只认 CraftInInventoryTask, 不认 ReceiveCraftingOutputSlotTask
+            //     等 —— 3x3 流程的 "Receiving output" 也实现 ITaskUsesCraftingGrid,
+            //     若纳入会在正常合成收产物时误粘掐断合成。
+            if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, getContainerTarget().getMatches())
+                    && thisOrChildSatisfies(task -> task instanceof CraftInInventoryTask)) {
+                setDebugState("2x2 intermediate craft in flight, holding collect task...");
+                return _collectTask;
+            }
             boolean materialsReady = StorageHelper.hasRecipeMaterialsOrTarget(mod, _targets);
             if (!materialsReady) {
                 boolean bigCraftingNow = (mod.getPlayer().currentScreenHandler instanceof CraftingScreenHandler);
