@@ -33,13 +33,21 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.SleepingChatScreen;
 import net.minecraft.client.gui.screen.ingame.MerchantScreen;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
+import net.minecraft.world.RaycastContext;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -430,13 +438,23 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 // 实体) → 本 tick 不点右键, 让 3s 小超时换侧/换站位; 准心落在
                 // 床方块(或落空)上才点。
                 if (MinecraftClient.getInstance().crosshairTarget instanceof EntityHitResult) {
+                    // (2026-09-06 v2, 用户: 换侧毫无意义, "获取不到实体框吗"—
+                    // 能拿到。准心被实体(床上的村民)挡住时直接按实体框重新选
+                    // 瞄准点: 在床两半块的顶面/朝玩家侧面网格采样, 找第一个
+                    // 【方块射线通畅 + 无实体包围盒横插】的点 lookAt 它;
+                    // crosshair 下一 tick 更新, 落回床方块即正常点击。
+                    Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
                     if (_crosshairBlockedLogTimer.elapsed()) {
                         _crosshairBlockedLogTimer.reset();
                         String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by entity "
                                 + ((EntityHitResult) MinecraftClient.getInstance().crosshairTarget).getEntity().getType().getName()
-                                + ", waiting for side-swap (player=" + pp.toShortString() + ")";
+                                + (alt != null ? ", retargeting to " + alt : ", no clear bed point visible")
+                                + " (player=" + pp.toShortString() + ")";
                         Debug.logMessage(m);
                         Debug.logToFile("altoclef_diag.log", m);
+                    }
+                    if (alt != null) {
+                        LookHelper.lookAt(mod, alt);
                     }
                 } else {
                     mod.getInputControls().tryPress(Input.CLICK_RIGHT);
@@ -1021,5 +1039,79 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // 流体(水/岩浆)仍拒绝, 避免把床放在水里。
         if (WorldHelper.isAir(mod, pos)) return true;
         return mod.getWorld().getBlockState(pos).getFluidState().isEmpty();
+    }
+
+    /**
+     * (2026-09-06 睡床瞄准点按实体框重取, 用户: "换侧毫无意义, 调整瞄准方向
+     * 就一定能点上, 获取不到实体框吗?") 默认瞄点被实体包围盒挡住时, 在床两
+     * 半块的【顶面 + 朝玩家侧面】网格采样候选点, 返回第一个满足:
+     *   1. 距眼睛 ≤ 4.5 格 (右键手长);
+     *   2. 眼睛→该点方块射线的第一个命中是床方块 (点床任意半块都能睡);
+     *   3. 射线上没有任何非旁观实体的包围盒横插在床之前 (实体框由
+     *      Box.raycast 求交, 与客户端准星实体判定同源)。
+     * 的点; 找不到返回 null (保持不出手, 走既有超时降级)。
+     */
+    private Vec3d findUnblockedBedAimPoint(AltoClef mod, BlockPos bedMain, BlockPos bedHead, Vec3d defaultAim) {
+        if (mod.getPlayer() == null) return null;
+        Vec3d eyes = mod.getPlayer().getEyePos();
+        // 两半块: 床头 + 床头 FACING 反方向(床脚), 再兜底 bedMain, 去重
+        List<BlockPos> halves = new ArrayList<>();
+        halves.add(bedHead);
+        BlockState bs = mod.getWorld().getBlockState(bedHead);
+        if (bs.getBlock() instanceof BedBlock) {
+            try { halves.add(bedHead.offset(bs.get(BedBlock.FACING).getOpposite())); } catch (Exception ignore) {}
+        }
+        if (!halves.contains(bedMain)) halves.add(bedMain);
+        List<Vec3d> candidates = new ArrayList<>();
+        for (BlockPos half : halves) {
+            if (!(mod.getWorld().getBlockState(half).getBlock() instanceof BedBlock)) continue;
+            // 顶面网格 (床碰撞箱高 9/16≈0.5625, 取 0.55)
+            for (double ox : new double[]{0.2, 0.5, 0.8}) {
+                for (double oz : new double[]{0.2, 0.5, 0.8}) {
+                    candidates.add(new Vec3d(half.getX() + ox, half.getY() + 0.55, half.getZ() + oz));
+                }
+            }
+            // 朝玩家侧面: 玩家相对床的主轴方向, 面上 2 高度 x 3 横向
+            double ddx = mod.getPlayer().getX() - (half.getX() + 0.5);
+            double ddz = mod.getPlayer().getZ() - (half.getZ() + 0.5);
+            int fx, fz;
+            if (Math.abs(ddx) >= Math.abs(ddz)) { fx = ddx >= 0 ? 1 : -1; fz = 0; }
+            else { fx = 0; fz = ddz >= 0 ? 1 : -1; }
+            for (double ys : new double[]{0.15, 0.35}) {
+                for (double lat : new double[]{-0.28, 0.0, 0.28}) {
+                    double lx = fx != 0 ? half.getX() + 0.5 + fx * 0.48 : half.getX() + 0.5 + lat;
+                    double lz = fz != 0 ? half.getZ() + 0.5 + fz * 0.48 : half.getZ() + 0.5 + lat;
+                    candidates.add(new Vec3d(lx, half.getY() + ys, lz));
+                }
+            }
+        }
+        // 拟人: 优先离默认瞄点最近的 (视线摆动最小)
+        candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(defaultAim)));
+        for (Vec3d p : candidates) {
+            double dist = eyes.distanceTo(p);
+            if (dist > 4.5 || dist < 0.1) continue;
+            // 方块射线: 第一个命中的必须是床 (点床任一半都能睡), 其它方块挡住则弃
+            Vec3d end = eyes.add(p.subtract(eyes).normalize().multiply(dist + 0.1));
+            BlockHitResult hit = MinecraftClient.getInstance().world.raycast(
+                    new RaycastContext(eyes, end, RaycastContext.ShapeType.COLLIDER,
+                            RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+            if (hit.getType() != HitResult.Type.BLOCK
+                    || !(mod.getWorld().getBlockState(hit.getBlockPos()).getBlock() instanceof BedBlock)) continue;
+            // 实体包围盒: 射线上任何实体在床之前横插 → 弃
+            if (entityBlocksRay(mod, eyes, p)) continue;
+            return p;
+        }
+        return null;
+    }
+
+    /** 眼睛→p 的射线上是否有实体包围盒在 p 之前横插 (挡右键/开交易界面)。 */
+    private boolean entityBlocksRay(AltoClef mod, Vec3d eyes, Vec3d p) {
+        Box search = new Box(eyes, p).expand(1.0);
+        for (Entity e : mod.getWorld().getOtherEntities(mod.getPlayer(), search)) {
+            if (!e.isAlive() || e.isSpectator()) continue;
+            Optional<Vec3d> isect = e.getBoundingBox().raycast(eyes, p);
+            if (isect.isPresent() && isect.get().distanceTo(eyes) < p.distanceTo(eyes) - 0.05) return true;
+        }
+        return false;
     }
 }
