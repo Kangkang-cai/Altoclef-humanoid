@@ -99,6 +99,37 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-06 烧肉被抢断止损) 用户实测: gear 任务顶替 Smelting 时
+        // (16:27:26 "Smelting raw food: chicken" Waiting 期被 Get catalogued
+        // 抢断), 熔炉输出槽 cooked_mutton x14 没收走就 STOP, 全部遗弃在炉里。
+        // onStop 同步执行、不能派子任务, 这里尽力而为: 熔炉界面还开着 →
+        // 直接 QUICK_MOVE 点一次输出槽 (一次点击搬走整组), 再关屏。
+        // 失败分支全部退化为现状 (物品留在炉里), 不新增丢物品路径:
+        // - 界面没开 (被打断时还在路上) → 收不了, 跳过;
+        // - 背包满/放不下 → QUICK_MOVE 无效, 跳过 (不在 onStop 里腾位/丢垃圾,
+        //   否则会拆掉 2026-09-03 满包死锁修复的链路);
+        // - canDoSlotAction 冷却中 → 本 tick 点不了, 跳过。
+        // 注: 只动本任务类, 不泛化到 DoStuffInContainerTask 基类 (箱子/工作台
+        // 语义不同)。
+        try {
+            if (mod.getPlayer() != null && mod.getWorld() != null
+                    && mod.getPlayer().currentScreenHandler instanceof FurnaceScreenHandler) {
+                ItemStack output = StorageHelper.getItemStackInSlot(FurnaceSlot.OUTPUT_SLOT);
+                if (!output.isEmpty()) {
+                    if (mod.getItemStorage().getSlotThatCanFitInPlayerInventory(output, false).isPresent()
+                            && mod.getSlotHandler().canDoSlotAction()) {
+                        mod.getSlotHandler().clickSlot(FurnaceSlot.OUTPUT_SLOT, 0, SlotActionType.QUICK_MOVE);
+                        Debug.logMessage("Furnace stop-loss: QUICK_MOVE output " + output + " before interrupt by "
+                                + interruptTask.getClass().getSimpleName() + ")");
+                    } else {
+                        Debug.logMessage("Furnace stop-loss skipped: no inventory room or click cooldown, output "
+                                + output + " stays in furnace");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Debug.logWarning("Furnace stop-loss failed (ignored): " + e);
+        }
         // Close furnace screen
         StorageHelper.closeScreen();
     }
