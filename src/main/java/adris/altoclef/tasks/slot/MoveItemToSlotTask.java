@@ -36,6 +36,15 @@ public class MoveItemToSlotTask extends Task {
         _getMovableSlots = getMovableSlots;
     }
 
+    /**
+     * (2026-09-06 烧铁 2.4s 死循环修复) 供父级容器任务判断"子链里正在搬运的
+     * 目标槽是否属于自己的合成流程": 若不属于 (如熔炉 fuel 槽), 搬运中间态
+     * (PICKUP 已上光标、还没点进目标槽) 期间父级不得翻面/清光标抢断。
+     */
+    public Slot getDestination() {
+        return _destination;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
 

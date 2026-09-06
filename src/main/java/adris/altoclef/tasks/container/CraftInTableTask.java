@@ -10,6 +10,7 @@ import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.resources.CollectRecipeCataloguedResourcesTask;
 import adris.altoclef.tasks.slot.MoveInaccessibleItemToInventoryTask;
 import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
+import adris.altoclef.tasks.slot.MoveItemToSlotFromInventoryTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -210,6 +211,24 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         }
 
         if (_collect) {
+            // (2026-09-06 烧铁 2.4s 死循环修复, 用户实测 19:08:21-53 六轮) 子链里有
+            // 活跃的 MoveItemToSlotFromInventoryTask 时, 光标上必然是它正在搬运的
+            // 中间态物品 (本例: 熔炉燃料 oak_planks, 第一步 PICKUP 已上光标、第二步
+            // 点进 fuel 槽还没执行)。此刻材料判定会把光标木板计入 → materialsReady
+            // 翻 true → super.onTick → 光标守卫("Clearing cursor slot")把熔炉子链
+            // 抢断, 木板被点回背包 → 子链重启再拿 → 每 ~2.4s 死循环, 燃料永远放不
+            // 进炉子, 铁一直开不了烧。搬运两步的中间态必须让它走完: 搬运进行中
+            // 保持返回 _collectTask 不翻面, 搬完光标自然清空再正常评估。
+            // 豁免边界: 搬运目标槽是【本工作台合成格】(CraftingTableSlot) 时不粘 —
+            // 那是本任务自己的放料流程, 粘住会反过来掐断正常合成。
+            if (thisOrChildSatisfies(task -> {
+                if (!(task instanceof MoveItemToSlotFromInventoryTask move)) return false;
+                Slot dest = move.getDestination();
+                return !(dest instanceof CraftingTableSlot);
+            })) {
+                setDebugState("Child slot-move in flight, holding collect task...");
+                return _collectTask;
+            }
             // (2026-09-06 木镐差1木板死锁修复, 同时防 09-01"有木棍仍造木棍"横跳复发)
             //
             // 死锁实锤(2026-09-06 12:37:58 trace): _collectTask 判"集齐放行 wooden_pickaxe"
