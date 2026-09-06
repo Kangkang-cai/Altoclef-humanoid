@@ -432,11 +432,17 @@ public class BeatMinecraft2Task extends Task {
     private int _belowSeaLevelTicks = 0;
     // (2026-08-23 防火药水保命阶段) 打烈焰人前的金锭+猪灵交易阶段状态。
     // _fireResPhaseActive = 正在进行; _fireResPhaseDone = 已尝试过 (达标或
-    // 超时), 不再重试。外层超时 (13 分钟) 比内层 (12 分钟) 长, 内层先放弃
+    // 超时), 不再重试。外层超时 (18 分钟) 比内层 (12 分钟) 长, 内层先放弃
     // 外层兜底。
+    // (2026-09-06 用户) 目标从 1 瓶提到 2 瓶 (落单烈焰人走盾战不喝药,
+    // 2 瓶留给刷怪笼房多只场景)。防任务打架: _fireResPhaseDone 是一次性
+    // 闩 — 本实例内一旦结束 (达标或超时) 就不再进本阶段, 之后喝掉 1~2 瓶
+    // (库存跌回 < 2) 也不会重新触发药水任务, 由喝药门槛 (CollectBlazeRodsTask)
+    // 决定要不要花。
+    private static final int FIRE_RES_POTION_TARGET = 2;
     private boolean _fireResPhaseActive = false;
     private boolean _fireResPhaseDone = false;
-    private final TimerGame _fireResPhaseTimer = new TimerGame(13 * 60);
+    private final TimerGame _fireResPhaseTimer = new TimerGame(18 * 60);
 
     /**
      * [Diag-flow] 分支切换诊断: debug 状态变化 ≈ 子任务切换。每次变化
@@ -1660,14 +1666,15 @@ public class BeatMinecraft2Task extends Task {
                     }
                 }
                 if (needsBlazeRods) {
-                    // (2026-08-23 防火药水保命) 打烈焰人前先搞 ≥1 瓶防火药水
+                    // (2026-08-23 防火药水保命) 打烈焰人前先搞防火药水
                     // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。只尝试
-                    // 一轮: 达标或超时 (12 分钟) 后不再重试, 不阻塞主线。
-                    // (2026-08-23 rev2 用户降低要求: 只需 1 瓶; 已检测到有 1 瓶
-                    // 防火药水就直接去打烈焰人, 不再进交易阶段。)
+                    // 一轮: 达标或超时后不再重试, 不阻塞主线。
+                    // (2026-09-06 用户) 目标提为 2 瓶 (FIRE_RES_POTION_TARGET);
+                    // _fireResPhaseDone 闩保证之后喝掉也不会重新进本阶段
+                    // (防任务打架), 花不花由 CollectBlazeRodsTask 的喝药门槛管。
                     if (!_fireResPhaseDone) {
                         if (!_fireResPhaseActive) {
-                            if (ItemHelper.countFireResPotions(mod) < 1) {
+                            if (ItemHelper.countFireResPotions(mod) < FIRE_RES_POTION_TARGET) {
                                 _fireResPhaseActive = true;
                                 _fireResPhaseTimer.reset();
                             } else {
@@ -1675,8 +1682,9 @@ public class BeatMinecraft2Task extends Task {
                             }
                         }
                         if (_fireResPhaseActive) {
-                            if (ItemHelper.countFireResPotions(mod) >= 1) {
-                                Debug.logMessage("(FireRes) Target reached: 1 fire resistance potion. Proceeding to blaze rods.");
+                            if (ItemHelper.countFireResPotions(mod) >= FIRE_RES_POTION_TARGET) {
+                                Debug.logMessage("(FireRes) Target reached: " + FIRE_RES_POTION_TARGET
+                                        + " fire resistance potions. Proceeding to blaze rods.");
                                 _fireResPhaseActive = false;
                                 _fireResPhaseDone = true;
                             } else if (_fireResPhaseTimer.elapsed()) {
@@ -1688,7 +1696,7 @@ public class BeatMinecraft2Task extends Task {
                                 _fireResPhaseDone = true;
                             } else {
                                 setDebugState("Getting fire resistance potions (gold + piglin trading)");
-                                return new CollectFireResPotionsTask(1);
+                                return new CollectFireResPotionsTask(FIRE_RES_POTION_TARGET);
                             }
                         }
                     }
