@@ -147,9 +147,20 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
         // altoclef_tasks log t=246/286/395/435 实锤)。木头/床是立即捡(自身就优先
         // 捡), 不受此抑制; 圆石/石头等非"紧贴必捡"目标挖满后一次还原。
         boolean mineAndCollectActive = thisOrChildSatisfies(task -> task instanceof MineAndCollectTask);
-        if (!shouldAvoidPickingUp(mod) && !craftingGridActive && !mineAndCollectActive && shouldPickupDrops(mod)) {
+        // (2026-09-06 捡烈焰棒乒乓修复, 用户"想拾取掉落的烈焰棒但一直捡不到,
+        // 没精确导航到烈焰棒位置") pickup 任务一旦激活且未完成必须【粘住】直到
+        // 自然结束 (捡到/拉黑/despawn), 冷却只该管"要不要进入捡取", 不该把
+        // 正在进行的捡取拦腰打断。旧逻辑: 进 pickup 设了 1.5s 冷却 → 冷却期
+        // shouldPickupDrops=false → 父任务切回要塞探索 → pickup 被停 → 冷却
+        // 过期再进 → 再被停… 每 ~1.5s 乒乓 (日志实锤 11:19:12-29 七连乒乓),
+        // 远处 (40+ 格) 掉落物永远走不到。
+        boolean pickupTaskActive = _pickupTask.isActive() && !_pickupTask.isFinished(mod);
+        if (!shouldAvoidPickingUp(mod) && !craftingGridActive && !mineAndCollectActive
+                && (pickupTaskActive || shouldPickupDrops(mod))) {
             // Check if items are on the floor. If so, pick em up.
-            if (mod.getEntityTracker().itemDropped(_itemTargets)) {
+            // pickupTaskActive 时不强求 itemDropped: tracker 缓存单 tick 抖动
+            // 不该打断一次正常进行的捡取。
+            if (pickupTaskActive || mod.getEntityTracker().itemDropped(_itemTargets)) {
 
                 // If we're picking up a pickaxe (we can't go far underground or mine much)
                 if (PickupDroppedItemTask.isIsGettingPickaxeFirst(mod)) {
@@ -167,8 +178,14 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
                 }
 
                 double range = mod.getModSettings().getResourcePickupRange();
+                if (pickupTaskActive) {
+                    // 粘住: 任务在进行中就继续, 不看距离/冷却。
+                    setDebugState("Picking up");
+                    _lastDropPickupMs = System.currentTimeMillis();
+                    return _pickupTask;
+                }
                 Optional<ItemEntity> closest = mod.getEntityTracker().getClosestItemDrop(mod.getPlayer().getPos(), _itemTargets);
-                if (range < 0 || (closest.isPresent() && closest.get().isInRange(mod.getPlayer(), range)) || (_pickupTask.isActive() && !_pickupTask.isFinished(mod))) {
+                if (range < 0 || (closest.isPresent() && closest.get().isInRange(mod.getPlayer(), range))) {
                     setDebugState("Picking up");
                     _lastDropPickupMs = System.currentTimeMillis();
                     return _pickupTask;
