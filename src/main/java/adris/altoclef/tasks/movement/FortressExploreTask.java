@@ -250,20 +250,27 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * 走廊目标选择 (人类式): 先走"没走过的" (前沿, 优先远的——把走廊走穿),
      * 全走过后按"最久没走"轮换巡逻 —— 像人在城堡里反复巡查各条路等刷怪。
      */
-    private BlockPos pickCorridorTarget(AltoClef mod, BlockPos player) {        BlockPos frontier = null;
+    private BlockPos pickCorridorTarget(AltoClef mod, BlockPos player) {
+        BlockPos frontier = null;
         double bestFrontierSq = -1;
         BlockPos oldest = null;
         long oldestTick = Long.MAX_VALUE;
 
         for (BlockPos cell : _floorTargets) {
+            // (2026-09-06 修复"2:1 坐标压缩走飞", 用户实测"转几圈就离开要塞
+            // 导航到非城堡区域") 归一 cell 只做【记忆 key】(visited 判重/巡逻
+            // 时间戳/落盘), 导航目标必须是【真实 cell】—— 旧版把 (x/2,z/2) 的
+            // 归一坐标直接当 GoalNear 目标, bot 朝压缩后的世界坐标走, 一路
+            // 走出要塞 (日志实锤: 要塞在 z~565, 目标却是 (64,63,254))。
+            BlockPos key = canonCell(cell);
             double sq = cell.getSquaredDistance(player);
-            if (!_visitedCells.contains(cell)) {
+            if (!_visitedCells.contains(key)) {
                 if (sq > bestFrontierSq) {
                     bestFrontierSq = sq;
                     frontier = cell;
                 }
             } else {
-                Long t = _lastVisitTicks.get(cell);
+                Long t = _lastVisitTicks.get(key);
                 long tt = t == null ? 0 : t;
                 if (tt < oldestTick) {
                     oldestTick = tt;
@@ -390,9 +397,10 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                     BlockPos pos = new BlockPos(x, y, z);
                     if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
                     if (isFortressFloorCell(mod, pos)) {
-                        // (2026-09-05) 立刻归一到 2 格网格: 与 _visitedCells 的 key
-                        // 同一坐标系, 否则 frontier 比对永远失配 (见 canonCell 注释)。
-                        out.add(canonCell(pos));
+                        // (2026-09-06) 存【真实坐标】: 记忆 key 由 pickCorridorTarget/
+                        // markVisited 现场归一。旧版在这里就存归一坐标, 导航目标跟着
+                        // 被压缩成半比例世界坐标, bot 直接走出要塞 (2:1 压缩 bug)。
+                        out.add(pos);
                     }
                 }
             }
