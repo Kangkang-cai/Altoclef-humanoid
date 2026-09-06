@@ -407,7 +407,19 @@ public class FoodChain extends SingleTaskChain {
                 float hungerLossPenalty = hungerWasted * _config.foodPickHungerWastePenaltyMultiplier;
                 float hungerNotFilledPenalty = hungerNotFilled * _config.foodPickHungerNotFilledPenaltyMultiplier;
 
-                float score = saturationGoodScore - saturationLossPenalty - hungerLossPenalty - hungerNotFilledPenalty;
+                float score;
+                if (health < _config.alwaysEatWhenBelowHealth) {
+                    // (2026-09-06 22:40 羊排不吃修复, 用户"背包有13块羊排怎么不吃")
+                    // 低血=为回血而吃: 回血速度由【饱食度】驱动, 大餐 (熟羊肉
+                    // hunger6/sat0.8) 恢复量全面优于面包 (hunger5/sat0.6)。
+                    // 但旧公式在高饥饿时被"浪费惩罚"反转: hunger=17 时熟羊肉
+                    // gainedHunger=3 浪费 3 点 → -6, 面包浪费 2 → -4; 饱食加成
+                    // 只差 0.2×8=1.6, 净分面包 0.8 > 羊肉 0.4 → 永远选面包。
+                    // 低血时取消一切浪费/未填满惩罚, 直接最大化进食后恢复量。
+                    score = saturationGoodScore + gainedHunger;
+                } else {
+                    score = saturationGoodScore - saturationLossPenalty - hungerLossPenalty - hungerNotFilledPenalty;
+                }
 
                 if (stack.getItem() == Items.ROTTEN_FLESH) {
                     score -= _config.foodPickRottenFleshPenalty;
