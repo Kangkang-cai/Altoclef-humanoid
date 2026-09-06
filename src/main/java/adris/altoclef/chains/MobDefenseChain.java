@@ -630,8 +630,8 @@ public class MobDefenseChain extends SingleTaskChain {
         // 反复横跳。现在改为: 有盾时面朝弹射物举盾格挡 (不躲, 原地站撸);
         // 没盾才退回躲避。格挡结束弹射物消失时上方统一放盾。
         // (2026-08-23 战斗中不抢占) 正在打任务目标 (_targetEntity != null) 时
-        // 不触发本链格挡 — 烈焰人火球由 KillEntityTask 的 shieldCombatTick
-        // 处理 (hasNearbyRangedThreat 已含烈焰人, 举盾+反击), 否则这里
+        // 不触发本链格挡 — 小白/苦力怕/烈焰人 (2026-09-06 加入盾战) 均由
+        // KillEntityTask 的 shieldCombatTick 处理 (举盾+反击), 否则这里
         // prio 65 抢占 → bot 一直举盾不打 (用户: "盾牌还是不放")。
         if (_targetEntity == null && !mod.getFoodChain().isTryingToEat() && mod.getModSettings().isDodgeProjectiles() && isProjectileClose(mod)) {
             _doingFunkyStuff = true;

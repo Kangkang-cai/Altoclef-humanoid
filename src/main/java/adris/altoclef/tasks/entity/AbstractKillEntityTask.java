@@ -47,6 +47,10 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // (2026-08-30 加大耐心, 用户"等一会儿没格挡就放弃") 30→80: 之前 1.5s 就放盾
     // 去 counter, 箭还在飞就露出挨箭; 现在耐心格挡 4s, 只有小白长时间哑火才出手。
     private static final int BLOCK_FORCE_COUNTER_TICKS = 80;
+    // (2026-09-06 烈焰人波次盾战, 用户) 烈焰人一轮连发 3 颗小火球 (间隔极短),
+    // 把整轮视为一波: 波内只举盾硬格, 波结束 (连续这么多 tick 无弹射物逼近,
+    // 烈焰人进入 ~3s 装填冷却) 才放盾反击。小白 (单箭节奏) 不受影响。
+    private static final int BLAZE_WAVE_GAP_TICKS = 25;
     // (2026-08-30 贴身, 用户实测) 小白会自己后退, 逼近目标太松会不停失去攻击
     // 距离。盾战逼近距离收紧到贴身 (原 reach-0.5≈2.7 → 0.8), 保证一旦出手就在
     // 武器命中范围内、且格挡时也粘住小白不掉距。
@@ -95,6 +99,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
 
     // Tick we started holding the shield up (for the force counter-attack timeout).
     private long _shieldHoldStartTick = -1;
+    // (2026-09-06 烈焰人波次) 最近一次"有弹射物逼近"的 tick — 判定一波连发是否结束。
+    private long _lastInboundTick = Long.MIN_VALUE;
     // Last tick we actually swung back, to pace our counter-attacks.
     private long _lastCounterTick = Long.MIN_VALUE;
     // (2026-08-23 反击窗口) 在此之前保持右键释放 (盾放下), 到点重新举盾。
@@ -164,6 +170,7 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         _lastCounterTick = Long.MIN_VALUE;
         _shieldLowerUntilTick = Long.MIN_VALUE;
         _counterWindowStartTick = Long.MIN_VALUE;
+        _lastInboundTick = Long.MIN_VALUE;
     }
 
     @Override
@@ -178,12 +185,14 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 能进盾战格挡。
         tryEquipShield(mod);
         // Shield combat: block, wait for the enemy to strike, then counter-attack.
-        // (2026-08-23 rev3) 盾牌只用于小白 (骷髅/凋零骷髅射箭) 和苦力怕 (爆炸) —
-        // 用户设计 "盾牌只针对小白和苦力怕, 其他怪不用盾牌"。盾牌本质是防
-        // 远程投射物和爆炸; 纯近战怪 (僵尸/末影人) 和火焰人直接剑砍 (举盾+
-        // 反击节奏跟他们合不上, 且举盾重置攻击冷却让反击变虚弱攻击)。
+        // (2026-08-23 rev3) 盾牌只用于小白 (骷髅/凋零骷髅射箭)、苦力怕 (爆炸) 和
+        // 烈焰人 (火球, 2026-09-06 用户加入 — 落单烈焰人不浪费防火药水, 改走盾战)。
+        // 盾牌本质是防远程投射物和爆炸; 纯近战怪 (僵尸/末影人) 直接剑砍。
+        // 烈焰人与小白节奏不同: 一轮连发 3 球, 走"波内只格挡、波次间反击"分支
+        // (见 shieldCombatTick 内 blazeTarget 处理)。
         boolean hasShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
-        boolean shieldTarget = entity instanceof AbstractSkeletonEntity || entity instanceof CreeperEntity;
+        boolean shieldTarget = entity instanceof AbstractSkeletonEntity || entity instanceof CreeperEntity
+                || entity instanceof BlazeEntity;
         if (hasShield && shieldTarget) {
             return shieldCombatTick(mod, entity);
         }
@@ -293,8 +302,19 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         return move;
     }
 
-    // 已格满 n 下 或 举盾超时 (小白哑火) → 开反击阶段。
-    boolean enoughBlocks = _blockStreak >= n;
+    // (2026-09-06 烈焰人波次, 用户) 已格满 n 下 (小白: 单箭节奏) 或 举盾超时
+    // (哑火兜底) → 开反击阶段。烈焰人例外: 一轮连发 3 球, 按 _blockStreak>=n
+    // 会在波内提前开反击窗然后立刻被打断 — 改为"一波结束才反击":
+    // 连续 BLAZE_WAVE_GAP_TICKS 无弹射物逼近且本波至少格到过 1 颗。
+    boolean blazeTarget = entity instanceof BlazeEntity;
+    boolean enoughBlocks;
+    if (blazeTarget) {
+        long sinceLastInbound = (_lastInboundTick == Long.MIN_VALUE) ? Long.MAX_VALUE
+                : nowTick - _lastInboundTick;
+        enoughBlocks = !_arrowInbound && _blockStreak > 0 && sinceLastInbound >= BLAZE_WAVE_GAP_TICKS;
+    } else {
+        enoughBlocks = _blockStreak >= n;
+    }
     boolean forced = (nowTick - _blockPhaseStartTick) > BLOCK_FORCE_COUNTER_TICKS;
     if (enoughBlocks || forced) {
         setDebugState("Opening counter window (" + n + " threats, " + _blockStreak + " blocked)");
@@ -327,29 +347,6 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             }
         }
         return best;
-    }
-
-    /**
-     * 检测附近是否有远程敌人 (骷髅/凋零骷髅/烈焰人等 — 2026-08-23 加烈焰人)。
-     * 烈焰人发射火球, 打它时同样应举盾格挡 + 反击, 否则火球飞来 Mob Defense
-     * 的 doProjectileBlock 会抢占 KillEntityTask → 一直举盾不打 (用户: "盾牌
-     * 还是不放").
-     */
-    private boolean hasNearbyRangedThreat(AltoClef mod) {
-        double RANGED_THREAT_RANGE = 20.0; // 20格内的远程敌人
-        for (Entity tracked : mod.getEntityTracker().getTrackedEntities(AbstractSkeletonEntity.class)) {
-            if (tracked.isAlive() && EntityHelper.isAngryAtPlayer(mod, tracked)) {
-                if (tracked.squaredDistanceTo(mod.getPlayer()) <= RANGED_THREAT_RANGE * RANGED_THREAT_RANGE) {
-                    return true;
-                }
-            }
-        }
-        for (Entity tracked : mod.getEntityTracker().getTrackedEntities(BlazeEntity.class)) {
-            if (tracked.isAlive() && tracked.squaredDistanceTo(mod.getPlayer()) <= RANGED_THREAT_RANGE * RANGED_THREAT_RANGE) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -459,6 +456,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         boolean now = incomingArrowNear(mod);
         if (now) {
             _arrowInbound = true;
+            // (2026-09-06 烈焰人波次) 记录最近一次逼近 tick, 供"一波连发结束"判定。
+            _lastInboundTick = WorldHelper.getTicks();
         } else if (_arrowInbound) {
             _blockStreak++;
             _arrowInbound = false;

@@ -14,6 +14,7 @@ import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Blocks;
@@ -34,6 +35,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     private static final int TOO_MANY_BLAZES = 5;
     private static final double TOO_LITTLE_HEALTH_BLAZE = 5;
+
+    // (2026-09-06 药水门槛, 用户) 喝防火药水的最低烈焰人数: 落单烈焰人走盾战, 不喝药。
+    private static final int POTION_MIN_BLAZES = 2;
+    // 血量低 (半血) 时即便落单也允许喝 — 盾战容错太差, 保命优先。
+    private static final float POTION_LOW_HEALTH = 10.0f;
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
     // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
@@ -107,13 +113,21 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
 
         if (toKill.isPresent() && toKill.get().isAlive()) {
-            // (2026-08-23 防火药水) 打烈焰人前喝防火药水 (用户设计: 打的时候
-            // 喝, 别提前喝 — 只在此处 (有烈焰人要打) 触发; 别一次多瓶 — 有
-            // FIRE_RESISTANCE 效果时不喝, 效果消失后才续杯)。
+            // (2026-09-06 药水门槛, 用户) 落单烈焰人不再浪费药水 — 改走盾牌
+            // 波次格挡 (AbstractKillEntityTask)。只有以下情况才喝:
+            //   1) 感知到 ≥ POTION_MIN_BLAZES 只烈焰人 (刷怪笼房, 火球密度太高);
+            //   2) 盾战不可行: 没盾 (ThreatEvaluator.hasShield 含背包) 或血量低。
+            // 有 FIRE_RESISTANCE 效果时不喝, 效果消失后才按上面门槛续杯。
             if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
                     && ItemHelper.countFireResPotions(mod) > 0) {
-                setDebugState("Drinking fire resistance potion before fighting blaze");
-                return new DrinkFireResPotionTask();
+                int blazeCount = mod.getEntityTracker().getTrackedEntities(BlazeEntity.class).size();
+                boolean manyBlazes = blazeCount >= POTION_MIN_BLAZES;
+                boolean shieldImpractical = !ThreatEvaluator.hasShield(mod)
+                        || mod.getPlayer().getHealth() <= POTION_LOW_HEALTH;
+                if (manyBlazes || shieldImpractical) {
+                    setDebugState("Drinking fire resistance potion before fighting blaze");
+                    return new DrinkFireResPotionTask();
+                }
             }
             setDebugState("Killing blaze");
             return new KillEntitiesTask(entity -> !isHoveringAboveLavaOrTooHigh(mod, entity), BlazeEntity.class);
