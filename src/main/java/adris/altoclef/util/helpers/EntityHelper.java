@@ -45,13 +45,23 @@ public class EntityHelper {
         if (hostile instanceof EndermanEntity enderman) {
             return enderman.isAngryAt(player) && enderman.isAngry();
         }
-        if (hostile instanceof PiglinEntity) {
+        if (hostile instanceof PiglinEntity pig) {
+            // (2026-09-06 Phase 1) 事件记忆判激怒: 被打过(或 16 格内同伴被打过)的猪灵
+            // 记仇 30s, 穿金甲也照样算敌对 —— 修复"金甲=免疫激怒"的方向性错误
+            // (11:56 实测: 玩家手动打的激怒猪灵贴脸输出, 防御链因金甲全程失明)。
+            // 客户端 ANGRY_AT brain 记忆不同步 (Phase 0 实测 angryAtMem 恒 false),
+            // 只能走本地事件记忆, 不能读 API。
+            if (HitRegistry.isPiglinAngered(pig)) {
+                return true;
+            }
             // Angry if we're not wearing gold
             return !StorageHelper.isArmorEquipped(mod, ItemHelper.GOLDEN_ARMORS);
         }
         if (hostile instanceof ZombifiedPiglinEntity zombie) {
-            // Will ALWAYS be false.
-            return zombie.hasAngerTime() && zombie.isAngryAt(player);
+            // (2026-09-06 Phase 1) 原实现 hasAngerTime() 客户端恒 false,
+            // 改用事件记忆: 打过任意一只 → 32 格内群体仇恨 25s。
+            // 行为推断兜底 (视觉线索) 留待 Phase 2。
+            return HitRegistry.isZombifiedAngered(zombie);
         }
         return !isTradingPiglin(hostile);
     }
@@ -98,6 +108,7 @@ public class EntityHelper {
                     // 成年猪灵: anger 走 brain (ANGRY_AT 记忆)。若客户端 brain 未同步,
                     // 这里将恒为空 → Phase 1 必须走事件记忆。
                     sb.append(" angryAtMem=").append(pig.getBrain().getOptionalMemory(MemoryModuleType.ANGRY_AT).isPresent())
+                            .append(" hitReg=").append(HitRegistry.isPiglinAngered(pig))
                             .append(" trading=").append(isTradingPiglin(pig))
                             .append(" baby=").append(pig.isBaby())
                             .append(" sees=").append(pig.canSee(mod.getPlayer()));
@@ -105,7 +116,8 @@ public class EntityHelper {
                     // 僵尸猪灵: anger 走服务端 AngerableManager, 客户端预期恒 false (Phase 0 实测确认)。
                     sb.append(" hasAngerTime=").append(zombie.hasAngerTime())
                             .append(" angryAtMem=").append(zombie.getAngryAt())
-                            .append(" isAngryAtPlayer=").append(zombie.isAngryAt(mod.getPlayer()));
+                            .append(" isAngryAtPlayer=").append(zombie.isAngryAt(mod.getPlayer()))
+                            .append(" hitReg=").append(HitRegistry.isZombifiedAngered(zombie));
                 }
                 // PiglinBruteEntity: 无 anger 概念, 仅报位置与距离。
             }
