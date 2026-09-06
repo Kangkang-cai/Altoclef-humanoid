@@ -32,7 +32,9 @@ import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.SleepingChatScreen;
+import net.minecraft.client.gui.screen.ingame.MerchantScreen;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -96,6 +98,10 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // (用户: 没破坏掉草, 站在草里很蠢; 建议交互无效就左键几下再右键)。每区域/
     // 每侧只清一次, 避免横跳。
     private boolean _interactClearedVeg = false;
+    // (2026-09-06 准心避开村民实体框) 睡床右键前校验 crosshairTarget, 被实体
+    // (最典型=床上躺着的村民) 挡住时本 tick 不点右键 — 点到村民会打开交易
+    // 界面而不是睡床。此日志 2s 节流, 防止每 tick 刷屏。
+    private final TimerGame _crosshairBlockedLogTimer = new TimerGame(2);
 
     public PlaceBedAndSetSpawnTask() {
 
@@ -188,6 +194,16 @@ public class PlaceBedAndSetSpawnTask extends Task {
         }
 
         Screen screen = MinecraftClient.getInstance().currentScreen;
+        // (2026-09-06 意外交易界面, 用户: 右键瞄床时准心落到村民实体框上会打开
+        // 交易界面而不是睡床) 出现村民交易界面 = 上一 tick 的右键点到了村民,
+        // 立即关闭 (closeHandledScreen 会发 close 包, 不会假死在 GUI 里)。
+        if (screen instanceof MerchantScreen) {
+            mod.getPlayer().closeHandledScreen();
+            String m = "[Diag-bed] accidental trade screen opened (right-click hit villager), closing it";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return null;
+        }
         if (!_stayInBed && _inBedTimer.elapsed() && screen instanceof SleepingChatScreen) {
             _progressChecker.reset();
             setDebugState("Sleeping...");
@@ -408,9 +424,25 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
                 // 空手 (避免对着床按右键先吃东西/放方块, 睡不了)
                 mod.getSlotHandler().forceDeequipRightClickableItem();
-                mod.getInputControls().tryPress(Input.CLICK_RIGHT);
-                // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
-                _inBedTimer.reset();
+                // (2026-09-06 准心避开村民实体框, 用户: 床上躺着村民, 右键点到
+                // 村民实体框会打开交易界面而不是睡床) 与击打准心校验同款原则:
+                // crosshairTarget 是实体(床边/床上的村民, 或任何挡在准星前的
+                // 实体) → 本 tick 不点右键, 让 3s 小超时换侧/换站位; 准心落在
+                // 床方块(或落空)上才点。
+                if (MinecraftClient.getInstance().crosshairTarget instanceof EntityHitResult) {
+                    if (_crosshairBlockedLogTimer.elapsed()) {
+                        _crosshairBlockedLogTimer.reset();
+                        String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by entity "
+                                + ((EntityHitResult) MinecraftClient.getInstance().crosshairTarget).getEntity().getType().getName()
+                                + ", waiting for side-swap (player=" + pp.toShortString() + ")";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                    }
+                } else {
+                    mod.getInputControls().tryPress(Input.CLICK_RIGHT);
+                    // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
+                    _inBedTimer.reset();
+                }
             } else {
                 // 距离还是超了 (被挤开/站错) → 重走 GetToBlock, 不耗超时
                 return new GetToBlockTask(standPos);
