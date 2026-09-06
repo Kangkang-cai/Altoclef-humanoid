@@ -258,9 +258,27 @@ public class FoodChain extends SingleTaskChain {
         if (emptySlot != null) {
             mod.getSlotHandler().clickSlotForced(emptySlot, 0,
                     net.minecraft.screen.slot.SlotActionType.PICKUP);
+            return;
+        }
+        // 背包满 (2026-09-06 22:33 补): 找一摞可丢弃的非食物垃圾, PICKUP 换位
+        // (盾入背包, 垃圾上光标), 再把垃圾丢地上 (vanilla 点击屏幕外=丢弃光标物品)。
+        adris.altoclef.util.slots.Slot junkSlot = null;
+        for (adris.altoclef.util.slots.Slot s : StorageHelper.getRealBackpackSlots()) {
+            ItemStack stack = StorageHelper.getItemStackInSlot(s);
+            if (!stack.isEmpty() && stack.getItem() != Items.SHIELD && !stack.isFood()
+                    && ItemHelper.canThrowAwayStack(mod, stack)) {
+                junkSlot = s;
+                break;
+            }
+        }
+        if (junkSlot != null) {
+            mod.getSlotHandler().clickSlotForced(junkSlot, 0,
+                    net.minecraft.screen.slot.SlotActionType.PICKUP);
+            mod.getSlotHandler().clickSlotForced(adris.altoclef.util.slots.Slot.UNDEFINED, 0,
+                    net.minecraft.screen.slot.SlotActionType.PICKUP);
         } else {
             Debug.logToFile("altoclef_diag.log",
-                    "[FOOD-EAT] shield parked on cursor, no empty slot to restore");
+                    "[FOOD-EAT] shield parked on cursor, no empty slot / junk to toss");
         }
     }
 

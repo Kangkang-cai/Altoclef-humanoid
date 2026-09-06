@@ -357,6 +357,17 @@ public class StorageHelper {
                 }
             }
         }
+        // (2026-09-06 22:33 副手不可见修复) 旧扫描只扫 main 0..35: 面包只剩副手
+        // 一摞时 forceEquip 永远失败 (实锤 "[FOOD-EAT] equip food FAILED: bread
+        // main=iron_pickaxe off=bread" 死循环)。补充副手槽 —— forceEquip 的
+        // SWAP(副手格, 快捷栏序号) 可直接把副手物品换到主手。
+        ItemStack offhand = player.getInventory().offHand.get(0);
+        for (Item item : items) {
+            if (offhand.getItem() == item) {
+                result.add(PlayerSlot.OFFHAND_SLOT);
+                break;
+            }
+        }
         return result;
     }
 

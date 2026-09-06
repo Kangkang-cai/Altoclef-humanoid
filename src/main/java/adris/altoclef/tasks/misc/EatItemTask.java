@@ -76,8 +76,10 @@ public class EatItemTask extends Task {
         boolean mainIsShield = main.getItem() == net.minecraft.item.Items.SHIELD;
 
         // 自愈旧 bug 遗留态 (21:20 实锤: 主手盾+副手面包): 主手盾捡上光标,
-        // 下一 tick 主手空 + 副手食物 → 直接从副手吃。
-        if (mainIsShield && off.isFood()) {
+        // 下一 tick 主手空 + 副手食物 → 直接从副手吃。光标被占时不抢 (PICKUP
+        // 会和光标上现有物品交换, 搅乱状态)。
+        if (mainIsShield && off.isFood()
+                && adris.altoclef.util.helpers.StorageHelper.getItemStackInCursorSlot().isEmpty()) {
             mod.getSlotHandler().clickSlotForced(
                     adris.altoclef.util.slots.PlayerSlot.getEquipSlot(), 0,
                     net.minecraft.screen.slot.SlotActionType.PICKUP);
@@ -97,14 +99,16 @@ public class EatItemTask extends Task {
         }
 
         // 装备食物到主手 (unInterruptable=true: 本任务拥有 bot)。
+        // (2026-09-06 22:33) getItemSlotsInInventoryReal 已含副手, 面包只剩副手
+        // 一摞时也能 SWAP 换到主手; 装备仍失败时, 主手为"无右键用途"物品
+        // (空手/工具) 的话直接从副手吃 —— vanilla 主手 use 失败才轮到副手,
+        // 工具/空手 use 恒失败, 副手食物正常开吃; 盾/方块/桶等会抢右键, 不行。
         if (!main.isFood()) {
             mod.getSlotHandler().forceEquipItem(new Item[]{food}, true);
             main = mod.getPlayer().getMainHandStack();
             if (!main.isFood()) {
-                // 装备失败: 若主手已空且副手是食物 → 直接从副手吃 (主手空不挡右键)。
-                if (main.isEmpty() && off.isFood()) {
-                    // fallthrough 到下方开吃, 吃副手。
-                } else {
+                boolean mainNotBlocking = main.isEmpty() || main.getItem() instanceof net.minecraft.item.ToolItem;
+                if (!(off.isFood() && mainNotBlocking)) {
                     releaseEat(mod);
                     _lastEquipFailLogMs = logThrottled(mod, _lastEquipFailLogMs,
                             "[FOOD-EAT] equip food FAILED: " + food
@@ -112,6 +116,7 @@ public class EatItemTask extends Task {
                     setDebugState("Failed to equip " + food.toString() + ", waiting");
                     return null;
                 }
+                // fallthrough 到下方开吃, 吃副手。
             }
         }
 
