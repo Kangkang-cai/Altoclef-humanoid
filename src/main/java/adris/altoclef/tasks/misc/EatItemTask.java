@@ -71,52 +71,72 @@ public class EatItemTask extends Task {
         }
 
         Item food = bestFood.get();
+        net.minecraft.item.ItemStack main = mod.getPlayer().getMainHandStack();
+        net.minecraft.item.ItemStack off = mod.getPlayer().getOffHandStack();
+        boolean mainIsShield = main.getItem() == net.minecraft.item.Items.SHIELD;
 
-        // (2026-08-23 吃不上饭修复, 复用 FoodChain 逻辑) 副手持盾时右键被盾抢走
-        // (MC 机制: 副手盾优先于主手使用 → 举盾不吃食物)。先换盾 (按钮40副手swap,
-        // 背包满则食物↔副手互换兜底, 2026-09-06 修复旧按钮9无效导致永久卡死)。
-        if (!FoodChain.tryClearShieldFromOffhand(mod, food)) {
-            // 换盾失败: 本 tick 绝不 hold 右键 (右键 = 举盾 → interactionPaused +
-            // 原地举盾卡死), 等下个 tick; 超时兜底退出。
-            releaseEat(mod);
-            _lastShieldStuckLogMs = logThrottled(mod, _lastShieldStuckLogMs,
-                    "[FOOD-EAT] shield swap FAILED, waiting (offhand=shield, food=" + food + ")");
-            setDebugState("Offhand shield stuck, waiting for slot");
+        // 自愈旧 bug 遗留态 (21:20 实锤: 主手盾+副手面包): 主手盾捡上光标,
+        // 下一 tick 主手空 + 副手食物 → 直接从副手吃。
+        if (mainIsShield && off.isFood()) {
+            mod.getSlotHandler().clickSlotForced(
+                    adris.altoclef.util.slots.PlayerSlot.getEquipSlot(), 0,
+                    net.minecraft.screen.slot.SlotActionType.PICKUP);
+            setDebugState("Recovering: main-hand shield -> cursor, eat from offhand");
             return null;
         }
 
-        // 装备食物 (unInterruptable=true: 本任务拥有 bot, 不许别的逻辑换手)。
-        boolean equipped = mod.getSlotHandler().forceEquipItem(new Item[]{food}, true);
-        if (!equipped) {
+        // (2026-09-06 21:38 重构) 副手盾 → 光标 (一把 forced PICKUP, 光标不是
+        // 手不挡右键; 不再依赖多步 SWAP 序列 —— 那会被槽位节流静默丢弃出中间态)。
+        if (off.getItem() == net.minecraft.item.Items.SHIELD && !FoodChain.parkShieldOffHands(mod)) {
+            // 停盾失败 (光标被占): 本 tick 绝不 hold 右键 (右键 = 举盾 → 卡死)。
             releaseEat(mod);
-            _lastEquipFailLogMs = logThrottled(mod, _lastEquipFailLogMs,
-                    "[FOOD-EAT] equip food FAILED: " + food);
-            setDebugState("Failed to equip " + food.toString() + ", waiting");
+            _lastShieldStuckLogMs = logThrottled(mod, _lastShieldStuckLogMs,
+                    "[FOOD-EAT] shield PARK FAILED (cursor busy), waiting");
+            setDebugState("Shield park failed (cursor busy), waiting");
             return null;
+        }
+
+        // 装备食物到主手 (unInterruptable=true: 本任务拥有 bot)。
+        if (!main.isFood()) {
+            mod.getSlotHandler().forceEquipItem(new Item[]{food}, true);
+            main = mod.getPlayer().getMainHandStack();
+            if (!main.isFood()) {
+                // 装备失败: 若主手已空且副手是食物 → 直接从副手吃 (主手空不挡右键)。
+                if (main.isEmpty() && off.isFood()) {
+                    // fallthrough 到下方开吃, 吃副手。
+                } else {
+                    releaseEat(mod);
+                    _lastEquipFailLogMs = logThrottled(mod, _lastEquipFailLogMs,
+                            "[FOOD-EAT] equip food FAILED: " + food
+                                    + " main=" + main.getItem() + " off=" + off.getItem());
+                    setDebugState("Failed to equip " + food.toString() + ", waiting");
+                    return null;
+                }
+            }
         }
 
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         mod.getExtraBaritoneSettings().setInteractionPaused(true);
         _eating = true;
-        setDebugState("Eating: " + food.toString());
+        setDebugState("Eating: " + (main.isFood() ? main.getItem().toString() : off.getItem().toString()));
         return null;
     }
 
     @Override
     public boolean isFinished(AltoClef mod) {
         // 注意: SingleTaskChain 的 isFinished 路径不会调用 onStop, 收尾
-        // (释放右键/恢复交互) 必须在这里先做完再返回 true。
+        // (释放右键/恢复交互/归还光标上的盾) 必须在这里先做完再返回 true。
         // onStart 尚未执行 (刚 setTask、还没被 tick 过): 绝不判结束,
         // 否则计时器未重置 → 开局即超时死循环 (见 _started 注释)。
         if (!_started) {
             return false;
         }
         if (_timeout.elapsed()) {
-            releaseEat(mod);
+            finishUp(mod);
             return true;
         }
         if (!mod.getFoodChain().needsToEat(mod)) {
-            releaseEat(mod);
+            finishUp(mod);
             return true;
         }
         return false;
@@ -124,7 +144,13 @@ public class EatItemTask extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        finishUp(mod);
+    }
+
+    private void finishUp(AltoClef mod) {
         releaseEat(mod);
+        // 盾在进食期间停在光标上, 结束时归还 (副手/背包空格)。
+        FoodChain.restoreShieldFromCursor(mod);
     }
 
     private void releaseEat(AltoClef mod) {

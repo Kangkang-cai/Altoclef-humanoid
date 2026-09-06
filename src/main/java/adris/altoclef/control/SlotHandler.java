@@ -96,6 +96,16 @@ public class SlotHandler {
         clickSlot(slot, mouseButton, type);
     }
 
+    /**
+     * (2026-09-06 进食修复) 强制槽位点击 (跳过 containerItemMoveDelay 节流)。
+     * 仅供"必须在本 tick 确定完成"的少数场景 (进食的盾/食物换位) 使用:
+     * 节流丢弃是静默的, 多步槽位序列混用普通点击会出现中间态永久卡死
+     * (实锤 21:20: 主手盾+副手面包, 换盾点击被节流丢弃后状态翻转)。
+     */
+    public void clickSlotForced(Slot slot, int mouseButton, SlotActionType type) {
+        clickSlotForce(slot, mouseButton, type);
+    }
+
     private void clickWindowSlot(int windowSlot, int mouseButton, SlotActionType type) {
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player == null) {
