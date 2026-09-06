@@ -297,7 +297,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
         BlockPos nearestBed = anyBed ? mod.getBlockTracker().getNearestTracking(BEDS).orElse(null) : null;
         boolean nearbyBed = nearestBed != null
                 && nearestBed.isWithinDistance(mod.getPlayer().getPos(), 30);
-        boolean shouldGoToBed = anyBed && (!hasBedItem || nearbyBed);
+        // (2026-09-06 就地合床修复, 用户: 夜里背包有 3 羊毛+原木可做床, 却跑去
+        // 100 格外村庄床睡) 旧判定 shouldGoToBed = anyBed && (!hasBedItem ||
+        // nearbyBed): 只要 BlockTracker 缓存里有任何一张床(无论多远)且背包没床
+        // 成品, 就无条件走去睡 —— nearbyBed(30 格) 约束对"没床成品"的情形完全
+        // 失效, 材料明明够也不就地合成。改为: 只有 30 格内真有床才去睡; 否则
+        // 背包有床就地放一张, 没床走下方 "Getting a bed first" → CollectBedTask
+        // (96 格内有可感知床才去拆, 超过则杀羊/羊毛+木板合床)。
+        boolean shouldGoToBed = anyBed && nearbyBed;
         if (anyBed && !shouldGoToBed && hasBedItem) {
             setDebugState("Has bed item, but nearest bed is far (" + (nearestBed == null ? "?" : nearestBed.getSquaredDistance(mod.getPlayer().getBlockPos())) + ") — placing bed nearby");
         }
