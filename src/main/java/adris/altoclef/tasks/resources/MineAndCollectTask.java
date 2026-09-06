@@ -477,10 +477,12 @@ public class MineAndCollectTask extends ResourceTask {
         // (2026-08-22 修补) 挖矿掉落物横跳: 挖掉一个方块掉落物立即出现在脚下,
         // getClosestTo 里 dropSq 极小 → 每挖一块就切去捡 → "挖一个→捡一个"
         // (UserTask 里 ResourceTask 的 shouldAvoidPickingUp=true 已绕过父类冷却)。
-        // 本类独立实现同款 2 秒冷却: 捡过掉落物后 2 秒内掉落物不参与目标竞争,
-        // 贴脸 2 格内的掉落物会被磁铁自然吸入, 不需要切换任务。
         private long _lastDropPickupMs = 0;
         private static final long DROP_PICKUP_COOLDOWN_MS = 2000;
+        // (2026-09-06 重启启用, 原为死代码) 捡取粘性窗口: 追过掉落物后 2 秒内
+        // 不开新隧道/环顾 (见 getWanderTask)。作用方向与旧注释相反 — 不是让
+        // 掉落物不参与目标竞争, 而是刚追过掉落物时【等一等】, 别让探索分支
+        // 抢断捡取 (用户实测 18:32 铁掉落物两次被 Digging a tunnel 顶停)。
         private Task _explorationTask;
         private BlockPos _miningPos;
         private AltoClef _mod;
@@ -1190,6 +1192,18 @@ public class MineAndCollectTask extends ResourceTask {
                 return null;
             }
             logBlindnessDiag(mod);
+            // (2026-09-06 捡取粘性移植 574295d8, 用户"贪婪挖铁任务也被打断") 机制:
+            // 掉落物实体合并/被吸入瞬间 isValid=false → pursuit 清空, entity tracker
+            // 异步滞后 1-2 tick 内 getClosestTo 返回空 → 本方法立刻开新隧道
+            // (Digging a tunnel) → 掉落物重新入册又切回捡取 → 每 ~1s 乒乓
+            // (日志实锤 18:32:44/49 pickup 两次被 tunnel 顶停, TaskPingPong 6x/5s,
+            // raw_iron 9 块只收到 6)。修复: 刚追过掉落物 (DROP_PICKUP_COOLDOWN_MS
+            // 窗口内) 不开新隧道也不环顾, 返回 null 站等 1-2 tick, tracker 回册后
+            // getClosestTo 自然重新锁掉落物续捡。只拦"进入探索", 不拦捡取本身 —
+            // 与 574295d8 "冷却只管进入决策" 同语义。窗口过完掉落真没了才继续探索。
+            if (System.currentTimeMillis() - _lastDropPickupMs < DROP_PICKUP_COOLDOWN_MS) {
+                return null;
+            }
             // 环顾行为（2026-08-21，替代已回滚的 FOV bypass——用户反馈
             // "绕过 FOV 太作弊"）：即将开新通道前，朝近处(≤24格)被 FOV
             // 拒绝的已知矿转头看 2 秒。人类行为：开新隧道前先环顾四周
