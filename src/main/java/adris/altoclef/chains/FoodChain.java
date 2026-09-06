@@ -1,8 +1,10 @@
 package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.Settings;
 import adris.altoclef.chains.FoodChain.FoodChainConfig;
+import adris.altoclef.tasks.misc.EatItemTask;
 import adris.altoclef.tasks.resources.CollectFoodTask;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.ConfigHelper;
@@ -36,6 +38,36 @@ public class FoodChain extends SingleTaskChain {
 
     private int _cachedFoodScore;
     private Optional<Item> _cachedPerfectFood = Optional.empty();
+
+    // ---- [FOOD-DIAG] (2026-09-06 战后不进食排查, 只读诊断) ----
+    // FoodChain 原先零诊断日志, "为什么不吃" 完全不可见。0.5s 节流打印
+    // 决策现场: 饥饿/血量/各闸门状态/选中食物/动作。
+    private long _lastDiagLogMs = 0;
+    private static final long FOOD_DIAG_INTERVAL_MS = 500;
+    // 最近一次 needsToEat() 结果 (getPriority 主流程写入, 诊断用)。
+    private boolean _lastNeedsToEat = false;
+
+    private void logFoodDiag(AltoClef mod, String action, String blocked) {
+        long now = System.currentTimeMillis();
+        if (now - _lastDiagLogMs < FOOD_DIAG_INTERVAL_MS) return;
+        _lastDiagLogMs = now;
+        try {
+            int hunger = mod.getPlayer().getHungerManager().getFoodLevel();
+            float health = mod.getPlayer().getHealth();
+            String m = "[FOOD-DIAG] hunger=" + hunger + " health=" + health
+                    + " autoEat=" + mod.getModSettings().isAutoEat()
+                    + " acro=" + mod.getMobDefenseChain().isDoingAcrobatics()
+                    + " combat=" + mod.getMobDefenseChain().isInCombat()
+                    + " falling=" + mod.getMLGBucketChain().isFallingOhNo(mod)
+                    + " needEat=" + _lastNeedsToEat
+                    + " hasFood=" + _cachedFoodScore
+                    + " bestFood=" + (_cachedPerfectFood.isPresent()
+                            ? _cachedPerfectFood.get().toString() : "none")
+                    + " action=" + action
+                    + (blocked == null || blocked.isEmpty() ? "" : " blocked=" + blocked);
+            Debug.logToFile("altoclef_diag.log", m);
+        } catch (Exception ignored) { /* 诊断日志绝不影响主逻辑 */ }
+    }
 
     public FoodChain(TaskRunner runner) {
         super(runner);
@@ -71,6 +103,7 @@ public class FoodChain extends SingleTaskChain {
         // We're in danger, don't eat now!!
         if (mod.getMobDefenseChain().isDoingAcrobatics() || mod.getMLGBucketChain().isFallingOhNo(mod)) {
             stopEat(mod);
+            logFoodDiag(mod, "idle", "acrobatics-or-falling");
             return Float.NEGATIVE_INFINITY;
         }
 
@@ -79,6 +112,7 @@ public class FoodChain extends SingleTaskChain {
         // 格挡 → 挨射), 且战斗中进食等于站桩挨打。让战斗优先, 战斗结束再吃。
         if (mod.getMobDefenseChain().isInCombat()) {
             stopEat(mod);
+            logFoodDiag(mod, "idle", "in-combat");
             return Float.NEGATIVE_INFINITY;
         }
 
@@ -87,6 +121,8 @@ public class FoodChain extends SingleTaskChain {
         _cachedPerfectFood = calculation.getRight();
 
         boolean hasFood = _cachedFoodScore > 0;
+        boolean needEat = needsToEat(mod);
+        _lastNeedsToEat = needEat;
 
         // If we requested a fillup but we're full, stop.
         if (_requestFillup && mod.getPlayer().getHungerManager().getFoodLevel() == 20) {
@@ -97,15 +133,32 @@ public class FoodChain extends SingleTaskChain {
             _requestFillup = false;
         }
 
-        if (hasFood && (needsToEat(mod) || _requestFillup) && _cachedPerfectFood.isPresent() && !mod.getMLGBucketChain().isChorusFruiting()) {
-            Item toUse = _cachedPerfectFood.get();
+        if (hasFood && (needEat || _requestFillup) && _cachedPerfectFood.isPresent() && !mod.getMLGBucketChain().isChorusFruiting()) {
             // Make sure we're not facing a container
             if (!LookHelper.tryAvoidingInteractable(mod)) {
+                logFoodDiag(mod, "wait", "facing-interactable");
                 return Float.NEGATIVE_INFINITY;
             }
-            startEat(mod, toUse);
+            if (needEat) {
+                // (2026-09-06 战后前台进食修复, 用户"打完架血量低不恢复, 继续挖铁")
+                // 真饿/低血时不再走异步后台进食 —— 异步右键会被获胜任务链 tick 里的
+                // 装备/举盾/放方块等动作静默抢断 (MineAndCollectTask 单物品 forceEquipItem
+                // 重载无 isTryingToEat 闸门), 且 FoodChain 原先零诊断日志, 出问题完全
+                // 不可见 (用户实测: 血量 2、饥饿 11~17、背包 129 食物, 战后无任何进食
+                // 动作直接挖铁)。改为前台接管: bot 站定吃完再回去干活。优先级
+                // eatForegroundPriority(默认 62) 高于用户任务(50), 低于逃跑/冷却(70)、
+                // 自信战斗(65 之下不冲突——有怪时战斗优先), MLG(100)/加急战斗(95) 可随时
+                // 抢占保命, 抢占时 EatItemTask.onStop 释放右键。
+                stopEat(mod);
+                setTask(new EatItemTask(_config.eatTaskTimeoutSeconds));
+                logFoodDiag(mod, "foreground-eat", "");
+                return _config.eatForegroundPriority;
+            }
+            startEat(mod, _cachedPerfectFood.get());
+            logFoodDiag(mod, "async-topup", "");
         } else {
             stopEat(mod);
+            logFoodDiag(mod, "idle", hasFood ? (needEat ? "no-fit-food" : "not-needed") : "no-food");
         }
 
         Settings settings = mod.getModSettings();
@@ -146,32 +199,11 @@ public class FoodChain extends SingleTaskChain {
         //Debug.logInternal("EATING " + toUse.getTranslationKey() + " : " + test);
         _isTryingToEat = true;
         _requestFillup = true;
-        // (2026-08-23 吃不上饭修复) 副手持盾时右键被盾抢走 (MC 机制: 副手
-        // 盾牌优先于主手使用 → 举盾不吃食物), 打架时 bot 副手常持盾, 想
-        // 吃东西一直卡着 (用户反馈)。先把副手盾换到背包空槽, 空出副手再
-        // 装备食物 + 右键进食。
-        if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) {
-            // (2026-09-03 2x2合成格污染根因, 用户"背包格东西被塞进合成格") 给副手盾找
-            // 放位的空槽绝不能用 getSlotsWithItemPlayerInventory(true, AIR) —— 该查询走
-            // tracker, 而 PlayerScreenHandler 下(无 GUI 时 MC 默认 handler 也是它)合成
-            // 输出(window0)+2x2合成格(window1-4)被 isSlotInPlayerInventory 归入"玩家背包
-            // 槽"。背包真满时唯一搜到的"空槽"就是合成格 → SWAP 点合成格 → 背包物品被
-            // 换进 2x2 格 (craftgrid_click.log 实锤 startEat 反复把铁腿/金苹果/深板岩/
-            // 树苗换进 window1-4)。只认真背包 inventory 0..35 (getRealBackpackSlots,
-            // 任意界面均天然排除合成格/输出槽/护甲/副手/光标); 无真背包装空槽则本次
-            // 不换盾、放弃进食(下方守卫 stopEat, 不卡死), 等下个 tick 或腾出空位再试。
-            adris.altoclef.util.slots.Slot emptySlot = adris.altoclef.util.helpers.StorageHelper.getRealBackpackSlots().stream()
-                    .filter(s -> adris.altoclef.util.helpers.StorageHelper.getItemStackInSlot(s).isEmpty())
-                    .findFirst().orElse(null);
-            if (emptySlot != null) {
-                mod.getSlotHandler().clickSlot(emptySlot,
-                        adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT.getInventorySlot(),
-                        net.minecraft.screen.slot.SlotActionType.SWAP);
-            }
-        }
+        // (2026-08-23 吃不上饭修复) 副手持盾时右键被盾抢走, 先换盾再进食。
+        tryClearShieldFromOffhand(mod);
         // (2026-09-03 背包满举盾卡死修复, 用户"要吃东西结果举盾卡住不动") 换盾
-        // 后【立即验证】副手是否真的不再是盾: 若仍是盾(背包满无空槽 → emptySlot
-        // null → 上面没换; 或 SWAP 网络包还没生效), 本 tick 绝不 hold 右键 —
+        // 后【立即验证】副手是否真的不再是盾: 若仍是盾(背包满无空槽 → 没换成;
+        // 或 SWAP 网络包还没生效), 本 tick 绝不 hold 右键 —
         // 否则右键 = 举盾, 而 interactionPaused 又把 baritone 导航暂停 → 原地
         // 举盾卡死 (用户实锤: 背包满 + 副手盾 + 主手已装食物 → 持续举盾不动)。
         // 放弃本次进食, 等背包腾出空位/下 tick 重试, 最多延迟 1 tick 不卡死。
@@ -182,6 +214,42 @@ public class FoodChain extends SingleTaskChain {
         mod.getSlotHandler().forceEquipItem(new Item[]{food}, true); //"true" because it's food
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         mod.getExtraBaritoneSettings().setInteractionPaused(true);
+    }
+
+    /**
+     * (2026-09-06 从 startEat 提取) 副手持盾时把盾换到背包空槽, 空出副手好进食。
+     *
+     * (2026-09-03 2x2合成格污染根因, 用户"背包格东西被塞进合成格") 给副手盾找
+     * 放位的空槽绝不能用 getSlotsWithItemPlayerInventory(true, AIR) —— 该查询走
+     * tracker, 而 PlayerScreenHandler 下(无 GUI 时 MC 默认 handler 也是它)合成
+     * 输出(window0)+2x2合成格(window1-4)被 isSlotInPlayerInventory 归入"玩家背包
+     * 槽"。背包真满时唯一搜到的"空槽"就是合成格 → SWAP 点合成格 → 背包物品被
+     * 换进 2x2 格。只认真背包 inventory 0..35 (getRealBackpackSlots,
+     * 任意界面均天然排除合成格/输出槽/护甲/副手/光标); 无真背包装空槽则不换。
+     *
+     * @return true = 副手已不是盾 (没盾 / 换盾成功); false = 仍持盾 (背包满等)。
+     */
+    public static boolean tryClearShieldFromOffhand(AltoClef mod) {
+        if (mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD) {
+            return true;
+        }
+        adris.altoclef.util.slots.Slot emptySlot = adris.altoclef.util.helpers.StorageHelper.getRealBackpackSlots().stream()
+                .filter(s -> adris.altoclef.util.helpers.StorageHelper.getItemStackInSlot(s).isEmpty())
+                .findFirst().orElse(null);
+        if (emptySlot != null) {
+            mod.getSlotHandler().clickSlot(emptySlot,
+                    adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT.getInventorySlot(),
+                    net.minecraft.screen.slot.SlotActionType.SWAP);
+        }
+        return mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD;
+    }
+
+    /**
+     * (2026-09-06 前台进食) 当前背包里"最优可吃食物" (排除受保护物品与蜘蛛眼,
+     * 按恢复量优先排序)。空 = 没有可吃的。
+     */
+    public Optional<Item> getBestFoodToEat(AltoClef mod) {
+        return calculateFood(mod).getRight();
     }
 
     private void stopEat(AltoClef mod) {
@@ -331,5 +399,10 @@ public class FoodChain extends SingleTaskChain {
         public int runDontEatMaxHunger = 3;
         public int canTankHitsAndEatArmor = 15;
         public int canTankHitsAndEatMaxHunger = 3;
+        // (2026-09-06 前台进食) 真饿/低血时的前台进食优先级: > 用户任务(50),
+        // < 逃跑/冷却(70)、加急战斗(95)、MLG(100)。
+        public float eatForegroundPriority = 62;
+        // 前台进食任务超时 (秒): 换盾失败/装备失败等异常时兜底退出, 防永久卡死。
+        public double eatTaskTimeoutSeconds = 20;
     }
 }
