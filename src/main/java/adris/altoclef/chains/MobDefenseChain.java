@@ -193,6 +193,8 @@ public class MobDefenseChain extends SingleTaskChain {
 
     @Override
     public float getPriority(AltoClef mod) {
+        // [PIGLIN-DIAG] (2026-09-06 Phase 0 只读诊断) 猪灵系激怒信号验证, 0.5s 节流, 不改行为。
+        if (AltoClef.inGame()) EntityHelper.logPiglinDiag(mod);
         _cachedLastPriority = getPriorityInner(mod);
         // [MOB-DIAG] #3/#4 只读: 打印最终返回的优先级 + 状态机 (0.5s 节流)。
         logPriorityAndState(mod);
