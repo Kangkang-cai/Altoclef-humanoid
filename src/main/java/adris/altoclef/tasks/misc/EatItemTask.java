@@ -29,6 +29,14 @@ public class EatItemTask extends Task {
 
     private final TimerGame _timeout;
     private boolean _eating = false;
+    // (2026-09-06 开局即超时修复) SingleTaskChain.onTick 在任务【首次 tick 之前】
+    // 就先查 isFinished (SingleTaskChain.java:59), onStart 来不及跑。而 BaseTimer
+    // 初始 _prevTime=0, elapsed() = 连接ticks/20 - 0 > interval —— 连接时长一旦
+    // 超过 eatTaskTimeoutSeconds(20s), 新建的 EatItemTask 在 onStart 前就被判
+    // 超时结束, 每 tick 被 FoodChain 重建→即死 (日志实锤 21:10:01 起
+    // "Food main task ending: isFinished=true" 刷屏, Food prio 62 常驻压死
+    // 用户任务 50 → "一启动任务就结束")。修复: onStart 没跑过就绝不判结束。
+    private boolean _started = false;
 
     public EatItemTask(double timeoutSeconds) {
         _timeout = new TimerGame(timeoutSeconds);
@@ -38,6 +46,7 @@ public class EatItemTask extends Task {
     protected void onStart(AltoClef mod) {
         _timeout.reset();
         _eating = false;
+        _started = true;
     }
 
     @Override
@@ -90,6 +99,11 @@ public class EatItemTask extends Task {
     public boolean isFinished(AltoClef mod) {
         // 注意: SingleTaskChain 的 isFinished 路径不会调用 onStop, 收尾
         // (释放右键/恢复交互) 必须在这里先做完再返回 true。
+        // onStart 尚未执行 (刚 setTask、还没被 tick 过): 绝不判结束,
+        // 否则计时器未重置 → 开局即超时死循环 (见 _started 注释)。
+        if (!_started) {
+            return false;
+        }
         if (_timeout.elapsed()) {
             releaseEat(mod);
             return true;
