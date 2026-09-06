@@ -47,6 +47,7 @@ import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
@@ -329,6 +330,19 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // 背包有床就地放一张, 没床走下方 "Getting a bed first" → CollectBedTask
         // (96 格内有可感知床才去拆, 超过则杀羊/羊毛+木板合床)。
         boolean shouldGoToBed = anyBed && nearbyBed;
+        // (2026-09-06 v3 根治"隔着方块点床", 用户: bot 会走过去尝试隔方块点床,
+        // 撞了 LOS 限制 12s 超时才离开) 出发前就地预判: 30 格内的床若从任何站
+        // 侧眼位都无法用方块射线点到 (全部隔着方块), 直接视为没有可睡床 — 不
+        // 再走过去撞墙等超时, 走下方就地放床/收集床。结果 1s 缓存, 不每 tick 重算。
+        if (shouldGoToBed && findInteractableBedNear(mod, 30) == null) {
+            if (_noClickableBedLogTimer.elapsed()) {
+                _noClickableBedLogTimer.reset();
+                String m = "[Diag-bed] all beds within 30 are block-blocked (no clear click line from any stand side), not walking over";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+            shouldGoToBed = false;
+        }
         if (anyBed && !shouldGoToBed && hasBedItem) {
             setDebugState("Has bed item, but nearest bed is far (" + (nearestBed == null ? "?" : nearestBed.getSquaredDistance(mod.getPlayer().getBlockPos())) + ") — placing bed nearby");
         }
@@ -353,7 +367,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
             }
             BlockPos toSleepIn = _justPlacedBed;
             if (toSleepIn == null || !(mod.getWorld().getBlockState(toSleepIn).getBlock() instanceof BedBlock)) {
-                toSleepIn = mod.getBlockTracker().getNearestTracking(BEDS).orElse(null);
+                // (2026-09-06 v3) 不再取"绝对最近床", 取最近一张【站侧射线可达】的床,
+                // 避免选到隔着方块的床走过去才发现点不到。
+                toSleepIn = findInteractableBedNear(mod, 30);
             }
             if (toSleepIn == null) {
                 // shouldn't happen (shouldGoToBed requires anyBed=true); 退而重扫
@@ -1054,6 +1070,22 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private Vec3d findUnblockedBedAimPoint(AltoClef mod, BlockPos bedMain, BlockPos bedHead, Vec3d defaultAim) {
         if (mod.getPlayer() == null) return null;
         Vec3d eyes = mod.getPlayer().getEyePos();
+        List<Vec3d> candidates = collectBedAimCandidates(mod, bedMain, bedHead, eyes);
+        // 拟人: 优先离默认瞄点最近的 (视线摆动最小)
+        candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(defaultAim)));
+        for (Vec3d p : candidates) {
+            double dist = eyes.distanceTo(p);
+            if (dist > 4.5 || dist < 0.1) continue;
+            if (!blockLineHitsBed(mod, eyes, p)) continue;
+            // 实体包围盒: 射线上任何实体在床之前横插 → 弃
+            if (entityBlocksRay(mod, eyes, p)) continue;
+            return p;
+        }
+        return null;
+    }
+
+    /** 床两半块的候选瞄准点: 顶面 3x3 网格 (y=0.55) + 朝 eye 所在侧的侧面 2 高度 x 3 横向。 */
+    private List<Vec3d> collectBedAimCandidates(AltoClef mod, BlockPos bedMain, BlockPos bedHead, Vec3d eye) {
         // 两半块: 床头 + 床头 FACING 反方向(床脚), 再兜底 bedMain, 去重
         List<BlockPos> halves = new ArrayList<>();
         halves.add(bedHead);
@@ -1071,9 +1103,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     candidates.add(new Vec3d(half.getX() + ox, half.getY() + 0.55, half.getZ() + oz));
                 }
             }
-            // 朝玩家侧面: 玩家相对床的主轴方向, 面上 2 高度 x 3 横向
-            double ddx = mod.getPlayer().getX() - (half.getX() + 0.5);
-            double ddz = mod.getPlayer().getZ() - (half.getZ() + 0.5);
+            // 朝 eye 侧面: eye 相对床的主轴方向, 面上 2 高度 x 3 横向
+            double ddx = eye.x - (half.getX() + 0.5);
+            double ddz = eye.z - (half.getZ() + 0.5);
             int fx, fz;
             if (Math.abs(ddx) >= Math.abs(ddz)) { fx = ddx >= 0 ? 1 : -1; fz = 0; }
             else { fx = 0; fz = ddz >= 0 ? 1 : -1; }
@@ -1085,23 +1117,19 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 }
             }
         }
-        // 拟人: 优先离默认瞄点最近的 (视线摆动最小)
-        candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(defaultAim)));
-        for (Vec3d p : candidates) {
-            double dist = eyes.distanceTo(p);
-            if (dist > 4.5 || dist < 0.1) continue;
-            // 方块射线: 第一个命中的必须是床 (点床任一半都能睡), 其它方块挡住则弃
-            Vec3d end = eyes.add(p.subtract(eyes).normalize().multiply(dist + 0.1));
-            BlockHitResult hit = MinecraftClient.getInstance().world.raycast(
-                    new RaycastContext(eyes, end, RaycastContext.ShapeType.COLLIDER,
-                            RaycastContext.FluidHandling.NONE, mod.getPlayer()));
-            if (hit.getType() != HitResult.Type.BLOCK
-                    || !(mod.getWorld().getBlockState(hit.getBlockPos()).getBlock() instanceof BedBlock)) continue;
-            // 实体包围盒: 射线上任何实体在床之前横插 → 弃
-            if (entityBlocksRay(mod, eyes, p)) continue;
-            return p;
-        }
-        return null;
+        return candidates;
+    }
+
+    /** 眼睛→p 的方块射线第一个命中必须是床方块 (点床任一半都能睡), 否则 false。 */
+    private boolean blockLineHitsBed(AltoClef mod, Vec3d eyes, Vec3d p) {
+        double dist = eyes.distanceTo(p);
+        if (dist < 0.1) return false;
+        Vec3d end = eyes.add(p.subtract(eyes).normalize().multiply(dist + 0.1));
+        BlockHitResult hit = MinecraftClient.getInstance().world.raycast(
+                new RaycastContext(eyes, end, RaycastContext.ShapeType.COLLIDER,
+                        RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+        return hit.getType() == HitResult.Type.BLOCK
+                && mod.getWorld().getBlockState(hit.getBlockPos()).getBlock() instanceof BedBlock;
     }
 
     /** 眼睛→p 的射线上是否有实体包围盒在 p 之前横插 (挡右键/开交易界面)。 */
@@ -1111,6 +1139,56 @@ public class PlaceBedAndSetSpawnTask extends Task {
             if (!e.isAlive() || e.isSpectator()) continue;
             Optional<Vec3d> isect = e.getBoundingBox().raycast(eyes, p);
             if (isect.isPresent() && isect.get().distanceTo(eyes) < p.distanceTo(eyes) - 0.05) return true;
+        }
+        return false;
+    }
+
+    // ==== (2026-09-06 v3 根治"隔着方块点床") ====
+    // 用户: bot 会走过去尝试隔着方块点床, 撞了 LOS 限制(12s 超时)才离开。
+    // 根治: 出发前就地预判 — 对每个候选床, 从 4 个站侧的眼位做方块射线采样,
+    // 至少有一个点能命中床才算"可睡"; 全部隔方块的床不选、不出发。
+    private final HashMap<BlockPos, Boolean> _bedClickableCache = new HashMap<>();
+    private final TimerGame _bedClickableCacheTimer = new TimerGame(1);
+    private final TimerGame _noClickableBedLogTimer = new TimerGame(5);
+
+    /**
+     * range 内最近的一张"至少一个站侧方块射线可达"的床; 全部隔方块返回 null。
+     * (按距离排序取第一个可用, 结果按床位缓存 1s。)
+     */
+    private BlockPos findInteractableBedNear(AltoClef mod, double range) {
+        if (mod.getPlayer() == null) return null;
+        if (_bedClickableCacheTimer.elapsed()) {
+            _bedClickableCacheTimer.reset();
+            _bedClickableCache.clear();
+        }
+        BlockPos playerPos = mod.getPlayer().getBlockPos();
+        List<BlockPos> beds = new ArrayList<>(mod.getBlockTracker().getKnownLocations(BEDS));
+        beds.sort(Comparator.comparingDouble(b -> b.getSquaredDistance(playerPos)));
+        for (BlockPos bed : beds) {
+            if (!bed.isWithinDistance(mod.getPlayer().getPos(), range)) continue;
+            Boolean cached = _bedClickableCache.get(bed);
+            boolean ok;
+            if (cached != null) {
+                ok = cached;
+            } else {
+                ok = bedHasClickableLine(mod, bed);
+                _bedClickableCache.put(bed, ok);
+            }
+            if (ok) return bed;
+        }
+        return null;
+    }
+
+    /** 床是否至少存在一个站侧, 从其眼位 (站立方块 +1.62) 的方块射线采样能命中床。 */
+    private boolean bedHasClickableLine(AltoClef mod, BlockPos bed) {
+        BlockPos head = WorldHelper.getBedHead(mod, bed);
+        if (head == null) head = bed;
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockPos stand = head.offset(dir);
+            Vec3d eye = new Vec3d(stand.getX() + 0.5, stand.getY() + 1.62, stand.getZ() + 0.5);
+            for (Vec3d p : collectBedAimCandidates(mod, bed, head, eye)) {
+                if (blockLineHitsBed(mod, eye, p)) return true;
+            }
         }
         return false;
     }
