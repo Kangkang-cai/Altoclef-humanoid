@@ -29,6 +29,8 @@ public class EatItemTask extends Task {
 
     private final TimerGame _timeout;
     private boolean _eating = false;
+    private long _lastShieldStuckLogMs = 0;
+    private long _lastEquipFailLogMs = 0;
     // (2026-09-06 开局即超时修复) SingleTaskChain.onTick 在任务【首次 tick 之前】
     // 就先查 isFinished (SingleTaskChain.java:59), onStart 来不及跑。而 BaseTimer
     // 初始 _prevTime=0, elapsed() = 连接ticks/20 - 0 > interval —— 连接时长一旦
@@ -71,11 +73,14 @@ public class EatItemTask extends Task {
         Item food = bestFood.get();
 
         // (2026-08-23 吃不上饭修复, 复用 FoodChain 逻辑) 副手持盾时右键被盾抢走
-        // (MC 机制: 副手盾优先于主手使用 → 举盾不吃食物)。先换盾到背包空槽。
-        if (!FoodChain.tryClearShieldFromOffhand(mod)) {
-            // 换盾失败 (背包满无空槽 / SWAP 未生效): 本 tick 绝不 hold 右键
-            // (右键 = 举盾 → interactionPaused + 原地举盾卡死), 等下个 tick。
+        // (MC 机制: 副手盾优先于主手使用 → 举盾不吃食物)。先换盾 (按钮40副手swap,
+        // 背包满则食物↔副手互换兜底, 2026-09-06 修复旧按钮9无效导致永久卡死)。
+        if (!FoodChain.tryClearShieldFromOffhand(mod, food)) {
+            // 换盾失败: 本 tick 绝不 hold 右键 (右键 = 举盾 → interactionPaused +
+            // 原地举盾卡死), 等下个 tick; 超时兜底退出。
             releaseEat(mod);
+            _lastShieldStuckLogMs = logThrottled(mod, _lastShieldStuckLogMs,
+                    "[FOOD-EAT] shield swap FAILED, waiting (offhand=shield, food=" + food + ")");
             setDebugState("Offhand shield stuck, waiting for slot");
             return null;
         }
@@ -84,6 +89,8 @@ public class EatItemTask extends Task {
         boolean equipped = mod.getSlotHandler().forceEquipItem(new Item[]{food}, true);
         if (!equipped) {
             releaseEat(mod);
+            _lastEquipFailLogMs = logThrottled(mod, _lastEquipFailLogMs,
+                    "[FOOD-EAT] equip food FAILED: " + food);
             setDebugState("Failed to equip " + food.toString() + ", waiting");
             return null;
         }
@@ -126,6 +133,14 @@ public class EatItemTask extends Task {
             mod.getExtraBaritoneSettings().setInteractionPaused(false);
             _eating = false;
         }
+    }
+
+    // 诊断日志 2s 节流: 卡在等待分支时让 altoclef_diag.log 有迹可循。
+    private long logThrottled(AltoClef mod, long lastMs, String message) {
+        long now = System.currentTimeMillis();
+        if (now - lastMs < 2000) return lastMs;
+        adris.altoclef.Debug.logToFile("altoclef_diag.log", message);
+        return now;
     }
 
     @Override

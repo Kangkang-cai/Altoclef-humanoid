@@ -27,6 +27,10 @@ import java.util.Optional;
 @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 public class FoodChain extends SingleTaskChain {
 
+    // vanilla SWAP 动作的特殊按钮: 40 = 与副手互换 (0~8 = 快捷栏)。
+    // 副手 swap 必须用 40, 传槽位号 (如 getInventorySlot()==9) 是静默 no-op。
+    private static final int VANILLA_SWAP_OFFHAND_BUTTON = 40;
+
     private static FoodChainConfig _config;
     static {
         ConfigHelper.loadConfig("configs/food_chain_settings.json", FoodChainConfig::new, FoodChainConfig.class, newConfig -> _config = newConfig);
@@ -200,7 +204,7 @@ public class FoodChain extends SingleTaskChain {
         _isTryingToEat = true;
         _requestFillup = true;
         // (2026-08-23 吃不上饭修复) 副手持盾时右键被盾抢走, 先换盾再进食。
-        tryClearShieldFromOffhand(mod);
+        tryClearShieldFromOffhand(mod, food);
         // (2026-09-03 背包满举盾卡死修复, 用户"要吃东西结果举盾卡住不动") 换盾
         // 后【立即验证】副手是否真的不再是盾: 若仍是盾(背包满无空槽 → 没换成;
         // 或 SWAP 网络包还没生效), 本 tick 绝不 hold 右键 —
@@ -217,19 +221,23 @@ public class FoodChain extends SingleTaskChain {
     }
 
     /**
-     * (2026-09-06 从 startEat 提取) 副手持盾时把盾换到背包空槽, 空出副手好进食。
+     * (2026-09-06 从 startEat 提取) 清空副手盾, 让右键能用于进食。
      *
-     * (2026-09-03 2x2合成格污染根因, 用户"背包格东西被塞进合成格") 给副手盾找
-     * 放位的空槽绝不能用 getSlotsWithItemPlayerInventory(true, AIR) —— 该查询走
-     * tracker, 而 PlayerScreenHandler 下(无 GUI 时 MC 默认 handler 也是它)合成
-     * 输出(window0)+2x2合成格(window1-4)被 isSlotInPlayerInventory 归入"玩家背包
-     * 槽"。背包真满时唯一搜到的"空槽"就是合成格 → SWAP 点合成格 → 背包物品被
-     * 换进 2x2 格。只认真背包 inventory 0..35 (getRealBackpackSlots,
-     * 任意界面均天然排除合成格/输出槽/护甲/副手/光标); 无真背包装空槽则不换。
+     * (2026-09-06 21:20 卡死根因修复) 旧实现换盾按钮传
+     * PlayerSlot.OFFHAND_SLOT.getInventorySlot() == 9, 而 vanilla SWAP 只接受
+     * 按钮 0~8 (快捷栏) 或 40 (副手) —— 按钮 9 是静默 no-op, 盾从未被换掉过
+     * (debugstate 实锤 "Offhand shield stuck" 永久等待)。修正为 40。
      *
-     * @return true = 副手已不是盾 (没盾 / 换盾成功); false = 仍持盾 (背包满等)。
+     * (2026-09-03 2x2合成格污染根因) 找空位只认真背包 inventory 0..35
+     * (getRealBackpackSlots), 排除合成格/输出槽/护甲/副手/光标。
+     *
+     * 背包满无空格的兜底: 把食物与副手盾互换 (盾去快捷栏当前格), 再
+     * forceEquip 一次把盾换回背包 → 主手食物 + 副手食物, 右键吃主手。
+     * 全程不需要空背包格。
+     *
+     * @return true = 副手已不是盾 (没盾 / 换盾成功); false = 仍持盾 (罕见, 记诊断)。
      */
-    public static boolean tryClearShieldFromOffhand(AltoClef mod) {
+    public static boolean tryClearShieldFromOffhand(AltoClef mod, Item foodToEat) {
         if (mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD) {
             return true;
         }
@@ -237,9 +245,18 @@ public class FoodChain extends SingleTaskChain {
                 .filter(s -> adris.altoclef.util.helpers.StorageHelper.getItemStackInSlot(s).isEmpty())
                 .findFirst().orElse(null);
         if (emptySlot != null) {
-            mod.getSlotHandler().clickSlot(emptySlot,
-                    adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT.getInventorySlot(),
+            // vanilla SWAP: 点任意槽 + 按钮 40 = 与副手互换 (盾 → 空格, 副手清空)
+            mod.getSlotHandler().clickSlot(emptySlot, VANILLA_SWAP_OFFHAND_BUTTON,
                     net.minecraft.screen.slot.SlotActionType.SWAP);
+        } else if (foodToEat != null) {
+            // 背包满兜底: 主手装备食物 → 与副手互换 (盾去快捷栏当前格) → 再
+            // forceEquip 把盾换走, 主手回到食物。主手食物可吃, 副手食物不影响
+            // (vanilla 主手 use 优先)。
+            mod.getSlotHandler().forceEquipItem(new Item[]{foodToEat}, true);
+            int selected = mod.getPlayer().getInventory().selectedSlot;
+            mod.getSlotHandler().clickSlot(adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT, selected,
+                    net.minecraft.screen.slot.SlotActionType.SWAP);
+            mod.getSlotHandler().forceEquipItem(new Item[]{foodToEat}, true);
         }
         return mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD;
     }
