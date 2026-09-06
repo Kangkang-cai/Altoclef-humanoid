@@ -115,9 +115,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _exploredCaveByKey
             = new java.util.HashMap<>();
     private static boolean _exploredCaveLoaded = false;
-    // (2026-09-03 探洞抑制日志节流) 记录上一次"cave scan suppressed"诊断日志时间,
-    // 10 秒节流避免每 tick 刷屏(见 findNearbyCave)。
-    private static long _exploredCaveScanLogMs = 0;
+    // (2026-09-06 闸门级诊断, 用户"22:31 在大矿洞里没触发探洞") findNearbyCave 有
+    // 多个【静默】返回点(露天闸门/跨度/邻居), 日志上完全看不出被哪道闸门拦下,
+    // 也无法区分"没扫"和"扫了被拒"。每次评估返回时打一行 [CaveScan] 原因:
+    // 每个实例首次评估必打(防 2 秒节流错过短窗口), 之后拒绝类 2 秒节流,
+    // 触发类(FIRE)必打。静态时间戳跨实例共享节流。
+    private static long _caveScanDiagMs = 0;
     // Check for caves every N steps.
     private static final int CAVE_SCAN_EVERY_STEPS = 3;
     // Horizontal direction of the staircase (dig east as we descend).
@@ -176,6 +179,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _step = 0;
     private boolean _inCave = false;
     private Task _subTask;
+    // (2026-09-06 闸门级诊断) 本实例是否已打过首次 [CaveScan] 评估行。
+    private boolean _caveScanDiagLogged = false;
     // Tunnel mode: we're already at the target depth, dig horizontally instead.
     private boolean _tunnelMode = false;
     // (2026-09-05 下界维度感知) onStart 时缓存是否在下界, 供隧道下限/上行模式判断。
@@ -950,12 +955,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 玩家 y 低于 CAVE_EXPLORE_MIN_DEPTH_Y 才允许检测。地表/浅层(y 高)即使
         // 头顶有方块(挖开的楼梯)也不检测。
         if (center.getY() > CAVE_EXPLORE_MIN_DEPTH_Y) {
+            logCaveScanDiag(mod, center, "REJECT depth y=" + center.getY() + ">" + CAVE_EXPLORE_MIN_DEPTH_Y);
             return Optional.empty();
         }
         // (2026-09-01 露天不检测洞, 二次保险) 玩家头顶无实心覆盖(露天) → 关闭检测。
         // 深度闸门放行后(已在地下)本判据几乎恒真, 但保留防"挖穿到地表天窗"等
         // 罕见场景。树冠不算顶(树下仍算露天)。
         if (!hasOverheadCover(mod, center)) {
+            logCaveScanDiag(mod, center, "REJECT no-cover (24格内无实心顶)");
             return Optional.empty();
         }
         // (2026-08-31 挖穿才进洞探索, 用户"挖一半墙后探测到洞就触发探索, 不让挖方块还绕远路")
@@ -972,26 +979,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-02 目标深度上界) 只认目标深度附近的天然空气: 钻石任务在 -24 时,
         // -8 以上的浅层洞空气不计入 — 防止"下挖到合法深度却被上方矿洞导航走"。
         int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetY + CAVE_ABOVE_TARGET_BUFFER);
+        // (2026-09-06 闸门级诊断) 逐原因计数: 天然空气不足时能直接看出是被
+        // 高度上界/自挖记忆/已探索区域哪一方吃掉的, 以及 BFS 512 上限是否饱和。
+        int aboveMaxY = 0, selfDugCount = 0, exploredCount = 0;
         for (BlockPos p : reachableAir) {
-            if (p.getY() > naturalMaxY) continue;
-            if (isSelfDugAir(mod, p)) continue;
+            if (p.getY() > naturalMaxY) { aboveMaxY++; continue; }
+            if (isSelfDugAir(mod, p)) { selfDugCount++; continue; }
             // (2026-09-03 区域记忆) 排除已探索洞穴区域内的空气: 整片洞区上次已探索完,
             // 本次连同 team 一起剔除 → 不再触发进洞 (用户"同一个矿洞打转", 防反复进)。
-            if (isInExploredCaveRegion(mod, p)) continue;
+            if (isInExploredCaveRegion(mod, p)) { exploredCount++; continue; }
             naturalAir.add(p);
         }
         if (naturalAir.size() < MIN_NATURAL_CAVE_AIR) {
-            // (2026-09-03 诊断被清理/节流) 每 tick 打一行会疯狂刷屏(日志 19:16 起
-            // reachableAir 27-35 每 tick 一条实锤), 且 90s 探洞看门狗本就不依赖此线。
-            // 改为 10 秒节流: 只在"天然空气被已探索区域剔除导致不够"这一真正值得
-            // 观察的场景打印(否则单纯空气不足是常见/无碍状态, 无需天天见)。
-            long nowMs = System.currentTimeMillis();
-            if (nowMs - _exploredCaveScanLogMs >= 10000) {
-                _exploredCaveScanLogMs = nowMs;
-                Debug.logToFile("altoclef_diag.log",
-                        "[ExploredCave] cave scan suppressed filtering naturalAir." +
-                                " center=" + center.toShortString() + " reachableAir=" + reachableAir.size());
-            }
+            // (2026-09-06 闸门级诊断) 取代原 10 秒节流的 suppression 单行: 补充
+            // reachable 规模(BFS 512 上限是否打满)、逐原因剔除计数与目标深度上界。
+            logCaveScanDiag(mod, center, "REJECT naturalAir=" + naturalAir.size() + "<" + MIN_NATURAL_CAVE_AIR
+                    + " reachable=" + reachableAir.size() + (reachableAir.size() >= 512 ? "(CAP HIT)" : "")
+                    + " aboveMaxY=" + aboveMaxY + " selfDug=" + selfDugCount + " explored=" + exploredCount
+                    + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY);
             return Optional.empty();
         }
         // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 天然洞与
@@ -999,30 +1004,52 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 现在只统计天然空气 — 自挖楼梯/隧道即使连通集合庞大, 天然空气侧
         // 约束为零。不依赖空气类型(cave_air vs 普通 air), 繁茂洞穴自然覆盖。
         if (!isOpenCaveSpace(naturalAir)) {
+            // (2026-09-06 闸门级诊断) 静默拒绝点: 打出三轴实际跨度, 直接看差多少。
+            int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
+            int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
+            int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
+            for (BlockPos p : naturalAir) {
+                minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+                minY = Math.min(minY, p.getY()); maxY = Math.max(maxY, p.getY());
+                minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+            }
+            logCaveScanDiag(mod, center, "REJECT spans X=" + (maxX - minX) + " Z=" + (maxZ - minZ)
+                    + " Y=" + (maxY - minY) + " natural=" + naturalAir.size());
             return Optional.empty();
         }
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
+        int noNeighbor = 0;
         for (BlockPos check : naturalAir) {
             // 只认与玩家连通的空间(reachableAir 已保证, 防透视: 墙后未挖开的洞空气不连通, 不触发)。
             // Require a couple of adjacent air blocks so a single hole doesn't count as a cave.
-            if (!hasCaveNeighbors(mod, check, 2)) continue;
+            if (!hasCaveNeighbors(mod, check, 2)) { noNeighbor++; continue; }
             double distSq = check.getSquaredDistance(center);
             if (distSq > bestDistSq) {
                 bestDistSq = distSq;
                 best = check;
             }
         }
-        // (2026-08-30 诊断) 打印"是否判定为矿洞"及连通/天然空气规模, 便于区分
-        // "没扫到开阔洞" vs "扫到了但没切探索"。
-        if (MinecraftClient.getInstance().world != null
-                && MinecraftClient.getInstance().world.getTime() % 200L == 0L) {
-            Debug.logToFile("altoclef_diag.log",
-                    String.format("[MineDown-CaveScan] center=(%d,%d,%d) R=%d connectedAir=%d naturalAir=%d hasCave=%s",
-                            center.getX(), center.getY(), center.getZ(), CAVE_SCAN_RADIUS,
-                            reachableAir.size(), naturalAir.size(), best != null));
-        }
+        // (2026-09-06 闸门级诊断) 取代原 200 tick 概率采样行: 每次评估都有确定结论,
+        // 触发(FIRE)必打, 拒绝(邻居不足)走 2 秒节流。
+        logCaveScanDiag(mod, center, (best != null ? "FIRE best=" + best.toShortString() : "REJECT no-neighbor x" + noNeighbor)
+                + " natural=" + naturalAir.size() + " reachable=" + reachableAir.size());
         return Optional.ofNullable(best);
+    }
+
+    /**
+     * (2026-09-06 闸门级诊断) findNearbyCave 每次评估的结论行, 写 altoclef_diag.log。
+     * 每个实例首次评估必打(防节流错过隧道模式 ~2 秒的扫描窗口), 拒绝类之后 2 秒
+     * 节流, FIRE 必打。行为完全不变, 纯诊断。
+     */
+    private void logCaveScanDiag(AltoClef mod, BlockPos center, String result) {
+        boolean isFire = result.startsWith("FIRE");
+        long nowMs = System.currentTimeMillis();
+        if (!isFire && _caveScanDiagLogged && nowMs - _caveScanDiagMs < 2000) return;
+        _caveScanDiagLogged = true;
+        _caveScanDiagMs = nowMs;
+        Debug.logToFile("altoclef_diag.log", "[CaveScan] " + result
+                + " c=" + center.toShortString() + " step=" + _step + " tun=" + _tunnelMode);
     }
 
     // (2026-09-01 矿洞深度感知) 只有玩家 y 低于此值(已挖到地下矿洞层)才允许
