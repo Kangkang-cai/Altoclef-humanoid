@@ -208,6 +208,15 @@ public class Settings implements IFailableConfigFile {
     private boolean dodgeProjectiles = true;
 
     /**
+     * (2026-09-07 塔式逃生, 用户设计) 逃跑失败升级时, 若追兵为纯近战
+     * (无远程怪/无苦力怕/有可放置方块), 优先尝试"逃到空旷 → 搭高 3 块
+     * 悬空方块 → 塔上进食 → 塔上打怪"的确定性逃生 (TowerEscapeTask),
+     * 替代"继续挖通道" (被追杀时挖洞来不及且导航会钻墙)。
+     * 设为 false 关闭, 行为回到旧升级链 (shelter → dig → long retreat)。
+     */
+    private boolean towerEscapeEnabled = true;
+
+    /**
      * If any hostile mob is "close" to our bot for this long,
      * consider it a nuissance and defeat it if we have enough gear.
      *
@@ -629,6 +638,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean isDodgeProjectiles() {
         return dodgeProjectiles;
+    }
+
+    public boolean isTowerEscapeEnabled() {
+        return towerEscapeEnabled;
     }
 
     public double getKillHostileWhenCloseForSeconds() {

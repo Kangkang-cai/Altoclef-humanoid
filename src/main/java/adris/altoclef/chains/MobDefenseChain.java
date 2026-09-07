@@ -116,7 +116,9 @@ public class MobDefenseChain extends SingleTaskChain {
     // in FIGHT until the whole batch is dead (or timeout / threat flips) —
     // this fixes the "hit once then ping-pong back to the user task" behavior.
     private enum DefenseState {
-        EVALUATE, FIGHT, RETREAT, SHELTER, DIG_ESCAPE, LONG_RETREAT, BLOCK_PATH, COOLDOWN
+        EVALUATE, FIGHT, RETREAT, SHELTER, DIG_ESCAPE, LONG_RETREAT, BLOCK_PATH, COOLDOWN,
+        // (2026-09-07 塔式逃生) 逃跑失败升级时, 纯近战围殴场景优先"逃到空旷搭塔"。
+        TOWER_ESCAPE
     }
     private DefenseState _defenseState = DefenseState.EVALUATE;
     private int _retreatEscalation = 0;
@@ -140,6 +142,8 @@ public class MobDefenseChain extends SingleTaskChain {
     private ShelterAndRecoverTask _shelterTask;
     private DigOutEscapeTask _digTask;
     private BlockOffPathTask _blockTask;
+    // (2026-09-07 塔式逃生) 塔逃任务实例 (同 shelter/dig: 持有真实运行实例判完成)。
+    private TowerEscapeTask _towerTask;
 
     // ---- FIGHT state (集中击杀, 2026-08-21) ----
     // The batch of hostiles we committed to killing. The kill task holds a
@@ -257,6 +261,8 @@ public class MobDefenseChain extends SingleTaskChain {
                 return stateShelter(mod);
             case DIG_ESCAPE:
                 return stateDigEscape(mod);
+            case TOWER_ESCAPE:
+                return stateTowerEscape(mod);
             case LONG_RETREAT:
                 return stateLongRetreat(mod);
             case BLOCK_PATH:
@@ -443,7 +449,8 @@ public class MobDefenseChain extends SingleTaskChain {
      * (2026-09-01 用户) "远程攻击者"判定: 能隔距离射击/投掷的怪。这类怪隔山
      * 打你, 逃跑/举盾才有意义, 不在"近战少怪直接打"豁免范围内。
      */
-    private static boolean isRangedThreat(Entity e) {
+    public static boolean isRangedThreat(Entity e) {
+        // (2026-09-07 塔式逃生) 改 public: TowerEscapeTask 塔上监视复用同一判定。
         // 普通骷髅/流浪者/沼泽骷髅会射箭; 凋灵骷髅是近战挥剑(且算 universally
         // dangerous), 不归为远程。
         if (e instanceof AbstractSkeletonEntity && !(e instanceof WitherSkeletonEntity)) return true;
@@ -1089,6 +1096,48 @@ public class MobDefenseChain extends SingleTaskChain {
         return 90;
     }
 
+    /**
+     * (2026-09-07 塔式逃生) 塔逃状态: TowerEscapeTask 自带四阶段状态机
+     * (找空旷→搭高→进食→站桩打怪) 与超时兜底, 这里只管结果分流:
+     *   SUCCESS              → 冷却, 交还用户任务 (16 格内怪已清空)。
+     *   ABORT_THREAT 且塔已完成 → SHELTER: ShelterAndRecoverTask 会在塔顶
+     *                          四面+顶盖封箱, 天然掩体 (首版封顶方案, 用户拍板)。
+     *   其他 (ABORT/TIMEOUT)  → LONG_RETREAT (与旧链失败降级一致)。
+     */
+    private float stateTowerEscape(AltoClef mod) {
+        // 运行中开关被关掉: 立刻退回旧链。
+        if (!mod.getModSettings().isTowerEscapeEnabled()) {
+            _towerTask = null;
+            _defenseState = DefenseState.LONG_RETREAT;
+            return priorityForState();
+        }
+        if (_towerTask == null) {
+            _towerTask = new TowerEscapeTask();
+            setTask(_towerTask);
+        }
+        if (_towerTask.isFinished(mod)) {
+            TowerEscapeTask.Result result = _towerTask.getResult();
+            boolean complete = _towerTask.isTowerComplete(mod);
+            _towerTask = null;
+            _runAwayTask = null;
+            String m = "[TowerEscape] finished result=" + result + " towerComplete=" + complete;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            if (result == TowerEscapeTask.Result.SUCCESS) {
+                enterCooldown(mod);
+                return 0;
+            }
+            if (complete) {
+                // 在塔顶遭遇远程怪/苦力怕: 塔顶封箱变掩体 (复用现有 SHELTER)。
+                _defenseState = DefenseState.SHELTER;
+                return priorityForState();
+            }
+            _defenseState = DefenseState.LONG_RETREAT;
+            return priorityForState();
+        }
+        return 90;
+    }
+
     private float stateLongRetreat(AltoClef mod) {
         if (_runAwayTask == null) {
             _runAwayTask = new ProgressiveRunAwayTask(LONG_RETREAT_DISTANCE, LONG_RETREAT_STEP, true);
@@ -1165,8 +1214,33 @@ public class MobDefenseChain extends SingleTaskChain {
     private DefenseState escalate(AltoClef mod) {
         _retreatEscalation++;
         if (_retreatEscalation >= 3) return DefenseState.LONG_RETREAT;
+        // (2026-09-07 塔式逃生, 用户设计) 逃跑失败一次就优先试塔逃: 纯近战
+        // 围殴时"挖通道"来不及 (导航会钻墙), "搭高 3 格悬空"是确定性安全位。
+        // 条件不满足时行为与旧链完全一致。 LONG_RETREAT 之前的两个层级都可
+        // 以进 (escalation 1 与 2)。
+        if (canTryTowerEscape(mod)) {
+            String m = "[TowerEscape] escalate -> TOWER_ESCAPE (escalation=" + _retreatEscalation + ")";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return DefenseState.TOWER_ESCAPE;
+        }
         if (_retreatEscalation >= 2 && isUnderground(mod)) return DefenseState.DIG_ESCAPE;
         return DefenseState.SHELTER;
+    }
+
+    /**
+     * (2026-09-07 塔式逃生) 塔逃进入条件: 开关打开 + 追兵为纯近战
+     * (无远程怪/无苦力怕, 用户前提) + 身上有 ≥3 个可放置方块。
+     * 不检查"当前是否空旷" —— 空旷由 TowerEscapeTask 的 FIND_OPEN 阶段
+     * 边跑边找 (用户要求: 快速策略, 小范围搜索+先跑, 不站着等导航)。
+     */
+    private boolean canTryTowerEscape(AltoClef mod) {
+        if (!mod.getModSettings().isTowerEscapeEnabled()) return false;
+        for (Entity h : getNearbyHostiles(mod)) {
+            if (h == null || !h.isAlive()) continue;
+            if (h instanceof CreeperEntity || isRangedThreat(h)) return false;
+        }
+        return mod.getItemStorage().getItemCount(TowerEscapeTask.getTowerItems()) >= 3;
     }
 
     private float priorityForState() {
