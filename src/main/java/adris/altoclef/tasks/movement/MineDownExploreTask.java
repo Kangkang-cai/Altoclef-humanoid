@@ -431,6 +431,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 if (cave.isPresent()) {
                     _inCave = true;
                     BlockPos anchor = cave.get();
+                    // (2026-09-07 FIRE 时即标记, 用户"刚转去挖洞没一会又被同一个洞吸引去探索")
+                    // 原设计只在探索结束(超时/完成)时标记, 但链重建会中途丢弃探索任务导致
+                    // mark 难产 → 同洞反复吸引。改为 FIRE 承诺探索时立即标记洞锚点;
+                    // 本次探索不受影响(ExploreCaveTask 选点豁免区域记忆), 探索结束路径的
+                    // 标记保留(玩家最终位置与锚点相距>24 时多记一个中心, 覆盖更全)。
+                    markExploredCaveRegion(mod, anchor);
+                    _lastFireAnchor = anchor.toImmutable();
                     Debug.logMessage("Found cave at shaft bottom at " + anchor.toShortString() + ", exploring it.");
                     _caveExploreTimer.reset();
                     // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
@@ -459,6 +466,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (cave.isPresent()) {
                 _inCave = true;
                 BlockPos anchor = cave.get();
+                // (2026-09-07 FIRE 时即标记, 同 reachedBottom 分支注释)。
+                markExploredCaveRegion(mod, anchor);
+                _lastFireAnchor = anchor.toImmutable();
                 Debug.logMessage("Found cave while digging at " + anchor.toShortString() + ", exploring it.");
                 Debug.logToFile("altoclef_diag.log",
                         "[MineDown-Cave] found cave while digging at " + anchor.toShortString() + ", exploring it first.");
@@ -773,6 +783,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 存档名取集成服务器 LevelName("新的世界"), 与维度(overworld/nether/the_end)拼接,
      * 不同存档/维度各自维护已探索区域。集成服务器不可用时(启动早期/主菜单)退化为维度。
      */
+    // (2026-09-07 FIRE 时标记配套) 最近一次 FIRE 的洞锚点与"探索中"查询:
+    // 供 MineAndCollectTask.createNextExplorationTask 在链重建(父任务对象被
+    // isEqual 判异重建)后认领仍在探索中的本任务(断点交接), 防止 _explorationTask
+    // 随父对象丢失导致探索进度作废、同洞反复吸引。
+    private static BlockPos _lastFireAnchor;
+    public boolean isExploringCave() { return _inCave; }
+    public boolean isNetherTask() { return _nether; }
+    public static BlockPos getLastFireAnchor() { return _lastFireAnchor; }
+
     private static String exploredCaveKey(AltoClef mod) {
         String levelName = "?";
         try {
@@ -876,6 +895,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 无天然空气 → null(洞已探索完/根本不是洞)。
      */
     static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int maxY) {
+        return pickFarthestNaturalCaveAir(mod, center, fromRef, exclude, maxY, false);
+    }
+
+    /**
+     * (2026-09-07 FIRE 时标记配套) ignoreExploredRegions=true 供 ExploreCaveTask 使用:
+     * 探索目标选择豁免区域记忆 — FIRE 时已把本洞标记为已探索, 若选点仍排除该区域,
+     * 本次探索自己的目标会被剔空而立即结束。探索任务天然只由 FIRE 创建, 恒豁免。
+     */
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int maxY, boolean ignoreExploredRegions) {
         // 探索目标选择用更远的 EXPLORE_SCAN_RADIUS, 探索段更长(用户"得调远一点")。
         Set<BlockPos> reachable = collectConnectedAir(mod, center, EXPLORE_SCAN_RADIUS);
         // (2026-09-02 目标深度上界) 导航目标也只选目标深度附近的天然空气, 防止
@@ -889,7 +917,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (exclude != null && exclude.contains(p)) continue;
             // (2026-09-03 区域记忆) 探索目标也不落到已探索洞穴区域 → 不会导航回刚
             // 探索完的洞区(用户"同一个矿洞打转", 双向排除: 探测 + 目标选择)。
-            if (isInExploredCaveRegion(mod, p)) continue;
+            if (!ignoreExploredRegions && isInExploredCaveRegion(mod, p)) continue;
             double d = p.getSquaredDistance(fromRef);
             if (d > bestDistSq) {
                 bestDistSq = d;

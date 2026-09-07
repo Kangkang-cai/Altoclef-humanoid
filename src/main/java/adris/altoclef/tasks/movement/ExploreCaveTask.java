@@ -121,8 +121,10 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private BlockPos pickNext(AltoClef mod, BlockPos center) {
         Set<BlockPos> exclude = new HashSet<>(_visited);
         exclude.addAll(_failedTargets);
+        // (2026-09-07 FIRE 时标记配套) 本任务只由 FIRE 创建, 而 FIRE 已把本洞标记为
+        // 已探索区域 → 选点必须豁免区域记忆, 否则自己的目标被剔空, 探索立即结束。
         return MineDownExploreTask.pickFarthestNaturalCaveAir(mod, center, _exploreStart, exclude,
-                _targetY + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER);
+                _targetY + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER, true);
     }
 
     /**

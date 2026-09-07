@@ -43,6 +43,13 @@ public class MineAndCollectTask extends ResourceTask {
 
     private final Block[] _blocksToMine;
 
+    // (2026-09-07 探索断点交接, 用户"刚转去挖洞没一会又被同一个洞吸引去探索")
+    // 最近一个仍在探索矿洞(_inCave)的 MineDownExploreTask。BeatMinecraft 重规划时
+    // MineOrCollectTask 会按 isEqual 被重建, 其 _explorationTask 字段随对象丢失 →
+    // 进行中的探索被换成全新实例, 探索进度作废、同洞反复吸引(16:0x 会话 11 次
+    // FIRE/0 mark 的根因之一)。静态引用跨对象存活, createNextExplorationTask 认领。
+    private static MineDownExploreTask _lastCaveExploration;
+
     private final MiningRequirement _requirement;
 
     private final TimerGame _cursorStackTimer = new TimerGame(3);
@@ -1387,7 +1394,21 @@ public class MineAndCollectTask extends ResourceTask {
             // 空腔里永远走不出、只能原地反复寻路 → 站死 (用户实测站定不动)。
             // (2026-09-05 目标带) 传 [min, max] 生成带, 每实例带内随机取目标高度。
             int[] band = targetShaftBand();
-            return new MineDownExploreTask(band[0], band[1]);
+            // (2026-09-07 探索断点交接) 链重建后认领仍在探索中的上一个探索任务:
+            // 同维度且玩家仍在最近 FIRE 锚点 64 格内 → 原样复用(MineDownExploreTask
+            // 的 isEqual 是 identity, 同一对象不会被框架重启重置), 探索无缝继续;
+            // 玩家已远离/维度已变/探索已结束 → 正常新建。
+            if (_lastCaveExploration != null && _lastCaveExploration.isExploringCave()
+                    && _lastCaveExploration.isNetherTask() == (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER)) {
+                BlockPos fireAnchor = MineDownExploreTask.getLastFireAnchor();
+                if (fireAnchor == null || mod.getPlayer() == null
+                        || fireAnchor.getSquaredDistance(mod.getPlayer().getBlockPos()) < 64 * 64) {
+                    return _lastCaveExploration;
+                }
+            }
+            MineDownExploreTask exploration = new MineDownExploreTask(band[0], band[1]);
+            _lastCaveExploration = exploration;
+            return exploration;
         }
 
         /**
