@@ -312,17 +312,22 @@ public class Settings implements IFailableConfigFile {
     private int unreachableCooldownSeconds = 25;
 
     /**
-     * (2026-09-07 二次修正, 用户"得离近了再触发, 差一百格的话 bot 只是反复向上
-     * 挖几格, 又没有搭高机制, 原地不动了属于是") GoToSurfaceTask 头顶水检测的
-     * 扫描范围 (格): 头顶【该范围内】同列含水才判"头顶有水"走逐格凿; 更远的水
-     * 交给 Baritone 正常寻路绕行, bot 爬近后每 1s 重扫自然接管。
-     * <p>
-     * 取值考量: 凿击窗口 5 格, 海底地板一般离其下方洞穴顶 10 格内, 16 能覆盖
-     * "凿穿顶板即见水"的场景, 又不会把上百格外的孤立含水层误判成头顶海洋。
+     * (2026-09-07 v3) GoToSurfaceTask 头顶水况的扫描范围 (格)。仅用于实测
+     * 水面距离/水柱深度做诊断与判定输入; 是否逐格凿由两个更严的条件共同
+     * 决定: 水面距脚 ≤5 (凿击窗口, "挖出必有水流下") 且 水柱深 ≥
+     * goToSurfaceMinWaterDepth ("一有一点水就 dig_up 不好")。
      * <p>
      * 设为 0 表示永不判有水 (禁用逐格凿, 纯 Baritone)。
      */
     private int goToSurfaceWaterDetectRange = 16;
+
+    /**
+     * (2026-09-07 v3, 用户"检测海洋智能点, 一有一点水就 dig_up 不好; 挖的距离
+     * 要可控, 确保挖出必有水流下") GoToSurfaceTask 判定"值得凿"的最小连续
+     * 水柱深度 (格)。滴水/1~2 格小水洼凿穿了也游不起来, 不进 DIG_UP; 成片的
+     * 水 (池/海) 凿穿顶板后 bot 入水走被验证的游泳上浮。
+     */
+    private int goToSurfaceMinWaterDepth = 3;
 
     /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
@@ -705,6 +710,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getGoToSurfaceWaterDetectRange() {
         return goToSurfaceWaterDetectRange;
+    }
+
+    public int getGoToSurfaceMinWaterDepth() {
+        return goToSurfaceMinWaterDepth;
     }
 
     public boolean isAutoReconnect() {
