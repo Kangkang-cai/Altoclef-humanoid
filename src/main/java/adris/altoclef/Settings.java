@@ -312,22 +312,31 @@ public class Settings implements IFailableConfigFile {
     private int unreachableCooldownSeconds = 25;
 
     /**
-     * (2026-09-07 v3) GoToSurfaceTask 头顶水况的扫描范围 (格)。仅用于实测
-     * 水面距离/水柱深度做诊断与判定输入; 是否逐格凿由两个更严的条件共同
-     * 决定: 水面距脚 ≤5 (凿击窗口, "挖出必有水流下") 且 水柱深 ≥
-     * goToSurfaceMinWaterDepth ("一有一点水就 dig_up 不好")。
+     * (2026-09-07 v4) GoToSurfaceTask 头顶水况的扫描范围 (格)。仅用于判定
+     * "凿穿后能否安全进水": 水面距脚 ≤5 (凿击窗口, "挖出必有水流下")、水柱深
+     * ≥goToSurfaceMinWaterDepth、水柱上方有空气。水体本身【不再】触发凿击
+     * (用户: 能不进水就不进水, 由 baritone 自己导航上去)。
      * <p>
      * 设为 0 表示永不判有水 (禁用逐格凿, 纯 Baritone)。
      */
     private int goToSurfaceWaterDetectRange = 16;
 
     /**
-     * (2026-09-07 v3, 用户"检测海洋智能点, 一有一点水就 dig_up 不好; 挖的距离
-     * 要可控, 确保挖出必有水流下") GoToSurfaceTask 判定"值得凿"的最小连续
-     * 水柱深度 (格)。滴水/1~2 格小水洼凿穿了也游不起来, 不进 DIG_UP; 成片的
-     * 水 (池/海) 凿穿顶板后 bot 入水走被验证的游泳上浮。
+     * (2026-09-07 v4, 用户"检测海洋智能点; 3 格深的水还有必要非要去游吗, 还可
+     * 能是洞穴水洞一点空气没有, 上去就淹死") 判定"凿穿后能安全进水"的最小
+     * 连续水柱深度 (格)。滴水/小水洼不值得凿。另需满足水面 dy≤5 且水柱上方
+     * 有空气 (封闭水洞不进)。
      */
     private int goToSurfaceMinWaterDepth = 3;
+
+    /**
+     * (2026-09-07 v4, 用户"当 baritone 找不到导航路线时, 希望它缩小导航长度,
+     * 几格几格逐步导航到头, 而不是最后到海洋前十几格傻等; 实在找不到落脚点时
+     * 才 dig_up") 判定"baritone 找不到路线"的持续时间 (秒): 连续该秒数没有可
+     * 执行路径 (hasPath()==false) 才认无路, 随后把目标段长 16→8→4→2 逐级缩短
+     * 重试; 最短段仍无路 = 确实找不到落脚点, 才允许凿穿进水。
+     */
+    private int goToSurfaceNoPathSeconds = 5;
 
     /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
@@ -714,6 +723,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getGoToSurfaceMinWaterDepth() {
         return goToSurfaceMinWaterDepth;
+    }
+
+    public int getGoToSurfaceNoPathSeconds() {
+        return goToSurfaceNoPathSeconds;
     }
 
     public boolean isAutoReconnect() {

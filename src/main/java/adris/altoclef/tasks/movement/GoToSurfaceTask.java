@@ -15,64 +15,69 @@ import net.minecraft.util.math.BlockPos;
  *
  * 用户原则: 地表资源(原木/食物/羊毛等)的收集任务, 当 bot 深处地下
  * (矿洞/深水)时, 应先显式"回到地表"再收集, 而不是让收集任务硬啃
- * 跨地形长路径 — Baritone 垂直挖穿几十格岩层耗时数分钟, 期间会被
- * 收集任务的进度检查误判"不可达"而放弃 ("挖一半就不挖了")。
- *
- * 实现: 目标 Y 取 58 (isDeepUnderground 硬下限), 以 isDeepUnderground
- * 变 false (头顶无盖且高于海平面下限) 为完成判据, 而非到达某个固定 Y
- * — 挖到山腰露头也算回到地表。峡谷/深坑判定 (getPitEscapeY) 保留。
+ * 跨地形长路径。完成判据是 isDeepUnderground 变 false (头顶无盖且高于
+ * 海平面下限), 而非到达某个固定 Y。峡谷/深坑判定 (getPitEscapeY) 保留。
  *
  * ============================================================================
- * (2026-09-07 v3) 回地表分流 — 三次事故迭代后的最终形态, 用户要求
- * "检测海洋智能点, 一有一点水就 dig_up 不好; 挖的距离要可控, 确保挖出必有
- * 水流下; 自己静态推演所有情况"。
+ * (2026-09-07 v4) 回地表分流 — 四次事故迭代后的最终形态。
+ * 用户定调 (2026-09-07 22:43): "之前加这个进水机制是因为头顶是一片海洋;
+ * 为了不透视原则, bot 的策略是能不进水就不进水, 由 baritone 自己逐步导航
+ * 上去; 但当 baritone 找不到导航路线 (上次遇到海洋就是这样) 时, 希望它缩小
+ * 导航长度, 几格几格逐步导航到头, 而不是最后到海洋前十几格傻等; 实在导航
+ * 找不到落脚点时才采用 dig_up, 自然就游泳上去。如果不是海洋在头顶, baritone
+ * 怎么会找不到路呢?"
  *
- * 核心事实 (三次会话日志实锤 + 用户确认):
- *  1. bot 在 DIG_UP 下不会爬高 (16:12 / 21:36 两次实锤: digging up 目标一路
- *     上移而 player Y 恒定), 凿竖井够不到顶板 = 原地废。峡谷脱困"GetToYTask
- *     会搭方块上去"从未验证, 不可作设计前提。
- *  2. 逐格凿的价值【只在"凿穿即见水"】: 水流下来 → bot 入水 → GetToYTask
- *     的 GoalYLevel 触发 CustomBaritoneGoalTask 水中垂直上浮 (2026-09-04
- *     [SwimUp] 实锤有效) — 这是唯一被验证的"不搭高也能上升"手段。
- *  3. 22:04 事故: 洞穴小水池在头顶 dy≤16 就触发 DIG_UP, bot 凿到离水还差
- *     3 格够不着, 既没水下来又不会爬 → 原地卡死 + 换列重挖 + 疯狂重导航。
+ * 三条设计原则:
+ *  1. 【默认不进水】水面/水体本身【不再】触发凿击。只要 baritone 找得到路,
+ *     无论头顶是干燥岩层还是洞穴小水池, 一律 baritone 正常导航 (拟人 + 反
+ *     透视: 能不进水就不进水)。
+ *  2. 【逐步缩短导航长度】检测到 baritone 找不到路线 (hasPath()==false 持续
+ *     goToSurfaceNoPathSeconds) 时, 不傻等也不放弃, 而是把目标从 y=58 缩成
+ *     "当前 +16 → +8 → +4 → +2" 的短段, 一段一段贴上去 (海底场景里这十几
+ *     格是"找不到落脚点"的高发区, 短段导航让 bot 一格格挪到头顶顶板上)。
+ *  3. 【找不到落脚点才进水凿穿】最短段 (2 格) 仍然长时间无路 → 判定"确实
+ *     找不到落脚点"。此时【且仅当】头顶是可安全进入的水体 (连续水柱 ≥min
+ *     深度, 且水柱上方有空气 — 封闭水洞会淹死) 才切 DIG_UP: 逐块凿穿顶板
+ *     → 水落到头上 → 入水 → GetToYTask 触发 CustomBaritoneGoalTask 水中垂直
+ *     上浮 ([SwimUp] 2026-09-04 实锤, 唯一被验证的"不搭高也能上升"手段)。
  *
- * 因此 DIG_UP 触发条件收紧为【凿击学上可保证】的形态:
- *    水面距脚 dy ≤ DIG_WINDOW(5) 且 从水面起连续水柱深 ≥ minWaterDepth(3)。
- *  - dy≤5: 水面在凿击窗口内 → 从下往上把窗口内顶板逐块凿穿后, 水必然落到
- *    bot 头上 (挖的距离可控, "挖出必有水流下")。
- *  - depth≥3: 只有成片的水 (池/海) 才值得凿 — 滴水/1~2 格小水洼凿穿了也
- *    游不起来 (用户"一有一点水就 dig_up 不好")。
- *  - 其余一切情况 (无水 / 水在 6~16 格 / 水太浅) → BARITONE 正常寻路;
- *    bot 被带上爬、水进入 5 格窗口后每 1s 重扫自然接管。
- *  - 挖穿进水后 (isTouchingWater) 不再凿水上方的方块, 立即交 GetToYTask(58)
- *    游泳上浮; 出水后水柱重扫判"水消失"自动回 BARITONE。
- *
- * 事故史 (防止回归):
- *  - 16:11: 对 y<58 一律逐格凿 + 每 tick 重算目标 → 三方乒乓, 没挖穿一块。
- *    修: 目标粘性 + 只在可保证见水时凿。
- *  - 21:36: "Baritone 失速 60s → 降级 DIG_UP"兜底 (v1) 实锤失败, 已删。
- *    干燥 stall 交给 baritone 自有 checker/wander。
- *  - 22:04: 16 格内有任意水就 DIG_UP (v2) 实锤失败 → v3 收紧为上述条件。
+ * 事故史 (防止回归, 每次改动都要回头看):
+ *  - 16:11 对 y<58 一律逐格凿 + 每 tick 重算目标 → 三方乒乓, 一块没挖穿。
+ *    → 修: 目标粘性 + 只在可保证见水时凿。
+ *  - 21:36 "Baritone 失速 60s → 降级 DIG_UP"兜底实锤失败 (干燥处凿了也不爬,
+ *    digging up -22→-18 而 player 恒 -23)。→ 修: 删除该兜底, 干燥 stall 交
+ *    baritone 自有 checker/wander。
+ *  - 22:04 头顶 16 格内有任意水就 DIG_UP: 洞穴小水池触发, 凿到离水差 3 格
+ *    够不着 (水不会流下) → 原地卡死 + 换列重挖 + 疯狂重导航。→ v3 加严,
+ *    v4 干脆改成"水不触发, 只有 baritone 找不到路才触发"。
+ *  - 未验证机制 (峡谷脱困"GetToYTask 会搭方块上去") 不得作为设计前提。
  */
 public class GoToSurfaceTask extends Task {
 
     private enum AscentMode {
-        /** 头顶无"凿穿必见水"形态: Baritone 正常寻路 (默认)。 */
+        /** 默认: baritone 分段导航, 不进水。 */
         BARITONE,
-        /** 头顶 dy≤5 有深≥3 的水柱: 逐格向上凿, 挖穿必有水流下。 */
+        /** baritone 最短段仍找不到落脚点 + 头顶可安全进水: 凿穿游泳上去。 */
         DIG_UP
     }
 
-    /** 凿击窗口: 与 tickDigUp 的 dy 扫描上限一致。水面必须在此窗口内。 */
+    /** 凿击窗口: 与 tickDigUp 的 dy 扫描上限一致。 */
     private static final int DIG_WINDOW = 5;
+
+    /** 导航分段阶梯 (格): 找不到路时逐级缩短, 让 bot 几格几格贴上去。 */
+    private static final int[] STEP_LADDER = {16, 8, 4, 2};
 
     private AscentMode _mode = AscentMode.BARITONE;
 
-    // 头顶水检测每 1s 重扫一次 (列扫描最多 16 格, 开销可忽略)。
+    // ===== BARITONE 分段导航状态 =====
+    private int _stepIdx = 0;                 // STEP_LADDER 指针
+    private int _stepTargetY = Integer.MIN_VALUE;
+    private TimerGame _noPathTimer = null;    // baritone 无路径持续时间
+
+    // 头顶水检测每 1s 重扫一次 (仅在需要判定"能否安全进水"时用)。
     private final TimerGame _waterScanTimer = new TimerGame(1);
-    // "看到水但不满足凿击条件"的诊断日志节流 (防刷屏)。
-    private final TimerGame _waterDiagLogTimer = new TimerGame(5);
+    // "找不到落脚点/不可进水"的节流诊断 (防刷屏)。
+    private final TimerGame _blockedLogTimer = new TimerGame(5);
 
     // 逐格凿粘性目标 (DIG_UP 模式)。
     private BlockPos _digTarget = null;
@@ -97,32 +102,42 @@ public class GoToSurfaceTask extends Task {
     }
 
     /**
-     * (2026-09-07 v3) 头顶列水况实测。
+     * (2026-09-07 v4) 头顶列是否是【可安全进入】的水体。
      *
-     * @return {firstWaterDy, waterDepth}: firstWaterDy = 第一个水格相对脚的
-     *         距离 (1..range), waterDepth = 从该格起【连续】水格数; 无水返回
-     *         {-1, 0}。未加载区块视为边界 (按无水处理)。
-     *         只认 WATER/FLOWING_WATER (岩浆不算 — 凿穿岩浆天花板会死)。
+     * @return {firstWaterDy, depth, hasAirAbove}: firstWaterDy = 第一个水格相对
+     *         脚的距离 (1..range, 无水 -1); depth = 从该格起连续水格数;
+     *         hasAirAbove = 水柱上方是否出现空气 (封闭水洞会淹死, 不可进)。
+     *         只认 WATER/FLOWING_WATER (岩浆不算)。未加载区块视为边界 (按无水)。
      */
     private int[] scanWaterOverhead(AltoClef mod, BlockPos player) {
         int range = mod.getModSettings().getGoToSurfaceWaterDetectRange();
-        if (range <= 0) return new int[]{-1, 0};
+        if (range <= 0) return new int[]{-1, 0, 0};
         int firstDy = -1;
         int depth = 0;
+        int hasAir = 0;
         for (int dy = 1; dy <= range; dy++) {
             BlockPos pos = player.up(dy);
             if (!mod.getChunkTracker().isChunkLoaded(pos)) break;
             FluidState fluid = mod.getWorld().getBlockState(pos).getFluidState();
             boolean water = fluid != null && !fluid.isEmpty()
                     && (fluid.getFluid() == Fluids.WATER || fluid.getFluid() == Fluids.FLOWING_WATER);
-            if (!water) {
-                if (firstDy > 0) break; // 连续水柱统计结束
+            if (water) {
+                if (firstDy < 0) firstDy = dy;
+                depth++;
                 continue;
             }
-            if (firstDy < 0) firstDy = dy;
-            depth++;
+            if (firstDy > 0) {
+                // 水柱结束: 上方是空气 (有呼吸空间) 还是实心 (会淹死)?
+                hasAir = WorldHelper.isSolid(mod, pos) ? 0 : 1;
+                break;
+            }
         }
-        return new int[]{firstDy, depth};
+        return new int[]{firstDy, depth, hasAir};
+    }
+
+    /** baritone 当前是否真的有路 (有正在执行的路径)。 */
+    private boolean baritoneHasPath(AltoClef mod) {
+        return mod.getClientBaritone().getPathingBehavior().hasPath();
     }
 
     @Override
@@ -145,68 +160,104 @@ public class GoToSurfaceTask extends Task {
         _pitEscapeY = null;
         BlockPos player = mod.getPlayer().getBlockPos();
 
-        // 每 1s 实测头顶水况, 双向驱动模式。
-        // DIG_UP 只在"凿穿必见水"形态下进入: 水面 dy≤DIG_WINDOW 且水深≥min。
-        if (_waterScanTimer.elapsed()) {
-            _waterScanTimer.reset();
-            int[] w = scanWaterOverhead(mod, player);
-            int firstDy = w[0], depth = w[1];
-            int minDepth = mod.getModSettings().getGoToSurfaceMinWaterDepth();
-            boolean digEligible = firstDy > 0 && firstDy <= DIG_WINDOW && depth >= minDepth;
-            if (digEligible && _mode != AscentMode.DIG_UP) {
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] diggable water overhead (dy="
-                        + firstDy + " depth=" + depth + ") at " + player + " -> DIG_UP");
-                _mode = AscentMode.DIG_UP;
-            } else if (!digEligible && _mode == AscentMode.DIG_UP) {
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] water gone/unsuitable at "
-                        + player + " -> back to BARITONE");
-                _mode = AscentMode.BARITONE;
-                _digTarget = null;
-            } else if (firstDy > 0 && !digEligible && _waterDiagLogTimer.elapsed()) {
-                // 有水但不值得凿 (太远/太浅): 节流记录, 留诊断证据。
-                _waterDiagLogTimer.reset();
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] water overhead but NOT diggable (dy="
-                        + firstDy + " depth=" + depth + ", need dy<=" + DIG_WINDOW
-                        + " depth>=" + minDepth + ") at " + player + " -> stay BARITONE");
-            }
-        }
-
         if (_mode == AscentMode.DIG_UP) {
+            // 水消失/条件不再满足 → 回 baritone (防一次误判锁死)。
+            if (_waterScanTimer.elapsed()) {
+                _waterScanTimer.reset();
+                if (!canEnterWater(mod, player)) {
+                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] water no longer usable at "
+                            + player + " -> back to BARITONE");
+                    _mode = AscentMode.BARITONE;
+                    _digTarget = null;
+                    return baritoneStep(mod, player);
+                }
+            }
             return tickDigUp(mod, player);
         }
 
-        // ===== BARITONE 模式 (默认): 无"凿穿必见水"形态, 正常寻路上去 =====
-        setDebugState("Going up to surface via baritone (target y=" + SURFACE_TARGET_Y + ")");
-        return new GetToYTask(SURFACE_TARGET_Y);
+        return baritoneStep(mod, player);
     }
 
     /**
-     * (2026-09-07 v3) 逐格向上凿 (仅"水面 dy≤5 且水柱深≥min"时进入)。
-     *
-     * 关键保证: 水面在凿击窗口内 → 窗口内顶板全部凿穿后水必然落到 bot 头上
-     * ("挖出必有水流下"), bot 入水即走游泳上浮 (唯一被验证的不搭高上升手段)。
-     *
-     * 入水后不再凿水上方的方块 — 那是 22:04 卡死的另一种形态 (凿穿池底后
-     * 继续够池顶)。目标粘性: 仍实心且未越过就保持, 不随 bot 微动换列。
+     * (2026-09-07 v4 核心) baritone 分段导航: 目标 y = min(58, 当前 + 段长)。
+     * 找不到路 (hasPath()==false 持续 N 秒) → 段长逐级缩短 (16→8→4→2), 让 bot
+     * 几格几格贴到头顶顶板; 最短段仍然无路 = 确实找不到落脚点 → 若头顶可安全
+     * 进水则切 DIG_UP, 否则继续等 baritone (干燥处凿了也不会爬, 旧事故教训)。
+     */
+    private Task baritoneStep(AltoClef mod, BlockPos player) {
+        int y = player.getY();
+        int step = STEP_LADDER[_stepIdx];
+        // 到达本段目标 (或首次) → 下一段目标。
+        if (_stepTargetY == Integer.MIN_VALUE || y >= _stepTargetY) {
+            _stepTargetY = Math.min(SURFACE_TARGET_Y, y + step);
+        }
+
+        if (_noPathTimer == null) {
+            int secs = mod.getModSettings().getGoToSurfaceNoPathSeconds();
+            _noPathTimer = new TimerGame(secs > 0 ? secs : 1);
+        }
+        if (baritoneHasPath(mod)) {
+            _noPathTimer.reset();
+        } else if (_noPathTimer.elapsed()) {
+            _noPathTimer.reset();
+            if (_stepIdx < STEP_LADDER.length - 1) {
+                // 缩小导航长度重试 (海底前十几格别傻等, 一段段贴上去)。
+                _stepIdx++;
+                _stepTargetY = Math.min(SURFACE_TARGET_Y, y + STEP_LADDER[_stepIdx]);
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone path, shrinking step to "
+                        + STEP_LADDER[_stepIdx] + " at " + player);
+            } else {
+                // 最短段仍无路 = 找不到落脚点。
+                int[] w = scanWaterOverhead(mod, player);
+                boolean canEnter = canEnterWater(mod, player);
+                if (canEnter) {
+                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] no foothold (shortest step) at "
+                            + player + " and water overhead (dy=" + w[0] + " depth=" + w[1]
+                            + ") -> DIG_UP");
+                    _mode = AscentMode.DIG_UP;
+                    return tickDigUp(mod, player);
+                }
+                if (_blockedLogTimer.elapsed()) {
+                    _blockedLogTimer.reset();
+                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone foothold at " + player
+                            + " but water not usable (dy=" + w[0] + " depth=" + w[1] + " airAbove=" + w[2]
+                            + ") -> keep waiting on baritone");
+                }
+            }
+        }
+        setDebugState("Going up via baritone (step " + STEP_LADDER[_stepIdx] + ", target y=" + _stepTargetY + ")");
+        return new GetToYTask(_stepTargetY);
+    }
+
+    /**
+     * 头顶是否是"凿穿后能安全进水再浮上去"的水体: 有水、水柱够深 (≥
+     * goToSurfaceMinWaterDepth, 滴水/小水洼不值得)、且水柱上方有空气
+     * (封闭水洞凿进去会淹死)。水面必须在凿击窗口 (dy≤DIG_WINDOW) 内 —
+     * "挖出必有水流下": 窗口内顶板全部凿穿后水必然落到 bot 头上。
+     */
+    private boolean canEnterWater(AltoClef mod, BlockPos player) {
+        int[] w = scanWaterOverhead(mod, player);
+        int minDepth = mod.getModSettings().getGoToSurfaceMinWaterDepth();
+        return w[0] > 0 && w[0] <= DIG_WINDOW && w[1] >= minDepth && w[2] == 1;
+    }
+
+    /**
+     * (2026-09-07 v4) 逐格向上凿 (仅在"baritone 找不到落脚点 + 头顶可安全进水"
+     * 时进入)。入水即停凿交 GetToYTask 游泳上浮, 不凿水上方的方块。
+     * 目标粘性: 仍实心且未越过就保持, 不随 bot 微动换列重置挖掘进度。
      */
     private Task tickDigUp(AltoClef mod, BlockPos player) {
-        // 挖穿进水 → 停凿, 交 GetToYTask(58): 水中由 CustomBaritoneGoalTask
-        // 垂直上浮接管 ([SwimUp] 实锤), 浅水/出水后 baritone 正常寻路。
         if (mod.getPlayer().isTouchingWater()) {
             _digTarget = null;
             setDebugState("In water after breach, swimming up");
             return new GetToYTask(SURFACE_TARGET_Y);
         }
-        // 粘性: 目标仍实心且未越过 → 保持, 不随 bot 微动换列重置挖掘进度。
         if (_digTarget != null) {
             if (!WorldHelper.isSolid(mod, _digTarget) || player.getY() >= _digTarget.getY()) {
                 _digTarget = null; // 已挖穿 / 已爬到该高度
             }
         }
         if (_digTarget == null) {
-            // 从脚+1 起 (越过身体格) 向上找第一块实心: 可挖则为目标,
-            // 不可挖 (基岩等) 停止扫描。窗口内全空 (顶板已凿穿但水未落) →
-            // 交 GetToYTask 兜底 (baritone 处理流动水/浅水)。
             for (int dy = 1; dy <= DIG_WINDOW; dy++) {
                 BlockPos cand = player.up(dy);
                 if (WorldHelper.isSolid(mod, cand)) {
@@ -241,6 +292,9 @@ public class GoToSurfaceTask extends Task {
     protected void onStart(AltoClef mod) {
         _pitEscapeY = null;
         _mode = AscentMode.BARITONE;
+        _stepIdx = 0;
+        _stepTargetY = Integer.MIN_VALUE;
+        _noPathTimer = null;
         _waterScanTimer.reset();
         _digTarget = null;
     }
