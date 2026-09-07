@@ -8,8 +8,10 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.FurnaceSlot;
 import adris.altoclef.util.slots.Slot;
+import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.ItemStack;
@@ -37,6 +39,18 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     private boolean _emptied = false;
     private MineAndCollectTask _mineTask = null;
 
+    // (2026-09-07 遗留熔炉定位) 16 格内真实熔炉的节流扫描缓存。上次会话/上次任务
+    // 留下的熔炉不在本次 BlockTracker 里 (本次从未追踪过它), 父类 getNearestTracking
+    // 必然漏判 → nearest 空 → 走进"新造容器"分支 (本类已禁止, 会返回 null 空转)。
+    // 范围与 BeatMinecraft2Task.findNearbyFurnace 的 FURNACE_GRAB_RANGE 保持一致。
+    private static final int SCAN_RANGE = 16;
+    private final TimerGame _rescanTimer = new TimerGame(1.0);
+    private BlockPos _cachedFurnace = null;
+
+    // 已经贴到炉边却始终打不开 (够不着/被挡/被别的链条抢开) 的容忍时间, 超时直接
+    // 拆走 — 否则本任务会站着空转, 又被上层反复重建。
+    private final TimerGame _stuckOpenTimer = new TimerGame(8.0);
+
     public EmptyFurnaceTask() {
         super(Blocks.FURNACE, new ItemTarget(Items.FURNACE));
     }
@@ -53,15 +67,44 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
 
     @Override
     protected Task onTick(AltoClef mod) {
-        // (2026-08-31) 内容已取尽 → 锁定"拆炉"阶段, 不再回容器分支反复打开。
+        // (2026-09-07) 内容已取尽 / 确认打不开 → 锁定"拆炉"阶段, 不再回容器分支反复打开。
         if (_emptied) {
             if (_mineTask == null) {
-                _mineTask = new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.HAND);
+                // (2026-09-07) 熔炉必须用镐才掉落物品: 旧值 MiningRequirement.HAND
+                // 会让 bot 空手/错工具去挖, 挖完不掉熔炉 → 永远收不到, 触发条件不消失。
+                _mineTask = new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.WOOD);
             }
             setDebugState("Mining the emptied furnace away");
             return _mineTask;
         }
+
+        // 刷新近场熔炉缓存, 并在"贴着炉子却长时间打不开"时兜底强拆。
+        if (mod.getPlayer() != null && mod.getWorld() != null) {
+            if (_rescanTimer.elapsed()) {
+                _rescanTimer.reset();
+                _cachedFurnace = scanFurnaceAround(mod, mod.getPlayer().getBlockPos(), SCAN_RANGE);
+            }
+            boolean open = isContainerOpen(mod);
+            BlockPos near = _cachedFurnace;
+            if (open || near == null || !mod.getPlayer().getBlockPos().isWithinDistance(near, 4.0)) {
+                // 界面开着、或还没走到炉边 → 不算卡住, 计时重置。
+                _stuckOpenTimer.reset();
+            } else if (_stuckOpenTimer.elapsed()) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[MAIN-FIX]\t[EmptyFurnace]\tstuck next to furnace @" + near.toShortString()
+                                + " for 8s without opening it -> mining it away");
+                _emptied = true;
+                return null;
+            }
+        }
         return super.onTick(mod);
+    }
+
+    @Override
+    protected boolean isAllowedToPlaceNewContainer() {
+        // 我们是来"取空并拆走眼前真实熔炉"的, 绝不为了取空而先放一个新炉 —
+        // 那等于自己给自己造活干, 且新炉让"附近还有炉可收"恒成立 (死循环)。
+        return false;
     }
 
     @Override
@@ -135,16 +178,57 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
         if (best != null) {
             return best;
         }
+        // (2026-09-07 遗留熔炉) 4 格内没有 → 用 16 格节流扫描缓存。本次从未追踪过的
+        // 熔炉 (上次任务/上次会话留下) 不在 BlockTracker 里, 父类取 nearest 会漏掉它。
+        if (_cachedFurnace != null && WorldHelper.canReach(mod, _cachedFurnace)) {
+            return _cachedFurnace;
+        }
         return getTargetContainerPosition();
+    }
+
+    /**
+     * 以玩家为中心扫 r 格立方, 返回最近的一个【可挖】的真实熔炉; 没有则 null。
+     * 立方是 33³ 量级, 故只在 onTick 里按 1 秒节流调用 (与 BeatMinecraft2Task
+     * 的 findNearbyFurnace 同款成本/同款范围)。
+     */
+    private BlockPos scanFurnaceAround(AltoClef mod, BlockPos center, int r) {
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos pos = center.add(dx, dy, dz);
+                    if (mod.getWorld().getBlockState(pos).getBlock() != Blocks.FURNACE) {
+                        continue;
+                    }
+                    if (!WorldHelper.canBreak(mod, pos)) {
+                        continue;
+                    }
+                    double sq = pos.getSquaredDistance(center);
+                    if (sq < bestSq) {
+                        bestSq = sq;
+                        best = pos;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        // 取尽内容后, 只有拆下来的熔炉真正落袋/任务收尾才算完成。
-        if (_emptied && _mineTask != null) {
-            return _mineTask.isFinished(mod);
+        // (2026-09-07 死循环根因修复) 取尽内容后绝不能立刻算完成。
+        // 旧实现 `return _emptied`: 取尽的那一 tick 就返回 true, 上层
+        // BeatMinecraft2Task 见 isFinished 立刻丢弃本实例另建一个新的,
+        // 而"拆炉"子任务 _mineTask 要等取尽后的下一 tick 才创建 → 拆炉阶段
+        // 永远没有执行机会, 熔炉永远留在世界里, "附近还有炉可收"的触发条件
+        // 永不消失 (2026-09-07 23:07 日志实锤: 60 秒内 3 轮 "Furnace emptied",
+        // 0 次 "Mining the emptied furnace away", 期间还被打去放新炉两次)。
+        // 因此: 取尽之后必须等拆炉任务真正跑完才算完成。
+        if (_emptied) {
+            return _mineTask != null && _mineTask.isFinished(mod);
         }
-        return _emptied;
+        return false;
     }
 
     @Override

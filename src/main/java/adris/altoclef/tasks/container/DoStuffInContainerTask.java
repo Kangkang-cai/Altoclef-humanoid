@@ -150,11 +150,19 @@ public abstract class DoStuffInContainerTask extends Task {
         if (costToWalk > getCostToMakeNew(mod)) {
             _placeForceTimer.reset();
         }
-        // (2026-09-01 工作台 Place↔Walking 乒乓根因修复)
+        // (2026-09-07 收熔炉死循环根因) 子类可声明"附近没容器时绝不允许就地新造"。
+        // 默认分支的语义是"我要用容器干活, 没有就造一个再用", 对"取走/拆掉眼前
+        // 已有容器"的子类 (EmptyFurnaceTask) 是纯错误: 它跑去放一个新熔炉, 打开
+        // 空炉立刻判定"内容已取尽", 炉子却留在原地 → 触发条件自持, 永不收敛
+        // (2026-09-07 23:07 日志: 60 秒内 3 轮 "Furnace emptied", 从未拆炉)。
         boolean nearestMissing = nearest.isEmpty();
         boolean placeForceActive = !_placeForceTimer.elapsed()
                 && StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches()) > 0;
         if (nearestMissing || placeForceActive) {
+            if (!isAllowedToPlaceNewContainer()) {
+                setDebugState("No container to take from, placing is not allowed here");
+                return null; // 交给子类自行兜底 (如直接拆走可挖的容器)。
+            }
             // It's cheaper to make a new one, or our only option.
 
             // We're no longer going to our previous container.
@@ -255,6 +263,18 @@ public abstract class DoStuffInContainerTask extends Task {
 
     public ItemTarget getContainerTarget() {
         return _containerTarget;
+    }
+
+    /**
+     * 附近没有可用容器时, 是否允许就地造/放一个新的。
+     *
+     * 默认 true — 合成/熔炼等"我要用容器"的场景本来就该自己造一张。
+     * (2026-09-07) 语义为"取走/拆掉眼前已有容器"的子类 (EmptyFurnaceTask) 必须
+     * 覆写返回 false: 对新造出来的容器做"取尽并拆走"是自相矛盾的, 新放的容器
+     * 又让上层的"附近还有容器可收"判定恒成立 → 死循环。
+     */
+    protected boolean isAllowedToPlaceNewContainer() {
+        return true;
     }
 
     /**

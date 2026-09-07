@@ -723,7 +723,8 @@ public class BeatMinecraft2Task extends Task {
                     }
                     return _emptyFurnaceTask;
                 }
-                return new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.HAND);
+                // (2026-09-07) 熔炉需镐才掉落, 用 HAND 会挖而不掉 → 永远收不到。
+                return new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.WOOD);
             }
         }
 
