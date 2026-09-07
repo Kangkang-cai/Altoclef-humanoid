@@ -376,7 +376,11 @@ public class BeatMinecraft2Task extends Task {
     // (2026-09-01 防横跳, 用户) 贪心矿检查冷却 1→8 游戏秒: 贪心批次释放后给主线
     // (铁套/挖铁等)长窗口推进, 不再每 1s 就因范围可见矿再次打断 → 铁套↔贪心横跳。
     // 触发本身仍快(冷却到点立即判), 只是两次贪心之间留 8s 缓冲。
-    private final TimerGame _greedyOreCheckCooldown = new TimerGame(8);
+    // (2026-09-07) 改为动态 interval: 普通阶段 GREEDY_ORE_CHECK_COOLDOWN_NORMAL,
+    // 放弃钻石→进下界阶段由 settings.preNetherGreedyCooldownSeconds 放大 (见
+    // onTick 贪婪检查块注释, 防贪婪↔燧石链乒乓)。
+    private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 8;
+    private final TimerGame _greedyOreCheckCooldown = new TimerGame(GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
     // (2026-08-22 工作台即收) findNearbyCraftingTable 的兜底暴力扫描
     // 节流 (16³=36k 次 getBlockState, 1 秒一次足够)。
     private final TimerGame _pickupTableScanTimer = new TimerGame(1);
@@ -1457,6 +1461,20 @@ public class BeatMinecraft2Task extends Task {
                 // 眼前无同类"才换。
                 boolean eyeGearSatisfied = StorageHelper.itemTargetsMet(mod, COLLECT_EYE_GEAR_MIN) && StorageHelper.isArmorEquippedAll(mod, COLLECT_EYE_ARMOR);
                 if (!eyeGearSatisfied) {
+                    // (2026-09-07 主线保护窗口, 用户"允许找flint途中贪婪挖矿, 但不允许
+                    // 频繁交换任务") 放弃钻石准备进下界阶段 (_diamondCollectGivenUp,
+                    // 主线=金靴/造门链/找燧石挖砂砾) 时, 贪婪触发冷却放大到
+                    // settings.preNetherGreedyCooldownSeconds (默认 45s)。实测根因
+                    // (2026-09-07 11:47-11:48 latest.log): 深板岩铁富集区 8 格内永远
+                    // 有生铁, 贪婪批次目标=1 挖完一处 2-4s 即释放, 8s 通用冷却挡不住
+                    // "每 ~8s 整链拆一次去下界任务"的乒乓 (61s 内互抢 14 次), 燧石链
+                    // 每次重开重选砂砾、部分挖掘进度全丢, 净进度≈0 永远凑不齐燧石。
+                    // 此阶段冷却放大 = 保留低频顺手挖矿 (用户允许), 给燧石链连续
+                    // 挖掘窗口 (用户禁止的是频繁交换, 不是贪婪本身)。普通阶段仍 8s。
+                    boolean preNetherPhase = _diamondCollectGivenUp;
+                    _greedyOreCheckCooldown.setInterval(preNetherPhase
+                            ? mod.getModSettings().getPreNetherGreedyCooldownSeconds()
+                            : GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
                     if (_greedyOreTask != null) {
                         if (_greedyOreTask.isFinished(mod)) {
                             _greedyOreTask = null;
@@ -1472,6 +1490,11 @@ public class BeatMinecraft2Task extends Task {
                             _greedyOreTask = new CollectVisibleOresTask();
                             setDebugState("Greedy mining visible ores");
                             _greedyOreCheckCooldown.reset();
+                            if (preNetherPhase) {
+                                Debug.logToFile("altoclef_diag.log",
+                                        "[PreNetherGreedy]\tgreedy fires during pre-nether phase (protection window="
+                                                + mod.getModSettings().getPreNetherGreedyCooldownSeconds() + "s)");
+                            }
                             return _greedyOreTask;
                         } else {
                             _greedyOreTask = null;
