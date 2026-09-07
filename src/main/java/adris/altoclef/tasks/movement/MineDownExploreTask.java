@@ -245,8 +245,25 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _caveExploreTimer.reset();
     }
 
+    // (2026-09-07 断点续探) 是否已完成过一次 onStart; 区分"首次启动"与"被打断后恢复"。
+    private boolean _startedOnce = false;
+
     @Override
     protected void onStart(AltoClef mod) {
+        // (2026-09-07 断点续探, 用户"挖完一个矿就继续挖通道, 矿洞记忆没生效") 任务
+        // 被打断(典型: 探洞途中感知到矿石, 父任务切去挖矿/捡取)后恢复时, 框架会重新
+        // 调 onStart。原实现无条件重置 _inCave/_step/_digQueue → 探索状态静默丢失,
+        // _inCave 分支里的 markExploredCaveRegion 永远执行不到 → 同一片洞区刚探索完
+        // 就再次被探测(10:26 复现实锤: FIRE 后 19 秒同洞二次 FIRE, 全程无 marked
+        // region 行)。改为: 仅当上次中断发生在探索中(_inCave)且维度未变时, 保留
+        // 探索状态(_inCave/_subTask/探索计时/冷却)原地续探; 挖掘中断(_inCave=false)
+        // 仍走完整重置, 保留死亡/传送后的自愈能力。
+        boolean dimChanged = _startedOnce
+                && _nether != (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER);
+        if (_startedOnce && _inCave && !dimChanged) {
+            return;
+        }
+        _startedOnce = true;
         // (2026-09-05 目标带) 本轮目标高度: 生成带内随机取一点 (含两端)。
         _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
         _digStart = mod.getPlayer().getBlockPos().down();
@@ -961,7 +978,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-01 露天不检测洞, 二次保险) 玩家头顶无实心覆盖(露天) → 关闭检测。
         // 深度闸门放行后(已在地下)本判据几乎恒真, 但保留防"挖穿到地表天窗"等
         // 罕见场景。树冠不算顶(树下仍算露天)。
-        if (!hasOverheadCover(mod, center)) {
+        // (2026-09-07 高 cavern 修复, 用户"洞边缘不触发") 24 格仰扫在大奶酪洞里
+        // 会全程空气 → 深地大洞被误判"露天"而整局关闸(10:24 复现实锤: REJECT
+        // no-cover c=251,-43,201)。主世界 y<0 物理上不可能露天(地表 y≥60), 下界
+        // 探测带 y≤45 也在顶盖(y=127)与大空腔(y≈90+)之下 → 这两种场景跳过本闸门,
+        // 地表误判防护仍由深度闸门(y≤45)承担。
+        boolean openSkyImpossible = _nether || center.getY() < 0;
+        if (!openSkyImpossible && !hasOverheadCover(mod, center)) {
             logCaveScanDiag(mod, center, "REJECT no-cover (24格内无实心顶)");
             return Optional.empty();
         }
