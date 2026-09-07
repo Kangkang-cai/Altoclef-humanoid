@@ -5,6 +5,7 @@ import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.events.BlockBreakingCancelEvent;
 import adris.altoclef.eventbus.events.BlockBreakingEvent;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.Hand;
@@ -26,6 +27,16 @@ public class PlayerExtraController {
     private final AltoClef _mod;
     private BlockPos _blockBreakPos;
     private double _blockBreakProgress;
+
+    // (2026-09-07 准心仲裁) 本 tick 的攻击瞄准诉求: 一根准心每 tick 只能瞄一个
+    // 实体, 多个击打诉求 (任务层主目标 + KillAura 力场近怪) 争夺时, 离 bot 最近
+    // 的拿到瞄准权 (用户"优先击杀脸上最近的怪")。attack() 只登记诉求不直接转头,
+    // 统一由 AltoClef tick 尾的 applyCombatAim() 唯一出口 lookAt, 避免各调用点
+    // 每 tick 互相抢覆盖 (修"两只僵尸在脸上却一直瞄远处那只")。
+    private long _combatAimTick = Long.MIN_VALUE;
+    private Entity _combatAimEntity = null;
+    private double _combatAimDistSq = Double.MAX_VALUE;
+    private Vec3d _combatAimPoint = null;
 
     public PlayerExtraController(AltoClef mod) {
         _mod = mod;
@@ -67,22 +78,66 @@ public class PlayerExtraController {
             // reach 内就结算伤害, bot 背对怪也能砍中 (外挂式)。KillAura 力场
             // (MobDefenseChain) 更是 360° 无朝向攻击。现改为: 只有准心
             // (crosshairTarget, 客户端每 tick 按真实视角 raycast 得出, 与玩家
-            // 看到的准心完全一致) 真的命中目标实体才出手; 没对准就先把视角
-            // 转向目标, 本 tick 不挥击。附带效果: 中间隔墙时准心是方块 →
-            // 打不到, 与真人一致。所有调用点 (KillAura/任务层近战/杀龙/船)
-            // 走这里, 自动拟人化。
-            if (!isCrosshairOn(entity)) {
-                // (2026-09-06 自适应瞄准点, 用户"中心被方块挡住就打不到") 旧版
-                // 永远瞄包围盒中心 —— 实体贴墙/躲半格后时中心被方块挡住, 准心
-                // 永远落不到实体上, bot 原地盯着墙不出手。改为在包围盒表面采样,
-                // 从中挑一个视线真正通(不被方块挡)的点瞄; 找不到就退回中心。
-                Optional<Vec3d> aim = findVisibleAimPoint(entity);
-                LookHelper.lookAt(_mod, aim.orElseGet(() -> entity.getBoundingBox().getCenter()));
+            // 看到的准心完全一致) 真的命中目标实体才出手。
+            // (2026-09-07 准心仲裁) 出刀还需本实体是本 tick 攻击诉求里最近的
+            // (准心空闲或已被自己认领视为满足) —— 否则上一 tick 遗留的准心停在
+            // 远目标上时, 远目标会趁近目标还没瞄上就抢刀, "优先杀脸上最近"
+            // 失效。没抢到准心的诉求只登记, tick 尾统一转头。
+            if (isCrosshairOn(entity) && isCombatAimOwner(entity)) {
+                _mod.getController().attackEntity(_mod.getPlayer(), entity);
+                _mod.getPlayer().swingHand(Hand.MAIN_HAND);
                 return;
             }
-            _mod.getController().attackEntity(_mod.getPlayer(), entity);
-            _mod.getPlayer().swingHand(Hand.MAIN_HAND);
+            requestCombatAim(entity);
         }
+    }
+
+    /**
+     * (2026-09-07 准心仲裁) 本实体是否拥有本 tick 的出刀权:
+     * 准心停在它身上, 且它就是本 tick 距离最近的攻击诉求 (或本 tick 还没人登记)。
+     */
+    private boolean isCombatAimOwner(Entity entity) {
+        if (_combatAimTick != WorldHelper.getTicks() || _combatAimEntity == null) return true;
+        if (_combatAimEntity == entity) return true;
+        return entity.squaredDistanceTo(_mod.getPlayer()) < _combatAimDistSq;
+    }
+
+    /**
+     * (2026-09-07 准心仲裁) 登记本 tick 的攻击瞄准诉求, 离 bot 最近者胜出。
+     * 胜出者的自适应瞄准点 (findVisibleAimPoint) 在登记时算好, tick 尾由
+     * applyCombatAim() 统一 lookAt。
+     */
+    private void requestCombatAim(Entity entity) {
+        long now = WorldHelper.getTicks();
+        if (_combatAimTick != now) {
+            _combatAimTick = now;
+            _combatAimEntity = null;
+            _combatAimDistSq = Double.MAX_VALUE;
+            _combatAimPoint = null;
+        }
+        double distSq = entity.squaredDistanceTo(_mod.getPlayer());
+        if (_combatAimEntity != null && distSq >= _combatAimDistSq) return;
+        _combatAimEntity = entity;
+        _combatAimDistSq = distSq;
+        // (2026-09-06 自适应瞄准点) 中心被方块挡住时改瞄露出的头/侧身。
+        _combatAimPoint = findVisibleAimPoint(entity)
+                .orElseGet(() -> entity.getBoundingBox().getCenter());
+    }
+
+    /**
+     * (2026-09-07 准心仲裁) tick 尾唯一出口: 把准心转向本 tick 胜出的攻击诉求
+     * 的瞄准点, 然后清空仲裁状态 (下一 tick 重新裁决)。由 AltoClef.onTick 在
+     * taskRunner.tick() 之后调用 —— 此时任务层和链层的所有 lookAt/attack 都已
+     * 跑完, 这里的转向不会被同一 tick 内的任何战斗代码再覆盖。
+     */
+    public void applyCombatAim() {
+        if (_combatAimTick != WorldHelper.getTicks() || _combatAimEntity == null) return;
+        if (_combatAimPoint != null) {
+            LookHelper.lookAt(_mod, _combatAimPoint);
+        }
+        _combatAimEntity = null;
+        _combatAimDistSq = Double.MAX_VALUE;
+        _combatAimPoint = null;
     }
 
     /**

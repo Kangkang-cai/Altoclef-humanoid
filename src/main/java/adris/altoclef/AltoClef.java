@@ -280,6 +280,10 @@ public class AltoClef implements ModInitializer {
             Debug.logMessage(m);
             Debug.logToFile("altoclef_slowtick.log", m);
         }
+        // (2026-09-07 准心仲裁) 任务+链层的所有击打诉求跑完后, 唯一出口决定本
+        // tick 准心瞄谁: 脸上最近的攻击诉求拿到瞄准权, 避免"任务层瞄远目标 &
+        // 力场瞄近怪"每 tick 互相抢 lookAt 覆盖, 准心永远停在远目标身上。
+        getControllerExtras().applyCombatAim();
         _blockTracker.postTickTask();
 
         _butler.tick();
