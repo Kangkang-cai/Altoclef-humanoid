@@ -39,9 +39,10 @@ import net.minecraft.util.math.BlockPos;
  * 一个方块没挖穿, 最终整个任务树 limit reached 放弃。
  *
  * 新分流:
- *  - 头顶列 (扫到建造上限/区块未加载为止) 出现任意水 (海洋/含水层/
- *    含水方块) → "头顶有水" → 逐格向上凿 + 挖穿进水后 GetToYTask 触发
- *    CustomBaritoneGoalTask 水中垂直上浮 (保留 2026-09-04 海洋逻辑)。
+ *  - 头顶列 (向上扫 goToSurfaceWaterDetectRange=16 格, 未加载视为无水) 出现
+ *    近距离水 (海洋底板/含水层/含水方块) → "头顶有水" → 逐格向上凿 + 挖穿
+ *    进水后 GetToYTask 触发 CustomBaritoneGoalTask 水中垂直上浮 (保留
+ *    2026-09-04 海洋逻辑)。只认近水: 上百格外的孤立水交给 Baritone 绕行。
  *  - 头顶无水 (默认) → Baritone 正常寻路上去 (GetToYTask(58), 洞穴
  *    穿行/楼梯), 不再盲目垂直凿。
  *  - Baritone 失速兜底: Y 净高度持续 goToSurfaceBaritoneFallbackSeconds
@@ -93,14 +94,16 @@ public class GoToSurfaceTask extends Task {
     }
 
     /**
-     * (2026-09-07) 头顶列是否有水: 从头顶向上扫到建造上限或区块未加载为止,
-     * 任意格含水 (海水/湖/含水层/含水方块如水海带) 即 true。
-     * "头顶是海洋"的判定不再靠猜测, 而是实测水柱。未加载视为无水 (深地下
-     * 上方区块通常已加载; 海洋场景 y=50 时上方也必然已加载)。
+     * (2026-09-07) 头顶列是否有水: 从头顶向上扫 goToSurfaceWaterDetectRange
+     * (默认 16) 格, 任意格含水 (海水/湖/含水层/含水方块如水海带) 即 true。
+     * (2026-09-07 二次修正, 用户"得离近了再触发, 差一百格 bot 只是反复向上挖
+     * 几格, 又没有搭高机制, 原地不动了属于是") 只认近水: 更远的水交给 Baritone
+     * 正常寻路绕行, bot 爬近后每 1s 重扫自然接管。未加载区块视为无水。
      */
     private boolean scanWaterOverhead(AltoClef mod, BlockPos player) {
-        // 384 格 = 1.18 全建造高度, 从任意深度出发都覆盖到顶。
-        int top = player.getY() + 384;
+        int range = mod.getModSettings().getGoToSurfaceWaterDetectRange();
+        if (range <= 0) return false; // 0 = 禁用逐格凿, 纯 Baritone
+        int top = player.getY() + range;
         for (int y = player.getY() + 1; y < top; y++) {
             BlockPos pos = new BlockPos(player.getX(), y, player.getZ());
             if (!mod.getChunkTracker().isChunkLoaded(pos)) {

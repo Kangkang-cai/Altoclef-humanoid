@@ -308,6 +308,19 @@ public class Settings implements IFailableConfigFile {
     private int goToSurfaceBaritoneFallbackSeconds = 60;
 
     /**
+     * (2026-09-07 二次修正, 用户"得离近了再触发, 差一百格的话 bot 只是反复向上
+     * 挖几格, 又没有搭高机制, 原地不动了属于是") GoToSurfaceTask 头顶水检测的
+     * 扫描范围 (格): 头顶【该范围内】同列含水才判"头顶有水"走逐格凿; 更远的水
+     * 交给 Baritone 正常寻路绕行, bot 爬近后每 1s 重扫自然接管。
+     * <p>
+     * 取值考量: 凿击窗口 5 格, 海底地板一般离其下方洞穴顶 10 格内, 16 能覆盖
+     * "凿穿顶板即见水"的场景, 又不会把上百格外的孤立含水层误判成头顶海洋。
+     * <p>
+     * 设为 0 表示永不判有水 (禁用逐格凿, 纯 Baritone)。
+     */
+    private int goToSurfaceWaterDetectRange = 16;
+
+    /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
      */
     private boolean autoMLGBucket = true;
@@ -680,6 +693,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getGoToSurfaceBaritoneFallbackSeconds() {
         return goToSurfaceBaritoneFallbackSeconds;
+    }
+
+    public int getGoToSurfaceWaterDetectRange() {
+        return goToSurfaceWaterDetectRange;
     }
 
     public boolean isAutoReconnect() {
