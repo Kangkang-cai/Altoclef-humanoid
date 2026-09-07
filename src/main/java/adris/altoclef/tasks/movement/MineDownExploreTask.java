@@ -1118,8 +1118,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-        _inCave = false;
-        _subTask = null;
+        // (2026-09-07 二次修复, 用户"记忆还是没生效") 原实现在此清空 _inCave/_subTask:
+        // 每次被打断(挖矿/合成/进食 overlay 抢占)都会把探索状态抹掉, 恢复时 onStart
+        // 的断点续探分支(_inCave 才续)永远走不到 → markExploredCaveRegion 仍不执行
+        // (11:36-11:46 会话 12 次 FIRE / 0 条 marked region)。探索状态的生命周期归
+        // onTick 的完成/超时分支管理(完成时先 mark 再清), onStop 不再插手; 任务对象
+        // 被父任务丢弃时状态随对象消亡, 无泄漏。
     }
 
     @Override
