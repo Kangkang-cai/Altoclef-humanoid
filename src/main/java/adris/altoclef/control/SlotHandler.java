@@ -28,6 +28,9 @@ public class SlotHandler {
     private boolean _overrideTimerOnce = false;
     // (2026-09-03 诊断) 点击合成格放东西诊断日志节流时间戳(ms).
     private long _lastCraftGridClickDiagMs = 0;
+    // (2026-09-07 [CraftClick] 诊断) 槽位点击哑火案: 每次真实发出的点击记录
+    // handler/syncId/revision/光标前后, 定案"客户端预测是否应用/是否被回滚"。
+    private long _lastCraftClickDiagMs = 0;
 
     public SlotHandler(AltoClef mod) {
         _mod = mod;
@@ -114,11 +117,35 @@ public class SlotHandler {
         registerSlotAction();
         int syncId = player.currentScreenHandler.syncId;
 
+        // (2026-09-07 [CraftClick] 专项诊断, "台前合成熔炉卡死"案) 现象: 配方书填充
+        // (CraftRequestC2SPacket, 无客户端预测无 revision) 生效, 而槽位点击
+        // (ClickSlotC2SPacket, 带客户端预测带 revision) 对同一 handler 全部哑光,
+        // 77 次输出格点击零产出且光标始终为空。本日志逐次记录点击环境, 一次复现
+        // 即可三分支定案: ①predicted=false → 点击根本没执行到预测层; ②predicted=true
+        // 且背包计数不变 → 客户端应用了但服务端未应用(revision/syncId 被静默丢弃);
+        // ③predicted=true 且服务端也应用 → 光标应持续持有成品(与用户观察矛盾, 若出现
+        // 则指向"光标物品被某个未记录的路径回滚")。300ms 节流防刷屏。
+        net.minecraft.item.ItemStack cursorBefore = player.currentScreenHandler.getCursorStack().copy();
+        int revisionBefore = player.currentScreenHandler.getRevision();
         try {
             _mod.getController().clickSlot(syncId, windowSlot, mouseButton, type, player);
         } catch (Exception e) {
             Debug.logWarning("Slot Click Error (ignored)");
             e.printStackTrace();
+        }
+        long now = System.currentTimeMillis();
+        if (now - _lastCraftClickDiagMs > 300) {
+            _lastCraftClickDiagMs = now;
+            net.minecraft.item.ItemStack cursorAfter = player.currentScreenHandler.getCursorStack();
+            boolean predicted = !net.minecraft.item.ItemStack.areEqual(cursorBefore, cursorAfter);
+            Debug.logToFile("altoclef_craftclick.log",
+                    String.format("[CraftClick] handler=%s syncId=%d slot=%d btn=%d type=%s rev=%d->%d | cursor %s -> %s | predicted=%s",
+                            player.currentScreenHandler.getClass().getSimpleName(),
+                            syncId, windowSlot, mouseButton, type,
+                            revisionBefore, player.currentScreenHandler.getRevision(),
+                            cursorBefore.isEmpty() ? "EMPTY" : cursorBefore.getItem() + "x" + cursorBefore.getCount(),
+                            cursorAfter.isEmpty() ? "EMPTY" : cursorAfter.getItem() + "x" + cursorAfter.getCount(),
+                            predicted));
         }
     }
 

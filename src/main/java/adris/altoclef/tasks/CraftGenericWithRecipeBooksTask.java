@@ -1,6 +1,7 @@
 package adris.altoclef.tasks;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
@@ -19,6 +20,15 @@ import net.minecraft.item.ItemStack;
 public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCraftingGrid {
 
     private final RecipeTarget _target;
+
+    // (2026-09-07 [CraftClick] 收成品哑火检测) "台前合成熔炉卡死"案: 输出格点击
+    // 77 次零产出。本任务实例在 containerSubTask 的 "Crafting"↔"Getting output"
+    // 抖动中因 isEqual 去重而存活, 适合做跨抖动的哑火计时器: 进入 Getting output
+    // 分支后, 若真实背包中成品计数 4s 纹丝不动, 打一条 INEFFECTIVE 行(5s 节流),
+    // 与 SlotHandler 的逐点击 [CraftClick] 行联合定案。
+    private long _gettingOutputSinceMs = 0;
+    private int _invCountAtGettingOutputStart = -1;
+    private long _lastIneffectiveLogMs = 0;
 
     public CraftGenericWithRecipeBooksTask(RecipeTarget target) {
         _target = target;
@@ -50,8 +60,26 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         // → 反复派发 ReceiveCraftingOutput(内部读到空 return) 造成 4-5 次反复。
         if (!output.isEmpty() && _target.getOutputItem() == output.getItem() && mod.getItemStorage().getItemCount(_target.getOutputItem()) < _target.getTargetCount()) {
             setDebugState("Getting output");
+            // [CraftClick] 哑火计时: 真实背包成品计数 4s 不动即告警。
+            long nowMs = System.currentTimeMillis();
+            int invCountNow = mod.getItemStorage().getItemCountInventoryOnly(_target.getOutputItem());
+            if (_gettingOutputSinceMs == 0 || invCountNow != _invCountAtGettingOutputStart) {
+                _gettingOutputSinceMs = nowMs;
+                _invCountAtGettingOutputStart = invCountNow;
+            } else if (nowMs - _gettingOutputSinceMs > 4000 && nowMs - _lastIneffectiveLogMs > 5000) {
+                _lastIneffectiveLogMs = nowMs;
+                ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
+                Debug.logToFile("altoclef_craftclick.log",
+                        String.format("[CraftClick] INEFFECTIVE: getting output %s for %.1fs, invCount stuck at %d, outputSlot=%sx%d, cursor=%s, handler=%s",
+                                _target.getOutputItem(), (nowMs - _gettingOutputSinceMs) / 1000.0,
+                                invCountNow, output.getItem(), output.getCount(),
+                                cursorNow.isEmpty() ? "EMPTY" : cursorNow.getItem() + "x" + cursorNow.getCount(),
+                                net.minecraft.client.MinecraftClient.getInstance().player.currentScreenHandler.getClass().getSimpleName()));
+            }
             return new ReceiveCraftingOutputSlotTask(outputSlot, _target.getTargetCount());
-        }  // TODO Migrate this back to Craft In Inventory
+        }
+        // 输出格不再就绪 → 重置哑火计时
+        _gettingOutputSinceMs = 0;
 
         // If a material is found in cursor, move it to the inventory.
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
