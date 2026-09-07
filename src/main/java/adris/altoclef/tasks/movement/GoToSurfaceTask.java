@@ -5,6 +5,9 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.WorldHelper;
+import adris.altoclef.util.time.TimerGame;
+import net.minecraft.fluid.FluidState;
+import net.minecraft.fluid.Fluids;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -15,10 +18,9 @@ import net.minecraft.util.math.BlockPos;
  * 跨地形长路径 — Baritone 垂直挖穿几十格岩层耗时数分钟, 期间会被
  * 收集任务的进度检查误判"不可达"而放弃 ("挖一半就不挖了")。
  *
- * 实现: 目标 Y 取附近陆地地表 (getLandSurfaceY), 用 GoalYLevel 让
- * Baritone 自己挖上去; 头顶是海洋时退化为"挖到海平面之上"。
- * 以 isDeepUnderground 变 false (头顶无盖且高于海平面下限) 为完成
- * 判据, 而非到达某个固定 Y — 挖到山腰露头也算回到地表。
+ * 实现: 目标 Y 取 58 (isDeepUnderground 硬下限), 以 isDeepUnderground
+ * 变 false (头顶无盖且高于海平面下限) 为完成判据, 而非到达某个固定 Y
+ * — 挖到山腰露头也算回到地表。
  *
  * 峡谷搭高扩展 (2026-08-22): 谷底能见天但两侧岩壁高出 12+ 格
  * (getPitEscapeY) 时也视为"未到地表" — Baritone 步行寻路找不到
@@ -27,14 +29,60 @@ import net.minecraft.util.math.BlockPos;
  *
  * 已有 CollectWoolTask 的私有实现是本模式的首次应用 (羊只在地表),
  * 此类是抽出后的通用版, 供 BeatMinecraft2Task 的 wood/food 分支用。
+ *
+ * (2026-09-07 分流重写, 用户"他还非常深就触发了之前用于头顶是海洋的
+ * 情况, 这不对, 他现在头顶也不是海洋, 他需要正常上去地面")
+ * 旧版对 y<58 一律"逐格向上凿" (该逻辑 2026-09-04 为"头顶是海洋、
+ * baritone 找不到落脚点"现场所加), 干燥洞穴里也垂直凿天井。现场确认
+ * (2026-09-07 16:11 tasks.log): 干燥洞穴 y=-40, 44s 内 Destroy(191)↔
+ * Destroy(192)↔GetToYTask 三方乒乓 (TaskPingPong 5s 7x), bot 没升一格,
+ * 一个方块没挖穿, 最终整个任务树 limit reached 放弃。
+ *
+ * 新分流:
+ *  - 头顶列 (扫到建造上限/区块未加载为止) 出现任意水 (海洋/含水层/
+ *    含水方块) → "头顶有水" → 逐格向上凿 + 挖穿进水后 GetToYTask 触发
+ *    CustomBaritoneGoalTask 水中垂直上浮 (保留 2026-09-04 海洋逻辑)。
+ *  - 头顶无水 (默认) → Baritone 正常寻路上去 (GetToYTask(58), 洞穴
+ *    穿行/楼梯), 不再盲目垂直凿。
+ *  - Baritone 失速兜底: Y 净高度持续 goToSurfaceBaritoneFallbackSeconds
+ *    (默认 60, 0=永不降级) 无增长 → 降级逐格凿 (2026-09-04 实锤干燥
+ *    低顶洞穴 baritone 卡 43s 的旧现场仍需兜底)。
+ *  - 逐格凿目标改粘性: 目标仍实心且未越过就保持, 不随 bot 微动换列
+ *    (修本次乒乓根因: 每 tick 重算"头顶 5 格内第一块实心", 相邻列间
+ *    反复横跳重置挖掘进度)。
  */
 public class GoToSurfaceTask extends Task {
 
-    private Integer _cachedSurfaceY = null;
+    private enum AscentMode {
+        /** 头顶无水: Baritone 正常寻路 (默认)。 */
+        BARITONE,
+        /** 头顶有水或 Baritone 失速降级: 逐格向上凿。 */
+        DIG_UP
+    }
+
+    private AscentMode _mode = AscentMode.BARITONE;
+
+    // 头顶水检测每 1s 重扫一次 (列扫描最多 ~380 格, 不能每 tick 调)。
+    private final TimerGame _waterScanTimer = new TimerGame(1);
+    private boolean _waterOverhead = false;
+
+    // BARITONE 模式失速兜底: 记录任务内最高 Y, 超时无增长 → 降级逐格凿。
+    private int _baritoneBestY = Integer.MIN_VALUE;
+    private TimerGame _baritoneStallTimer = null;
+
+    // 逐格凿粘性目标 (DIG_UP 模式)。
+    private BlockPos _digTarget = null;
+    // 挖掘诊断日志节流 (旧版每 tick 一行, 本次事故打了 930 行)。
+    private final TimerGame _digLogTimer = new TimerGame(1);
+
     // 峡谷脱困目标 Y (getPitEscapeY): 壁顶+1。搭到壁顶后水平走出去。
     // 每 1 秒重算一次 (getPitEscapeY 扫 960 个方块, 不能每 tick 调)。
     private Integer _pitEscapeY = null;
-    private final adris.altoclef.util.time.TimerGame _pitEscapeTimer = new adris.altoclef.util.time.TimerGame(1);
+    private final TimerGame _pitEscapeTimer = new TimerGame(1);
+
+    // (2026-08-27) 表面目标高度 63→58, 与 isDeepUnderground 的硬下限一致:
+    // 挖到 58 露头 (头顶不再被盖) 即视为回到表面即可。
+    private static final int SURFACE_TARGET_Y = 58;
 
     private boolean inPit(AltoClef mod) {
         if (_pitEscapeY == null || _pitEscapeTimer.elapsed()) {
@@ -42,6 +90,29 @@ public class GoToSurfaceTask extends Task {
             _pitEscapeTimer.reset();
         }
         return _pitEscapeY >= 0;
+    }
+
+    /**
+     * (2026-09-07) 头顶列是否有水: 从头顶向上扫到建造上限或区块未加载为止,
+     * 任意格含水 (海水/湖/含水层/含水方块如水海带) 即 true。
+     * "头顶是海洋"的判定不再靠猜测, 而是实测水柱。未加载视为无水 (深地下
+     * 上方区块通常已加载; 海洋场景 y=50 时上方也必然已加载)。
+     */
+    private boolean scanWaterOverhead(AltoClef mod, BlockPos player) {
+        // 384 格 = 1.18 全建造高度, 从任意深度出发都覆盖到顶。
+        int top = player.getY() + 384;
+        for (int y = player.getY() + 1; y < top; y++) {
+            BlockPos pos = new BlockPos(player.getX(), y, player.getZ());
+            if (!mod.getChunkTracker().isChunkLoaded(pos)) {
+                return false; // 再往上不可知, 按无水处理
+            }
+            FluidState fluid = mod.getWorld().getBlockState(pos).getFluidState();
+            if (fluid != null && !fluid.isEmpty()
+                    && (fluid.getFluid() == Fluids.WATER || fluid.getFluid() == Fluids.FLOWING_WATER)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -63,43 +134,86 @@ public class GoToSurfaceTask extends Task {
         }
         _pitEscapeY = null;
         BlockPos player = mod.getPlayer().getBlockPos();
-        // (2026-09-04 回地表直接向上挖, 用户"上方海洋 baritone 找不到落脚点" 现场:
-        // y=50 干燥洞穴顶低, 头顶 y=51 是岩石) baritone 的 GoalYLevel(58) 在"洞穴
-        // 顶上方是水/需跨水挖穿"时寻路失败原地卡死 (日志实锤 y=50 卡 43s)。修复:
-        // deep (y<58) 时只要头顶是可挖实心就【持续挖正上方】逐格凿穿洞穴顶 — 不
-        // 依赖 baritone 规划。挖穿进入空气/水后: 空气 → 交 GetToYTask (baritone
-        // 正常上); 水 → 交 CustomBaritoneGoalTask 的水中上浮 (sprint+瞄准) 游出水面。
-        // (2026-09-04 v3 修复) 前两版用 player.up() 挖顶是错的: up() 是玩家【身体所在
-        // 格】(通常空气, isSolid=false) → 挖顶永不触发 (日志实锤: jar 已最新、游戏
-        // 12:12:58 启动加载新 jar, 但 [GoToSurface] 从未出现)。正确目标 = 头顶第一格
-        // 实心方块: 从 up(1) 向上扫描 (脚+1 起, 越过身体格), 找第一个实心且可挖的挖。
-        // 挖开后 bot 跳上一格 (GetToYTask), 继续向上找下一格, 逐格凿穿洞穴顶。
-        BlockPos digTarget = null;
-        for (int dy = 1; dy <= 5; dy++) {
-            BlockPos cand = player.up(dy);
-            if (WorldHelper.isSolid(mod, cand)) {
-                float h = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
-                if (h >= 0 && !mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) {
-                    digTarget = cand;
-                }
-                break; // 遇到实心 (可挖或不可挖/基岩) 就停
+
+        // 每 1s 实测头顶列: 有水 → 切 DIG_UP (海洋/含水层场景)。
+        if (_waterScanTimer.elapsed()) {
+            _waterScanTimer.reset();
+            boolean water = scanWaterOverhead(mod, player);
+            if (water && !_waterOverhead) {
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] water overhead detected at "
+                        + player + " -> DIG_UP mode");
+            }
+            _waterOverhead = water;
+            if (_waterOverhead && _mode != AscentMode.DIG_UP) {
+                _mode = AscentMode.DIG_UP;
             }
         }
-        if (digTarget != null) {
-            Debug.logToFile("altoclef_diag.log", "[GoToSurface] digging up at "
-                    + digTarget + " player=" + player);
+
+        if (_mode == AscentMode.DIG_UP) {
+            return tickDigUp(mod, player);
+        }
+
+        // ===== BARITONE 模式 (默认): 头顶无水, 正常寻路上去 =====
+        // 失速兜底: Y 净高度持续 N 秒无增长 → 降级逐格凿。
+        int y = player.getY();
+        if (_baritoneStallTimer == null) {
+            int fb = mod.getModSettings().getGoToSurfaceBaritoneFallbackSeconds();
+            _baritoneStallTimer = new TimerGame(fb > 0 ? fb : Double.MAX_VALUE);
+        }
+        if (_baritoneBestY == Integer.MIN_VALUE) {
+            _baritoneBestY = y;
+        }
+        if (y > _baritoneBestY) {
+            _baritoneBestY = y;
+            _baritoneStallTimer.reset();
+        } else if (_baritoneStallTimer.elapsed()) {
+            Debug.logToFile("altoclef_diag.log", "[GoToSurface] baritone stalled (bestY=" + _baritoneBestY
+                    + ", player=" + player + ") -> fallback to DIG_UP");
+            _mode = AscentMode.DIG_UP;
+            return tickDigUp(mod, player);
+        }
+        setDebugState("Going up to surface via baritone (target y=" + SURFACE_TARGET_Y + ")");
+        return new GetToYTask(SURFACE_TARGET_Y);
+    }
+
+    /**
+     * (2026-09-07) 逐格向上凿 (仅头顶有水 / Baritone 失速降级时)。
+     * 目标 = 头顶 5 格内第一块实心可挖方块, 粘性保持直到挖穿或越过,
+     * 挖开后 bot 跳上一格 (GetToYTask), 继续向上; 挖穿进水后 GetToYTask
+     * 的 GoalYLevel 会触发 CustomBaritoneGoalTask 水中垂直上浮。
+     */
+    private Task tickDigUp(AltoClef mod, BlockPos player) {
+        // 粘性: 目标仍实心且未越过 → 保持, 不随 bot 微动换列重置挖掘进度。
+        if (_digTarget != null) {
+            if (!WorldHelper.isSolid(mod, _digTarget) || player.getY() >= _digTarget.getY()) {
+                _digTarget = null; // 已挖穿 / 已爬到该高度
+            }
+        }
+        if (_digTarget == null) {
+            // 从脚+1 起 (越过身体格) 向上找第一块实心: 可挖则为目标,
+            // 不可挖 (基岩等) 停止扫描。头顶 5 格内全空 → 交 GetToYTask。
+            for (int dy = 1; dy <= 5; dy++) {
+                BlockPos cand = player.up(dy);
+                if (WorldHelper.isSolid(mod, cand)) {
+                    float h = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
+                    if (h >= 0 && !mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) {
+                        _digTarget = cand;
+                    }
+                    break; // 遇到实心 (可挖或不可挖/基岩) 就停
+                }
+            }
+        }
+        if (_digTarget != null) {
+            if (_digLogTimer.elapsed()) {
+                _digLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] digging up at "
+                        + _digTarget + " player=" + player);
+            }
             setDebugState("Digging upward to surface");
-            return new DestroyBlockTask(digTarget);
+            return new DestroyBlockTask(_digTarget);
         }
-        // (2026-08-27 表面目标高度 63→58, 用户改判) 旧版固定 63 (海平面), 卡死现场
-        // (15:34): bot 已到 y≈63 但抬起头扫描仍判深地下, GetToYTask(63) 目标==当前位置
-        // 立刻"完成", 再无上升动力 → 锁死在 63 走不动。降为 58 与 isDeepUnderground 的
-        // 硬下限一致: 挖到 58 露头 (头顶不再被盖) 即视为回到表面即可, 不必强行爬到 63。
-        if (_cachedSurfaceY == null) {
-            _cachedSurfaceY = 58;
-        }
-        setDebugState("Digging up to surface (target y=" + _cachedSurfaceY + ")");
-        return new GetToYTask(_cachedSurfaceY);
+        setDebugState("Digging up to surface (target y=" + SURFACE_TARGET_Y + ")");
+        return new GetToYTask(SURFACE_TARGET_Y);
     }
 
     @Override
@@ -111,10 +225,17 @@ public class GoToSurfaceTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _pitEscapeY = null;
+        _mode = AscentMode.BARITONE;
+        _waterOverhead = false;
+        _waterScanTimer.reset();
+        _baritoneBestY = Integer.MIN_VALUE;
+        _baritoneStallTimer = null;
+        _digTarget = null;
     }
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        _digTarget = null;
     }
 
     @Override

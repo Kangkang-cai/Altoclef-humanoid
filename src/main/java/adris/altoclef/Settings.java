@@ -294,6 +294,20 @@ public class Settings implements IFailableConfigFile {
     private int preNetherGreedyCooldownSeconds = 45;
 
     /**
+     * (2026-09-07 回地表分流, 用户"他还非常深就触发了之前用于头顶是海洋的情况,
+     * 这不对, 头顶不是海洋就要正常上去地面") GoToSurfaceTask 分流: 头顶列扫到水
+     * (海洋/含水层) 才用"逐格向上凿+游泳上浮"; 头顶无水时默认交 Baritone 正常
+     * 寻路上去 (洞穴穿行/楼梯)。
+     * <p>
+     * 本项 = Baritone 模式的失速兜底秒数: 回地表期间玩家 Y 净高度持续该秒数无
+     * 增长 (2026-09-04 日志实锤: 干燥低顶洞穴 y=50, Baritone GoalYLevel(58)
+     * 寻路失败原地卡 43s) 才降级为逐格向上凿。
+     * <p>
+     * 设为 0 表示永不降级 (严格 Baritone, 低顶洞穴可能长时间卡死)。
+     */
+    private int goToSurfaceBaritoneFallbackSeconds = 60;
+
+    /**
      * If true, MLG/No Fall Bucket if we're knocked off course and falling.
      */
     private boolean autoMLGBucket = true;
@@ -662,6 +676,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getPreNetherGreedyCooldownSeconds() {
         return preNetherGreedyCooldownSeconds;
+    }
+
+    public int getGoToSurfaceBaritoneFallbackSeconds() {
+        return goToSurfaceBaritoneFallbackSeconds;
     }
 
     public boolean isAutoReconnect() {
