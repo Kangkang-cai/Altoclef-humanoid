@@ -241,7 +241,9 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 时旧判定刚超界, 杀怪任务不举盾, 被链层"逃跑"接管)
         if (fusingCreeper != null && fusingCreeper.isInRange(mod.getPlayer(), CREEPER_SHIELD_BLOCK_RANGE)) {
             setDebugState("Shield up vs fusing creeper (highest priority)");
-            LookHelper.lookAt(mod, fusingCreeper.getPos());
+            // (2026-09-07 防御朝向优先) 面朝 fuse 苦力怕走仲裁防御槽, 不被
+            // 攻击瞄准覆盖。
+            mod.getControllerExtras().requestDefenseAim(fusingCreeper.getPos());
             mod.getInputControls().hold(Input.CLICK_RIGHT);
             return null;
         }

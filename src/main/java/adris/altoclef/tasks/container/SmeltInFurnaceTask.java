@@ -171,6 +171,14 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         private FurnaceCache _furnaceCache = new FurnaceCache();
 
+        // (2026-09-07 熔炉守卫) 烧制等待期不抱界面: 走 FurnaceSmeltGuardTask
+        // (关屏守炉+扫视+16格内派杀), 驻留期满由本类 onTick 恢复 super.onTick
+        // 走 walk&reopen 重开炉收货。守卫接管期间必须压住父类 onTick —— 否则
+        // 父类每 tick 重判 isContainerOpen=false 会立刻切回 walk&open, 守卫活
+        // 不过 1 tick。
+        private FurnaceSmeltGuardTask _guard = null;
+        private boolean _guardActive = false;
+
         private final ItemTarget _allMaterials;
 
         // (2026-08-22 烧铁无煤横跳修复) 燃料收集"提交期"计时器。CollectFuelTask
@@ -242,7 +250,30 @@ public class SmeltInFurnaceTask extends ResourceTask {
         }
 
         @Override
+        protected void onStop(AltoClef mod, Task interruptTask) {
+            super.onStop(mod, interruptTask);
+            // (2026-09-07 熔炉守卫) 被外部打断 (gear 顶替/用户取消) 时清守卫状态:
+            // 任务重跑从头走 walk&open, 防止旧守卫实例把重启后的任务又拉回守卫分支。
+            _guardActive = false;
+            _guard = null;
+        }
+
+        @Override
         protected Task onTick(AltoClef mod) {
+            // (2026-09-07 熔炉守卫接管分支) 守卫激活且未驻留期满时, 直接返回
+            // 守卫, 不走下方原有流程 —— 否则父类 DoStuffInContainerTask.onTick
+            // 每 tick 重判 isContainerOpen=false 会立刻切回 walk&open, 守卫活
+            // 不过 1 tick。驻留期满 → 恢复原流程 → walk&reopen 重开熔炉 →
+            // containerSubTask 收输出/补燃料 → 再次 Waiting 再次守卫, 循环直至
+            // isFurnaceDrained。
+            if (_guardActive) {
+                if (_guard == null || _guard.isFinished(mod)) {
+                    _guardActive = false;
+                    _guard = null;
+                } else {
+                    return _guard;
+                }
+            }
             tryUpdateOpenFurnace(mod);
             // Include both regular + optional items
             ItemTarget materialTarget = _allMaterials;
@@ -457,6 +488,19 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
             }
 
+            // (2026-09-07 熔炉守卫, 用户"烧东西时不能一直在烧制界面") 等待期
+            // 不再 return null 抱着界面: 激活守卫子任务 (关屏、站炉边扫视、
+            // 16 格内敌对生物派杀), 驻留期满由本类 onTick 恢复 super.onTick
+            // 重开熔炉收货/补料。炉位取 override (近场真实熔炉扫描) 优先,
+            // 退回缓存位置; 两者都空则退化为旧"抱界面等待"。
+            BlockPos furnacePos = overrideContainerPosition(mod);
+            if (furnacePos == null) furnacePos = getTargetContainerPosition();
+            if (furnacePos != null) {
+                _guard = new FurnaceSmeltGuardTask(furnacePos);
+                _guardActive = true;
+                setDebugState("Handing over to furnace guard");
+                return _guard;
+            }
             setDebugState("Waiting...");
             return null;
         }

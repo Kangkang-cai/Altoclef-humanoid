@@ -38,6 +38,13 @@ public class PlayerExtraController {
     private double _combatAimDistSq = Double.MAX_VALUE;
     private Vec3d _combatAimPoint = null;
 
+    // (2026-09-07 防御朝向优先, 用户"苦力怕格挡优先") 举盾格挡的面朝方向
+    // (盾牌核弹面朝 fuse 苦力怕 / 面朝来袭弹射物) 比"瞄最近攻击目标"更优先:
+    // 盾的角度错了格挡就白举。单槽不参与距离竞争 —— 防御朝向由威胁选择逻辑
+    // (MobDefenseChain) 自己决定。applyCombatAim 里防御诉求存在时压过攻击诉求。
+    private long _defenseAimTick = Long.MIN_VALUE;
+    private Vec3d _defenseAimPoint = null;
+
     public PlayerExtraController(AltoClef mod) {
         _mod = mod;
 
@@ -125,13 +132,33 @@ public class PlayerExtraController {
     }
 
     /**
-     * (2026-09-07 准心仲裁) tick 尾唯一出口: 把准心转向本 tick 胜出的攻击诉求
-     * 的瞄准点, 然后清空仲裁状态 (下一 tick 重新裁决)。由 AltoClef.onTick 在
-     * taskRunner.tick() 之后调用 —— 此时任务层和链层的所有 lookAt/attack 都已
-     * 跑完, 这里的转向不会被同一 tick 内的任何战斗代码再覆盖。
+     * (2026-09-07 防御朝向优先) 登记本 tick 的防御朝向诉求 (面朝 fuse 苦力怕/
+     * 来袭弹射物举盾)。防御 > 攻击: 格挡的角度错了伤害一点挡不住, 攻击瞄准
+     * 晚几 tick 无伤大雅。由 applyCombatAim() 在 tick 尾统一 lookAt。
+     */
+    public void requestDefenseAim(Vec3d point) {
+        _defenseAimTick = WorldHelper.getTicks();
+        _defenseAimPoint = point;
+    }
+
+    /**
+     * (2026-09-07 准心仲裁) tick 尾唯一出口: 优先应用防御朝向 (格挡),
+     * 其次把准心转向本 tick 胜出的攻击诉求的瞄准点, 然后清空仲裁状态
+     * (下一 tick 重新裁决)。由 AltoClef.onTick 在 taskRunner.tick() 之后
+     * 调用 —— 此时任务层和链层的所有 lookAt/attack 都已跑完, 这里的转向
+     * 不会被同一 tick 内的任何战斗代码再覆盖。
      */
     public void applyCombatAim() {
-        if (_combatAimTick != WorldHelper.getTicks() || _combatAimEntity == null) return;
+        long now = WorldHelper.getTicks();
+        if (_defenseAimTick == now && _defenseAimPoint != null) {
+            LookHelper.lookAt(_mod, _defenseAimPoint);
+            _defenseAimPoint = null;
+            _combatAimEntity = null;
+            _combatAimDistSq = Double.MAX_VALUE;
+            _combatAimPoint = null;
+            return;
+        }
+        if (_combatAimTick != now || _combatAimEntity == null) return;
         if (_combatAimPoint != null) {
             LookHelper.lookAt(_mod, _combatAimPoint);
         }

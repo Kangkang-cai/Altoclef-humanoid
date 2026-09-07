@@ -1405,7 +1405,9 @@ public class MobDefenseChain extends SingleTaskChain {
         }
 
         // ② 面朝苦力怕 (脚位置即可，爆炸来自脚下)
-        LookHelper.lookAt(mod, creeper.getPos());
+        // (2026-09-07 防御朝向优先) 走准心仲裁的防御槽, tick 尾统一 lookAt 且
+        // 压过攻击瞄准 —— 旧直写会被 applyCombatAim 覆盖, 盾面朝错方向白举。
+        mod.getControllerExtras().requestDefenseAim(creeper.getPos());
 
         // ③ 持续举盾（hold 保证每 tick 不下压）
         // (避免每 tick 刷屏: 只在首次启动和爆炸瞬间各打一条日志)
@@ -1465,7 +1467,8 @@ public class MobDefenseChain extends SingleTaskChain {
             return false;
         }
         // 面朝弹射物 + 举盾 + 取消寻路 (原地格挡, 不躲)
-        LookHelper.lookAt(mod, nearest.position);
+        // (2026-09-07 防御朝向优先) 同盾牌核弹, 走防御槽不被攻击瞄准覆盖。
+        mod.getControllerExtras().requestDefenseAim(nearest.position);
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         if (BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().isPathing()) {
             BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything();
