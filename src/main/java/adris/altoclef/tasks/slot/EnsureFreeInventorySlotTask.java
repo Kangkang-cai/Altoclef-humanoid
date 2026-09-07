@@ -2,6 +2,7 @@ package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.container.StoreGarbageInContainerTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
@@ -15,9 +16,16 @@ public class EnsureFreeInventorySlotTask extends Task {
     // (2026-08-27 合并诊断日志) 每 2 秒一条写独立文件, 便于检索合并为何不触发。
     private static long _lastConsolidateDiag = 0;
 
+    // (2026-09-07 容器腾位) 站在箱子前时优先把垃圾存进容器。跨 tick 持有该子任务
+    // 实例以便查询它是否已判定"容器存不下"; 判定失败后本轮不再重试, 直接走丢弃
+    // 级联 (否则每 tick 重建一个已结束的任务 = 空转)。
+    private StoreGarbageInContainerTask _storeTask = null;
+    private boolean _containerStoreBlocked = false;
+
     @Override
     protected void onStart(AltoClef mod) {
-
+        _storeTask = null;
+        _containerStoreBlocked = false;
     }
 
     @Override
@@ -53,15 +61,39 @@ public class EnsureFreeInventorySlotTask extends Task {
                             + " cursor=" + cursor + " emptySlots=" + empty
                             + " garbageSlot=" + garbage);
         }
-        // (2026-08-27 用户要求: 可堆叠物品合并放一起省空间, 放在丢垃圾之前)
-        // 背包满需要腾位时, 先尝试把同类部分堆合并 (省格子, 不丢任何东西);
-        // 合并完仍满才走丢垃圾/随机丢逻辑。有可合并的对才启动合并任务,
-        // 否则空跑会立刻结束导致死循环。
-        if (StorageHelper.findMergeableStackPair(mod) != null) {
-            setDebugState("Consolidating stacks before freeing space");
-            return new ConsolidateInventoryTask();
-        }
+        // (2026-09-07 卡死根因修复, 现场: 光标拿着面包 + 背包 36 格全满)
+        // 光标非空时【绝不能】走合并: 此时点任何槽都是"放置/交换光标物品", 合并
+        // 根本无从执行; 而 ConsolidateInventoryTask 又要求"光标为空"才算完成 →
+        // 两者互锁 = 永久空转, 真正的腾位/丢弃链路一次都执行不到 (23:15:37-53
+        // 日志: [ConsolidateDiag] cursor=bread emptySlots=0 findMergeablePair=true
+        // 持续 8 次采样, 直到用户手动停止)。光标非空一律直接走下面的腾位/丢弃级联。
         ItemStack cursorStack = StorageHelper.getItemStackInCursorSlot();
+        boolean cursorBusy = !cursorStack.isEmpty();
+
+        if (!cursorBusy) {
+            // (2026-09-07 用户拍板) 站在箱子前腾位: 先把垃圾【存进这个箱子】,
+            // 能不扔地上就不扔 — 都开箱了还把东西丢一地不合理。存不下再由
+            // StoreGarbageInContainerTask 自己结束, 落到下面的丢弃级联。
+            if (!_containerStoreBlocked && StoreGarbageInContainerTask.isStorageContainerOpen()) {
+                if (_storeTask == null) {
+                    _storeTask = new StoreGarbageInContainerTask();
+                }
+                if (_storeTask.isFinished(mod)) {
+                    _containerStoreBlocked = true;
+                } else {
+                    setDebugState("Making room by storing junk in container");
+                    return _storeTask;
+                }
+            }
+            // (2026-08-27 用户要求: 可堆叠物品合并放一起省空间, 放在丢垃圾之前)
+            // 背包满需要腾位时, 先尝试把同类部分堆合并 (省格子, 不丢任何东西);
+            // 合并完仍满才走丢垃圾/随机丢逻辑。有可合并的对才启动合并任务,
+            // 否则空跑会立刻结束导致死循环。
+            if (StorageHelper.findMergeableStackPair(mod) != null) {
+                setDebugState("Consolidating stacks before freeing space");
+                return new ConsolidateInventoryTask();
+            }
+        }
         // 我们为腾位主动拿起的 bulk 建材（可能在 throwaway 列表之外，
         // 如花岗岩）：直接扔，别卡在光标里。
         if (!cursorStack.isEmpty() && StorageHelper.isBulkDisposalItem(cursorStack.getItem())

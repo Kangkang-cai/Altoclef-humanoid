@@ -109,6 +109,16 @@ public class LootContainerTask extends Task {
             _weDoneHere = true;
             return null;
         }
+        // (2026-09-07 用户现场: 想拿箱子里的面包, 背包全满 → 举着面包发呆卡死)
+        // 拿之前先看背包放不放得下这件东西 (含并进已有的部分堆); 放不下就先腾位。
+        // 顺序很关键: 先腾位时光标是空的, EnsureFreeInventorySlotTask 能走"把垃圾
+        // 存进这个箱子"这条无损路径; 若先拿起来再发现没地方放, 光标被占住后所有
+        // 槽位操作都退化成"交换", 腾位链路施展不开 (23:15:37 光标=bread 卡死)。
+        ItemStack want = StorageHelper.getItemStackInSlot(optimal.get());
+        if (mod.getItemStorage().getSlotThatCanFitInPlayerInventory(want, true).isEmpty()) {
+            setDebugState("Making room before looting");
+            return new EnsureFreeInventorySlotTask();
+        }
         // (2026-08-27 拿了又放反复修复) 光标仍空但刚点过的拿起槽还在同步宽限期:
         // 物品已拿起(光标稍后到位)却还没被此槽清掉 → 别再重复点它, 否则会把
         // 光标物品放回箱子(拿起又放下)。等光标真正到位。
