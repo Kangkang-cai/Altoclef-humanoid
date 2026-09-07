@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.movement.GetToEntityTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.CombatMemory;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
@@ -24,6 +25,8 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Attacks an entity, but the target entity must be specified.
@@ -99,6 +102,16 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
 
     // Tick we started holding the shield up (for the force counter-attack timeout).
     private long _shieldHoldStartTick = -1;
+
+    // (2026-09-07 击杀超时兜底, 用户"蜘蛛躲在暗处 bot 傻傻对准, 必须绕路才能
+    // 打到, 也没有击杀超时兜底") 准心校验拟人化后"打不到就是真打不到", 必须
+    // 有止损: 连续 killGiveUpSeconds 既没砍中一刀、也没在接近目标 (距离无净
+    // 缩短) → 放弃, 标记 CombatMemory 不可达冷却 (unreachableCooldownSeconds),
+    // 守卫派杀 / KillEntitiesTask / DoToClosestEntityTask 的目标选择冷却期内
+    // 跳过该实体。冷却过后再试一次 (怪可能自己走出来了)。
+    private long _lastHitTick = Long.MIN_VALUE;
+    private double _prevDistSq = Double.MAX_VALUE;
+    private boolean _gaveUp = false;
     // (2026-09-06 烈焰人波次) 最近一次"有弹射物逼近"的 tick — 判定一波连发是否结束。
     private long _lastInboundTick = Long.MIN_VALUE;
     // Last tick we actually swung back, to pace our counter-attacks.
@@ -137,6 +150,43 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     protected void onStart(AltoClef mod) {
         super.onStart(mod);
         tryEquipShield(mod);
+        _lastHitTick = WorldHelper.getTicks();
+        _prevDistSq = Double.MAX_VALUE;
+        _gaveUp = false;
+    }
+
+    /**
+     * (2026-09-07 击杀超时兜底) 超过 killGiveUpSeconds 既没命中一刀、距离又无
+     * 净缩短 → 放弃该目标: 标记 CombatMemory 冷却并停止本任务的动作 (返回
+     * null), 上层 (熔炉守卫 / KillEntitiesTask / DoToClosestEntityTask) 下一
+     * tick 重选目标时会跳过冷却中的实体。0 = 永不放弃 (Settings 开关)。
+     */
+    @Override
+    protected Task onTick(AltoClef mod) {
+        int giveUpSeconds = mod.getModSettings().getKillGiveUpSeconds();
+        Optional<Entity> target = getEntityTarget(mod);
+        if (target.isPresent() && giveUpSeconds > 0) {
+            UUID id = target.get().getUuid();
+            long now = WorldHelper.getTicks();
+            long lastSwing = mod.getControllerExtras().getLastSwingTickFor(id);
+            if (lastSwing > _lastHitTick) _lastHitTick = lastSwing;
+            double distSq = target.get().squaredDistanceTo(mod.getPlayer());
+            // 距离仍在净缩短 = 接近有进展, 刷新止损窗口 (长途追击不误杀)。
+            boolean closingIn = distSq < _prevDistSq - 0.25;
+            _prevDistSq = distSq;
+            if (closingIn) _lastHitTick = now;
+            if (!_gaveUp && now - _lastHitTick > giveUpSeconds * 20L) {
+                int cooldown = mod.getModSettings().getUnreachableCooldownSeconds();
+                CombatMemory.markUnreachable(id, cooldown * 20);
+                _gaveUp = true;
+                _lastHitTick = now; // 防冷却期内每 tick 刷日志
+                setDebugState("Kill timeout: target unreachable, giving up");
+                Debug.logMessage("[KillTimeout] giving up on " + target.get().getType().getTranslationKey()
+                        + " (no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s)");
+                return null;
+            }
+        }
+        return super.onTick(mod);
     }
 
     // (2026-08-23 打末影人) 末影人机制: 你不盯着它, 它不会主动攻击/追你。

@@ -45,6 +45,11 @@ public class PlayerExtraController {
     private long _defenseAimTick = Long.MIN_VALUE;
     private Vec3d _defenseAimPoint = null;
 
+    // (2026-09-07 击杀超时兜底) 最近一次真实出刀 (准心落上并挥击) 的目标与
+    // tick, 供 AbstractKillEntityTask 判定"多久没砍中目标了"。
+    private long _lastSwingTick = Long.MIN_VALUE;
+    private java.util.UUID _lastSwingTargetId = null;
+
     public PlayerExtraController(AltoClef mod) {
         _mod = mod;
 
@@ -93,10 +98,20 @@ public class PlayerExtraController {
             if (isCrosshairOn(entity) && isCombatAimOwner(entity)) {
                 _mod.getController().attackEntity(_mod.getPlayer(), entity);
                 _mod.getPlayer().swingHand(Hand.MAIN_HAND);
+                _lastSwingTick = WorldHelper.getTicks();
+                _lastSwingTargetId = entity.getUuid();
                 return;
             }
             requestCombatAim(entity);
         }
+    }
+
+    /**
+     * (2026-09-07 击杀超时兜底) 指定目标最近一次被真实出刀 (准心落上并挥击)
+     * 的游戏 tick; 从未砍中过返回 Long.MIN_VALUE。
+     */
+    public long getLastSwingTickFor(java.util.UUID targetId) {
+        return targetId != null && targetId.equals(_lastSwingTargetId) ? _lastSwingTick : Long.MIN_VALUE;
     }
 
     /**

@@ -308,6 +308,24 @@ public class Settings implements IFailableConfigFile {
     private int goToSurfaceBaritoneFallbackSeconds = 60;
 
     /**
+     * (2026-09-07 击杀超时兜底, 用户"蜘蛛躲在暗处 bot 傻傻对准, 必须绕路才能
+     * 打到, 也没有击杀超时兜底") 单个击杀目标连续该秒数既没命中一刀、也没在
+     * 接近它 (距离无净缩短) 时放弃: 标记 CombatMemory 不可达冷却, 由上层
+     * (守卫/KillEntitiesTask) 重选目标或回归主线。准心校验拟人化后, 打不到
+     * 就是真打不到, 必须有止损。
+     * <p>
+     * 设为 0 表示永不放弃 (可能对躲在暗处的怪无限耗)。
+     */
+    private int killGiveUpSeconds = 15;
+
+    /**
+     * 击杀超时放弃的目标的冷却秒数: 冷却期内所有击杀目标选择跳过该实体,
+     * 防止"放弃 → 立刻重选同一只 → 再放弃"死循环。冷却过后会再尝试一次
+     * (怪可能自己走出来了, 玩家也会时不时回头看一眼)。
+     */
+    private int unreachableCooldownSeconds = 25;
+
+    /**
      * (2026-09-07 二次修正, 用户"得离近了再触发, 差一百格的话 bot 只是反复向上
      * 挖几格, 又没有搭高机制, 原地不动了属于是") GoToSurfaceTask 头顶水检测的
      * 扫描范围 (格): 头顶【该范围内】同列含水才判"头顶有水"走逐格凿; 更远的水
@@ -693,6 +711,14 @@ public class Settings implements IFailableConfigFile {
 
     public int getGoToSurfaceBaritoneFallbackSeconds() {
         return goToSurfaceBaritoneFallbackSeconds;
+    }
+
+    public int getKillGiveUpSeconds() {
+        return killGiveUpSeconds;
+    }
+
+    public int getUnreachableCooldownSeconds() {
+        return unreachableCooldownSeconds;
     }
 
     public int getGoToSurfaceWaterDetectRange() {

@@ -3,6 +3,7 @@ package adris.altoclef.tasks.entity;
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.AbstractDoToClosestObjectTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.CombatMemory;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.math.Vec3d;
 
@@ -53,7 +54,10 @@ public class DoToClosestEntityTask extends AbstractDoToClosestObjectTask<Entity>
     @Override
     protected Optional<Entity> getClosestTo(AltoClef mod, Vec3d pos) {
         if (!mod.getEntityTracker().entityFound(_targetEntities)) return Optional.empty();
-        return mod.getEntityTracker().getClosestEntity(pos, _shouldInteractWith, _targetEntities);
+        // (2026-09-07 击杀超时兜底) 跳过 CombatMemory 不可达冷却中的目标,
+        // 防止"放弃 → 立刻重选同一只 → 再放弃"死循环 (蜘蛛躲暗处实测)。
+        return mod.getEntityTracker().getClosestEntity(pos,
+                _shouldInteractWith.and(e -> !CombatMemory.isUnreachable(e.getUuid())), _targetEntities);
     }
 
     @Override
@@ -71,7 +75,9 @@ public class DoToClosestEntityTask extends AbstractDoToClosestObjectTask<Entity>
 
     @Override
     protected boolean isValid(AltoClef mod, Entity obj) {
-        return obj.isAlive() && mod.getEntityTracker().isEntityReachable(obj);
+        // (2026-09-07 击杀超时兜底) 当前目标进入不可达冷却 → 视为无效, 触发重选。
+        return obj.isAlive() && mod.getEntityTracker().isEntityReachable(obj)
+                && !CombatMemory.isUnreachable(obj.getUuid());
     }
 
     @Override

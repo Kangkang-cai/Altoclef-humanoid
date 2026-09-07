@@ -4,8 +4,10 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.CombatMemory;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.math.BlockPos;
@@ -41,11 +43,18 @@ public class FurnaceSmeltGuardTask extends Task {
     private static final double SCAN_INTERVAL_SECONDS = 2;
     // 离炉超过这个距离就先走回来 (追击杀完怪后可能站得远)。
     private static final double RETURN_TO_FURNACE_DISTANCE = 4;
+    // (2026-09-07 击杀承诺粘性) 承诺的杀目标从感知列表消失超过该 tick 数
+    // (3s) 才撤销承诺 —— 感知列表会因视角/遮挡抖动, 没有粘性会
+    // "Dispatching kill ↔ Returning to furnace" 高频横跳 (18:04 日志实锤)。
+    private static final long COMMIT_LOST_TICKS = 60;
 
     private final BlockPos _furnacePos;
     private final TimerGame _dwellTimer = new TimerGame(DWELL_SECONDS);
     private final TimerGame _scanTimer = new TimerGame(SCAN_INTERVAL_SECONDS);
     private boolean _screenClosed = false;
+    // 当前承诺击杀的目标 (killGiveUpSeconds 超时放弃后由 CombatMemory 冷却解除)。
+    private Entity _committedKill = null;
+    private long _committedLastSeenTick = Long.MIN_VALUE;
 
     public FurnaceSmeltGuardTask(BlockPos furnacePos) {
         _furnacePos = furnacePos;
@@ -56,6 +65,8 @@ public class FurnaceSmeltGuardTask extends Task {
         _screenClosed = false;
         _dwellTimer.reset();
         _scanTimer.reset();
+        _committedKill = null;
+        _committedLastSeenTick = Long.MIN_VALUE;
     }
 
     @Override
@@ -73,24 +84,45 @@ public class FurnaceSmeltGuardTask extends Task {
             return null;
         }
 
-        // ② 威胁派杀: ≤16 格内有感知到的敌对生物 → 打它 (KillEntityTask 按
-        // 目标实体 isEqual 复用同实例, 不会每 tick 重启)。打斗期间驻留计时
+        // ② 击杀承诺维持: 一旦承诺杀某目标就粘住 —— 只要它还在感知列表
+        // (3s 内见过) 且未进入超时冷却, 就继续杀它, 不因感知抖动退回守卫。
+        long now = WorldHelper.getTicks();
+        if (_committedKill != null) {
+            if (CombatMemory.isUnreachable(_committedKill.getUuid())) {
+                // 击杀任务超时放弃了它 (KillTimeout) → 解除承诺, 冷却期内不再选它。
+                _committedKill = null;
+            } else if (isTrackedAsHostile(mod, _committedKill)) {
+                _committedLastSeenTick = now;
+            } else if (!_committedKill.isAlive() || now - _committedLastSeenTick > COMMIT_LOST_TICKS) {
+                _committedKill = null;
+            }
+        }
+        if (_committedKill != null) {
+            _dwellTimer.reset();
+            setDebugState("Killing committed threat: " + _committedKill.getType().getTranslationKey());
+            return new KillEntityTask(_committedKill);
+        }
+
+        // ③ 威胁派杀: ≤16 格内有感知到的敌对生物 → 承诺并打它 (KillEntityTask
+        // 按目标实体 isEqual 复用同实例, 不会每 tick 重启)。打斗期间驻留计时
         // 重置 —— 威胁解除后重新数满一个驻留周期再回炉。
         Optional<Entity> threat = findNearestThreat(mod);
         if (threat.isPresent()) {
+            _committedKill = threat.get();
+            _committedLastSeenTick = now;
             _dwellTimer.reset();
             setDebugState("Dispatching kill: " + threat.get().getType().getTranslationKey());
             return new KillEntityTask(threat.get());
         }
 
-        // ③ 追击杀完可能站远了, 先走回炉边再守。
+        // ④ 追击杀完可能站远了, 先走回炉边再守。
         if (_furnacePos != null
                 && _furnacePos.getSquaredDistance(mod.getPlayer().getBlockPos()) > RETURN_TO_FURNACE_DISTANCE * RETURN_TO_FURNACE_DISTANCE) {
             setDebugState("Returning to furnace");
             return new GetToBlockTask(_furnacePos, true);
         }
 
-        // ④ 扫视: 周期性随机转向, 让视觉感知覆盖四周。
+        // ⑤ 扫视: 周期性随机转向, 让视觉感知覆盖四周。
         if (_scanTimer.elapsed()) {
             LookHelper.randomOrientation(mod);
             _scanTimer.reset();
@@ -114,7 +146,8 @@ public class FurnaceSmeltGuardTask extends Task {
     }
 
     /**
-     * 最近的可派杀威胁: 感知到的敌对生物且 ≤16 格。
+     * 最近的可派杀威胁: 感知到的敌对生物且 ≤16 格, 且不在击杀超时冷却中
+     * (CombatMemory)。
      * (EntityTracker 的感知即"看过/听过", 符合拟人感知原则, 不用透视。)
      */
     private Optional<Entity> findNearestThreat(AltoClef mod) {
@@ -122,6 +155,7 @@ public class FurnaceSmeltGuardTask extends Task {
         double bestDistSq = THREAT_DISPATCH_RANGE * THREAT_DISPATCH_RANGE;
         for (Entity hostile : mod.getEntityTracker().getHostiles()) {
             if (hostile == null || !hostile.isAlive()) continue;
+            if (CombatMemory.isUnreachable(hostile.getUuid())) continue;
             double distSq = hostile.squaredDistanceTo(mod.getPlayer());
             if (distSq <= bestDistSq) {
                 bestDistSq = distSq;
@@ -129,6 +163,18 @@ public class FurnaceSmeltGuardTask extends Task {
             }
         }
         return Optional.ofNullable(best);
+    }
+
+    /**
+     * (2026-09-07 承诺粘性) 目标是否仍在感知列表里 (按 UUID 比对, 不依赖
+     * Entity 实例引用)。
+     */
+    private boolean isTrackedAsHostile(AltoClef mod, Entity entity) {
+        if (entity == null) return false;
+        for (Entity hostile : mod.getEntityTracker().getHostiles()) {
+            if (hostile != null && hostile.getUuid().equals(entity.getUuid())) return true;
+        }
+        return false;
     }
 
     @Override
