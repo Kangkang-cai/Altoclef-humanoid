@@ -353,6 +353,12 @@ public class BeatMinecraft2Task extends Task {
     // 粘住直到完成(取尽炉内物品+拆炉带走), 防止每 tick 新建被其他分支切走,
     // 也确保 onTick 顶部延续块能持续返回同一实例。
     private EmptyFurnaceTask _emptyFurnaceTask = null;
+    // (2026-09-08 仅掉落物收炉粘性) 旧实现每 tick `return new MineAndCollectTask(...)`
+    // 全新实例 — 配合 MineOrCollectTask 的"无目标空转放弃"兜底会变成
+    // 5 秒空转→放弃→重建 的循环, 且每次重建丢失探索/捡取记忆。
+    // 改粘性实例 + 放弃后 10 秒冷却。
+    private MineAndCollectTask _pickupFurnaceDropTask = null;
+    private long _furnaceDropGiveUpUntilMs = 0;
     // (2026-08-27 床保险一次性完成) 地表白天"必须持床"只执行一轮: 拿到并持有
     // 一张床(或睡过一张床已设重生点) 就置 true 放行, 之后不再因"背包没床"打断
     // 木头/食物/挖矿主线 (否则每次回地表都被拽去拿床)。与 _woodStockpiled 同构。
@@ -723,8 +729,22 @@ public class BeatMinecraft2Task extends Task {
                     }
                     return _emptyFurnaceTask;
                 }
-                // (2026-09-07) 熔炉需镐才掉落, 用 HAND 会挖而不掉 → 永远收不到。
-                return new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.WOOD);
+                // (2026-09-08) 仅掉落物场景: 粘性实例。放弃(无目标空转 5s)后 10 秒内
+                // 不再重建 — 掉落物大概率已消失/不可达, 反复重建只会空转循环。
+                if (_pickupFurnaceDropTask != null && _pickupFurnaceDropTask.isFinished(mod)) {
+                    if (_pickupFurnaceDropTask.gaveUpWandering()) {
+                        _furnaceDropGiveUpUntilMs = System.currentTimeMillis() + 10_000;
+                    }
+                    _pickupFurnaceDropTask = null;
+                }
+                if (_pickupFurnaceDropTask == null && System.currentTimeMillis() >= _furnaceDropGiveUpUntilMs) {
+                    // (2026-09-07) 熔炉需镐才掉落, 用 HAND 会挖而不掉 → 永远收不到。
+                    _pickupFurnaceDropTask = new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.WOOD);
+                }
+                if (_pickupFurnaceDropTask != null) {
+                    return _pickupFurnaceDropTask;
+                }
+                // 冷却期内: 不再因掉落物新建任务, 掉到后面分支继续推进主线。
             }
         }
 

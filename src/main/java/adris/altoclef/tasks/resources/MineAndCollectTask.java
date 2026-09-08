@@ -97,8 +97,7 @@ public class MineAndCollectTask extends ResourceTask {
         this(new ItemTarget(item, count), blocksToMine, requirement);
     }
 
-    public static Block[] itemTargetToBlockList(ItemTarget[] targets) {
-        List<Block> result = new ArrayList<>(targets.length);
+    public static Block[] itemTargetToBlockList(ItemTarget[] targets) {        List<Block> result = new ArrayList<>(targets.length);
         for (ItemTarget target : targets) {
             for (Item item : target.getMatches()) {
                 Block block = Block.getBlockFromItem(item);
@@ -313,6 +312,11 @@ public class MineAndCollectTask extends ResourceTask {
         return null;
     }
 
+    /** (2026-09-08 无目标空转兜底) 子任务是否已因连续无动作放弃本次收集。 */
+    public boolean gaveUpWandering() {
+        return _subtask.gaveUpWandering();
+    }
+
     @Override
     public boolean isFinished(AltoClef mod) {
         if (!super.isFinished(mod)) {
@@ -321,6 +325,14 @@ public class MineAndCollectTask extends ResourceTask {
             // 已去偏置=null; 背包又没拿到床所以 super.isFinished 恒 false)。找不到可挖床就
             // 放弃本次挖床, 让父任务 CollectBedTask 回到杀羊取毛做床正路。木头/工作台不受影响。
             if (_subtask.isTargetingBed() && !hasNearbyMineableTarget(mod)) {
+                return true;
+            }
+            // (2026-09-08 无目标空转兜底) 子任务连续 5 秒无任何动作(掉落物/近场矿/
+            // 探索全无, surface 目标探索刻意为 null) → 宣告本次收集放弃。旧实现返回
+            // false 会让上层(BeatMinecraft 收炉分支等)永远等待, bot 站桩卡死 37 秒
+            // (08:27 日志实锤)。放弃后触发条件(如 findNearbyFurnace)若仍成立自然重试,
+            // 否则分支收敛, 不会死循环。
+            if (_subtask.gaveUpWandering()) {
                 return true;
             }
             return false;
@@ -1190,6 +1202,35 @@ public class MineAndCollectTask extends ResourceTask {
             return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos()).isPresent();
         }
 
+        // (2026-09-08 无目标空转兜底) surface 目标(熔炉/工作台等)在全无目标时
+        // createNextExplorationTask 刻意返回 null "停下等"(注释见该方法: 床/羊毛
+        // 不做无脑探索), 但"停"没有上限, 且本类未覆写 isFinished → Task 默认
+        // false → 上层永远等不到结束, bot 在 "Waiting for calculations
+        // (wandering)" 站桩卡死 (08:27 日志实锤: 拆完熔炉后掉落物未及时进包,
+        // 空转 734 ticks = 36.7 秒, debugstate 状态一字未变, 直到用户手动停)。
+        // 修复: onTick 返回 null(本 tick 完全无动作)连续超过阈值 → 宣告放弃,
+        // 交还上层决策; 触发条件(findNearbyFurnace 等)若仍成立自然再试, 否则
+        // 分支收敛。捡取粘性冷却(等 tracker 回册的 2s)不计入空转。
+        private static final int BLIND_GIVE_UP_TICKS = 100; // 5 秒
+        private int _blindNullTicks = 0;
+
+        /** 连续无动作空转是否已超过放弃阈值。 */
+        public boolean gaveUpWandering() {
+            return _blindNullTicks >= BLIND_GIVE_UP_TICKS;
+        }
+
+        /** 统一出口: 记录本 tick 是否完全无动作 (供无目标空转兜底计数)。 */
+        private Task trackSuperTick(Task sub) {
+            if (sub != null) {
+                // 有任何动作(捡取/挖掘/探索/环顾)都不算空转。
+                _blindNullTicks = 0;
+            } else if (System.currentTimeMillis() - _lastDropPickupMs >= DROP_PICKUP_COOLDOWN_MS) {
+                // 掉落物合并/吸入的 1~2 tick tracker 滞后属于正常等待, 不计。
+                _blindNullTicks++;
+            }
+            return sub;
+        }
+
         @Override
         protected Task getWanderTask(AltoClef mod) {
             // (2026-08-28 贪心=纯贴身) 贪心没有紧贴矿就收手, 绝不挖隧道/探索
@@ -1491,20 +1532,20 @@ public class MineAndCollectTask extends ResourceTask {
                     } else {
                         mod.getInputControls().hold(Input.CLICK_LEFT);
                     }
-                    return super.onTick(mod);
+                    return trackSuperTick(super.onTick(mod));
                 }
                 // 首次失败: 开始挥击 (长按左键清挡路小草)
                 _swingTicksLeft = SWING_TICKS;
                 Debug.logMessage("Failed to mine block, swinging to clear grass/foliage...");
                 mod.getInputControls().hold(Input.CLICK_LEFT);
-                return super.onTick(mod);
+                return trackSuperTick(super.onTick(mod));
             }
             // 有进展/正常: 保险松开可能按住的左键
             if (_swingTicksLeft > 0) {
                 _swingTicksLeft = 0;
                 mod.getInputControls().release(Input.CLICK_LEFT);
             }
-            return super.onTick(mod);
+            return trackSuperTick(super.onTick(mod));
         }
 
         @Override
@@ -1569,6 +1610,7 @@ public class MineAndCollectTask extends ResourceTask {
         protected void onStart(AltoClef mod) {
             _progressChecker.reset();
             _miningPos = null;
+            _blindNullTicks = 0;
         }
 
         @Override
