@@ -362,6 +362,16 @@ public class BeatMinecraft2Task extends Task {
     // (2026-09-08) 收炉侧线整体冷却截止时间: EmptyFurnaceTask/掉落物收集因无目标
     // 空转放弃后置 now+30s, 冷却期内收炉分支整体让位主线。
     private long _furnaceSidelineGiveUpUntilMs = 0;
+    // (2026-09-08 收工作台粘性+超时兜底) 旧实现每 tick `return new MineAndCollectTask(...)`
+    // 全新实例且无任何兜底 — 与找岩浆主线每 2s 互抢 ping-pong (日志 22:56 实锤:
+    // isMainLineBusy 把收工作台自身的 MineAndCollectTask 判"忙", 分支刚跑就把自己
+    // 判掉, 岩浆主线抢回; 掉落物 itemDropped 又无距离闸门), 每次都差几格没吸到。
+    // 改粘性实例 + 顶部延续块保活; 15s 仍没拿到或内部空转放弃 → 触发层冷却 30s。
+    private MineAndCollectTask _pickupCraftingTableTask = null;
+    // (2026-09-08) 收工作台侧线整体冷却截止时间: 放弃后置 now+30s, 冷却期内分支让位。
+    private long _craftingTableSidelineGiveUpUntilMs = 0;
+    // (2026-09-08) 当前收工作台粘性实例的启动时间, 用于 15s 外部超时判定。
+    private long _pickupCraftingTableStartMs = 0;
     // (2026-08-27 床保险一次性完成) 地表白天"必须持床"只执行一轮: 拿到并持有
     // 一张床(或睡过一张床已设重生点) 就置 true 放行, 之后不再因"背包没床"打断
     // 木头/食物/挖矿主线 (否则每次回地表都被拽去拿床)。与 _woodStockpiled 同构。
@@ -676,6 +686,31 @@ public class BeatMinecraft2Task extends Task {
             }
         }
 
+        // (2026-09-08 收工作台粘性延续) 一旦进入收工作台侧线, 就持续返回同一实例
+        // 直到完成 — 绝不被找岩浆等主线半路抢断。放在分支闸门之前, 绕过
+        // isMainLineBusy (该判定把收工作台自身的 MineAndCollectTask 也算"忙",
+        // 是 22:56 收工作台↔找岩浆每 2s 互抢 ping-pong 的根因之一)。
+        // 超时兜底: 启动 15s 仍没拿到 → 主动放弃 + 触发层冷却 30s, 杜绝
+        // "永远差几格"式无限横跳; 内部无目标空转放弃同样进冷却。
+        if (_pickupCraftingTableTask != null) {
+            if (WorldHelper.getCurrentDimension() != Dimension.END
+                    && _pickupCraftingTableTask.isActive() && !_pickupCraftingTableTask.isFinished(mod)) {
+                if (System.currentTimeMillis() - _pickupCraftingTableStartMs > 15_000) {
+                    Debug.logMessage("[PickupTable] pickup timeout (15s), giving up + 30s cooldown");
+                    _craftingTableSidelineGiveUpUntilMs = System.currentTimeMillis() + 30_000;
+                    _pickupCraftingTableTask = null;
+                } else {
+                    return _pickupCraftingTableTask;
+                }
+            }
+            if (_pickupCraftingTableTask != null && _pickupCraftingTableTask.isFinished(mod)) {
+                if (_pickupCraftingTableTask.gaveUpWandering()) {
+                    _craftingTableSidelineGiveUpUntilMs = System.currentTimeMillis() + 30_000;
+                }
+                _pickupCraftingTableTask = null;
+            }
+        }
+
         // Portable crafting table.
         // If we're NOT using our crafting table right now and there's one nearby, grab it.
         // 2026-08-21: "nearby" is now enforced (CRAFTING_TABLE_GRAB_RANGE).
@@ -698,6 +733,9 @@ public class BeatMinecraft2Task extends Task {
                 // 不盖过进行中的原木收集。若 _woodStockpileTask 还在跑就放行木头,
                 // 否则 tableNearby/dropped 一闪烁就和木头任务互踩 (日志: 每2s
                 // Stockpiling wood <-> Pick up crafting table 互跳)。
+                // (2026-09-08) 收工作台侧线放弃冷却期: 上次超时/空转放弃后 30 秒内
+                // 分支整体让位, 防止重建同一个捡不到的任务再横跳一轮。
+                && System.currentTimeMillis() >= _craftingTableSidelineGiveUpUntilMs
                 && !(_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))) {
             // (2026-08-22 修复) 不依赖 isBlockPerceivable: 刚放置/紧邻的工作台
             // LOS 射线判定不稳定, 用户实测 14:22 会话合成石镐后工作台留下不捡
@@ -721,7 +759,13 @@ public class BeatMinecraft2Task extends Task {
                                 + " dropped=" + mod.getEntityTracker().itemDropped(Items.CRAFTING_TABLE)
                                 + " woodActive=" + (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))
                                 + " nightPrio=" + isNightSleepPriority(mod));
-                return new MineAndCollectTask(Items.CRAFTING_TABLE, 1, new Block[]{Blocks.CRAFTING_TABLE}, MiningRequirement.HAND);
+                // (2026-09-08) 粘性实例: 顶部延续块负责持续返回直到完成/超时,
+                // 不再每 tick new (每 tick new 是与找岩浆互抢的根因之一)。
+                if (_pickupCraftingTableTask == null) {
+                    _pickupCraftingTableTask = new MineAndCollectTask(Items.CRAFTING_TABLE, 1, new Block[]{Blocks.CRAFTING_TABLE}, MiningRequirement.HAND);
+                    _pickupCraftingTableStartMs = System.currentTimeMillis();
+                }
+                return _pickupCraftingTableTask;
             }
         }
 
