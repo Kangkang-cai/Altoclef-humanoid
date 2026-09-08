@@ -46,6 +46,8 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     private ItemEntity _currentDrop = null;
     // (2026-08-31) 掉水里物品导航诊断节流时间戳。
     private long _lastPickupDiagMs = 0;
+    // (2026-09-08) 导航目标方块诊断节流时间戳 ([PickupGoal])。
+    private long _lastGoalDiagMs = 0;
 
     // (2026-08-26 下潜捡眼失败) 掉落物在动 (下落/漂移) 时, 直接用实时 pos 做导航
     // 目标 → 目标每 tick 变 → GetToBlockTask 每 tick 重启 → TaskPingPong 永远追不上
@@ -261,11 +263,26 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             if (now - _lastPickupDiagMs > 5000) {
                 _lastPickupDiagMs = now;
                 Vec3d p = obj.getPos();
-                double py = _mod != null && _mod.getPlayer() != null ? _mod.getPlayer().getY() : -1;
+                // (2026-09-08 零行为改动诊断增强) 补玩家完整坐标、水平/3D 距离、
+                // 物品所在格与脚下方块的方块 id — 定位"baritone 疯狂寻路/不动、
+                // 眼前几格吸不到"时双方到底各在哪、脚下是什么方块。
+                Vec3d me = (_mod != null && _mod.getPlayer() != null)
+                        ? _mod.getPlayer().getPos() : Vec3d.ZERO;
+                double ddx = p.x - me.x;
+                double ddz = p.z - me.z;
+                double hDist = Math.sqrt(ddx * ddx + ddz * ddz);
+                String itemBlock = _mod != null
+                        ? String.valueOf(_mod.getWorld().getBlockState(obj.getBlockPos()).getBlock()) : "?";
+                String groundBlock = _mod != null
+                        ? String.valueOf(_mod.getWorld().getBlockState(obj.getBlockPos().down()).getBlock()) : "?";
                 Debug.logMessage("[PickupTarget] item=(" + (int)p.x + "," + (int)p.y + "," + (int)p.z
                         + ") isTouchingWater=" + obj.isTouchingWater()
                         + " isOnGround=" + obj.isOnGround()
-                        + " playerY=" + (int)py
+                        + " player=(" + String.format("%.2f", me.x) + "," + String.format("%.2f", me.y) + "," + String.format("%.2f", me.z) + ")"
+                        + " hDist=" + String.format("%.2f", hDist)
+                        + " dist3d=" + String.format("%.2f", me.distanceTo(p))
+                        + " itemBlock=" + itemBlock
+                        + " groundBlock=" + groundBlock
                         + " openWater=" + isOpenWaterColumn(mod, obj));
             }
         }
@@ -450,6 +467,20 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         }
         Vec3d targetPos = _pickupNavTarget;
         BlockPos target = new BlockPos(targetPos);
+        // (2026-09-08 零行为改动诊断) baritone "疯狂寻路/站着不动"时, 目标方块到底
+        // 是什么 id、是否实心 — 与 [PickupTarget] 对齐时间窗一起看。独立 5s 节流。
+        {
+            long now = System.currentTimeMillis();
+            if (now - _lastGoalDiagMs > 5000) {
+                _lastGoalDiagMs = now;
+                Debug.logMessage("[PickupGoal] goal=" + target.toShortString()
+                        + " solid=" + WorldHelper.isSolid(_mod, target)
+                        + " solidBelow=" + WorldHelper.isSolid(_mod, target.down())
+                        + " block=" + _mod.getWorld().getBlockState(target).getBlock()
+                        + " below=" + _mod.getWorld().getBlockState(target.down()).getBlock()
+                        + " navItem=" + (_pickupNavItem == null ? "null" : _pickupNavItem.getBlockPos()));
+            }
+        }
         boolean riding = _mod.getPlayer().getVehicle() instanceof BoatEntity;
         // (2026-08-26 下潜捡眼) Baritone 不支持可靠水下下潜 (只会带到水面 XZ,
         // 12:51 日志: GetToBlockTask 追水下目标 y 逐 tick 变 → TaskPingPong, bot
