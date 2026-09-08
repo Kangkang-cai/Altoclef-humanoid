@@ -1209,9 +1209,10 @@ public class MineAndCollectTask extends ResourceTask {
         // (wandering)" 站桩卡死 (08:27 日志实锤: 拆完熔炉后掉落物未及时进包,
         // 空转 734 ticks = 36.7 秒, debugstate 状态一字未变, 直到用户手动停)。
         // 修复: onTick 返回 null(本 tick 完全无动作)连续超过阈值 → 宣告放弃,
-        // 交还上层决策; 触发条件(findNearbyFurnace 等)若仍成立自然再试, 否则
-        // 分支收敛。捡取粘性冷却(等 tracker 回册的 2s)不计入空转。
-        private static final int BLIND_GIVE_UP_TICKS = 100; // 5 秒
+        // 交还上层决策; 上层(BeatMinecraft 收炉分支)对放弃冷却 30 秒, 期间让位
+        // 主线 — 用户"5s 太长, 观感上就是卡住"定 2 秒。捡取粘性冷却(等 tracker
+        // 回册的 2s)不计入空转。
+        private static final int BLIND_GIVE_UP_TICKS = 40; // 2 秒
         private int _blindNullTicks = 0;
 
         /** 连续无动作空转是否已超过放弃阈值。 */

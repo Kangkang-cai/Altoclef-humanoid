@@ -355,10 +355,12 @@ public class BeatMinecraft2Task extends Task {
     private EmptyFurnaceTask _emptyFurnaceTask = null;
     // (2026-09-08 仅掉落物收炉粘性) 旧实现每 tick `return new MineAndCollectTask(...)`
     // 全新实例 — 配合 MineOrCollectTask 的"无目标空转放弃"兜底会变成
-    // 5 秒空转→放弃→重建 的循环, 且每次重建丢失探索/捡取记忆。
-    // 改粘性实例 + 放弃后 10 秒冷却。
+    // 空转→放弃→重建 的循环, 且每次重建丢失探索/捡取记忆。改粘性实例;
+    // 放弃后的重试节流由收炉侧线整体冷却 _furnaceSidelineGiveUpUntilMs (30s) 统一接管。
     private MineAndCollectTask _pickupFurnaceDropTask = null;
-    private long _furnaceDropGiveUpUntilMs = 0;
+    // (2026-09-08) 收炉侧线整体冷却截止时间: EmptyFurnaceTask/掉落物收集因无目标
+    // 空转放弃后置 now+30s, 冷却期内收炉分支整体让位主线。
+    private long _furnaceSidelineGiveUpUntilMs = 0;
     // (2026-08-27 床保险一次性完成) 地表白天"必须持床"只执行一轮: 拿到并持有
     // 一张床(或睡过一张床已设重生点) 就置 true 放行, 之后不再因"背包没床"打断
     // 木头/食物/挖矿主线 (否则每次回地表都被拽去拿床)。与 _woodStockpiled 同构。
@@ -646,6 +648,13 @@ public class BeatMinecraft2Task extends Task {
                 return _emptyFurnaceTask;
             }
             if (_emptyFurnaceTask.isFinished(mod)) {
+                // (2026-09-08) 拆炉收集因无目标空转放弃(而非正常完成) → 收炉侧线
+                // 整体冷却 30 秒。冷却期内本分支不进入, 防止"放弃→立即重建同一个
+                // 还是无目标的任务→再空转"的循环; 冷却结束后条件若仍成立自然重试
+                // (那时掉落物多半已被吸走/消失, 或 bot 移动后 FOV 恢复)。
+                if (_emptyFurnaceTask.gaveUpWandering()) {
+                    _furnaceSidelineGiveUpUntilMs = System.currentTimeMillis() + 30_000;
+                }
                 _emptyFurnaceTask = null;
             }
         }
@@ -708,7 +717,10 @@ public class BeatMinecraft2Task extends Task {
                 // (2026-08-31 顺路收容不让位打断主线) 主链(铁装合成/下矿/食物/熔炼)
                 // 忙时让位 — 否则熔炼铁锭到一半会被收熔炉拦腰打断 (用户 12:42 日志)。
                 && !isMainLineBusy(mod)
-                && !isNightSleepPriority(mod)) {
+                && !isNightSleepPriority(mod)
+                // (2026-09-08) 收炉侧线放弃冷却期: 上次因无目标空转放弃后 30 秒内
+                // 整个分支让位, 避免重建同一个仍无目标的任务再卡一轮。
+                && System.currentTimeMillis() >= _furnaceSidelineGiveUpUntilMs) {
             boolean furnaceBlockNearby = findNearbyFurnace(mod);
             if (furnaceBlockNearby || mod.getEntityTracker().itemDropped(Items.FURNACE)) {
                 setDebugState(furnaceBlockNearby ? "Emptying then picking up furnace" : "Pick up furnace while we're at it");
@@ -729,22 +741,19 @@ public class BeatMinecraft2Task extends Task {
                     }
                     return _emptyFurnaceTask;
                 }
-                // (2026-09-08) 仅掉落物场景: 粘性实例。放弃(无目标空转 5s)后 10 秒内
-                // 不再重建 — 掉落物大概率已消失/不可达, 反复重建只会空转循环。
+                // (2026-09-08) 仅掉落物场景: 粘性实例。放弃(无目标空转 2s)后由
+                // 分支顶部的 30 秒侧线冷却统一接管, 不再单独建 10 秒小冷却。
                 if (_pickupFurnaceDropTask != null && _pickupFurnaceDropTask.isFinished(mod)) {
                     if (_pickupFurnaceDropTask.gaveUpWandering()) {
-                        _furnaceDropGiveUpUntilMs = System.currentTimeMillis() + 10_000;
+                        _furnaceSidelineGiveUpUntilMs = System.currentTimeMillis() + 30_000;
                     }
                     _pickupFurnaceDropTask = null;
                 }
-                if (_pickupFurnaceDropTask == null && System.currentTimeMillis() >= _furnaceDropGiveUpUntilMs) {
+                if (_pickupFurnaceDropTask == null) {
                     // (2026-09-07) 熔炉需镐才掉落, 用 HAND 会挖而不掉 → 永远收不到。
                     _pickupFurnaceDropTask = new MineAndCollectTask(Items.FURNACE, 1, new Block[]{Blocks.FURNACE}, MiningRequirement.WOOD);
                 }
-                if (_pickupFurnaceDropTask != null) {
-                    return _pickupFurnaceDropTask;
-                }
-                // 冷却期内: 不再因掉落物新建任务, 掉到后面分支继续推进主线。
+                return _pickupFurnaceDropTask;
             }
         }
 

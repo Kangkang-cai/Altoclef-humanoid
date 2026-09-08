@@ -107,6 +107,11 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
         return false;
     }
 
+    /** (2026-09-08) 拆炉子收集任务是否因无目标空转而放弃 (供上层触发冷却)。 */
+    public boolean gaveUpWandering() {
+        return _mineTask != null && _mineTask.gaveUpWandering();
+    }
+
     @Override
     protected Task containerSubTask(AltoClef mod) {
         // 光标先清回背包 (PICKUP 拿起的东西要落袋才算取走)。
