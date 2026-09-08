@@ -399,6 +399,13 @@ public class BeatMinecraft2Task extends Task {
     // 修法: 与 _greedyOreTask 同模式缓存保活, 守卫计数用含光标的
     // countItemsInInventoryReal; 生肉彻底消失且炉已排空才弃缓存换肉。
     private SmeltInFurnaceTask _cachedSmeltTask = null;
+    // (2026-09-08 二次修复) "生肉消失+炉排空"弃缓存需连续成立 20 tick (~1s):
+    // 单 tick 的缓存陈旧/界面同步抖动不再触发换肉抢切 (15:17 实测牛肉刚进炉
+    // 1 tick 后就被换肉任务抢切, 疑似 isFurnaceDrained 单 tick 误判, 待诊断日志实锤)。
+    private int _smeltDiscardStreak = 0;
+    private static final int SMELT_DISCARD_STREAK_TICKS = 20;
+    // "生肉没了但炉未排空"状态翻转记录 (诊断用, 只记翻转不刷屏)
+    private boolean _lastSmeltGoneNotDrained = false;
     // (2026-08-22 工作台即收) findNearbyCraftingTable 的兜底暴力扫描
     // 节流 (16³=36k 次 getBlockState, 1 秒一次足够)。
     private final TimerGame _pickupTableScanTimer = new TimerGame(1);
@@ -1574,13 +1581,40 @@ public class BeatMinecraft2Task extends Task {
                     // 任务同样留在缓存里, 恢复后继续跑 (stop-loss 在 onStop 已兜底)。
                     if (_cachedSmeltTask != null) {
                         if (_cachedSmeltTask.isFinished(mod)) {
+                            Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\tdiscard: isFinished raw="
+                                    + ItemHelper.stripItemName(_cachedSmeltTask.getTargets()[0].getMaterial().getMatches()[0])
+                                    + " cache=" + _cachedSmeltTask.describeFurnaceCache());
                             _cachedSmeltTask = null;
+                            _smeltDiscardStreak = 0;
                         } else {
                             Item[] cachedRaw = _cachedSmeltTask.getTargets()[0].getMaterial().getMatches();
-                            if (StorageHelper.countItemsInInventoryReal(mod, cachedRaw) == 0
-                                    && _cachedSmeltTask.isFurnaceDrained()) {
-                                _cachedSmeltTask = null;
+                            int rawCount = StorageHelper.countItemsInInventoryReal(mod, cachedRaw);
+                            boolean drained = _cachedSmeltTask.isFurnaceDrained();
+                            boolean goneNotDrained = rawCount == 0 && !drained;
+                            // 诊断: 状态翻转才记 —— 肉在炉里烧时 rawCount==0 属正常
+                            if (goneNotDrained != _lastSmeltGoneNotDrained) {
+                                Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\traw gone but "
+                                        + (drained ? "drained" : "NOT drained")
+                                        + " raw=" + ItemHelper.stripItemName(cachedRaw[0])
+                                        + " cache=" + _cachedSmeltTask.describeFurnaceCache());
+                                _lastSmeltGoneNotDrained = goneNotDrained;
+                            }
+                            if (rawCount == 0 && drained) {
+                                _smeltDiscardStreak++;
+                                if (_smeltDiscardStreak >= SMELT_DISCARD_STREAK_TICKS) {
+                                    Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\tdiscard: raw gone+drained raw="
+                                            + ItemHelper.stripItemName(cachedRaw[0]) + " streak=" + _smeltDiscardStreak
+                                            + " cache=" + _cachedSmeltTask.describeFurnaceCache());
+                                    _cachedSmeltTask = null;
+                                    _smeltDiscardStreak = 0;
+                                } else {
+                                    // 未达连续阈值, 本 tick 仍保活
+                                    setDebugState("Smelting raw food: "
+                                            + ItemHelper.stripItemName(cachedRaw[0]));
+                                    return _cachedSmeltTask;
+                                }
                             } else {
+                                _smeltDiscardStreak = 0;
                                 setDebugState("Smelting raw food: "
                                         + ItemHelper.stripItemName(cachedRaw[0]));
                                 return _cachedSmeltTask;
@@ -1594,6 +1628,8 @@ public class BeatMinecraft2Task extends Task {
                                 int targetCount = mod.getItemStorage().getItemCount(cooked.get()) + mod.getItemStorage().getItemCount(raw);
                                 setDebugState("Smelting raw food: " + ItemHelper.stripItemName(raw));
                                 _cachedSmeltTask = new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(cooked.get(), targetCount), new ItemTarget(raw, targetCount)));
+                                Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\tcreated raw="
+                                        + ItemHelper.stripItemName(raw) + " target=" + targetCount);
                                 return _cachedSmeltTask;
                             }
                         }

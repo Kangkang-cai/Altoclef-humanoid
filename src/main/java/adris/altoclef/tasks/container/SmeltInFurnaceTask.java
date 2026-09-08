@@ -155,6 +155,13 @@ public class SmeltInFurnaceTask extends ResourceTask {
         return _doTask.isFurnaceDrained();
     }
 
+    /**
+     * (2026-09-08 诊断) 缓存快照文本, 供上层弃缓存/保活日志携带现场。
+     */
+    public String describeFurnaceCache() {
+        return _doTask.describeFurnaceCache();
+    }
+
     @Override
     protected boolean isEqualResource(ResourceTask other) {
         if (other instanceof SmeltInFurnaceTask task) {
@@ -242,7 +249,30 @@ public class SmeltInFurnaceTask extends ResourceTask {
                     && !_furnaceCache.materialSlot.isEmpty();
             boolean outputLeft = _target.getItem().matches(_furnaceCache.outputSlot.getItem())
                     && !_furnaceCache.outputSlot.isEmpty();
-            return !materialLeft && !outputLeft;
+            boolean drained = !materialLeft && !outputLeft;
+            // (2026-09-08 诊断) 抓"肉刚进炉却判已排空"的翻转现场——上一版
+            // ping-pong 修复失败的疑似根因, 翻转才记, 不刷屏。
+            if (drained != _lastDrainedValue) {
+                boolean screenOpen = net.minecraft.client.MinecraftClient.getInstance().player != null
+                        && net.minecraft.client.MinecraftClient.getInstance().player.currentScreenHandler instanceof FurnaceScreenHandler;
+                Debug.logToFile("altoclef_diag.log", "[SmeltDrained]\t" + _lastDrainedValue + "->" + drained
+                        + " target=" + _target.getMaterial() + " cache=" + describeFurnaceCache()
+                        + " screenOpen=" + screenOpen);
+                _lastDrainedValue = drained;
+            }
+            return drained;
+        }
+
+        private boolean _lastDrainedValue = true;
+
+        /**
+         * (2026-09-08 诊断) 缓存快照: 材料槽/输出槽/燃料槽/烧制进度。
+         */
+        public String describeFurnaceCache() {
+            return "[mat=" + _furnaceCache.materialSlot.getItem() + " x" + _furnaceCache.materialSlot.getCount()
+                    + "][out=" + _furnaceCache.outputSlot.getItem() + " x" + _furnaceCache.outputSlot.getCount()
+                    + "][fuel=" + _furnaceCache.fuelSlot.getItem() + " x" + _furnaceCache.fuelSlot.getCount()
+                    + "][burn=" + String.format("%.2f", _furnaceCache.burnPercentage) + "]";
         }
 
         @Override
@@ -432,6 +462,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
             // 的根因, 已放弃。
             ItemTarget materialTarget = _allMaterials;
 
+            // (2026-09-08 换肉 swap 修复) 输入槽被"非本任务材料"占据时, 直接把新料
+            // 点上去会发生槽位 SWAP (羊肉进、牛肉 11 个弹到光标, 再被光标守卫倒回
+            // 背包) —— 用户实测"牛肉放进去还没烧就被羊肉换上去"的物理过程。
+            // 先把异料取出到光标 (下一 tick 光标守卫倒回背包), 输入槽空了再喂新料。
+            if (!material.isEmpty() && !_allMaterials.matches(material.getItem())) {
+                setDebugState("Taking out foreign material: " + material.getItem());
+                return new ClickSlotTask(FurnaceSlot.INPUT_SLOT_MATERIALS);
+            }
+
             int materialsAlreadyIn = (materialTarget.matches(material.getItem()) ? material.getCount() : 0);
             // (2026-08-27 不再过量喂料, 用户方案) 只喂到目标输出所需的原料量, 别把整堆
             // 原料都塞进炉子 — 否则 target 到量就结束, 炉里剩下的生铁随熔炉一起被弃
@@ -581,8 +620,21 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 _furnaceCache.burnPercentage = StorageHelper.getFurnaceCookPercent();
                 _furnaceCache.burningFuelCount = StorageHelper.getFurnaceFuel();
                 _furnaceCache.fuelSlot = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_FUEL);
-                _furnaceCache.materialSlot = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_MATERIALS);
-                _furnaceCache.outputSlot = StorageHelper.getItemStackInSlot(FurnaceSlot.OUTPUT_SLOT);
+                ItemStack newMaterial = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_MATERIALS);
+                ItemStack newOutput = StorageHelper.getItemStackInSlot(FurnaceSlot.OUTPUT_SLOT);
+                // (2026-09-08 诊断) 材料槽/输出槽变化才记, 抓"肉进炉但缓存没跟上"的时序
+                if (newMaterial.getItem() != _furnaceCache.materialSlot.getItem()
+                        || newMaterial.getCount() != _furnaceCache.materialSlot.getCount()
+                        || newOutput.getItem() != _furnaceCache.outputSlot.getItem()
+                        || newOutput.getCount() != _furnaceCache.outputSlot.getCount()) {
+                    Debug.logToFile("altoclef_diag.log", "[SmeltCache]\tmat=" + newMaterial.getItem() + " x"
+                            + newMaterial.getCount() + " out=" + newOutput.getItem() + " x" + newOutput.getCount()
+                            + " (was mat=" + _furnaceCache.materialSlot.getItem() + " x"
+                            + _furnaceCache.materialSlot.getCount() + " out=" + _furnaceCache.outputSlot.getItem()
+                            + " x" + _furnaceCache.outputSlot.getCount() + ")");
+                }
+                _furnaceCache.materialSlot = newMaterial;
+                _furnaceCache.outputSlot = newOutput;
             }
         }
     }
