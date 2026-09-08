@@ -108,6 +108,14 @@ public class Settings implements IFailableConfigFile {
      */
     private int foodUnitsToCollect = 0;
 
+    /**
+     * (2026-09-08 贪婪食物峰值, 用户) 食物收集的贪婪目标: 峰值未达成前, 地表
+     * 食物门槛按该值(与 foodUnitsToCollect 取大)贪婪收集; 库存峰值一旦达到过
+     * 该值即永久锁存 (FoodChain.s_foodPeakReached), 之后吃东西回落不再触发
+     * 收集, 只有跌破危险线才重新收集。<=0 时视为禁用峰值逻辑 (退回旧 120 门槛)。
+     */
+    private int foodPeakUnits = 240;
+
 
     /**
      * Chests are cached for their contents.
@@ -671,6 +679,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getFoodUnitsToCollect() {
         return foodUnitsToCollect;
+    }
+
+    public int getFoodPeakUnits() {
+        return foodPeakUnits;
     }
 
     public int getMinimumFoodAllowed() {

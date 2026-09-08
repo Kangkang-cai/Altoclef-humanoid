@@ -36,6 +36,13 @@ public class FoodChain extends SingleTaskChain {
     private boolean _requestFillup = false;
     private boolean _needsFood = false;
 
+    // ---- (2026-09-08 贪婪食物峰值, 用户) ----
+    // 库存食物分数一旦达到过 settings.getFoodPeakUnits()(默认 240) 即永久锁存。
+    // 锁存后: 吃东西导致分数回落【不再】触发食物收集 (消灭"120 目标吃一口就
+    // 重复触发"的循环), 只有跌破 settings.getMinimumFoodAllowed() 真断粮才重新
+    // 收集。静态字段: BeatMinecraft2Task 每 tick 重建实例, 锁存必须跨实例存活。
+    public static boolean s_foodPeakReached = false;
+
     private int _cachedFoodScore;
     private Optional<Item> _cachedPerfectFood = Optional.empty();
 
@@ -174,13 +181,29 @@ public class FoodChain extends SingleTaskChain {
         // ownership bounced back, and the bot ping-ponged between "sleep in
         // bed" and "collect food" every tick while doing nothing.
         int inventoryFoodScore = StorageHelper.calculateInventoryFoodScore(mod);
-        if (_needsFood || _cachedFoodScore < settings.getMinimumFoodAllowed()) {
-            _needsFood = inventoryFoodScore < settings.getFoodUnitsToCollect();
+
+        // (2026-09-08 贪婪食物峰值) 峰值检测: 达到过一次即锁存, 吃掉回落不再触发。
+        int peakUnits = Math.max(settings.getFoodUnitsToCollect(), settings.getFoodPeakUnits());
+        if (peakUnits > 0 && !s_foodPeakReached && inventoryFoodScore >= peakUnits) {
+            s_foodPeakReached = true;
+            _needsFood = false;
+            Debug.logToFile("altoclef_diag.log",
+                    "[FOOD-FIX]\t[FoodPeak]\tpeak reached food=" + inventoryFoodScore
+                            + "/" + peakUnits + " -> LATCHED; eating back down will NOT re-trigger collection");
+        }
+        // 锁存前: 沿用旧触发 (跌破 minimumFoodAllowed 锁定 _needsFood, 收集到达峰);
+        // 锁存后: 只有跌破 minimumFoodAllowed 真断粮才重新收集, 目标直接冲峰值。
+        boolean wantCollectFood = s_foodPeakReached
+                ? inventoryFoodScore < settings.getMinimumFoodAllowed()
+                : (_needsFood || _cachedFoodScore < settings.getMinimumFoodAllowed())
+                    && inventoryFoodScore < peakUnits;
+        if (wantCollectFood) {
+            _needsFood = true;
 
             // Only collect if we don't have enough food.
             // If the user inputs invalid settings, the bot would get stuck here.
-            if (inventoryFoodScore < settings.getFoodUnitsToCollect()) {
-                setTask(new CollectFoodTask(settings.getFoodUnitsToCollect()));
+            if (inventoryFoodScore < peakUnits) {
+                setTask(new CollectFoodTask(peakUnits));
                 return 55f;
             }
         }

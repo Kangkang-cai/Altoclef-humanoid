@@ -3,6 +3,7 @@ package adris.altoclef.tasks.speedrun;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.chains.FoodChain;
 import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
@@ -1579,35 +1580,50 @@ public class BeatMinecraft2Task extends Task {
                 // "烧生肉→做木板燃料→消耗原木→返回来砍木"反复循环 (2026-09-01 用户
                 // 实测 t=414 挖石被 Stockpiling wood 打断, 圆石需 8 个永远集不齐)。
 
-                // FOOD FIRST (先于挖矿) — 强门槛。 (2026-08-31 rev, 用户再次收紧)
-                // 进入下矿(挖生铁)/熔炼铁锭之前, 食物必须攒够 settings.foodUnitsToCollect
-                // (用户实配 ~220) 才允许放行。旧版一度降为 minFoodUnits(=20, "一点点应急")
-                // 就放行, 实测食物完全没收集就一头钻进铁装/熔炉链, 熔炉里还烧着没取走的
-                // 肉就被连炉拖走 (用户 12:42 日志)。食物链仍排在 mining 之前。
+                // FOOD FIRST (先于挖矿) — 强门槛。 (2026-09-08 贪婪食物峰值 rev, 用户)
+                // 旧版: 地表食物 < foodUnits(120) 就收食物, 吃几口跌回 120 以下又重复
+                // 触发收集 (用户实测: 干草收到 120 就停, 吃一块又回去收, 循环往复)。
+                // 新版: 峰值锁存 — 峰值(settings.foodPeakUnits, 默认 240, 与 120 取大)
+                // 未达成前, 地表贪婪收食物直达峰值(干草/作物/猎杀全开); 库存峰值一旦
+                // 达到过 240 即永久锁存 (FoodChain.s_foodPeakReached), 之后吃东西回落
+                // 不再触发收集, 只有跌破危险线(minFoodUnits=10)真断粮才重新收集(冲峰值)。
                 int strongFoodUnits = mod.getModSettings().getFoodUnitsToCollect();
                 if (strongFoodUnits <= 0) strongFoodUnits = _config.foodUnits; // settings 未配时兜底强门槛
+                int foodPeakUnits = Math.max(strongFoodUnits, mod.getModSettings().getFoodPeakUnits());
                 double foodScore = StorageHelper.calculateInventoryFoodScore(mod);
-                if (foodScore < strongFoodUnits) {
+                if (foodPeakUnits > 0 && !FoodChain.s_foodPeakReached && foodScore >= foodPeakUnits) {
+                    FoodChain.s_foodPeakReached = true;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[MAIN-FIX]\t[FoodPeak]\tpeak reached food=" + foodScore
+                                    + "/" + foodPeakUnits + " -> LATCHED; no more re-collection on eating");
+                }
+                // 锁存前: 食物 < 峰值即收集 (地表强门槛改为贪婪冲峰); 锁存后: 只有
+                // 跌破危险线才再收集。地下分支保持原样: 未到危险线就地继续挖矿不回地表。
+                boolean foodGateNeedCollect = FoodChain.s_foodPeakReached
+                        ? foodScore <= _config.minFoodUnits
+                        : foodScore < foodPeakUnits;
+                if (foodGateNeedCollect) {
                     if (isUndergroundDebounced(mod) || isInPit(mod)) {
                         // (2026-09-01 用户"食物没到 10 units 不该回表面") 地下时只有
-                        // 食物跌破危险线(minFoodUnits=10)才回地表收集; 食物在
-                        // 10~strongFoodUnits 之间就地继续挖矿/熔炼, 不回表面 —
-                        // 否则 120 目标让 bot 在食物还很多时频繁回地表, 打断下矿。
+                        // 食物跌破危险线(minFoodUnits=10)才回地表收集; 其余情况就地
+                        // 继续挖矿/熔炼, 不回表面。
                         if (foodScore <= _config.minFoodUnits) {
                             setDebugState("Returning to surface to collect food (critical low).");
                             return new GoToSurfaceTask();
                         }
                         // 食物尚可(>minFoodUnits): 跳过食物门, 继续下矿/熔炼等后续分支。
                     } else {
-                        // 地表: 下矿前的强门槛, 收集到 strongFoodUnits 再放行。
-                        _foodTask = new CollectFoodTask(strongFoodUnits);
-                        diagIronPhase(mod, "collect food (strong gate)",
+                        // 地表: 贪婪收集到达峰 (锁存后真断粮也冲峰值重建库存)。
+                        _foodTask = new CollectFoodTask(foodPeakUnits);
+                        diagIronPhase(mod, "collect food (greedy peak gate)",
                                 "foodScore=" + foodScore
-                                        + " strongFoodUnits=" + strongFoodUnits
+                                        + " peakUnits=" + foodPeakUnits
+                                        + " peakLatched=" + FoodChain.s_foodPeakReached
                                         + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
                         Debug.logToFile("altoclef_diag.log",
-                                "[MAIN-FIX]\t[FoodGate]\tstrong-gate food=" + foodScore
-                                        + "/" + strongFoodUnits + " -> CollectFoodTask before mining/smelting");
+                                "[MAIN-FIX]\t[FoodGate]\tgreedy-peak food=" + foodScore
+                                        + "/" + foodPeakUnits + " latched=" + FoodChain.s_foodPeakReached
+                                        + " -> CollectFoodTask before mining/smelting");
                         return _foodTask;
                     }
                 }
