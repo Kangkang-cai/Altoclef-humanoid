@@ -7,6 +7,7 @@ import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask.DoSmeltInFurnaceTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask.FurnaceCache;
 import adris.altoclef.tasks.resources.CollectFuelTask;
+import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.slot.*;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -243,27 +244,36 @@ public class SmeltInFurnaceTask extends ResourceTask {
          * 一次烧满原则：熔炉是否已排空（材料槽无剩余目标材料、输出槽无
          * 剩余产物）。缓存只在打开熔炉时刷新，若缓存显示还有剩余，任务
          * 不会结束并会走回熔炉取货/等待烧完。
+         * <p>
+         * (2026-09-08 记得管理修复) 新增 _cacheKnown 闸门: **从未观察到任何
+         * 熔炉时不算已排空**。旧版空缓存=drained=true, 上层"生肉消失+排空"
+         * 就弃缓存换肉 —— 17:12 实测: 牛肉x11进炉, 熔炉方块随后被毁, 任务
+         * 转去做新炉并打开了空炉, 缓存被空炉数据覆盖 → "已排空" → 弃缓存
+         * → 牛肉x8(掉落物)永远遗忘。未知≠排空, 未知必须保守处理。
          */
         public boolean isFurnaceDrained() {
             boolean materialLeft = _target.getMaterial().matches(_furnaceCache.materialSlot.getItem())
                     && !_furnaceCache.materialSlot.isEmpty();
             boolean outputLeft = _target.getItem().matches(_furnaceCache.outputSlot.getItem())
                     && !_furnaceCache.outputSlot.isEmpty();
-            boolean drained = !materialLeft && !outputLeft;
-            // (2026-09-08 诊断) 抓"肉刚进炉却判已排空"的翻转现场——上一版
-            // ping-pong 修复失败的疑似根因, 翻转才记, 不刷屏。
+            boolean drained = _cacheKnown && !materialLeft && !outputLeft;
+            // (2026-09-08 诊断) 翻转才记, 不刷屏。
             if (drained != _lastDrainedValue) {
                 boolean screenOpen = net.minecraft.client.MinecraftClient.getInstance().player != null
                         && net.minecraft.client.MinecraftClient.getInstance().player.currentScreenHandler instanceof FurnaceScreenHandler;
                 Debug.logToFile("altoclef_diag.log", "[SmeltDrained]\t" + _lastDrainedValue + "->" + drained
                         + " target=" + _target.getMaterial() + " cache=" + describeFurnaceCache()
-                        + " screenOpen=" + screenOpen);
+                        + " known=" + _cacheKnown + " screenOpen=" + screenOpen);
                 _lastDrainedValue = drained;
             }
             return drained;
         }
 
         private boolean _lastDrainedValue = true;
+        // (2026-09-08 记得管理) 缓存所属熔炉的坐标; null=还没见过任何炉子。
+        private BlockPos _cachePos = null;
+        // 是否已实际观察到炉内数据 (打开过熔炉且坐标未切换)。
+        private boolean _cacheKnown = false;
 
         /**
          * (2026-09-08 诊断) 缓存快照: 材料槽/输出槽/燃料槽/烧制进度。
@@ -299,6 +309,17 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         @Override
         protected Task onTick(AltoClef mod) {
+            // (2026-09-08 记得管理) 掉落捡回保活: 记忆中的炉子被毁时, 材料以掉落物
+            // 形式散在原地 (5 分钟 despawn), 先捡回再继续。缓存实例保活 (勿一次性
+            // new 后靠标志防重入)。
+            if (_recoverTask != null) {
+                if (_recoverTask.isFinished(mod)) {
+                    _recoverTask = null;
+                } else {
+                    setDebugState("Recovering drops from destroyed furnace");
+                    return _recoverTask;
+                }
+            }
             // (2026-09-07 熔炉守卫接管分支) 守卫激活且未驻留期满时, 直接返回
             // 守卫, 不走下方原有流程 —— 否则父类 DoStuffInContainerTask.onTick
             // 每 tick 重判 isContainerOpen=false 会立刻切回 walk&open, 守卫活
@@ -314,6 +335,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
             }
             tryUpdateOpenFurnace(mod);
+            checkFurnaceStillThere(mod);
             // Include both regular + optional items
             ItemTarget materialTarget = _allMaterials;
             ItemTarget outputTarget = _target.getItem();
@@ -616,6 +638,21 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         private void tryUpdateOpenFurnace(AltoClef mod) {
             if (isContainerOpen(mod)) {
+                // (2026-09-08 记得管理) 熔炉身份校验: 缓存必须绑定"具体哪一座炉"。
+                // 若当前目标炉坐标变了 (旧炉被毁后转投新炉/另寻炉), 旧炉未排空的
+                // 内容绝不能被新炉的空槽覆盖成"已排空" (17:13 实测牛肉x8 被空炉
+                // 数据清零 → 上层误弃缓存)。换炉 → 缓存置 UNKNOWN, 保守等下一次
+                // 实际观察。
+                BlockPos openPos = getTargetContainerPosition();
+                if (openPos != null) {
+                    if (_cacheKnown && _cachePos != null && !openPos.equals(_cachePos)) {
+                        Debug.logToFile("altoclef_diag.log", "[SmeltCache]\tFURNACE SWITCHED "
+                                + _cachePos + " -> " + openPos + " (old cache=" + describeFurnaceCache()
+                                + ") -> cache marked UNKNOWN");
+                        _cacheKnown = false;
+                    }
+                    _cachePos = openPos;
+                }
                 // Update current furnace cache
                 _furnaceCache.burnPercentage = StorageHelper.getFurnaceCookPercent();
                 _furnaceCache.burningFuelCount = StorageHelper.getFurnaceFuel();
@@ -635,8 +672,42 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
                 _furnaceCache.materialSlot = newMaterial;
                 _furnaceCache.outputSlot = newOutput;
+                _cacheKnown = true;
             }
         }
+
+        /**
+         * (2026-09-08 记得管理) 记忆中的炉子还在不在: 缓存显示炉里还有我们的
+         * 材料、bot 就在炉边、但方块已不是熔炉 → 炉子被毁 (苦力怕/意外), 内容
+         * 已变掉落物散在原地。立即捡回掉落并作废缓存 (unknown), 保活不弃任务。
+         * 1 秒节流; 界面开着时方块必在, 跳过。
+         */
+        private void checkFurnaceStillThere(AltoClef mod) {
+            if (!_cacheKnown || _cachePos == null || _furnaceCache.materialSlot.isEmpty()) return;
+            if (!_furnaceGoneCheckTimer.elapsed()) return;
+            _furnaceGoneCheckTimer.reset();
+            if (isContainerOpen(mod)) return;
+            if (mod.getPlayer().getBlockPos().isWithinDistance(_cachePos, 6)
+                    && mod.getWorld().getBlockState(_cachePos).getBlock() != Blocks.FURNACE) {
+                Item raw = _target.getMaterial().getMatches()[0];
+                int count = _furnaceCache.materialSlot.getCount();
+                Debug.logToFile("altoclef_diag.log", "[SmeltFurnaceGone]\t" + _cachePos + " vanished with mat="
+                        + _furnaceCache.materialSlot.getItem() + " x" + count + " -> recovering drops");
+                // 缓存作废: 炉子没了, 内容已掉落。置 unknown 防"伪排空"弃缓存。
+                _cacheKnown = false;
+                _cachePos = null;
+                _furnaceCache.materialSlot = ItemStack.EMPTY;
+                _furnaceCache.fuelSlot = ItemStack.EMPTY;
+                _furnaceCache.outputSlot = ItemStack.EMPTY;
+                _furnaceCache.burnPercentage = 0;
+                _furnaceCache.burningFuelCount = 0;
+                // 多材料场景兜底: 匹配数组里第一个即生肉 (烧肉只有单一生料)
+                _recoverTask = new PickupDroppedItemTask(new ItemTarget(raw, count), true);
+            }
+        }
+
+        private final TimerGame _furnaceGoneCheckTimer = new TimerGame(1);
+        private Task _recoverTask = null;
     }
 
     static class FurnaceCache {
