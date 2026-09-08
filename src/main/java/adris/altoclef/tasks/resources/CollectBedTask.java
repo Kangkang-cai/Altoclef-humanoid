@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.resources;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasksystem.Task;
@@ -28,6 +29,20 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
 
     // Visual-only: used to keep isEqualResource stable across craft/mine swings.
     private final ItemTarget _visualBedTarget;
+
+    // (2026-09-08 挖床站桩兜底, 用户"晚上想睡但感知不到床/羊, bot 呆住 39.7s 直到调白天"
+    //  日志实锤 altoclef_tasks-20260908-180420.log t=51→t=844) 挖床分支 MineAndCollect(bed)
+    //  锁不到目标时内层每 tick 返回 null 站桩, 而所有放弃兜底(gaveUpWandering 2s/床无目标
+    //  放弃)都挂在 MineAndCollectTask.isFinished — Task.tickInternal 从不调用子任务
+    //  isFinished, 床链(CollectBedTask/SleepThroughNight)也无人查 → 兜底死代码, 站到天亮。
+    //  且挖床分支 12s 滞回 + anyFound 持续 true → 永不回落杀羊取毛。
+    //  修复: 父层(CollectBedTask)显式查 gaveUpWandering, 放弃后 30s 冷却挖床分支(触发
+    //  条件层冷却, 同 6eedb369), 回落 super 杀羊取毛路径(无羊时 BiasedExplore 主动找)。
+    //  SleepThroughNightTask 每 tick new PlaceBedAndSetSpawnTask → 本任务每 tick 重建,
+    //  冷却与缓存实例必须 static(同 9dbeb779 教训), 否则重建绕过一切兜底。
+    private static final long MINE_BED_GIVEUP_COOLDOWN_MS = 30_000;
+    private static long s_mineBedGiveUpUntilMs = 0;
+    private static MineAndCollectTask s_bedMineTask = null;
 
     public CollectBedTask(Item[] beds, ItemTarget wool, int count) {
         // Top 3 are wool, must be the same.
@@ -60,12 +75,6 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
         super.onResourceStart(mod);
     }
 
-    @Override
-    protected void onResourceStop(AltoClef mod, Task interruptTask) {
-        mod.getBlockTracker().stopTracking(BEDS);
-        super.onResourceStop(mod, interruptTask);
-    }
-
     // 挖床分支决策滞回 (2026-08-21 挖床↔收集木头横跳修复):
     // anyFound(BEDS) 会随 BlockTracker 缓存闪烁 — 导航中途一次进度
     // 检查失败 → 床被黑名单 2 秒 → 下次重扫(约 7 秒间隔)时从缓存移除
@@ -87,7 +96,7 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
         if (mod.getBlockTracker().anyFound(BEDS)) {
             _bedsSeenRecently.reset();
         }
-        if (!_bedsSeenRecently.elapsed()) {
+        if (!_bedsSeenRecently.elapsed() && System.currentTimeMillis() >= s_mineBedGiveUpUntilMs) {
             List<BlockPos> knownBeds = mod.getBlockTracker().getKnownLocations(ItemHelper.itemsToBlocks(ItemHelper.BED));
             BlockPos playerPos = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
             boolean perceivableBedInRange = playerPos != null && knownBeds.stream().anyMatch(bed ->
@@ -101,10 +110,35 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
             }
             // 真实可感知的床就在附近 → 拆它拿床。
             markProtectedBedsUnreachable(mod);
-            return new MineAndCollectTask(new ItemTarget(ItemHelper.BED, 1), BEDS, MiningRequirement.HAND);
+            // (2026-09-08 挖床站桩兜底) 缓存实例保活(9dbeb779 模式), 并显式查
+            // gaveUpWandering: 内层 2 秒完全无动作(目标锁不到+surface 探索=null)
+            // → 放弃本次挖床, 冷却 30s, 回杀羊取毛做床 — 不再站到天亮。
+            if (s_bedMineTask == null) {
+                s_bedMineTask = new MineAndCollectTask(new ItemTarget(ItemHelper.BED, 1), BEDS, MiningRequirement.HAND);
+            }
+            if (s_bedMineTask.gaveUpWandering()) {
+                Debug.logMessage("[CollectBed] mine-bed subtask gave up (2s no action), cooldown "
+                        + (MINE_BED_GIVEUP_COOLDOWN_MS / 1000) + "s, falling back to sheep/wool path.");
+                Debug.logToFile("altoclef_diag.log",
+                        "[CollectBed]\t[MineGiveUp]\tmine-bed subtask 2s idle -> cooldown "
+                                + (MINE_BED_GIVEUP_COOLDOWN_MS / 1000) + "s -> wool path fallback");
+                s_mineBedGiveUpUntilMs = System.currentTimeMillis() + MINE_BED_GIVEUP_COOLDOWN_MS;
+                s_bedMineTask = null;
+                return super.onResourceTick(mod);
+            }
+            return s_bedMineTask;
         }
         markProtectedBedsUnreachable(mod);
         return super.onResourceTick(mod);
+    }
+
+    @Override
+    protected void onResourceStop(AltoClef mod, Task interruptTask) {
+        // 缓存挖床实例随任务停发作废(冷却 s_mineBedGiveUpUntilMs 保留, 跨重建生效);
+        // 正常拿到床/被打断都清, 下一晚全新开始。
+        s_bedMineTask = null;
+        mod.getBlockTracker().stopTracking(BEDS);
+        super.onResourceStop(mod, interruptTask);
     }
 
     /**
