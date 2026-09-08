@@ -918,9 +918,9 @@ public class StorageHelper {
             if (equipped.getItem() instanceof ArmorItem ea) {
                 // (2026-09-08 修上个会话遗留编译错误) 1.18.2 Yarn 的
                 // ArmorMaterial.getProtectionAmount 需要传 EquipmentSlot
-                curProt = ea.getMaterial().getProtectionAmount(ea.getSlotType());
+                curProt = ea.getProtection();
             }
-            int newProt = armor.getMaterial().getProtectionAmount(armor.getSlotType());
+            int newProt = armor.getProtection();
             int gain = newProt - curProt;
             if (gain > bestGain) {
                 bestGain = gain;
