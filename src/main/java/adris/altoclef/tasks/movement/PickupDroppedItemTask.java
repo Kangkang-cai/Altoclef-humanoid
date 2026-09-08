@@ -61,6 +61,14 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     // 导航目标更新阈值 (平方距离): 物品移动超过该距离才重建导航任务。
     private static final double PICKUP_NAV_UPDATE_DIST_SQ = 9;
 
+    // (2026-09-08 干草块现场兜底) 掉落物就在几格内、baritone 却站着不动时的直走
+    // 兜底 (详见 WalkToDropTask 注释)。参数: 水平/垂直触发距离, 直走失败后的冷却。
+    private WalkToDropTask _walkTask = null;
+    private ItemEntity _walkItem = null;
+    private final TimerGame _walkCooldown = new TimerGame(6);
+    private static final double CLOSE_WALK_HORIZONTAL = 4.5;
+    private static final double CLOSE_WALK_VERTICAL = 2.0;
+
     // (2026-08-22) 做镐子切换的被困前置: 用户原则"感知目标 = 承诺目标,
     // 不论多远不设时限; 超时/上限仅限探索"。捡不到掉落物的常见原因是
     // 游泳慢/绕路/腾背包, 不是没镐子; 原逻辑一次 progress 失败(3x6s 静止)
@@ -450,6 +458,45 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         }
         Vec3d targetPos = _pickupNavTarget;
         BlockPos target = new BlockPos(targetPos);
+        // (2026-09-08 干草块现场根因) 已落地的物品 y 略低于所在方块顶面 (实测
+        // 实体 y=64.94, 地面方块顶面 65.0) → 取整后的 BlockPos 落在【物品脚下的
+        // 实心方块】上, 而 GoalBlock 要求玩家站到那个方块的格子里 = 站进实心方
+        // 块内部 → baritone 无解/认为已到达 → bot 原地静止 36 秒, 3 格外的掉落物
+        // 永远吸不到 (08:07:39-08:08:15 日志实锤)。修: 目标方块实心时改为它上方
+        // 一格 (玩家的站立位, 与物品 3D 距离 < 1 格即可吸附)。
+        if (WorldHelper.isSolid(_mod, target)) {
+            BlockPos fixed = target.up();
+            Debug.logToFile("altoclef_diag.log",
+                    "[PickupNav] target " + target + " is solid -> standing on " + fixed
+                            + " instead (item at " + itemEntity.getBlockPos() + ")");
+            target = fixed;
+        }
+        // (2026-09-08 干草块现场兜底) 物品就在几格内却迟迟捡不到 (baritone 整格
+        // 判定与 MC 1 格吸附判定不一致的老问题) → 直接走两步捡起来, 别启动全局
+        // 寻路。走完/走不动都进入 6 秒冷却, 先让 baritone 试, 防两边来回抢。
+        if (_walkItem != itemEntity) {
+            _walkItem = itemEntity;
+            _walkTask = null;
+        }
+        if (_walkTask != null && _walkTask.isFinished(_mod)) {
+            _walkCooldown.reset();
+            _walkTask = null;
+        }
+        if (itemEntity.isOnGround() && _walkCooldown.elapsed()) {
+            Vec3d me = _mod.getPlayer().getPos();
+            double dx = itemEntity.getX() - me.x;
+            double dz = itemEntity.getZ() - me.z;
+            double horizontal = Math.sqrt(dx * dx + dz * dz);
+            double vertical = Math.abs(itemEntity.getY() - me.y);
+            if (horizontal <= CLOSE_WALK_HORIZONTAL && vertical <= CLOSE_WALK_VERTICAL
+                    && me.distanceTo(itemEntity.getPos()) > 1.0) {
+                if (_walkTask == null) {
+                    _walkTask = new WalkToDropTask(itemEntity);
+                }
+                setDebugState("Walking directly to nearby drop");
+                return _walkTask;
+            }
+        }
         boolean riding = _mod.getPlayer().getVehicle() instanceof BoatEntity;
         // (2026-08-26 下潜捡眼) Baritone 不支持可靠水下下潜 (只会带到水面 XZ,
         // 12:51 日志: GetToBlockTask 追水下目标 y 逐 tick 变 → TaskPingPong, bot
