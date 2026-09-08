@@ -9,7 +9,6 @@ import adris.altoclef.util.CraftingRecipe;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.ItemHelper;
-import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.BedBlock;
@@ -43,6 +42,22 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
     private static final long MINE_BED_GIVEUP_COOLDOWN_MS = 30_000;
     private static long s_mineBedGiveUpUntilMs = 0;
     private static MineAndCollectTask s_bedMineTask = null;
+
+    // (2026-09-08 B修: 闸门/选目标口径对齐) 分支闸门与 MineAndCollectTask.getClosestTo
+    // 的候选过滤必须同一套, 否则"闸门说有床、挖床锁不到"→ 只能靠放弃兜底兜住。
+    // 闸门此前缺: ①真实方块仍是床(缓存陈旧/床被拆 → canBreak 对空气照样过);
+    // ②区块已加载才信世界校验; ③贴液体不挖。isBlockPerceivable 对床是
+    // 无条件通过(VisibilityHelper 床保险, 穿墙), 重复判无意义, 移除。
+    private boolean isMineableBedInRange(AltoClef mod, BlockPos bed, BlockPos playerPos) {
+        if (!bed.isWithinDistance(playerPos, BED_GRAB_RANGE)) return false;
+        if (!mod.getChunkTracker().isChunkLoaded(bed)) return false;
+        if (!(mod.getWorld().getBlockState(bed).getBlock() instanceof BedBlock)) return false;
+        if (WorldHelper.isAdjacentToLiquid(mod, bed)) return false;
+        return WorldHelper.canBreak(mod, bed);
+    }
+
+    // 闸门命中诊断(5s 节流): 记录选中的床坐标与距离, 复现"切了挖床却锁不到"时直接定位。
+    private static long s_lastGateDiagMs = 0;
 
     public CollectBedTask(Item[] beds, ItemTarget wool, int count) {
         // Top 3 are wool, must be the same.
@@ -99,14 +114,31 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
         if (!_bedsSeenRecently.elapsed() && System.currentTimeMillis() >= s_mineBedGiveUpUntilMs) {
             List<BlockPos> knownBeds = mod.getBlockTracker().getKnownLocations(ItemHelper.itemsToBlocks(ItemHelper.BED));
             BlockPos playerPos = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
-            boolean perceivableBedInRange = playerPos != null && knownBeds.stream().anyMatch(bed ->
-                    bed.isWithinDistance(playerPos, BED_GRAB_RANGE)
-                            && VisibilityHelper.isBlockPerceivable(mod, bed)
-                            && WorldHelper.canBreak(mod, bed));
-            if (!perceivableBedInRange) {
+            BlockPos gateBed = null;
+            if (playerPos != null) {
+                double bestSq = Double.POSITIVE_INFINITY;
+                for (BlockPos bed : knownBeds) {
+                    if (!isMineableBedInRange(mod, bed, playerPos)) continue;
+                    double sq = bed.getSquaredDistance(playerPos);
+                    if (sq < bestSq) {
+                        bestSq = sq;
+                        gateBed = bed;
+                    }
+                }
+            }
+            if (gateBed == null) {
                 // 96 格内没有可感知/可挖的床 → 回到作者正路: 杀羊取毛做床。
                 markProtectedBedsUnreachable(mod);
                 return super.onResourceTick(mod);
+            }
+            // (B修诊断) 闸门命中: 打出选中的床与距离, 便于对账挖床子任务是否真锁到了它。
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - s_lastGateDiagMs > 5000) {
+                s_lastGateDiagMs = nowMs;
+                Debug.logToFile("altoclef_diag.log",
+                        "[CollectBed]\t[GateHit]\tbed=" + gateBed.toShortString()
+                                + " dist=" + (int) Math.sqrt(gateBed.getSquaredDistance(playerPos))
+                                + " -> mine branch");
             }
             // 真实可感知的床就在附近 → 拆它拿床。
             markProtectedBedsUnreachable(mod);
