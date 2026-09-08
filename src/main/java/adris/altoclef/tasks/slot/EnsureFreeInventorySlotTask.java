@@ -4,10 +4,14 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.container.StoreGarbageInContainerTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
+import net.minecraft.item.ArmorItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.screen.PlayerScreenHandler;
 
 import java.util.Optional;
 
@@ -92,6 +96,28 @@ public class EnsureFreeInventorySlotTask extends Task {
             if (StorageHelper.findMergeableStackPair(mod) != null) {
                 setDebugState("Consolidating stacks before freeing space");
                 return new ConsolidateInventoryTask();
+            }
+            // (2026-09-08 腾位穿甲, 用户"背包满有盔甲他穿上也可以") 光标为空时,
+            // 背包里有比当前护甲槽更好(或空槽)的盔甲 → 先穿甲: 空出一个背包格
+            // 且不掉任何物资。放在丢弃级联之前, 合并之后 (同样无损)。
+            // 若当前开着别的界面, 先关界面等下一 tick (穿甲要用 PlayerScreenHandler
+            // 槽位映射, 见 EquipArmorTask 同款守卫)。
+            Slot armorSlot = StorageHelper.findEquippableArmorUpgrade(mod);
+            if (armorSlot != null) {
+                ItemStack armorStack = StorageHelper.getItemStackInSlot(armorSlot);
+                if (!(mod.getPlayer().currentScreenHandler instanceof PlayerScreenHandler)) {
+                    StorageHelper.closeScreen();
+                    setDebugState("Closing screen to equip armor");
+                    return null;
+                }
+                ArmorItem armor = (ArmorItem) armorStack.getItem();
+                setDebugState("Equipping " + armorStack.getItem().getTranslationKey()
+                        + " from backpack to free a slot");
+                Debug.logMessage("(EnsureFreeInventorySlotTask) Equipping backpack armor "
+                        + armorStack.getItem().getTranslationKey() + " to free a slot instead of discarding.");
+                return new MoveItemToSlotFromInventoryTask(
+                        new ItemTarget(armorStack.getItem(), 1),
+                        PlayerSlot.getEquipSlot(armor.getSlotType()));
             }
         }
         // 我们为腾位主动拿起的 bulk 建材（可能在 throwaway 列表之外，

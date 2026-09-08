@@ -2,14 +2,18 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -185,6 +189,23 @@ public class DeathRecoveryTask extends Task {
         _noDropsTimer.reset();
         ItemEntity target = closest.get();
 
+        // (2026-09-08 腾位接入, 用户"背包满了为什么不丢东西") 满背包时走近
+        // 掉落物也吸不进 (物品留在地上), 只会原地打转。原实现直接 GetToEntity
+        // 完全没有容量检查 —— "背包满→先腾位"逻辑只存在于 PickupDroppedItemTask,
+        // 死亡捡回链路绕过了它。背包放不下该掉落物 → 先走 EnsureFreeInventorySlot
+        // (丢垃圾/穿甲/合并级联), 腾出格子再捡。
+        if (mod.getItemStorage().getSlotsThatCanFitInPlayerInventory(target.getStack(), false).isEmpty()) {
+            setDebugState("Inventory full — making room before picking up "
+                    + target.getStack().getItem().getTranslationKey());
+            Debug.logToFile("death_recovery.log", String.format(
+                    "[PICKUP FULL] stack=%s x%d; running EnsureFreeInventorySlotTask",
+                    target.getStack().getItem().getTranslationKey(), target.getStack().getCount()));
+            if (!(_currentSub instanceof EnsureFreeInventorySlotTask)) {
+                _currentSub = new EnsureFreeInventorySlotTask();
+            }
+            return _currentSub;
+        }
+
         // Reuse the current GetToEntityTask if it's already chasing the
         // exact same ItemEntity reference — saves tearing down / rebuilding
         // the baritone goal every tick.
@@ -254,20 +275,40 @@ public class DeathRecoveryTask extends Task {
      * of the grave (euclidean XZ distance — close enough that the walk is
      * trivial). Falls back to the player's current position when no drops
      * exist near the grave.
+     *
+     * (2026-09-08 粘性目标修复) 死亡掉落物是一堆散件, 两个距离几乎相同的掉落物
+     * 每 tick 交替成为"最近" → sameTarget 判定失败 → 每 tick 重建 GetToEntityTask
+     * → TaskPingPong 5 秒切 6 次 (09:41 日志实锤), bot 永远走不到任何一个。
+     * 修复: ① 距离与最近者相近 (1.25x 内) 的都算并列候选, 当前目标仍在候选窗
+     * 内就保持不换; ② 真正并列时用实体 id 稳定 tie-break。
      */
     private Optional<ItemEntity> findClosestDropNearGrave(AltoClef mod, List<ItemEntity> drops) {
-        ItemEntity best = null;
-        double bestSq = Double.POSITIVE_INFINITY;
         Vec3d centre = Vec3d.ofCenter(_gravePos);
         double radiusSq = (double) PICKUP_RADIUS * PICKUP_RADIUS;
+        double bestSq = Double.POSITIVE_INFINITY;
         for (ItemEntity drop : drops) {
             if (drop == null || !drop.isAlive()) continue;
             double dsq = drop.squaredDistanceTo(centre);
             if (dsq <= radiusSq && dsq < bestSq) {
-                best = drop;
                 bestSq = dsq;
             }
         }
-        return Optional.ofNullable(best);
+        if (bestSq == Double.POSITIVE_INFINITY) {
+            return Optional.empty();
+        }
+        List<ItemEntity> candidates = new ArrayList<>();
+        for (ItemEntity drop : drops) {
+            if (drop == null || !drop.isAlive()) continue;
+            if (drop.squaredDistanceTo(centre) <= bestSq * 1.25) {
+                candidates.add(drop);
+            }
+        }
+        // 粘性: 当前目标仍有效且还在候选窗内 → 保持, 不换
+        if (_currentPickupTarget != null && _currentPickupTarget.isAlive()
+                && candidates.contains(_currentPickupTarget)) {
+            return Optional.of(_currentPickupTarget);
+        }
+        // 并列 tie-break 用实体 id, 保证跨 tick 稳定
+        return candidates.stream().min(Comparator.comparingInt(Entity::getId));
     }
 }

@@ -899,6 +899,37 @@ public class StorageHelper {
         return false;
     }
 
+    /**
+     * (2026-09-08 腾位穿甲) 扫真背包里的可穿戴盔甲, 找出"比当前对应护甲槽
+     * 更好(或护甲槽为空)"的, 返回其背包槽位 —— 供 EnsureFreeInventorySlotTask
+     * 腾位级联"先穿甲再丢东西": 穿甲占护甲槽不占背包, 空出一个背包格且不掉任何
+     * 物资 (用户 2026-09-08: "背包满了有盔甲他穿上也可以")。
+     * 只认严格更好 (护甲点数更高), 避免来回换装。无则返回 null。
+     */
+    public static Slot findEquippableArmorUpgrade(AltoClef mod) {
+        Slot bestSlot = null;
+        int bestGain = 0;
+        for (Slot slot : getRealBackpackSlots()) {
+            ItemStack stack = getItemStackInSlot(slot);
+            if (!(stack.getItem() instanceof ArmorItem armor)) continue;
+            ItemStack equipped = mod.getPlayer().getInventory()
+                    .getArmorStack(armor.getSlotType().getEntitySlotId());
+            int curProt = -1;
+            if (equipped.getItem() instanceof ArmorItem ea) {
+                // (2026-09-08 修上个会话遗留编译错误) 1.18.2 Yarn 的
+                // ArmorMaterial.getProtectionAmount 需要传 EquipmentSlot
+                curProt = ea.getMaterial().getProtectionAmount(ea.getSlotType());
+            }
+            int newProt = armor.getMaterial().getProtectionAmount(armor.getSlotType());
+            int gain = newProt - curProt;
+            if (gain > bestGain) {
+                bestGain = gain;
+                bestSlot = slot;
+            }
+        }
+        return bestSlot;
+    }
+
 
     public static int getBuildingMaterialCount(AltoClef mod) {
         return mod.getItemStorage().getItemCount(Arrays.stream(mod.getModSettings().getThrowawayItems(mod, true)).filter(item -> item instanceof BlockItem).toArray(Item[]::new));
