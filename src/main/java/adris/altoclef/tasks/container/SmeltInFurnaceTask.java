@@ -146,6 +146,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
         return (StorageHelper.itemTargetsMetInventory(mod, _itemTargets) || _doTask.isFinished(mod)) && _doTask.isFurnaceDrained();
     }
 
+    /**
+     * (2026-09-08 烧肉 ping-pong 修复) 对外暴露"炉已排空"查询: 供上层
+     * (BeatMinecraft2Task 烧肉分支) 在丢弃缓存实例前判断炉里是否还有
+     * 料/产物——防止"肉已塞进炉、背包为 0"时被误判弃缓存。
+     */
+    public boolean isFurnaceDrained() {
+        return _doTask.isFurnaceDrained();
+    }
+
     @Override
     protected boolean isEqualResource(ResourceTask other) {
         if (other instanceof SmeltInFurnaceTask task) {

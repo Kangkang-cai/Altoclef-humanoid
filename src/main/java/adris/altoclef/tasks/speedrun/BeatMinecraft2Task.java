@@ -390,6 +390,15 @@ public class BeatMinecraft2Task extends Task {
     // onTick 贪婪检查块注释, 防贪婪↔燧石链乒乓)。
     private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 8;
     private final TimerGame _greedyOreCheckCooldown = new TimerGame(GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
+    // (2026-09-08 烧肉 ping-pong 修复) 烧炼任务实例缓存保活。本分支原来每 tick
+    // new SmeltInFurnaceTask, 且选肉按 RAW_FOODS 顺序 + getItemStorage().hasItem
+    // (不含光标) —— 搬运子任务把生肉拿起在光标上的那一 tick, hasItem(生肉)=false
+    // → 父任务立刻换下一块肉的子任务抢切 → 被打断的任务 Dumping cursor 把肉放回
+    // 背包 → 下一 tick hasItem 又变 true 切回。beef/mutton/porkchop 2s 周期互抢
+    // 39 分钟 (11:33~12:12, TaskPingPong 449 次), 净进度≈0 (用户旁观+日志实锤)。
+    // 修法: 与 _greedyOreTask 同模式缓存保活, 守卫计数用含光标的
+    // countItemsInInventoryReal; 生肉彻底消失且炉已排空才弃缓存换肉。
+    private SmeltInFurnaceTask _cachedSmeltTask = null;
     // (2026-08-22 工作台即收) findNearbyCraftingTable 的兜底暴力扫描
     // 节流 (16³=36k 次 getBlockState, 1 秒一次足够)。
     private final TimerGame _pickupTableScanTimer = new TimerGame(1);
@@ -1557,13 +1566,35 @@ public class BeatMinecraft2Task extends Task {
                 }
                 // Smelt remaining raw food
                 if (_config.alwaysCookRawFood) {
+                    // (2026-09-08 烧肉 ping-pong 修复) 先保活缓存任务: 未 finished 就
+                    // 继续 return 它, 不给"每 tick 换肉抢切"任何机会。弃缓存仅两条路:
+                    // ① 任务自身 finished (达标且炉排空); ② 原料彻底消失(死亡掉落/
+                    // 被扔) 且 炉已排空 —— 后者防"肉已塞进炉里、背包为 0"被误判,
+                    // 炉里还有料时保活让任务自己收完产物。中途被更高优先级抢切的
+                    // 任务同样留在缓存里, 恢复后继续跑 (stop-loss 在 onStop 已兜底)。
+                    if (_cachedSmeltTask != null) {
+                        if (_cachedSmeltTask.isFinished(mod)) {
+                            _cachedSmeltTask = null;
+                        } else {
+                            Item[] cachedRaw = _cachedSmeltTask.getTargets()[0].getMaterial().getMatches();
+                            if (StorageHelper.countItemsInInventoryReal(mod, cachedRaw) == 0
+                                    && _cachedSmeltTask.isFurnaceDrained()) {
+                                _cachedSmeltTask = null;
+                            } else {
+                                setDebugState("Smelting raw food: "
+                                        + ItemHelper.stripItemName(cachedRaw[0]));
+                                return _cachedSmeltTask;
+                            }
+                        }
+                    }
                     for (Item raw : ItemHelper.RAW_FOODS) {
                         if (mod.getItemStorage().hasItem(raw)) {
                             Optional<Item> cooked = ItemHelper.getCookedFood(raw);
                             if (cooked.isPresent()) {
                                 int targetCount = mod.getItemStorage().getItemCount(cooked.get()) + mod.getItemStorage().getItemCount(raw);
                                 setDebugState("Smelting raw food: " + ItemHelper.stripItemName(raw));
-                                return new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(cooked.get(), targetCount), new ItemTarget(raw, targetCount)));
+                                _cachedSmeltTask = new SmeltInFurnaceTask(new SmeltTarget(new ItemTarget(cooked.get(), targetCount), new ItemTarget(raw, targetCount)));
+                                return _cachedSmeltTask;
                             }
                         }
                     }
