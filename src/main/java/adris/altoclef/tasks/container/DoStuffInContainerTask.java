@@ -203,11 +203,28 @@ public abstract class DoStuffInContainerTask extends Task {
                 _justPlacedTimer.reset();
                 return new DoToClosestBlockTask(InteractWithBlockTask::new, _containerBlocks);
             }
-            // 记忆里有台子但刚放点已失效: 也先按"有可用"放一张, 不反复去合成。
-            setDebugState("Placing container (re-using existing)...");
-            Debug.logTrace("craft-place", "世界有容器但刚放点失效, 重新放置 " + _containerTarget.toString());
-            _justPlacedTimer.reset();
-            return _placeTask;
+            // (2026-09-08 空放置修复, 用户"手上没有熔炉谁触发的放置?") 手头无
+            // 容器物品时, "重新放置"是纯游荡: PlaceBlockNearbyTask 无物可放,
+            // 只会 Wander→超时→放弃, 每轮呆住 5~20s, 还逼上层再合成一张
+            // (18:06 实测: 炉就在脚边, canReach 过滤误判 nearest 空 → 走到这里
+            // → 空放置 20s → 又做一张新炉, 场上越堆越多)。isItemOwned(USE)
+            // 刚才为 true 说明 tracker 明确知道世界里有同类容器 → 去开它
+            // (不带 canReach 过滤, 走到跟前自然能开), 而不是空着手假装能放。
+            Optional<BlockPos> trackedExisting = mod.getBlockTracker()
+                    .getNearestTracking(currentPos, blockPos -> true, _containerBlocks);
+            if (trackedExisting.isPresent()) {
+                setDebugState("Using existing container (tracker knows one)");
+                Debug.logTrace("craft-place", "复用 tracker 已知容器 @" + trackedExisting.get().toShortString());
+                _cachedContainerPosition = trackedExisting.get();
+                _placeForceTimer.reset();
+                _justPlacedTimer.reset();
+                return new InteractWithBlockTask(trackedExisting.get());
+            }
+            // tracker 完全没货 (理论上到不了: isItemOwned(USE)=true 需要世界里有):
+            // 兜底回"获取容器物品"重造, 别空手放置。
+            setDebugState("Getting container item (no usable container found)");
+            Debug.logTrace("craft-place", "世界与手头都没有可用容器, 回去造 " + _containerTarget.toString());
+            return TaskCatalogue.getItemTask(_containerTarget);
         }
 
         // This is insanely cursed.
