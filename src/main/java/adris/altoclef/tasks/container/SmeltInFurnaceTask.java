@@ -6,6 +6,7 @@ import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask.DoSmeltInFurnaceTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask.FurnaceCache;
+import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.resources.CollectFuelTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.slot.*;
@@ -365,6 +366,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
             // (2026-08-24 真实背包兜底) 材料判定改用真实背包计数: tracker 缓存
             // 可能陈旧 (用户实测背包有 22 生金矿却判缺材料 → 挖 raw_gold → 回
             // 主世界造门), 必须以真实背包为准。
+            // (2026-09-08 记得管理) 孤儿炉债优先于猎材料: 任务转投新炉后, 旧炉里
+            // 还躺着我们的肉 —— 先取回旧料, 别跑去猎牛/收集新料把它晾在原地
+            // (17:13 实测: 牛肉x8 滞留旧炉, 任务转头猎牛, 牛肉被遗忘)。
+            if (_recoverTask == null && !ORPHAN_FURNACES.isEmpty()) {
+                OrphanFurnace orphan = ORPHAN_FURNACES.remove(0);
+                Debug.logToFile("altoclef_diag.log", "[SmeltOrphan]\tclaimed " + orphan.pos
+                        + " raw=" + orphan.raw + " x" + orphan.count);
+                _recoverTask = new RecoverFurnaceTask(orphan.pos, orphan.raw, orphan.cooked);
+            }
             if (StorageHelper.countItemsInInventoryReal(mod, materialTarget.getMatches()) < materialsNeeded) {
                 setDebugState("Getting Materials");
                 return getMaterialTask(_target.getMaterial());
@@ -646,6 +656,17 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 BlockPos openPos = getTargetContainerPosition();
                 if (openPos != null) {
                     if (_cacheKnown && _cachePos != null && !openPos.equals(_cachePos)) {
+                        // (2026-09-08 记得管理) 旧炉里还有我们的东西 → 记孤儿账,
+                        // 由本任务 onTick 排队取回; 没有残留才直接作废。
+                        if (!_furnaceCache.materialSlot.isEmpty() || !_furnaceCache.outputSlot.isEmpty()) {
+                            ORPHAN_FURNACES.add(new OrphanFurnace(_cachePos,
+                                    _target.getMaterial().getMatches()[0],
+                                    _target.getItem().getMatches()[0],
+                                    _furnaceCache.materialSlot.getCount()));
+                            Debug.logToFile("altoclef_diag.log", "[SmeltOrphan]\trecorded " + _cachePos
+                                    + " mat=" + _furnaceCache.materialSlot.getItem() + " x"
+                                    + _furnaceCache.materialSlot.getCount() + " (switched to " + openPos + ")");
+                        }
                         Debug.logToFile("altoclef_diag.log", "[SmeltCache]\tFURNACE SWITCHED "
                                 + _cachePos + " -> " + openPos + " (old cache=" + describeFurnaceCache()
                                 + ") -> cache marked UNKNOWN");
@@ -716,5 +737,98 @@ public class SmeltInFurnaceTask extends ResourceTask {
         public ItemStack outputSlot = ItemStack.EMPTY;
         public double burningFuelCount;
         public double burnPercentage;
+    }
+
+    // ==================== (2026-09-08 记得管理) 孤儿炉账本 ====================
+
+    /** 转投他炉时旧炉残留的一条账 (静态跨任务实例, 会话级)。 */
+    private static class OrphanFurnace {
+        final BlockPos pos;
+        final Item raw;
+        final Item cooked;
+        final int count;
+        OrphanFurnace(BlockPos pos, Item raw, Item cooked, int count) {
+            this.pos = pos; this.raw = raw; this.cooked = cooked; this.count = count;
+        }
+    }
+
+    private static final List<OrphanFurnace> ORPHAN_FURNACES = new ArrayList<>();
+
+    /**
+     * 孤儿炉回收任务: 走回旧炉开门, 把材料槽/输出槽里属于我们的东西
+     * QUICK_MOVE 回背包 (燃料留下复用, 别的任务放的料不动)。炉子没了 →
+     * 就地捡掉落 (只试一轮, 防无掉落时无限循环)。
+     */
+    public static class RecoverFurnaceTask extends Task {
+        private final BlockPos _pos;
+        private final Item[] _targets;
+        private boolean _pickupTried = false;
+        private boolean _done = false;
+
+        RecoverFurnaceTask(BlockPos pos, Item raw, Item cooked) {
+            _pos = pos;
+            _targets = new Item[]{raw, cooked};
+        }
+
+        @Override
+        protected Task onTick(AltoClef mod) {
+            if (_done) return null;
+            boolean furnaceThere = mod.getWorld().getBlockState(_pos).getBlock() == Blocks.FURNACE;
+            if (!furnaceThere) {
+                if (_pickupTried) {
+                    _done = true;
+                    return null;
+                }
+                _pickupTried = true;
+                Debug.logToFile("altoclef_diag.log", "[SmeltOrphan]\t" + _pos + " block gone, picking up drops");
+                return new PickupDroppedItemTask(new ItemTarget(_targets), true);
+            }
+            if (!(mod.getPlayer().currentScreenHandler instanceof FurnaceScreenHandler)) {
+                setDebugState("Walking back to abandoned furnace " + _pos.toShortString());
+                return new InteractWithBlockTask(_pos);
+            }
+            for (FurnaceSlot slot : new FurnaceSlot[]{FurnaceSlot.INPUT_SLOT_MATERIALS, FurnaceSlot.OUTPUT_SLOT}) {
+                ItemStack stack = StorageHelper.getItemStackInSlot(slot);
+                if (stack.isEmpty()) continue;
+                boolean ours = false;
+                for (Item t : _targets) {
+                    if (stack.getItem() == t) { ours = true; break; }
+                }
+                if (!ours) continue; // 别的任务放的料 (如羊肉) 不动
+                if (mod.getItemStorage().getSlotThatCanFitInPlayerInventory(stack, true).isEmpty()) {
+                    setDebugState("Making room before recovery");
+                    return new EnsureFreeInventorySlotTask();
+                }
+                setDebugState("Recovering " + stack.getItem() + " x" + stack.getCount() + " from orphan furnace");
+                return new ClickSlotTask(slot, SlotActionType.QUICK_MOVE);
+            }
+            _done = true;
+            return null;
+        }
+
+        @Override
+        public boolean isFinished(AltoClef mod) {
+            return _done;
+        }
+
+        @Override
+        protected void onStart(AltoClef mod) {
+        }
+
+        @Override
+        protected void onStop(AltoClef mod, Task interruptTask) {
+            // 被打断时别把熔炉界面留在屏幕上
+            StorageHelper.closeScreen();
+        }
+
+        @Override
+        public String toDebugString() {
+            return "Recover furnace contents @" + _pos.toShortString();
+        }
+
+        @Override
+        protected boolean isEqual(Task other) {
+            return other instanceof RecoverFurnaceTask task && task._pos.equals(_pos);
+        }
     }
 }
