@@ -112,6 +112,39 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // 界面而不是睡床。此日志 2s 节流, 防止每 tick 刷屏。
     private final TimerGame _crosshairBlockedLogTimer = new TimerGame(2);
 
+    // ==== (2026-09-08 睡床卡死三连修, 用户: 瞄准避开了村民却被普通方块挡住,
+    // 挡路方块永远没被拆掉, 试了好多次最终卡住) ====
+    // (a) 拆障保活: 清障 DestroyBlockTask 缓存保活到拆完。旧版每 tick 重进
+    //     "清障分支"但下一 tick 就被换侧分支抢切, 拆障任务只活 1 tick,
+    //     挡路方块永远拆不掉 (09:34 日志实锤: 反复 Destroy 同一方块 8 轮)。
+    private Task _blockerClearTask;
+    private BlockPos _blockerClearPos;
+    private long _blockerClearStartMs;
+    // 同一挡路方块连续拆不动的次数 (任务结束方块还在/超时), >=2 视为拆不动
+    private int _blockerClearFails;
+    // (c) 尝试次数上限: 真实站侧(去重后通常 2 个)全试过仍没睡进去 → 放弃本次
+    private int _humanSleepAttempts;
+    private boolean _sleepGaveUp;
+    // 触发层冷却 (静态: SleepThroughNightTask 每 tick new 实例, 实例字段会随
+    // 重建丢失)。放弃后 BeatMinecraft2Task 在冷却内不再派发睡觉任务, 让位主线
+    // (机制同收炉侧线整体冷却 6eedb369 — 冷却必须加在触发条件层, 否则重建绕过兜底)。
+    private static volatile long s_sleepGiveUpUntilMs = 0;
+    private static final long SLEEP_GIVEUP_COOLDOWN_MS = 30_000;
+    private static final long BLOCKER_CLEAR_TIMEOUT_MS = 8_000;
+
+    public static boolean isSleepGiveUpCooldown() {
+        return System.currentTimeMillis() < s_sleepGiveUpUntilMs;
+    }
+
+    /** 开始拆一个挡路方块; 连续 2 次拆不动则返回 null (不再重试, 走换侧/放弃)。 */
+    private Task startBlockerClear(BlockPos blocker) {
+        if (_blockerClearFails >= 2) return null;
+        _blockerClearTask = new DestroyBlockTask(blocker);
+        _blockerClearPos = blocker;
+        _blockerClearStartMs = System.currentTimeMillis();
+        return _blockerClearTask;
+    }
+
     public PlaceBedAndSetSpawnTask() {
 
     }
@@ -128,6 +161,12 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _humanSleepSideLast = -1;
         _humanSleepTimer.reset();
         _interactClearedVeg = false;
+        // (2026-09-08) 新一轮睡觉尝试: 重置拆障保活/尝试计数/放弃态
+        _blockerClearTask = null;
+        _blockerClearPos = null;
+        _blockerClearFails = 0;
+        _humanSleepAttempts = 0;
+        _sleepGaveUp = false;
 
         // Don't break our bed thing.
         mod.getBehaviour().push();
@@ -196,10 +235,40 @@ public class PlaceBedAndSetSpawnTask extends Task {
         //      Stand on the edge of the long (3) side
         //      Place on the middle block, reliably placing the bed.
 
+        // (2026-09-08) 已放弃本次睡觉 → 不再做任何动作; 触发层依静态冷却到期后
+        // 重新派发时 onStart 会重置本标志。
+        if (_sleepGaveUp) {
+            setDebugState("Sleep give-up cooldown (waiting at trigger layer)");
+            return null;
+        }
+
         // We cannot do this anywhere but the overworld.
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD) {
             setDebugState("Going to the overworld first.");
             return new DefaultGoToDimensionTask(Dimension.OVERWORLD);
+        }
+
+        // (2026-09-08 拆障保活, 睡床/放床两条流程共用) 正在拆挡路方块/植被时,
+        // 持续执行到拆完为止。父任务 onTick 每 tick 重跑: 不缓存任务实例的话,
+        // 上一 tick 返回的 DestroyBlockTask 下一 tick 就被瞄准/放床/换侧分支
+        // 抢切, 只活 1 tick, 挡路方块永远拆不掉 (09:34 日志实锤: 反复 Destroy
+        // 同一方块 8 轮, 用户实锤"根本没有拆掉那方块")。
+        if (_blockerClearTask != null) {
+            boolean timedOut = System.currentTimeMillis() - _blockerClearStartMs > BLOCKER_CLEAR_TIMEOUT_MS;
+            if (timedOut || _blockerClearTask.isFinished(mod)) {
+                // 任务结束: 方块还在(拆不动/超时)计一次失败, 连续 2 次后不再重试
+                if (timedOut) {
+                    _blockerClearFails = 2;
+                } else if (_blockerClearPos != null && !WorldHelper.isAir(mod, _blockerClearPos)) {
+                    _blockerClearFails++;
+                }
+                _blockerClearTask = null;
+                _blockerClearPos = null;
+                _humanSleepTimer.reset(); // 拆完重开 3s 瞄准窗口
+            } else {
+                setDebugState("Sleep/place blocked -> destroying blocker " + _blockerClearPos.toShortString());
+                return _blockerClearTask;
+            }
         }
 
         Screen screen = MinecraftClient.getInstance().currentScreen;
@@ -386,14 +455,16 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 try { face = bsHead.get(BedBlock.FACING); } catch (Exception ignore) {}
             }
 
-            // ③ 4 个候选站侧: 优先 face.clockwise (原设计正确的侧) 不行再换 3 侧, 每次换
-            // 侧就 reset 小超时 _humanSleepTimer(3s) 也 reset 大超时, 不再因 wander 耗光
-            Direction[] sideCandidates = new Direction[]{
-                    face.rotateYClockwise(),
-                    face.rotateYCounterclockwise(),
-                    face.rotateYClockwise().getOpposite(),
-                    face.rotateYCounterclockwise().getOpposite()
-            };
+            // ③ 候选站侧 (2026-09-08 去重): 旧 4 候选 [顺时针, 逆时针, 顺时针对面,
+            // 逆时针对面] 对水平朝向恒有 逆时针=顺时针对面, 实际只有 2 个不同站位,
+            // 重复侧必然同结果白等 3s (09:34 日志实锤: side 2/3 与 side 1/0 的
+            // standPos/aim 一模一样)。去重保序后全试完即放弃。
+            java.util.LinkedHashSet<Direction> uniqueSides = new java.util.LinkedHashSet<>();
+            uniqueSides.add(face.rotateYClockwise());
+            uniqueSides.add(face.rotateYCounterclockwise());
+            uniqueSides.add(face.rotateYClockwise().getOpposite());
+            uniqueSides.add(face.rotateYCounterclockwise().getOpposite());
+            Direction[] sideCandidates = uniqueSides.toArray(new Direction[0]);
             if (_humanSleepSide < 0 || _humanSleepSide >= sideCandidates.length) _humanSleepSide = 0;
             Direction standDir = sideCandidates[_humanSleepSide];
             // 要右键点的是"床头朝向玩家的那个面"= 玩家站 standDir, 要 hit 的面是 standDir.opposite
@@ -457,7 +528,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     // (2026-09-06 v2, 用户: 换侧毫无意义, "获取不到实体框吗"—
                     // 能拿到。准心被实体(床上的村民)挡住时直接按实体框重新选
                     // 瞄准点: 在床两半块的顶面/朝玩家侧面网格采样, 找第一个
-                    // 【方块射线通畅 + 无实体包围盒横插】的点 lookAt 它;
+                    // 【方块射线通畅 + 无实体横插】的点 lookAt 它;
                     // crosshair 下一 tick 更新, 落回床方块即正常点击。
                     Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
                     if (_crosshairBlockedLogTimer.elapsed()) {
@@ -472,6 +543,51 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     if (alt != null) {
                         LookHelper.lookAt(mod, alt);
                     }
+                } else if (MinecraftClient.getInstance().crosshairTarget instanceof BlockHitResult) {
+                    // (2026-09-08 准心避开方块遮挡, 用户: 避开了村民却被普通方块
+                    // 挡住, 旧版此分支每 tick 盲点右键全点在挡路方块上, 永远点不到床)
+                    // 准心先命中非床方块 → 不点右键:
+                    //   可拆 → 保活拆障 (拆完重开瞄准窗口, 见分支顶部 keep-alive);
+                    //   不可拆 → 尝试重取瞄点, 重取不到就等 3s 小超时换侧/放弃。
+                    BlockHitResult bhr = (BlockHitResult) MinecraftClient.getInstance().crosshairTarget;
+                    BlockPos hitPos = bhr.getBlockPos();
+                    boolean hitIsBed = mod.getWorld().getBlockState(hitPos).getBlock() instanceof BedBlock;
+                    if (hitIsBed) {
+                        mod.getInputControls().tryPress(Input.CLICK_RIGHT);
+                        // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
+                        _inBedTimer.reset();
+                    } else if (WorldHelper.canBreak(mod, hitPos)) {
+                        Task clearTask = startBlockerClear(hitPos);
+                        if (_crosshairBlockedLogTimer.elapsed()) {
+                            _crosshairBlockedLogTimer.reset();
+                            String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by block "
+                                    + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
+                                    + " at " + hitPos.toShortString()
+                                    + (clearTask != null ? ", destroying it" : ", unbreakable/failed twice, holding click")
+                                    + " (player=" + pp.toShortString() + ")";
+                            Debug.logMessage(m);
+                            Debug.logToFile("altoclef_diag.log", m);
+                        }
+                        if (clearTask != null) {
+                            return clearTask;
+                        }
+                        // 拆不动 → 重取瞄点碰运气, 否则干等 3s 换侧
+                        Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
+                        if (alt != null) LookHelper.lookAt(mod, alt);
+                    } else {
+                        Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
+                        if (_crosshairBlockedLogTimer.elapsed()) {
+                            _crosshairBlockedLogTimer.reset();
+                            String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by unbreakable block "
+                                    + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
+                                    + " at " + hitPos.toShortString()
+                                    + (alt != null ? ", retargeting to " + alt : ", no clear bed point from this side")
+                                    + " (player=" + pp.toShortString() + ")";
+                            Debug.logMessage(m);
+                            Debug.logToFile("altoclef_diag.log", m);
+                        }
+                        if (alt != null) LookHelper.lookAt(mod, alt);
+                    }
                 } else {
                     mod.getInputControls().tryPress(Input.CLICK_RIGHT);
                     // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
@@ -482,24 +598,41 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 return new GetToBlockTask(standPos);
             }
 
-            // ⑥ 小超时换侧: 3 秒内没睡进去/没 Respawn 消息 → 换下一侧 (共 4 侧)
+            // ⑥ 小超时换侧: 3 秒内没睡进去/没 Respawn 消息 → 清障 / 换下一侧 / 全侧试完放弃
             if (_humanSleepTimer.elapsed()) {
-                // (2026-09-02 加强) 换侧前先左键清一遍床边植被 — 床可能被草包住
-                // 点不到(人类: 睡不进去先撸两下草再点)。每侧只清一次。
-                if (!_interactClearedVeg) {
-                    _interactClearedVeg = true;
-                    BlockPos veg = findBlockingVegetationAround(mod, _bedForSpawnPoint);
-                    if (veg != null) {
-                        _humanSleepSideLast = -1; // 回来重走"到位→瞄→右键"小超时
-                        setDebugState("Sleep no-response -> brushing grass/flowers around bed");
-                        return new DestroyBlockTask(veg);
+                // (2026-09-02 加强, 2026-09-08 保活化) 换侧前先扫床边植被 — 床可能
+                // 被草包住点不到(人类: 睡不进去先撸两下草再点)。清障任务走顶部
+                // keep-alive 缓存, 拆完回来重开 3s 窗口, 不再 1 tick 即弃。
+                BlockPos veg = findBlockingVegetationAround(mod, _bedForSpawnPoint);
+                if (veg != null) {
+                    Task clearTask = startBlockerClear(veg);
+                    if (clearTask != null) {
+                        setDebugState("Sleep no-response -> brushing vegetation " + veg.toShortString());
+                        return clearTask;
                     }
+                    // 拆不动(连续 2 次失败) → 不再重试, 直接换侧/放弃
                 }
-                String m2 = "[Diag-bed] human-sleep 3s no-sleep, bumping side " + _humanSleepSide + "-> " + ((_humanSleepSide + 1) % 4);
+                // (2026-09-08 尝试次数上限, 用户"尝试次数两次就够了") 真实站侧
+                // (去重后通常 2 个)全试过仍没睡进去 → 放弃本次睡觉 + 触发层冷却。
+                // 旧版换侧同时给 12s 大超时续命 → 循环永不终止, 8 轮 45s 卡死。
+                _humanSleepAttempts++;
+                if (_humanSleepAttempts >= sideCandidates.length) {
+                    s_sleepGiveUpUntilMs = System.currentTimeMillis() + SLEEP_GIVEUP_COOLDOWN_MS;
+                    _sleepGaveUp = true;
+                    String m3 = "[Diag-bed] sleep give-up: all " + sideCandidates.length
+                            + " real stand sides tried, no sleep; cooldown "
+                            + (SLEEP_GIVEUP_COOLDOWN_MS / 1000) + "s. bed=" + _bedForSpawnPoint
+                            + " player=" + pp.toShortString();
+                    Debug.logMessage(m3);
+                    Debug.logToFile("altoclef_diag.log", m3);
+                    return null;
+                }
+                String m2 = "[Diag-bed] human-sleep 3s no-sleep, bumping side " + _humanSleepSide
+                        + "-> " + ((_humanSleepSide + 1) % sideCandidates.length)
+                        + " (attempt " + _humanSleepAttempts + "/" + sideCandidates.length + ")";
                 Debug.logMessage(m2);
                 Debug.logToFile("altoclef_diag.log", m2);
-                _humanSleepSide = (_humanSleepSide + 1) % 4;
-                _interactClearedVeg = false; // 换侧重置"已清障"
+                _humanSleepSide = (_humanSleepSide + 1) % sideCandidates.length;
                 // 推玩家 1 格: 用 4 ticks 的 WanderTask(1) 走开当前站位=换侧前抖一下
                 mod.getBehaviour().avoidBlockPlacing(pos -> false);
                 return new TimeoutWanderTask(1, true);
@@ -693,16 +826,21 @@ public class PlaceBedAndSetSpawnTask extends Task {
         if (_placeAttemptTimer != null && _placeAttemptTimer.elapsed()) {
             BlockPos saw = findPlacedBedNearRegion(mod, _currentBedRegion);
             if (saw == null) {
-                // (2026-09-02 加强) 交互无效(3s 没放上床): 先左键清一遍放床区域
+                // (2026-09-02 加强, 2026-09-08 保活化) 交互无效(3s 没放上床): 先左键清一遍放床区域
                 // 植被再右键重试; 已清过仍失败才换区域 — 不再"站在草里傻放"就换地方。
+                // 清障走顶部 keep-alive (旧版 new DestroyBlockTask 每 tick 被抢切只活 1 tick)。
                 if (!_interactClearedVeg) {
                     _interactClearedVeg = true;
                     BlockPos veg = findBlockingVegetationAround(mod, _currentBedRegion);
                     if (veg != null) {
-                        _placeAttemptTimer = null;
-                        _progressChecker.reset();
-                        setDebugState("Place bed failed -> brushing grass/flowers, retry");
-                        return new DestroyBlockTask(veg);
+                        Task clearTask = startBlockerClear(veg);
+                        if (clearTask != null) {
+                            _placeAttemptTimer = null;
+                            _progressChecker.reset();
+                            setDebugState("Place bed failed -> brushing vegetation " + veg.toShortString());
+                            return clearTask;
+                        }
+                        // 拆不动 → 走下方超时换区域
                     }
                 }
                 String m = "[Diag-bed] PLACE BED TIMEOUT after 3s at region " + (_currentBedRegion == null ? "null" : _currentBedRegion.toShortString())
@@ -772,6 +910,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-08) 放弃态 = 本轮尝试结束, 让上层干净收尾
+        if (_sleepGaveUp) return true;
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD) {
             Debug.logWarning("Can't place spawnpoint/sleep in a bed unless we're in the overworld!");
             return true;

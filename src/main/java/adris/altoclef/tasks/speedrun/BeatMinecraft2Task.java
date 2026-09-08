@@ -2182,6 +2182,14 @@ public class BeatMinecraft2Task extends Task {
         if (effectiveCanSleep) {
             // 路2: 地表夜间 → 优先睡觉
             if (hasBedRegard) {
+                // (2026-09-08 睡觉放弃冷却, 用户"尝试次数两次就够了, 兜底不够智能") 
+                // PlaceBedAndSetSpawnTask 的真实站侧(去重后通常 2 个)全试过仍没睡
+                // 进去 → 静态冷却 30s 内不再派发睡觉任务, 让位主线推进。冷却必须
+                // 加在触发条件层(同收炉侧线冷却 6eedb369), 否则任务放弃后条件仍
+                // 成立会立即重建同一个任务, 绕过一切兜底。
+                if (PlaceBedAndSetSpawnTask.isSleepGiveUpCooldown()) {
+                    return null;
+                }
                 _nightBedFindInProgress = false;
                 _skipNightBedUntilMs = 0;
                 _nightBedGivenUp = false; // 找到床了, 解除"本夜放弃找床"
