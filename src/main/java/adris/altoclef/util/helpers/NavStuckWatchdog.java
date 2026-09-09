@@ -158,12 +158,34 @@ public final class NavStuckWatchdog {
             }
 
             boolean customGoal, pathing, builder;
+            String pathInfo;
+            String baritoneInputs;
             try {
                 customGoal = mod.getClientBaritone().getCustomGoalProcess().isActive();
                 pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
                 builder = mod.getClientBaritone().getBuilderProcess().isActive();
+                // (2026-09-09 补测量盲区) vanilla KeyBinding 读不到 baritone 的按键 —
+                // baritone 走 InputOverrideHandler 覆盖, 不 setPressed。inputs[fwd=...]
+                // 只反映 AltoClef 自己 InputControls 的按键 (直游/进食等)。
+                // baritone 是否真的在开键必须读 isInputForcedFor。
+                baritoneInputs = "bIn[fwd=" + mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)
+                        + " jump=" + mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.JUMP)
+                        + " sprint=" + mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.SPRINT)
+                        + " sneak=" + mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.SNEAK) + "]";
+                // 当前路径: 是否存在 / 段长 / 目的地 — pathing=true 但无 path 或
+                // 目的地就在脚下反复重算时, 即为"自称寻路实际不动"的直接证据。
+                java.util.Optional<baritone.api.pathing.calc.IPath> bPath =
+                        mod.getClientBaritone().getPathingBehavior().getPath();
+                pathInfo = "path[present=" + bPath.isPresent();
+                if (bPath.isPresent()) {
+                    pathInfo += " segLen=" + bPath.get().length()
+                            + " dest=" + bPath.get().getDest();
+                }
+                pathInfo += "]";
             } catch (Throwable t) {
                 customGoal = pathing = builder = false;
+                pathInfo = "path[err]";
+                baritoneInputs = "bIn[err]";
             }
 
             Vec3d vel = p.getVelocity();
@@ -193,6 +215,8 @@ public final class NavStuckWatchdog {
                     + " swimming=" + p.isSwimming()
                     + " onLadder=" + p.isClimbing()
                     + " baritone[customGoal=" + customGoal + " pathing=" + pathing + " builder=" + builder + "]"
+                    + " " + baritoneInputs
+                    + " " + pathInfo
                     + " inputs[fwd=" + mod.getInputControls().isHeldDown(Input.MOVE_FORWARD)
                     + " jump=" + mod.getInputControls().isHeldDown(Input.JUMP)
                     + " sprint=" + mod.getInputControls().isHeldDown(Input.SPRINT)
