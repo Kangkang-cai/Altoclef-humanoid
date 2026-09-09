@@ -496,6 +496,57 @@ public class BeatMinecraft2Task extends Task {
     private final TimerGame _preNetherDrainScanTimer = new TimerGame(1.0);
     private BlockPos _preNetherDrainScanPos = null;
 
+    // (2026-09-09 进下界前清仓生金, 用户"有多少生金矿就烧多少") 进下界前若背包
+    // 持有 RAW_GOLD, 先全量熔炼成金锭再进门 (不额外挖矿凑数 — 输出目标=现有锭+
+    // 生金数, 材料目标=生金数, 严格匹配绝不缺料, SmeltInFurnaceTask 不会派挖矿)。
+    // 这样下界 FireRes 阶段的猪灵交易直接有锭可用, 避免重演"下界挖金粒 18 分钟"。
+    // 实例粘性: 生金放进炉后背包计数归零, 必须靠缓存实例 keep-alive 到烧完,
+    // 否则下 tick 就被排空闸门把炉里的金取出来 (与排空闸门打架)。
+    // 放弃兜底: 外部 5 分钟超时 → 30s 冷却重试; 累计 2 次放弃后本次会话永久
+    // 放行 (生金留着生金, 不无限阻塞进门)。
+    private SmeltInFurnaceTask _preNetherGoldSmeltTask = null;
+    private long _preNetherGoldSmeltStartMs = 0L;
+    private long _preNetherGoldSmeltGiveUpUntilMs = 0L;
+    private int _preNetherGoldSmeltGiveUpCount = 0;
+    private static final long PRE_NETHER_GOLD_SMELT_TIMEOUT_MS = 5 * 60_000L;
+
+    private Task getPreNetherGoldSmeltTask(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (_preNetherGoldSmeltGiveUpCount >= 2 || now < _preNetherGoldSmeltGiveUpUntilMs) {
+            return null;
+        }
+        // 实例粘性: 烧炼进行中持续返回同一实例 (此时背包 rawGold 已进炉归零,
+        // 不能按背包重新判定, 否则排空闸门会把炉里的金取出来)。
+        if (_preNetherGoldSmeltTask != null && !_preNetherGoldSmeltTask.isFinished(mod)) {
+            if (now - _preNetherGoldSmeltStartMs > PRE_NETHER_GOLD_SMELT_TIMEOUT_MS) {
+                Debug.logMessage("(PreNetherGold) Gold smelt timed out, 30s cooldown then retry.");
+                Debug.logToFile("altoclef_diag.log", "[MAIN-FIX]\t[PreNetherGold]\ttimeout, cooldown 30s, giveUpCount=" + _preNetherGoldSmeltGiveUpCount);
+                _preNetherGoldSmeltGiveUpCount++;
+                _preNetherGoldSmeltGiveUpUntilMs = now + 30_000;
+                _preNetherGoldSmeltTask = null;
+                return null;
+            }
+            setDebugState("Smelting held raw gold into ingots before Nether");
+            return _preNetherGoldSmeltTask;
+        }
+        _preNetherGoldSmeltTask = null;
+        // 口径三件套规则: 材料够不够判定用含合成格口径 (344bd043), 防
+        // 配方书把生金搬进格后背包计数"骤减"导致误判/打断。
+        int rawGold = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, net.minecraft.item.Items.RAW_GOLD);
+        if (rawGold <= 0) {
+            return null; // 没有生金, 直接放行
+        }
+        int ingots = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, net.minecraft.item.Items.GOLD_INGOT);
+        _preNetherGoldSmeltTask = new SmeltInFurnaceTask(new SmeltTarget(
+                new ItemTarget(net.minecraft.item.Items.GOLD_INGOT, ingots + rawGold),
+                new ItemTarget(net.minecraft.item.Items.RAW_GOLD, rawGold)));
+        _preNetherGoldSmeltStartMs = now;
+        Debug.logMessage("(PreNetherGold) Holding " + rawGold + " raw gold — smelting all into ingots before entering Nether.");
+        Debug.logToFile("altoclef_diag.log", "[MAIN-FIX]\t[PreNetherGold]\tsmelt rawGold=" + rawGold + " ingots=" + ingots);
+        setDebugState("Smelting held raw gold into ingots before Nether");
+        return _preNetherGoldSmeltTask;
+    }
+
     /**
      * [Diag-flow] 分支切换诊断: debug 状态变化 ≈ 子任务切换。每次变化
      * 打出全部关键条件快照, 下次测试直接从日志看横跳是哪个条件翻转
@@ -1805,7 +1856,11 @@ public class BeatMinecraft2Task extends Task {
                         if (bootsTask != null) {
                             return bootsTask;
                         }
-                        // (2026-09-09 进下界前排空熔炉) 金靴做完 → 排炉 → 进门。
+                        // (2026-09-09 进下界前排空熔炉) 金靴做完 → 清仓生金 → 排炉 → 进门。
+                        Task preNetherGold = getPreNetherGoldSmeltTask(mod);
+                        if (preNetherGold != null) {
+                            return preNetherGold;
+                        }
                         Task preNetherDrain = getPreNetherFurnaceDrainTask(mod);
                         if (preNetherDrain != null) {
                             return preNetherDrain;
@@ -1819,7 +1874,11 @@ public class BeatMinecraft2Task extends Task {
                     return _gearTask;
                 }
                 // Then go to the nether.
-                // (2026-09-09 进下界前排空熔炉) 主路径同样过排炉闸门。
+                // (2026-09-09 进下界前) 主路径同样过 清仓生金→排炉 两道闸门。
+                Task preNetherGold = getPreNetherGoldSmeltTask(mod);
+                if (preNetherGold != null) {
+                    return preNetherGold;
+                }
                 Task preNetherDrain = getPreNetherFurnaceDrainTask(mod);
                 if (preNetherDrain != null) {
                     return preNetherDrain;
