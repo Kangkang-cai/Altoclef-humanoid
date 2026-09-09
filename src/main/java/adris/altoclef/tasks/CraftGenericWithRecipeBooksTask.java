@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
+import adris.altoclef.tasksystem.CraftingGridArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.RecipeTarget;
@@ -42,7 +43,13 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
     @Override
     protected Task onTick(AltoClef mod) {
 
-        
+        // (2026-09-09 [GridWar] 根修) 配方书填充会写 2x2 格(配方书点击/材料
+        // 归位/收成品), 与清格链互斥, 必须持 CRAFT 租约。父任务每 tick 重跑
+        // 本 onTick 持续续租; 清格一拍完成即释放, 等待有界。
+        if (!CraftingGridArbiter.begin(CraftingGridArbiter.INTENT_CRAFT)) {
+            setDebugState("2x2 busy: clearing holds the grid, waiting");
+            return null;
+        }
 
         boolean bigCrafting = StorageHelper.isBigCraftingOpen();
 

@@ -5,6 +5,7 @@ import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.MoveItemToSlotFromInventoryTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
+import adris.altoclef.tasksystem.CraftingGridArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -39,6 +40,14 @@ public class CraftGenericManuallyTask extends Task implements ITaskUsesCraftingG
 
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (2026-09-09 [GridWar] 根修) 本任务要往 2x2 格写材料, 必须持 CRAFT
+        // 租约: 清格链(CLEAR)持有时就地等待。等待有界: 清格一拍 ~1-2s 完成
+        // 即释放, 或租约 3s 自动过期。父任务每 tick 重跑本 onTick 持续续租。
+        if (!CraftingGridArbiter.begin(CraftingGridArbiter.INTENT_CRAFT)) {
+            setDebugState("2x2 busy: clearing holds the grid, waiting");
+            return null;
+        }
 
         boolean bigCrafting = StorageHelper.isBigCraftingOpen();
 

@@ -89,7 +89,11 @@ public class EnsureFreeCursorSlotTask extends Task {
                 }
                 // 真实扫描无果 (真背包无空槽且无可合并堆) → 缓存兜底。
                 Optional<Slot> moveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
-                if (moveTo.isPresent()) {
+                // (2026-09-09 [GridWar] 根修#2 缓存假空槽) 缓存答案可能过期:
+                // 15:32 场次实锤缓存指向被 netherrackx52 占据的槽, 左键 PICKUP
+                // 变 SWAP, 光标 log 被换成 netherrack, 东西在热栏倒来倒去不收敛。
+                // 点击前按真实屏幕栈复核, 过期答案作废 → 落回下方丢弃级联。
+                if (moveTo.isPresent() && canPlaceCursorIntoSlot(cursor, moveTo.get())) {
                     setDebugState("Moving cursor stack back");
                     return new ClickSlotTask(moveTo.get());
                 }

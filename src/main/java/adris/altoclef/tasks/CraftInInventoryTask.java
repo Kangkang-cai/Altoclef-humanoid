@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.resources.CollectRecipeCataloguedResourcesTask;
 import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
+import adris.altoclef.tasksystem.CraftingGridArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -75,6 +76,14 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+        // (2026-09-09 [GridWar] 根修) 本任务的收成品/正式合成阶段都在操作 2x2
+        // 格, 与清格链互斥: 清格(CLEAR)持有时整体等待, 防止收成品时输入格被
+        // 抽走。材料收集阶段被顺带等待无碍(有界 ≤3s)。子任务 CraftGeneric*
+        // 每 tick 重跑各自续租。
+        if (!CraftingGridArbiter.begin(CraftingGridArbiter.INTENT_CRAFT)) {
+            setDebugState("2x2 busy: clearing holds the grid, waiting");
+            return null;
+        }
         // Grab from output FIRST
         if (StorageHelper.isPlayerInventoryOpen()) {
             ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
