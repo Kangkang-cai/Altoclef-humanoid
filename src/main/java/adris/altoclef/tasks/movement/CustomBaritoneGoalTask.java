@@ -49,7 +49,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     // 出水/接近目标/5 秒失速才交还 baritone。
     private boolean _directSwimControl = false;
     private double _directSwimBestDist = Double.MAX_VALUE;
-    private final TimerGame _directSwimStallTimer = new TimerGame(5);
+    // (2026-09-09 用户: 5s 窗口太长, 调 2s) 直游失速判定窗口。
+    private final TimerGame _directSwimStallTimer = new TimerGame(2);
     private static final double DIRECT_SWIM_STOP_DISTANCE = 3;
     // (2026-08-26 用户多次反馈: 游泳时按住疾跑, 一直没修好) 游泳时是否要强制
     // 关 baritone 疾跑 (allowSprint)。上/下水状态变化时切换一次。
@@ -67,11 +68,15 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
 
     // ===== 直游换气 (2026-09-09, 用户实锤"只游不按空格上浮, 快淹死了") =====
     // GoalXZ 的 target.getY()=0 → 平游分支无条件 release(JUMP) → 埋头游不换气。
-    // 修复: 平游时头一入水(air 未满)就按 JUMP 贴水面游; 下潜时氧气 <40% 强制
-    // 上浮换气, >90% 才继续下潜(换气标志, 防在 40%~90% 之间抖动)。
+    // 修复: 平游时间歇按 JUMP (按 2s / 松 2s 循环, 用户: 不能一直按着空格,
+    // 过几秒再按 — 有特殊情况需要间歇处理); 缺氧 <40% 才切持续按, >90% 恢复
+    // 间歇 (滞回防抖)。下潜时氧气 <40% 强制上浮换气到 >90% 才继续下潜。
     private boolean _breaching = false;
     private static final double BREACH_TRIGGER_FRACTION = 0.4;
     private static final double BREACH_RELEASE_FRACTION = 0.9;
+    // 间歇跳跃节奏: 跳跃相位(按住)与滑行相位(松开)各 2s。
+    private final TimerGame _breathPaceTimer = new TimerGame(2);
+    private boolean _breathJumpPhase = true;
 
     public CustomBaritoneGoalTask(boolean wander) {
         _wander = wander;
@@ -199,6 +204,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         BlockPos target = goalXZ();
                         _directSwimBestDist = horizontalDist(mod, target);
                         _directSwimStallTimer.reset();
+                        _breathJumpPhase = true;
+                        _breathPaceTimer.reset();
                         holdDirectSwim(mod, target);
                         setDebugState("Swimming directly to goal");
                         return null;
@@ -266,13 +273,22 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
             mod.getInputControls().release(Input.SNEAK);
             mod.getInputControls().release(Input.SPRINT);
         } else {
-            // (2026-09-09) 平游/换气: 头在水中(air 未满)→按 JUMP 贴水面游;
-            // 头在空气里→松开自然滑行。不再无条件 release(JUMP) 埋头游。
+            // (2026-09-09) 平游/换气: 间歇跳跃 — 按 2s / 松 2s 循环 (用户要求,
+            // 不能一直按着空格); 缺氧(_breaching)切持续按直到恢复。松开相头会
+            // 慢慢下沉, 2s 内掉不到危险线, <40% 兜底会立即切持续按。
             mod.getInputControls().release(Input.SNEAK);
-            if (_breaching || airFrac < 0.98) {
+            if (_breaching) {
                 mod.getInputControls().hold(Input.JUMP);
             } else {
-                mod.getInputControls().release(Input.JUMP);
+                if (_breathPaceTimer.elapsed()) {
+                    _breathJumpPhase = !_breathJumpPhase;
+                    _breathPaceTimer.reset();
+                }
+                if (_breathJumpPhase) {
+                    mod.getInputControls().hold(Input.JUMP);
+                } else {
+                    mod.getInputControls().release(Input.JUMP);
+                }
             }
             // (2026-08-26 用户要求) 游泳 (水平/水面) 关疾跑 — 开疾跑游泳会带来问题。
             mod.getInputControls().release(Input.SPRINT);
@@ -288,6 +304,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         _directSwimControl = false;
         _directSwimUpMode = false;
         _breaching = false;
+        _breathJumpPhase = true;
+        _breathPaceTimer.reset();
         _checker.reset();
     }
 
