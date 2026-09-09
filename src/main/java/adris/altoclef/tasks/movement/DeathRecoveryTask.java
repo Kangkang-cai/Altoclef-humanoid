@@ -41,7 +41,9 @@ public class DeathRecoveryTask extends Task {
     private static final int PICKUP_RADIUS = 16;
     private static final int GRAVE_REACHED_HORIZONTAL = 3;
     private static final int GRAVE_REACHED_VERTICAL = 4;
-    private static final int NO_DROPS_GIVE_UP_SECONDS = 10;
+    // (2026-09-09 10→5, 用户"捡完了任务还不更新") 最后一件捡完后的空窗等待,
+    // 5s 足够确认没有新掉落, 不用陪掉落物消失窗口耗满 10s。
+    private static final int NO_DROPS_GIVE_UP_SECONDS = 5;
 
     private enum Phase { GOTO_GRAVE, PICKUP, DONE }
 
@@ -55,6 +57,8 @@ public class DeathRecoveryTask extends Task {
 
     private final TimerGame _overallTimer;
     private final TimerGame _noDropsTimer;
+    // (2026-09-09 空窗僵住修复) 空窗 Wander 用缓存实例 keep-alive, 不反复 new。
+    private final TimeoutWanderTask _noDropsWander = new TimeoutWanderTask(20);
     // Track whether the first onTick has logged the header.
     private boolean _started = false;
 
@@ -178,8 +182,16 @@ public class DeathRecoveryTask extends Task {
                     waited, NO_DROPS_GIVE_UP_SECONDS));
             // Small wander so the player doesn't stand still and starve /
             // keeps the render distance ticking over.
-            if (_currentSub == null || _currentSub.isFinished(mod)) {
-                _currentSub = new TimeoutWanderTask(20);
+            // (2026-09-09 空窗僵住修复, 用户"捡完了任务还不更新") 旧条件
+            // `_currentSub == null || _currentSub.isFinished(mod)` 在上一个
+            // 子任务是 GetToEntityTask 时永不成立 —— GetToEntityTask 不覆写
+            // isFinished, Task 基类默认恒 false。实锤: 22:29 场次最后一件
+            // (sand) 捡完后, 旧的追实体子任务对已消失实体引用跑了 15s
+            // ("Swimming directly to target"), 任务栈全程静止, 直到
+            // noDropsTimer 到期才 DONE, 期间从未进入 Wander。改为强制切到
+            // 缓存的 Wander 实例 (keep-alive)。
+            if (!(_currentSub instanceof TimeoutWanderTask)) {
+                _currentSub = _noDropsWander;
             }
             return _currentSub;
         }
