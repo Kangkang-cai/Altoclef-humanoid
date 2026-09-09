@@ -2,6 +2,7 @@ package adris.altoclef.tasks.container;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.resources.MineAndCollectTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasksystem.Task;
@@ -33,6 +34,10 @@ import java.util.Optional;
  * 流程: 打开最近真实熔炉 → 逐槽 PICKUP 取物 → 光标物品放回背包 → 三槽全空即
  * _emptied → 关屏 → 用 MineAndCollectTask 把已清空的熔炉拆走。全程复用
  * DoStuffInContainerTask 的"走到/打开容器"逻辑与 ClickSlotTask 槽位点击, 不新造轮子。
+ *
+ * (2026-09-09) 上层只对【非空】熔炉派发本任务 (BeatMinecraft2Task.findNearbyFurnace
+ * 过滤, 空炉不触发侧线); 本任务定位熔炉时非空优先于距离, 且已锁定坐标但未贴到时
+ * 直接 GetToBlockTask 走过去 (Fix-A), 不再依赖父类 tracker 型最近目标查找。
  */
 public class EmptyFurnaceTask extends DoStuffInContainerTask {
 
@@ -50,6 +55,10 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     // 已经贴到炉边却始终打不开 (够不着/被挡/被别的链条抢开) 的容忍时间, 超时直接
     // 拆走 — 否则本任务会站着空转, 又被上层反复重建。
     private final TimerGame _stuckOpenTimer = new TimerGame(8.0);
+
+    // (2026-09-09 Fix-A) 直走已知熔炉坐标的移动子任务 (同目标复用, 不每 tick new)。
+    private GetToBlockTask _walkTask = null;
+    private BlockPos _walkTaskTarget = null;
 
     public EmptyFurnaceTask() {
         super(Blocks.FURNACE, new ItemTarget(Items.FURNACE));
@@ -95,6 +104,24 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
                                 + " for 8s without opening it -> mining it away");
                 _emptied = true;
                 return null;
+            }
+
+            // (2026-09-09 Fix-A 无限wander根因修复) 已锁定熔炉坐标但还没贴到 →
+            // 直接 GetToBlockTask 走过去, 绕过父类 _openTableTask 的 tracker 型最近
+            // 目标查找 — 那套只认 BlockTracker 缓存 + 玩家 6 格兜底, 熔炉在两者
+            // 夹缝 (本例 14 格, y 差 5) 时双 miss → "Wander for Infinity" 永不自退
+            // (9月8日 23:26 铁匠铺熔炉 276,60,179 实锤, 卡 62 秒直到手动停止)。
+            // 自己扫到的炉自己走过去; 贴到 4 格内才交回父类走开&打开逻辑
+            // (届时 6 格兜底能命中, 正常交互)。任务超时兜底仍是上面的 8s 贴炉强拆。
+            if (!open && near != null
+                    && mod.getWorld().getBlockState(near).getBlock() == Blocks.FURNACE
+                    && !mod.getPlayer().getBlockPos().isWithinDistance(near, 4.0)) {
+                if (_walkTask == null || !near.equals(_walkTaskTarget)) {
+                    _walkTaskTarget = near;
+                    _walkTask = new GetToBlockTask(near);
+                }
+                setDebugState("Walking straight to known furnace " + near.toShortString());
+                return _walkTask;
             }
         }
         return super.onTick(mod);
@@ -161,24 +188,36 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     protected BlockPos overrideContainerPosition(AltoClef mod) {
         // 优先锁定玩家近场真实存在的熔炉 (与 DoSmeltInFurnaceTask 同款兜底), 不依赖
         // 异步缓存; 正在收熔炉的场景熔炉必在近场。
+        // (2026-09-09 非空优先) 与 scanFurnaceAround 同理: 非空熔炉优先于距离,
+        // 防止近场更近的空炉 (铁匠铺) 把真目标顶掉。
         if (mod.getPlayer() == null) return getTargetContainerPosition();
         BlockPos player = mod.getPlayer().getBlockPos();
         int r = 4;
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
+        BlockPos bestNonEmpty = null;
+        double bestNonEmptySq = Double.MAX_VALUE;
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -2; dy <= 2; dy++) {
                 for (int dz = -r; dz <= r; dz++) {
                     BlockPos pos = player.add(dx, dy, dz);
                     if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE) {
                         double sq = pos.getSquaredDistance(player);
-                        if (sq < bestSq) {
+                        if (WorldHelper.isFurnaceNonEmpty(mod, pos)) {
+                            if (sq < bestNonEmptySq) {
+                                bestNonEmptySq = sq;
+                                bestNonEmpty = pos;
+                            }
+                        } else if (sq < bestSq) {
                             bestSq = sq;
                             best = pos;
                         }
                     }
                 }
             }
+        }
+        if (bestNonEmpty != null) {
+            return bestNonEmpty;
         }
         if (best != null) {
             return best;
@@ -192,13 +231,18 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     }
 
     /**
-     * 以玩家为中心扫 r 格立方, 返回最近的一个【可挖】的真实熔炉; 没有则 null。
+     * 以玩家为中心扫 r 格立方, 返回最近的一个【可挖】真实熔炉; 没有则 null。
      * 立方是 33³ 量级, 故只在 onTick 里按 1 秒节流调用 (与 BeatMinecraft2Task
      * 的 findNearbyFurnace 同款成本/同款范围)。
+     * (2026-09-09 非空优先) 本任务由"附近有非空熔炉"触发; 近场若同时有更近的
+     * 空炉 (如村庄铁匠铺), 锁错空炉会把真目标漏在原地 — 非空熔炉优先于距离,
+     * 空炉仅作非空全部失效时的兜底 (BE 滞后误判"空"时仍能走到并打开确认)。
      */
     private BlockPos scanFurnaceAround(AltoClef mod, BlockPos center, int r) {
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
+        BlockPos bestNonEmpty = null;
+        double bestNonEmptySq = Double.MAX_VALUE;
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
                 for (int dz = -r; dz <= r; dz++) {
@@ -210,14 +254,19 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
                         continue;
                     }
                     double sq = pos.getSquaredDistance(center);
-                    if (sq < bestSq) {
+                    if (WorldHelper.isFurnaceNonEmpty(mod, pos)) {
+                        if (sq < bestNonEmptySq) {
+                            bestNonEmptySq = sq;
+                            bestNonEmpty = pos;
+                        }
+                    } else if (sq < bestSq) {
                         bestSq = sq;
                         best = pos;
                     }
                 }
             }
         }
-        return best;
+        return bestNonEmpty != null ? bestNonEmpty : best;
     }
 
     @Override

@@ -11,6 +11,7 @@ import baritone.process.MineProcess;
 import baritone.utils.BlockStateInterface;
 import net.minecraft.block.*;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.FurnaceBlockEntity;
 import net.minecraft.block.entity.MobSpawnerBlockEntity;
 import net.minecraft.block.enums.BedPart;
 import net.minecraft.block.enums.ChestType;
@@ -643,6 +644,32 @@ public interface WorldHelper {
             }
         }
         return null;
+    }
+
+    /**
+     * (2026-09-09 熔炉非空检测, 客户端只读) 收炉侧线只应被【非空】熔炉触发。
+     *
+     * 检测两级, 都是客户端可靠可读的:
+     * 1. {@code FurnaceBlock.LIT} 方块状态 — blockstate 恒同步, 燃料在烧必然非空
+     *    (含"肉还在炉里烧"的关键场景);
+     * 2. {@link FurnaceBlockEntity} 三槽 (0=input / 1=fuel / 2=output) — chunk 加载
+     *    快照 + LIT 翻转时随方块更新重发, 兜住"烧完了但产物/燃料躺在炉里"。
+     * 误判方向代价: 误判"非空"(BE 略滞后) → 走过去打开发现空的, 立即转拆炉, 代价小;
+     * 误判"空"需要炉内容物在无 LIT 翻转、无 bot 交互下变化, 实际不发生。
+     */
+    static boolean isFurnaceNonEmpty(AltoClef mod, BlockPos pos) {
+        if (mod.getWorld() == null) return false;
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+        BlockState state = mod.getWorld().getBlockState(pos);
+        if (state.getBlock() != Blocks.FURNACE) return false;
+        if (state.get(FurnaceBlock.LIT)) return true;
+        BlockEntity be = mod.getWorld().getBlockEntity(pos);
+        if (be instanceof FurnaceBlockEntity furnace) {
+            for (int slot = 0; slot < 3; slot++) {
+                if (!furnace.getStack(slot).isEmpty()) return true;
+            }
+        }
+        return false;
     }
 
     static Vec3d getOverworldPosition(Vec3d pos) {

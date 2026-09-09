@@ -771,8 +771,10 @@ public class BeatMinecraft2Task extends Task {
 
         // (2026-08-27 熔炉即收) 烧完东西后把自放/近处的熔炉带走 — 与合成台同款
         // 站桩分支。条件: 主世界 / 门未开 / 配置开 / 背包无熔炉 / 当前不在用熔炉 /
-        // (2026-08-31) 主链忙时让位 / 非夜间睡/床优先时段。检测 16 格内是否有熔炉
-        // ("顺手拿"), 有则先取尽炉内内容物再拆走。
+        // (2026-08-31) 主链忙时让位 / 非夜间睡/床优先时段。检测 16 格内是否有
+        // 【非空】熔炉, 有则先取尽炉内内容物再拆走。
+        // (2026-09-09 只收非空熔炉, 用户指定) 空熔炉完全不触发本分支 — 路过村庄
+        // 铁匠铺的空炉不再被绊; 自放且已彻底掏空的炉子留在原地, 下次熔炼重新合成。
         if (!_endPortalOpened && WorldHelper.getCurrentDimension() != Dimension.END && _config.rePickupFurnace
                 && !mod.getItemStorage().hasItem(Items.FURNACE)
                 // (2026-08-31 顺路收容不让位打断主线) 主链(铁装合成/下矿/食物/熔炼)
@@ -1972,7 +1974,11 @@ public class BeatMinecraft2Task extends Task {
         BlockPos player = mod.getPlayer().getBlockPos();
         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.FURNACE)) {
             if (pos.isWithinDistance(player, FURNACE_GRAB_RANGE)
-                    && mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE) {
+                    && mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
+                    // (2026-09-09 只收非空熔炉) 空炉不触发取尽+拆走侧线 —
+                    // 路过村庄铁匠铺的空炉不再把 bot 绊进收炉分支
+                    // (9月8日 23:26 日志: 铁匠铺空炉触发 EmptyFurnaceTask → 无限 wander)。
+                    && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
                 return true;
             }
         }
@@ -1984,7 +1990,9 @@ public class BeatMinecraft2Task extends Task {
                 for (int dz = -r; dz <= r; dz++) {
                     BlockPos pos = player.add(dx, dy, dz);
                     if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
-                            && WorldHelper.canBreak(mod, pos)) {
+                            && WorldHelper.canBreak(mod, pos)
+                            // (2026-09-09 只收非空熔炉) 同上, 空炉跳过继续扫。
+                            && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
                         return true;
                     }
                 }
