@@ -5,6 +5,7 @@ import net.minecraft.block.BedBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.LeavesBlock;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
@@ -80,6 +81,38 @@ public final class VisibilityHelper {
     // 退化为挖隧道找矿 → 与"回地表收集木头"反复互相打断。工作台按感知
     // 目标原则 16 格内必感知, 消除拾取与挖掘的判定不一致。
     private static final double CRAFTING_TABLE_PERCEIVE_DISTANCE = 16.0;
+
+    // (2026-09-09 树木结构推断, 用户"我都看到树了它还没看到木头") 原木类方块
+    // 集合。与 MineAndCollectTask.WOOD_LOG_BLOCKS / WorldMemory.WOOD_LOG_BLOCKS
+    // 口径一致 (三处各自私有, 本项目既有惯例)。
+    private static final Set<Block> WOOD_BLOCKS = Set.of(
+            Blocks.OAK_LOG, Blocks.BIRCH_LOG, Blocks.SPRUCE_LOG,
+            Blocks.JUNGLE_LOG, Blocks.ACACIA_LOG, Blocks.DARK_OAK_LOG,
+            Blocks.CRIMSON_STEM, Blocks.WARPED_STEM,
+            Blocks.MUSHROOM_STEM,
+            Blocks.STRIPPED_OAK_LOG, Blocks.STRIPPED_BIRCH_LOG, Blocks.STRIPPED_SPRUCE_LOG,
+            Blocks.STRIPPED_JUNGLE_LOG, Blocks.STRIPPED_ACACIA_LOG, Blocks.STRIPPED_DARK_OAK_LOG,
+            Blocks.STRIPPED_CRIMSON_STEM, Blocks.STRIPPED_WARPED_STEM,
+            Blocks.OAK_WOOD, Blocks.BIRCH_WOOD, Blocks.SPRUCE_WOOD,
+            Blocks.JUNGLE_WOOD, Blocks.ACACIA_WOOD, Blocks.DARK_OAK_WOOD,
+            Blocks.CRIMSON_HYPHAE, Blocks.WARPED_HYPHAE
+    );
+    // 树叶透明 LOS 射线的最大距离。原木感知选取半径最大 64 格 (MineAndCollectTask
+    // wood cacheRange), 超过 64 的原木不会被选取, 无需为它们步进射线。
+    private static final double WOOD_RAY_MAX_DISTANCE = 64.0;
+    // 射线步进采样步长 (格): 0.5 格保证 1 格宽的原木体内至少落一个采样点。
+    private static final double WOOD_RAY_STEP = 0.5;
+    // 视为"透明"的树冠方块: 树叶 + 下界巨型菌盖 + 蘑菇盖。这些方块只存在于
+    // 树的可见部分, 本身就是"这有一棵树"的视觉证据 — 穿过树冠 ≠ 穿过岩壁。
+    private static final Set<Block> CANOPY_OCCLUDERS = Set.of(
+            Blocks.NETHER_WART_BLOCK, Blocks.WARPED_WART_BLOCK,
+            Blocks.BROWN_MUSHROOM_BLOCK, Blocks.RED_MUSHROOM_BLOCK
+            // LeavesBlock 类型在射线逻辑里用 instanceof 判定, 不在此列
+    );
+
+    public static boolean isWoodBlock(Block block) {
+        return WOOD_BLOCKS.contains(block);
+    }
 
     // Structure loot / functional blocks (2026-08-21 revision 2): these blocks
     // ignore the FOV cone and distance cap (see isBlockVisible), but they now
@@ -259,6 +292,15 @@ public final class VisibilityHelper {
                 return true;
             }
         }
+        // (2026-09-09 树木结构推断, 用户"我都看到树了它还没看到木头") 原木目标:
+        // 树叶透明 LOS。人看到整棵树 (树冠可见) 就推断树干有木头 — 这是反透视
+        // 线索优先级里的"结构推断"层级, 不是 X-ray: 树叶只存在于树的可见部分,
+        // 穿过树冠看到自家树干 ≠ 穿过岩壁透视。21:07 日志实锤: 353 个缓存原木
+        // 全部被树冠挡住 (perceivable=0, occluded ray to center) → bot 在林边
+        // 瞎逛 4 分钟不砍树。
+        if (isWoodBlock(block) && isWoodVisibleThroughLeaves(mod, pos)) {
+            return true;
+        }
         if (isBlockVisible(mod, pos)) {
             // (2026-08-22 防透视) 普通矿石被岩石完全包围时, 即使 LOS 射线
             // 判定通过也视为不可感知 — 用户实测 19:19: 被岩石包住的铁矿
@@ -285,6 +327,38 @@ public final class VisibilityHelper {
         }
         // 能看到流体上方的空气位置 (LOS 到空气方块)
         return isBlockVisible(mod, above);
+    }
+
+    /**
+     * (2026-09-09 树木结构推断, 用户"我都看到树了它还没看到木头") 原木目标的
+     * 树叶透明 LOS: 从眼睛向目标原木步进采样, 树叶/菌盖等树冠方块视为透明,
+     * 其他实心方块仍算遮挡。人看到树冠即推断树干存在 (反透视"结构推断"层级);
+     * 树冠只生成在树的可见部位, 穿过树冠不等于隔墙透视。
+     * 距离超 WOOD_RAY_MAX_DISTANCE (64) 时直接 false — 原木选取半径不超过 64,
+     * 更远的原木无需步进射线 (走普通严格 LOS 判定)。
+     */
+    private static boolean isWoodVisibleThroughLeaves(AltoClef mod, BlockPos pos) {
+        ClientPlayerEntity player = mod.getPlayer();
+        if (player == null || mod.getWorld() == null) return false;
+        Vec3d eye = LookHelper.getCameraPos(player);
+        Vec3d center = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Vec3d delta = center.subtract(eye);
+        double dist = delta.length();
+        if (dist > WOOD_RAY_MAX_DISTANCE) return false;
+        Vec3d dir = delta.multiply(1.0 / dist);
+        for (double t = WOOD_RAY_STEP; t < dist; t += WOOD_RAY_STEP) {
+            Vec3d p = eye.add(dir.multiply(t));
+            BlockPos bp = new BlockPos(p.x, p.y, p.z);
+            if (bp.equals(pos)) return true; // 到达目标原木
+            BlockState st = mod.getWorld().getBlockState(bp);
+            Block b = st.getBlock();
+            // 树冠透明: 树叶 (所有变种) + 下界菌盖 + 蘑菇盖
+            if (b instanceof LeavesBlock || CANOPY_OCCLUDERS.contains(b)) continue;
+            if (!st.isSolidBlock(mod.getWorld(), bp)) continue; // 空气/草等非实心不挡
+            return false; // 其他实心方块 → 遮挡 (岩壁/泥土/其他树的树干等)
+        }
+        // 走完无遮挡 (终点紧贴目标块边缘) → 可见
+        return true;
     }
 
     /**

@@ -762,9 +762,12 @@ public class MineAndCollectTask extends ResourceTask {
             // 24 格 → 床在 24~96 格之间(村庄床常 50~90 格)时"切了挖床却 lock 不到" →
             // 卡在 "Mining or Collecting" 空转, 直到晚上被 Sleeping 链抢占才去碰床。
             // 仅对【床】目标放宽搜索到 96 + 免 FOV, 与 CollectBed 门控一致: 白天感知到的
-            // 床直接锁到并走过去拆进背包(真正"持有床")。木头/工作台回归原 24+FOV 逻辑,
-            // 不受此放宽影响 — 避免把"舍近求远"的锁远树连锁到砍木(用户拦截)。
-            int cacheRange = bedTarget ? 96 : 24;
+            // 床直接锁到并走过去拆进背包(真正"持有床")。
+            // (2026-09-09 木头感知半径 24→64, 用户"我都看到树了它还没看到木头"实测:
+            // 21:05-21:10 开阔地 30-45m 外的树在视野里, bot 瞎逛 4 分钟不砍) 24 格
+            // 感知半径意味着 30m 外的树对 bot 不存在; 配合 VisibilityHelper 树叶透明
+            // LOS(2026-09-09) 才能真正锁到远树。仍要求 FOV+LOS, 不透视。
+            int cacheRange = bedTarget ? 96 : (isTargetingWood() ? 64 : 24);
             // (2026-09-01 防透视回归修复) 主线远场恢复 LOS 门控 (用户原则: 主线
             // 发现矿需 FOV+LOS)。上一轮性能修复在这里传了 requireLos=false —
             // BlockTracker 缓存是全 chunk 扫描数据(天然透视), LOS 一关, 被岩石
