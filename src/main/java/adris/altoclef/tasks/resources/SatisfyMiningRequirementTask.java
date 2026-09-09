@@ -72,15 +72,22 @@ public class SatisfyMiningRequirementTask extends Task {
      * 铁源: 铁锭 ≥3 或 生铁 ≥3 (TaskCatalogue.smelt("iron_ingot", ...) 链
      * 自带"生铁→熔炉→铁锭", 燃料由 SmeltInFurnaceTask 自取)。
      * 棒源: 木棍 ≥2, 或 木板 ≥2, 或 原木 ≥1 (可合成木棍/木板)。
+     *
+     * (2026-09-09 口径修正, 用户目击"原木放进合成格→任务翻转收集金子") 计数
+     * 必须用含 2x2 合成格口径: 配方链把原木/木棍/木板放进 2x2 格做中间合成时,
+     * 真背包口径计数变 0 → 本判定翻 false → SatisfyMiningReq 重选石镐 → 石镐链
+     * "Breaking the crafting grid" 清格打断中间合成 → 原木回背包 → 判定又 true
+     * → 无限翻转 (16:36 场次实锤, ~6.3s/圈)。与项目约定"配方判定用含格口径"
+     * 对齐 (StorageHelper.countItemInInventoryRealIncludingCraftGrid)。
      */
     private boolean shouldPreferIronPickaxe(AltoClef mod) {
-        int ingots = StorageHelper.countItemInInventoryReal(mod, Items.IRON_INGOT);
-        int rawIron = StorageHelper.countItemInInventoryReal(mod, Items.RAW_IRON);
+        int ingots = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.IRON_INGOT);
+        int rawIron = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.RAW_IRON);
         if (ingots < 3 && rawIron < 3) return false;
-        if (StorageHelper.countItemInInventoryReal(mod, Items.STICK) >= 2) return true;
-        if (StorageHelper.countItemsInInventoryReal(mod, ItemHelper.PLANKS) >= 2) return true;
+        if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.STICK) >= 2) return true;
+        if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS) >= 2) return true;
         for (Item log : ItemHelper.LOG) {
-            if (StorageHelper.countItemInInventoryReal(mod, log) >= 1) return true;
+            if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, log) >= 1) return true;
         }
         return false;
     }
