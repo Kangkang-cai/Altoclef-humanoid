@@ -28,12 +28,14 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private final Task _wanderTask = new TimeoutWanderTask(10);
     protected Goal _cachedGoal = null;
     // (2026-08-27 确定性导航超时) 挖方块开路不在此判定:MovementProgressChecker 挖块时
-    // 走单独的"挖掘进度"检查(0.5 游戏秒内挖块进度>0.001, 破块即重置距离计时器), 不会
+    // 走单独的"挖掘进度"检查(0.5 秒内挖块进度>0.001, 破块即重置距离计时器), 不会
     // 因 1s 没位移而误判卡住。这里只判"纯行走的净位移":窗口内净位移 <1 块才判卡住。
-    // 取值 60 游戏秒(3 现实秒) — 步伐稍慢/绕路折返(净位移一时 <1 块)也不误报,
-    // 真卡住 3s 也能脱身。曾取 6(太急)→120(放置/挖块失手卡 6s)→20(用户担心净位移
-    // <1 块易误报), 现取 60。
-    protected MovementProgressChecker _checker = new MovementProgressChecker(60, 1.0, 0.5, 0.001);
+    // (2026-09-09 单位实锤修正, [NAV-STUCK] 日志两次 49s/52s 现场实锤) 原取 60 并
+    // 注释称"60 游戏秒=3 现实秒" — 错。TimerGame 计时源是 ClientConnection.ticks/20,
+    // 即【真实秒】, 60=真实 60 秒: bot 水中贴藤蔓被 baritone 假寻路卡住 52 秒
+    // (pathing=true 有 path 但 bIn 全 false 一个键不按), 任务层 60s 没到永远装死,
+    // 直游/wander 脱困机制全被这段沉默期埋没。修正为设计本意 3 真实秒。
+    protected MovementProgressChecker _checker = new MovementProgressChecker(3, 1.0, 0.5, 0.001);
     // How many times we failed to make progress on this goal (e.g. stuck/no path).
     // Used by the mob defense chain to decide when retreating is hopeless and we
     // should switch to sheltering instead.
