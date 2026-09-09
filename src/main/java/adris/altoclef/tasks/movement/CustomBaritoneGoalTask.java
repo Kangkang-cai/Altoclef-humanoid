@@ -65,6 +65,14 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private int _directSwimLastY = Integer.MIN_VALUE;
     private static final int DIRECT_SWIM_UP_MIN_Y_GAIN = 1;
 
+    // ===== 直游换气 (2026-09-09, 用户实锤"只游不按空格上浮, 快淹死了") =====
+    // GoalXZ 的 target.getY()=0 → 平游分支无条件 release(JUMP) → 埋头游不换气。
+    // 修复: 平游时头一入水(air 未满)就按 JUMP 贴水面游; 下潜时氧气 <40% 强制
+    // 上浮换气, >90% 才继续下潜(换气标志, 防在 40%~90% 之间抖动)。
+    private boolean _breaching = false;
+    private static final double BREACH_TRIGGER_FRACTION = 0.4;
+    private static final double BREACH_RELEASE_FRACTION = 0.9;
+
     public CustomBaritoneGoalTask(boolean wander) {
         _wander = wander;
     }
@@ -230,14 +238,25 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
 
     /** 直游: 停掉 baritone 寻路, 视角对准目标 XZ, 按住前进 + 按目标 Y 垂直控制
      * (2026-08-26 修复: 之前一直按 JUMP 上浮, 目标在水下(沉水眼睛)时游不下去;
-     * 目标在下方→按潜行下沉, 在上方→按跳跃上浮, 平齐→中性)。 */
+     * 目标在下方→按潜行下沉, 在上方→按跳跃上浮, 平齐→中性)。
+     * (2026-09-09 换气修复: 平齐(GoalXZ Y=0)不再是纯中性——头在水中(air 未满)
+     * 就按 JUMP 贴水面游, 防沉底淹死; 下潜分支氧气 <40% 强制换气到 >90%。)
+     * 换气期间仍按 W 朝目标推进, 人类换气也是边游边抬头。 */
     private void holdDirectSwim(AltoClef mod, BlockPos target) {
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         LookHelper.lookAt(mod, new Vec3d(target.getX() + 0.5, mod.getPlayer().getY(), target.getZ() + 0.5));
         mod.getInputControls().hold(Input.MOVE_FORWARD);
         // 目标 Y 有效 (GoalBlock/TwoBlocks, Y>0) 时才做垂直控制; GoalXZ 的 Y=0 忽略。
         double dy = target.getY() - mod.getPlayer().getY();
-        if (target.getY() > 0 && dy < -1.5) {
+        // 换气状态机 (滞回防抖): <40% 触发, >90% 解除。
+        double airFrac = mod.getPlayer().getMaxAir() > 0
+                ? (double) mod.getPlayer().getAir() / mod.getPlayer().getMaxAir() : 1.0;
+        if (_breaching) {
+            if (airFrac >= BREACH_RELEASE_FRACTION) _breaching = false;
+        } else if (airFrac < BREACH_TRIGGER_FRACTION) {
+            _breaching = true;
+        }
+        if (target.getY() > 0 && dy < -1.5 && !_breaching) {
             mod.getInputControls().hold(Input.SNEAK);   // 目标在下方 → 潜行下沉
             mod.getInputControls().release(Input.JUMP);
             // (2026-08-26 用户要求) 下潜时开疾跑 (更快逼近水下目标)。
@@ -247,8 +266,14 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
             mod.getInputControls().release(Input.SNEAK);
             mod.getInputControls().release(Input.SPRINT);
         } else {
-            mod.getInputControls().release(Input.JUMP);
+            // (2026-09-09) 平游/换气: 头在水中(air 未满)→按 JUMP 贴水面游;
+            // 头在空气里→松开自然滑行。不再无条件 release(JUMP) 埋头游。
             mod.getInputControls().release(Input.SNEAK);
+            if (_breaching || airFrac < 0.98) {
+                mod.getInputControls().hold(Input.JUMP);
+            } else {
+                mod.getInputControls().release(Input.JUMP);
+            }
             // (2026-08-26 用户要求) 游泳 (水平/水面) 关疾跑 — 开疾跑游泳会带来问题。
             mod.getInputControls().release(Input.SPRINT);
         }
@@ -262,6 +287,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getInputControls().release(Input.SPRINT);
         _directSwimControl = false;
         _directSwimUpMode = false;
+        _breaching = false;
         _checker.reset();
     }
 
