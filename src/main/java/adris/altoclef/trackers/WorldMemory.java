@@ -122,6 +122,17 @@ public final class WorldMemory {
     private final Map<Dimension, Set<BlockPos>> _portalMemory = new HashMap<>();
     // (2026-09-05) 落盘回填只做一次: 见过的门从 altoclef_portals.log 读回内存。
     private boolean _portalSeeded = false;
+    // (2026-09-09 门熄灭诊断+框保护) 曾经见过、但本次会话里确认已熄灭 (紫块消失)
+    // 的门内坐标。用途有二:
+    // ① 诊断: getPortalLocations 清除死门时记录 [PortalGuard] PURPLE LOST 日志
+    //    (附玩家位置与 32 格内恶魂/苦力怕快照) — 2026-09-09 11:11 场次实锤下界门
+    //    紫块全没而框"看似完整"(框列缺口被工作台/熔炉填了), 当时无任何日志能定案
+    //    是谁干的, 下次复现直接看日志。
+    // ② 框保护兜底: BotBehaviour.isPortalBodyBlock 的门框判定依赖"相邻还有紫块",
+    //    门一旦熄灭框就裸奔; 用本集合让死门相邻的黑曜石继续受保护。
+    private final Map<Dimension, Set<BlockPos>> _lostPortalMemory = new HashMap<>();
+    // 死门记忆上限: 门位置是有限个手工/生成结构, 正常远达不到; 仅防御异常刷入。
+    private static final int LOST_PORTAL_CAP = 256;
     private final Map<Dimension, Set<BlockPos>> _bedMemory = new HashMap<>();
 
     // Death grave memory: the most recent death point per dimension.
@@ -254,6 +265,9 @@ public final class WorldMemory {
                     out.add(p);
                 } else {
                     it.remove();
+                    // (2026-09-09 门熄灭诊断) 记死门 + 打 [PortalGuard] 快照日志,
+                    // 供 BotBehaviour 死门框保护与事后定案使用。
+                    rememberLostPortal(dim, p);
                     // 门已不存在: 同步清掉落盘记录, 防止重启后又回填死位置。
                     PortalMemoryStore.removeSeen(_mod, dim, p);
                     changed = true;
@@ -272,6 +286,68 @@ public final class WorldMemory {
     public Optional<BlockPos> getNearestPortal(Vec3d pos) {
         // 传送门不加距离上限：稀有且关键（维度切换必需），远也值得走。
         return nearest(getPortalLocations(), pos, Double.POSITIVE_INFINITY);
+    }
+
+    /**
+     * (2026-09-09 门熄灭诊断+框保护) 本会话内确认已熄灭的门内坐标 (当前维度)。
+     * 消费方: BotBehaviour.isPortalBodyBlock — 死门相邻的黑曜石 (框) 继续受
+     * 破坏/放置保护, 死门内部位置禁止放置。不做跨会话持久化 (重启后没见过就没见过)。
+     */
+    public Set<BlockPos> getLostPortalLocations() {
+        return _lostPortalMemory.getOrDefault(WorldHelper.getCurrentDimension(), Collections.emptySet());
+    }
+
+    /**
+     * (2026-09-09) 记住一扇熄灭的门并打诊断快照: 玩家位置 + 32 格内恶魂/苦力怕
+     * (爆炸是"紫块全没、黑曜石框无损"的头号嫌疑 — 爆炸对方块选择性破坏)。
+     * 零行为改动, 只写 altoclef_diag.log 与聊天栏一条。
+     */
+    private void rememberLostPortal(Dimension dim, BlockPos p) {
+        Set<BlockPos> set = _lostPortalMemory.computeIfAbsent(dim, d -> new HashSet<>());
+        if (set.size() >= LOST_PORTAL_CAP || !set.add(p)) return;
+        String player = (_mod.getPlayer() != null)
+                ? _mod.getPlayer().getBlockPos().toShortString() : "?";
+        String hostiles = describeNearbyExplosiveMobs(p);
+        String line = "[PortalGuard]\tPURPLE LOST @" + p.toShortString()
+                + " dim=" + dim + " player=" + player + hostiles;
+        adris.altoclef.Debug.logToFile("altoclef_diag.log", line);
+        adris.altoclef.Debug.logMessage("[PortalGuard] Nether portal blocks lost @ "
+                + p.toShortString() + hostiles.replace('\t', ' '));
+    }
+
+    /**
+     * (2026-09-09) 快照门坐标 32 格内能造成爆炸的生物 (恶魂火球/苦力怕), 附最近距离。
+     * 空串 = 32 格内没有爆炸源 (那就得怀疑 bot 自己或 baritone 了)。
+     */
+    private String describeNearbyExplosiveMobs(BlockPos p) {
+        if (_mod.getWorld() == null) return "";
+        try {
+            net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(
+                    p.add(-32, -32, -32), p.add(32, 32, 32));
+            StringBuilder sb = new StringBuilder();
+            appendNearby(sb, _mod.getWorld().getEntitiesByClass(
+                    net.minecraft.entity.mob.GhastEntity.class, box, e -> true), p, "ghast");
+            appendNearby(sb, _mod.getWorld().getEntitiesByClass(
+                    net.minecraft.entity.mob.CreeperEntity.class, box, e -> true), p, "creeper");
+            return sb.toString();
+        } catch (Exception e) {
+            return "\tnearby-scan-error=" + e.getClass().getSimpleName();
+        }
+    }
+
+    private void appendNearby(StringBuilder sb, List<? extends Entity> found, BlockPos p, String label) {
+        if (found == null || found.isEmpty()) return;
+        Entity nearest = null;
+        double bestSq = Double.MAX_VALUE;
+        for (Entity e : found) {
+            double sq = e.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5);
+            if (sq < bestSq) {
+                bestSq = sq;
+                nearest = e;
+            }
+        }
+        sb.append("\tnearby-").append(label).append("=x").append(found.size())
+                .append("@").append(String.format("%.1f", Math.sqrt(bestSq))).append("m");
     }
 
     public List<BlockPos> getBedLocations() {

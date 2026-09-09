@@ -483,6 +483,19 @@ public class BeatMinecraft2Task extends Task {
     private boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(18 * 60);
 
+    // (2026-09-09 进下界前排空熔炉, 用户"把烧金子挪到进传送门之前") 进下界前若
+    // 16 格内有非空熔炉 (input/fuel/output 任一有物), 先 EmptyFurnaceTask 取尽
+    // 并连炉带走: ①炉里的金锭/物资不丢 — 11:11 场次实测, 门旁炉内 8 金锭被
+    // FireRes 阶段接管后 18 分钟无人取, 随烈焰棒抢切永远留在下界; ②炉+剩燃料
+    // 随身进下界, 缓解下界 "no wood here" 燃料死结。放弃兜底 (凡"停下等"必须
+    // 有放弃上限): 外部 90s 超时或子任务 gaveUpWandering() → 30s 触发层冷却后
+    // 放行进下界 (冷却加在本闸门入口, 任务实例重建绕不过)。
+    private EmptyFurnaceTask _preNetherFurnaceDrainTask = null;
+    private long _preNetherFurnaceDrainStartMs = 0L;
+    private long _preNetherFurnaceDrainGiveUpUntilMs = 0L;
+    private final TimerGame _preNetherDrainScanTimer = new TimerGame(1.0);
+    private BlockPos _preNetherDrainScanPos = null;
+
     /**
      * [Diag-flow] 分支切换诊断: debug 状态变化 ≈ 子任务切换。每次变化
      * 打出全部关键条件快照, 下次测试直接从日志看横跳是哪个条件翻转
@@ -1792,6 +1805,11 @@ public class BeatMinecraft2Task extends Task {
                         if (bootsTask != null) {
                             return bootsTask;
                         }
+                        // (2026-09-09 进下界前排空熔炉) 金靴做完 → 排炉 → 进门。
+                        Task preNetherDrain = getPreNetherFurnaceDrainTask(mod);
+                        if (preNetherDrain != null) {
+                            return preNetherDrain;
+                        }
                         setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
                         return _goToNetherTask;
                     }
@@ -1801,6 +1819,11 @@ public class BeatMinecraft2Task extends Task {
                     return _gearTask;
                 }
                 // Then go to the nether.
+                // (2026-09-09 进下界前排空熔炉) 主路径同样过排炉闸门。
+                Task preNetherDrain = getPreNetherFurnaceDrainTask(mod);
+                if (preNetherDrain != null) {
+                    return preNetherDrain;
+                }
                 setDebugState("Going to Nether");
                 return _goToNetherTask;
             }
@@ -1967,6 +1990,91 @@ public class BeatMinecraft2Task extends Task {
             }
         }
         return false;
+    }
+
+    /**
+     * (2026-09-09 进下界前排空熔炉) 进下界 (_goToNetherTask) 前的最后一道闸:
+     * 16 格内存在非空熔炉 (input/fuel/output 任一有物) → 返回 EmptyFurnaceTask
+     * (取尽三槽并连炉拆走); 没有 → null 放行。判定口径与 findNearbyFurnace 一致
+     * (BlockTracker + 16 格暴力兜底, 仅非空), 扫描 1s 节流。实例粘性: 一旦派发
+     * 就持续返回同一实例直到完成/放弃, 不被其他分支抢成 1-tick 任务。
+     * 放弃上限: 外部 90s 超时或 gaveUpWandering() → 置 30s 触发层冷却后放行,
+     * 防止进下界主线被一颗够不着的炉子卡死 (凡"停下等"必须有放弃上限)。
+     */
+    private Task getPreNetherFurnaceDrainTask(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (now < _preNetherFurnaceDrainGiveUpUntilMs) {
+            return null;
+        }
+        if (_preNetherDrainScanTimer.elapsed()) {
+            _preNetherDrainScanTimer.reset();
+            _preNetherDrainScanPos = scanNearestNonEmptyFurnace(mod);
+        }
+        if (_preNetherDrainScanPos == null) {
+            // 没有非空炉 → 缓存实例作废, 直接放行。
+            _preNetherFurnaceDrainTask = null;
+            return null;
+        }
+        if (_preNetherFurnaceDrainTask == null) {
+            _preNetherFurnaceDrainTask = new EmptyFurnaceTask();
+            _preNetherFurnaceDrainStartMs = now;
+            Debug.logMessage("(PreNetherDrain) Non-empty furnace @ "
+                    + _preNetherDrainScanPos.toShortString()
+                    + " — draining (input/fuel/output) and taking the furnace before entering Nether.");
+            Debug.logToFile("altoclef_diag.log",
+                    "[MAIN-FIX]\t[PreNetherDrain]\tdrain furnace @"
+                            + _preNetherDrainScanPos.toShortString());
+        }
+        if (now - _preNetherFurnaceDrainStartMs > 90_000 || _preNetherFurnaceDrainTask.gaveUpWandering()) {
+            Debug.logMessage("(PreNetherDrain) Furnace drain gave up (timeout/unreachable), proceeding to Nether. 30s cooldown.");
+            Debug.logToFile("altoclef_diag.log",
+                    "[MAIN-FIX]\t[PreNetherDrain]\tgive up, cooldown 30s");
+            _preNetherFurnaceDrainGiveUpUntilMs = now + 30_000;
+            _preNetherFurnaceDrainTask = null;
+            _preNetherDrainScanPos = null; // 下次扫描重新找炉
+            return null;
+        }
+        setDebugState("Draining nearby furnace before Nether");
+        return _preNetherFurnaceDrainTask;
+    }
+
+    /**
+     * (2026-09-09) 16 格内最近的非空熔炉坐标; 没有则 null。BlockTracker 命中优先
+     * (零扫描成本), miss 才走 1s 节流暴力扫 (同 findNearbyFurnace 成本口径)。
+     */
+    private BlockPos scanNearestNonEmptyFurnace(AltoClef mod) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.FURNACE)) {
+            if (pos.isWithinDistance(player, FURNACE_GRAB_RANGE)
+                    && mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
+                    && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
+                double sq = pos.getSquaredDistance(player);
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    best = pos;
+                }
+            }
+        }
+        if (best != null) return best;
+        int r = (int) Math.ceil(FURNACE_GRAB_RANGE);
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos pos = player.add(dx, dy, dz);
+                    if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
+                            && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
+                        double sq = pos.getSquaredDistance(player);
+                        if (sq < bestSq) {
+                            bestSq = sq;
+                            best = pos;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     // (2026-08-27 熔炉即收) 与 findNearbyCraftingTable 同款: 16 格内是否有可用熔炉。

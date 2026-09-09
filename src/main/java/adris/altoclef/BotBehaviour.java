@@ -60,6 +60,13 @@ public class BotBehaviour {
      * 挖掘与放置两条路径共用同一判定, 避免"挖有保护、放没保护"的单边缺口。
      */
     private boolean isPortalBodyBlock(BlockPos pos) {
+        // (2026-09-09 死门内部禁放置) 门熄灭后内部是空气, 原判定放行 → bot 会把
+        // 工作台/熔炉放进门框缺口 (2026-09-09 11:11 场次实锤: 工作台 -23,59,67 /
+        // 熔炉 -23,60,67 被放进下界门框列)。死门内部位置一律禁止破坏判定为真
+        // (挖空气无意义) 并禁止放置。
+        if (_mod.getWorldMemory().getLostPortalLocations().contains(pos)) {
+            return true;
+        }
         Block block = _mod.getWorld().getBlockState(pos).getBlock();
         if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_PORTAL_FRAME) {
             return true;
@@ -67,6 +74,14 @@ public class BotBehaviour {
         if (block == Blocks.OBSIDIAN || block == Blocks.CRYING_OBSIDIAN) {
             for (Direction dir : Direction.values()) {
                 if (_mod.getWorld().getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
+                    return true;
+                }
+            }
+            // (2026-09-09 门熄灭后框仍保护) 原判定依赖"相邻还有紫块"; 门一旦熄灭
+            // (被炸/被挖), 框瞬间从保护里裸奔。与"曾见过但已熄灭"的门内坐标相邻
+            // (曼哈顿/欧氏距离 1) 的黑曜石同样保护。
+            for (BlockPos lost : _mod.getWorldMemory().getLostPortalLocations()) {
+                if (lost.isWithinDistance(pos, 1.0)) {
                     return true;
                 }
             }
