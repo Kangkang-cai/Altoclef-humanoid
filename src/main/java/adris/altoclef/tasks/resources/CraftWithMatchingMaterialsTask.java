@@ -111,7 +111,10 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
             // We may need to convert our raw materials into our "matching" materials.
             int trueCanCraftTotal = 0;
             for (Item sameCheck : _sameResourceTarget.getMatches()) {
-                int trueCount = StorageHelper.countItemsInInventoryReal(mod, sameCheck);
+                // (2026-09-09 含合成台格口径) 与上方 canCraftTotal 判定保持同一口径:
+                // 材料被配方书填充搬进 3x3 合成台格后从真实背包"消失", 纯背包计数会
+                // 误判"实数不够" → getSpecificSameResourceTask(床类未覆写, logError+null)。
+                int trueCount = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, sameCheck);
                 int trueCanCraft = (trueCount / _sameResourcePerRecipe) * _recipe.outputCount();
                 trueCanCraftTotal += trueCanCraft;
             }
@@ -147,8 +150,13 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
     //  判 0 -> canCraftTotal<need -> getAllSameResourcesTask -> Collect 999999
     //  wool -> 无意义地杀羊/游荡, 永不退回合成路径; 改真实背包计数, 与
     //  ResourceTask / CollectFoodTask / CollectWoolTask 口径统一。
+    // (2026-09-09 含合成格口径, 修做床 ping-pong) 真实背包计数不含合成格:
+    //  配方书一键填充(instantFillRecipeViaBook)把羊毛搬进 3x3 台格后计数 3->0,
+    //  canCraftTotal<need → 每轮填充后翻面 Collect 999999 wool 打断自家合成,
+    //  关屏羊毛回背包 → 再填充 → 再打断, 08:27 tasks log 实锤 ~15 轮到天亮。
+    //  改含格计数(2x2+3x3)后材料进格不再触发翻面, 合成一路走完。
     protected int getExpectedTotalCountOfSameItem(AltoClef mod, Item sameItem) {
-        return StorageHelper.countItemsInInventoryReal(mod, sameItem);
+        return StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, sameItem);
     }
 
     // Virtual

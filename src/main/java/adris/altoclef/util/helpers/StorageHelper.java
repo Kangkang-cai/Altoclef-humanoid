@@ -207,6 +207,23 @@ public class StorageHelper {
                 }
             }
         }
+        // (2026-09-09 补 3x3 合成台格) 上版只扫 2x2 PlayerSlot.CRAFT_INPUT_SLOTS。
+        // 3x3 合成台打开时(如做床) 配方书一键填充 instantFillRecipeViaBook 把材料
+        // 搬进 CraftingTableSlot 格, 材料同样从真实背包"消失" → CraftWithMatchingMaterialsTask
+        // 判缺料翻面 "Collect 999999 wool" 打断自家合成 (2026-09-09 08:27 tasks log
+        // 做床 ping-pong ~15 轮实锤)。与 hasRecipeMaterialsOrTarget 的 3x3 口径对齐。
+        if (player.currentScreenHandler instanceof CraftingScreenHandler) {
+            for (Slot tableSlot : CraftingTableSlot.INPUT_SLOTS) {
+                ItemStack stack = getItemStackInSlot(tableSlot);
+                if (stack.isEmpty()) continue;
+                for (Item item : items) {
+                    if (stack.getItem() == item) {
+                        count += stack.getCount();
+                        break;
+                    }
+                }
+            }
+        }
         return count;
     }
 
