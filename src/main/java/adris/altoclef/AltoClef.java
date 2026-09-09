@@ -20,6 +20,7 @@ import adris.altoclef.ui.CommandStatusOverlay;
 import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
+import adris.altoclef.util.helpers.NavStuckWatchdog;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
 import baritone.altoclef.AltoClefSettings;
@@ -284,6 +285,14 @@ public class AltoClef implements ModInitializer {
         // tick 准心瞄谁: 脸上最近的攻击诉求拿到瞄准权, 避免"任务层瞄远目标 &
         // 力场瞄近怪"每 tick 互相抢 lookAt 覆盖, 准心永远停在远目标身上。
         getControllerExtras().applyCombatAim();
+
+        // [NAV-STUCK] 原地不动/水中浮动看门狗 (2026-09-09, 只读诊断):
+        // "泡在水里/站原地不动但挂着导航任务" 此前无任何日志可证。250ms 采样,
+        // 4s 窗口净位移判卡, 卡住时连同 baritone 活跃态 + 按键 + 任务链一起落盘
+        // altoclef_diag.log。零行为改动。
+        if (inGame()) {
+            NavStuckWatchdog.tick(this);
+        }
         _blockTracker.postTickTask();
 
         _butler.tick();
