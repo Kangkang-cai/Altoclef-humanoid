@@ -494,11 +494,15 @@ public class ItemHelper {
      * 若背包数量 ≤ Settings.reservedBuildingBlockCount (默认 64, 一组) 则视为
      * 不可丢 — 保证 bot 始终留一组可合成熔炉/石工具。超过保留量才允许丢弃。
      * 供 canThrowAwayStack 与 StorageHelper.getRandomThrowableSlot 共用。
+     * (2026-09-09 修订) ① 石头家族【合并计数】而非按物品单算 — 各留 30 个
+     * 也凑不出一组 64。② 纳入黑石(blackstone): 下界没有圆石, 黑石就是下界的
+     * "圆石"(可合成石镐/熔炉), 用户实测下界石头丢光后挖不到圆石死循环
+     * (14:25-14:27 tasks log: Collect Cobblestone → 挖竖井 no ores found ×3 轮)。
      */
     public static boolean isReservedBlockUnderLimit(AltoClef mod, ItemStack stack) {
         Item item = stack.getItem();
-        if (item != Items.COBBLESTONE && item != Items.COBBLED_DEEPSLATE) return false;
-        int have = StorageHelper.countItemInInventoryReal(mod, item);
+        if (item != Items.COBBLESTONE && item != Items.COBBLED_DEEPSLATE && item != Items.BLACKSTONE) return false;
+        int have = StorageHelper.countItemsInInventoryReal(mod, Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.BLACKSTONE);
         return have <= mod.getModSettings().getReservedBuildingBlockCount();
     }
 

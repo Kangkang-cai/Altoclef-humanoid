@@ -454,6 +454,11 @@ public class StorageHelper {
             ItemStack stack = getItemStackInSlot(slot);
             if (stack == null || stack.isEmpty()) continue;
             if (ItemHelper.isStackProtected(mod, stack)) continue;
+            // (2026-09-09 保留闸门补洞, 用户"丢垃圾至少保留一组石头") 旧实现
+            // 对 BULK 清单(圆石排第一位!)无任何保留检查: 背包满+无垃圾时, 30 个
+            // 圆石也会被整堆扔掉 → 下界捡不回 → 挖不到圆石死循环。圆石家族
+            // (圆石/深板岩圆石/黑石)在保留量内绝不参与大堆腾位丢弃。
+            if (ItemHelper.isReservedBlockUnderLimit(mod, stack)) continue;
             if (stack.getCount() > bestCount) {
                 bestCount = stack.getCount();
                 best = slot;
@@ -505,7 +510,9 @@ public class StorageHelper {
                 // throwawayItems 方块(树苗/泥土/安山岩等)都是垃圾, 有就丢 — 旧
                 // 逻辑把它们的总量也塞进保留闸门, 合计 <64 时一个都不丢。
                 Item blockItem = stack.getItem();
-                if (blockItem == Items.COBBLESTONE || blockItem == Items.COBBLED_DEEPSLATE) {
+                // (2026-09-09) 黑石=下界的"圆石"(可做石镐/熔炉), 与圆石/深板岩圆石
+                // 同进保留闸门合计, 与 isReservedBlockUnderLimit 口径一致。
+                if (blockItem == Items.COBBLESTONE || blockItem == Items.COBBLED_DEEPSLATE || blockItem == Items.BLACKSTONE) {
                     totalBlockThrowaways += stack.getCount();
                     throwawayBlockItems.add(slot);
                 } else {
@@ -815,8 +822,9 @@ public class StorageHelper {
             if (ArrayUtils.contains(ItemHelper.BED, stack.getItem())) continue;
             if (ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) continue;
             if (ArrayUtils.contains(ItemHelper.PLANKS, stack.getItem())) continue;
-            // (2026-08-25 保留方块) 圆石/深板岩圆石 ≤ 保留量不参与随机丢
-            if (ItemHelper.isReservedBlockUnderLimit(mod, stack)) continue;
+            // (2026-09-09 用户拍板"除非被随机丢弃") 保底随机丢是最后手段:
+            // 此处【去掉】石头保留豁免 — 垃圾/大堆建材两条常规路径都找不到
+            // 可丢时, 石头家族允许参与随机丢腾位 (宁丢一组石头, 不永久空转)。
             if (wouldLeaveNoPickaxe(mod, stack)) continue;
             if (ItemHelper.isStackProtected(mod, stack)) {
                 protectedSlots.add(slot);

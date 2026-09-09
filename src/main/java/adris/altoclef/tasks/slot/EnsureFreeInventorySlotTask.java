@@ -122,7 +122,11 @@ public class EnsureFreeInventorySlotTask extends Task {
         }
         // 我们为腾位主动拿起的 bulk 建材（可能在 throwaway 列表之外，
         // 如花岗岩）：直接扔，别卡在光标里。
+        // (2026-09-09 保留闸门补洞) 圆石家族(圆石/深板岩圆石/黑石)在保留量
+        // (一组)内不从光标抛丢 — 与 getBulkDisposalSlot / getGarbageSlot 口径
+        // 一致。此路径此前无保留检查, 圆石进光标即被整堆扔掉。
         if (!cursorStack.isEmpty() && StorageHelper.isBulkDisposalItem(cursorStack.getItem())
+                && !ItemHelper.isReservedBlockUnderLimit(mod, cursorStack)
                 && !ItemHelper.isStackProtected(mod, cursorStack)) {
             setDebugState("Throwing bulk stack from cursor");
             return new ThrowCursorTask();
