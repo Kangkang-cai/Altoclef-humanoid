@@ -433,6 +433,26 @@ public interface WorldHelper {
     }
 
     /**
+     * (2026-09-09 23:20 床链判别日志, 零行为改动) canBreak 的四个子条件逐个
+     * 报告失败点: hardness / avoidBreaking / plausibleToBreak / canReach
+     * (canReach=区块可达+tracker unreachable)。仅供诊断路径调用 — 与 canBreak
+     * 相同的检查顺序, 不改任何判定。返回 null = 可挖。
+     */
+    public static String canBreakFailReason(AltoClef mod, BlockPos pos) {
+        boolean prevInteractionPaused = mod.getExtraBaritoneSettings().isInteractionPaused();
+        mod.getExtraBaritoneSettings().setInteractionPaused(false);
+        try {
+            if (mod.getWorld().getBlockState(pos).getHardness(mod.getWorld(), pos) < 0) return "hardness<0";
+            if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(pos)) return "avoidBreaking";
+            if (!MineProcess.plausibleToBreak(new CalculationContext(mod.getClientBaritone()), pos)) return "not-plausible";
+            if (!canReach(mod, pos)) return "canReach:false(tracker-unreachable?)";
+            return null;
+        } finally {
+            mod.getExtraBaritoneSettings().setInteractionPaused(prevInteractionPaused);
+        }
+    }
+
+    /**
      * (2026-08-30 没镐别挖石头墙, 用户) 供 Baritone 寻路 avoidBlockBreak 谓词用:
      * 该方块所需采矿等级 > 当前等级 → 应避开 (没镐时石头/矿石都挖不动, 让寻路
      * 改走门)。关键: 只用 vanilla BlockState.isToolRequired (经

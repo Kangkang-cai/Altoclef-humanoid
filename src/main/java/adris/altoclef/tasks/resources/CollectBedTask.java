@@ -48,16 +48,30 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
     // 闸门此前缺: ①真实方块仍是床(缓存陈旧/床被拆 → canBreak 对空气照样过);
     // ②区块已加载才信世界校验; ③贴液体不挖。isBlockPerceivable 对床是
     // 无条件通过(VisibilityHelper 床保险, 穿墙), 重复判无意义, 移除。
-    private boolean isMineableBedInRange(AltoClef mod, BlockPos bed, BlockPos playerPos) {
-        if (!bed.isWithinDistance(playerPos, BED_GRAB_RANGE)) return false;
-        if (!mod.getChunkTracker().isChunkLoaded(bed)) return false;
-        if (!(mod.getWorld().getBlockState(bed).getBlock() instanceof BedBlock)) return false;
-        if (WorldHelper.isAdjacentToLiquid(mod, bed)) return false;
-        return WorldHelper.canBreak(mod, bed);
+    private String bedRejectReason(AltoClef mod, BlockPos bed, BlockPos playerPos) {
+        if (!bed.isWithinDistance(playerPos, BED_GRAB_RANGE)) return "far96";
+        if (!mod.getChunkTracker().isChunkLoaded(bed)) return "chunk-unloaded";
+        Block actual = mod.getWorld().getBlockState(bed).getBlock();
+        if (!(actual instanceof BedBlock)) return "not-bed(" + actual.asItem() + ")";
+        if (WorldHelper.isAdjacentToLiquid(mod, bed)) return "liquid";
+        String cbFail = WorldHelper.canBreakFailReason(mod, bed);
+        return cbFail == null ? null : ("canBreak:" + cbFail);
     }
 
     // 闸门命中诊断(5s 节流): 记录选中的床坐标与距离, 复现"切了挖床却锁不到"时直接定位。
     private static long s_lastGateDiagMs = 0;
+
+    // (2026-09-09 23:20 判别日志, 用户"别废话了直接加日志, 我复现一遍你亲自部署")
+    // 22:58 场次三个事实互相矛盾, 无法用当前源码解释:
+    //   ① 挖床分支已派发 (tasks log t=3 -> <Mine And Collect [[beds]]> 持续 13s)
+    //   ② 本类 GateHit/MineGiveUp 在 diag 全文 0 条 — 父任务每 tick 重跑
+    //      (Task.tickInternal:67), 闸门若通过 5s 节流下 13s 应有 2-3 条 GateHit
+    //   ③ 内层 [Diag-blind] cached=22 valid=0 — canBreak 对全部 22 张床失败
+    // 本轮日志覆盖 onResourceTick 每条 return 路径:
+    //   START 行(构建标记, 证明新 jar 在跑) + 每秒决策行(闸门输入/最终路径)
+    //   + 逐床淘汰原因(bedRejectReason, canBreak 细分到四子条件) + 闸门翻转日志。
+    private static long s_lastDecisionDiagMs = 0;
+    private static BlockPos s_lastGateBed = null;
 
     public CollectBedTask(Item[] beds, ItemTarget wool, int count) {
         // Top 3 are wool, must be the same.
@@ -86,6 +100,8 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
+        Debug.logMessage("[CollectBed] START build=" + Debug.BUILD_ID);
+        Debug.logToFile("altoclef_diag.log", "[CollectBed]\tSTART\tbuild=" + Debug.BUILD_ID);
         mod.getBlockTracker().trackBlock(BEDS);
         super.onResourceStart(mod);
     }
@@ -108,31 +124,68 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
         // 的 LOS 感知拒绝而挖不到 → 无目标 → 偏置探索乱逛/卡死不动。
         // 现在: 仅当 96 格内存在【真正可感知 + 可挖】的床才切挖床; 否则一律走
         // super 的杀羊做床正路。
+        long nowMs = System.currentTimeMillis();
+        boolean logDecision = nowMs - s_lastDecisionDiagMs > 1000;
         if (mod.getBlockTracker().anyFound(BEDS)) {
             _bedsSeenRecently.reset();
         }
-        if (!_bedsSeenRecently.elapsed() && System.currentTimeMillis() >= s_mineBedGiveUpUntilMs) {
+        boolean hysteresisActive = !_bedsSeenRecently.elapsed();
+        boolean coolingDown = nowMs < s_mineBedGiveUpUntilMs;
+
+        if (hysteresisActive && !coolingDown) {
             List<BlockPos> knownBeds = mod.getBlockTracker().getKnownLocations(ItemHelper.itemsToBlocks(ItemHelper.BED));
             BlockPos playerPos = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
             BlockPos gateBed = null;
+            String rejects = "player-null";
             if (playerPos != null) {
                 double bestSq = Double.POSITIVE_INFINITY;
+                StringBuilder rj = new StringBuilder();
+                int shown = 0;
                 for (BlockPos bed : knownBeds) {
-                    if (!isMineableBedInRange(mod, bed, playerPos)) continue;
+                    String reason = bedRejectReason(mod, bed, playerPos);
+                    if (reason != null) {
+                        if (shown < 3) {
+                            if (shown > 0) rj.append("; ");
+                            rj.append(bed.toShortString()).append("@")
+                                    .append((int) Math.sqrt(bed.getSquaredDistance(playerPos))).append("m:")
+                                    .append(reason);
+                            shown++;
+                        }
+                        continue;
+                    }
                     double sq = bed.getSquaredDistance(playerPos);
                     if (sq < bestSq) {
                         bestSq = sq;
                         gateBed = bed;
                     }
                 }
+                rejects = rj.toString();
+            }
+            if (logDecision) {
+                s_lastDecisionDiagMs = nowMs;
+                Debug.logToFile("altoclef_diag.log",
+                        "[CollectBed]\ttick build=" + Debug.BUILD_ID
+                                + " hysteresis=true cooldownMs=" + (coolingDown ? (s_mineBedGiveUpUntilMs - nowMs) : 0)
+                                + " knownBeds=" + knownBeds.size()
+                                + " gateBed=" + (gateBed == null ? "NONE" : gateBed.toShortString())
+                                + " rejects=[" + rejects + "]");
             }
             if (gateBed == null) {
+                if (!bedPosEquals(gateBed, s_lastGateBed)) {
+                    s_lastGateBed = null;
+                    Debug.logToFile("altoclef_diag.log", "[CollectBed]\tGATE-CHANGE\t-> NONE (wool path)");
+                }
                 // 96 格内没有可感知/可挖的床 → 回到作者正路: 杀羊取毛做床。
                 markProtectedBedsUnreachable(mod);
                 return super.onResourceTick(mod);
             }
+            if (!bedPosEquals(gateBed, s_lastGateBed)) {
+                s_lastGateBed = gateBed;
+                Debug.logToFile("altoclef_diag.log", "[CollectBed]\tGATE-CHANGE\t-> "
+                        + gateBed.toShortString() + " dist="
+                        + (int) Math.sqrt(gateBed.getSquaredDistance(playerPos)));
+            }
             // (B修诊断) 闸门命中: 打出选中的床与距离, 便于对账挖床子任务是否真锁到了它。
-            long nowMs = System.currentTimeMillis();
             if (nowMs - s_lastGateDiagMs > 5000) {
                 s_lastGateDiagMs = nowMs;
                 Debug.logToFile("altoclef_diag.log",
@@ -147,6 +200,7 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
             // → 放弃本次挖床, 冷却 30s, 回杀羊取毛做床 — 不再站到天亮。
             if (s_bedMineTask == null) {
                 s_bedMineTask = new MineAndCollectTask(new ItemTarget(ItemHelper.BED, 1), BEDS, MiningRequirement.HAND);
+                Debug.logToFile("altoclef_diag.log", "[CollectBed]\tMINE-TASK\tnew MineAndCollect instance created");
             }
             if (s_bedMineTask.gaveUpWandering()) {
                 Debug.logMessage("[CollectBed] mine-bed subtask gave up (2s no action), cooldown "
@@ -156,12 +210,25 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
                                 + (MINE_BED_GIVEUP_COOLDOWN_MS / 1000) + "s -> wool path fallback");
                 s_mineBedGiveUpUntilMs = System.currentTimeMillis() + MINE_BED_GIVEUP_COOLDOWN_MS;
                 s_bedMineTask = null;
+                s_lastGateBed = null;
                 return super.onResourceTick(mod);
             }
             return s_bedMineTask;
         }
+        if (logDecision) {
+            s_lastDecisionDiagMs = nowMs;
+            Debug.logToFile("altoclef_diag.log",
+                    "[CollectBed]\ttick build=" + Debug.BUILD_ID
+                            + " hysteresis=" + hysteresisActive + " cooldownMs="
+                            + (coolingDown ? (s_mineBedGiveUpUntilMs - nowMs) : 0)
+                            + " -> wool path (gate skipped)");
+        }
         markProtectedBedsUnreachable(mod);
         return super.onResourceTick(mod);
+    }
+
+    private static boolean bedPosEquals(BlockPos a, BlockPos b) {
+        return a == null ? b == null : a.equals(b);
     }
 
     @Override

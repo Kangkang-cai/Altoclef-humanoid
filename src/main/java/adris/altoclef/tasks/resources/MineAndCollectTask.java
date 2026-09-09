@@ -1367,17 +1367,38 @@ public class MineAndCollectTask extends ResourceTask {
             List<BlockPos> known = mod.getBlockTracker().getKnownLocations(_blocks);
             int valid = 0;
             int perceivable = 0;
+            int blacklisted = 0;
+            int unbreakable = 0;
             BlockPos nearestRejected = null;
             double nearestRejectedDistSq = Double.POSITIVE_INFINITY;
+            BlockPos nearestHardFail = null;
+            double nearestHardFailDistSq = Double.POSITIVE_INFINITY;
+            String nearestHardFailReason = null;
             for (BlockPos pos : known) {
-                if (_blacklist.contains(pos)) continue;
-                if (!WorldHelper.canBreak(mod, pos)) continue;
+                double dSq = pos.getSquaredDistance(mod.getPlayer().getBlockPos());
+                if (_blacklist.contains(pos)) {
+                    blacklisted++;
+                    if (dSq < nearestHardFailDistSq) {
+                        nearestHardFailDistSq = dSq;
+                        nearestHardFail = pos;
+                        nearestHardFailReason = "blacklisted(task-level)";
+                    }
+                    continue;
+                }
+                if (!WorldHelper.canBreak(mod, pos)) {
+                    unbreakable++;
+                    if (dSq < nearestHardFailDistSq) {
+                        nearestHardFailDistSq = dSq;
+                        nearestHardFail = pos;
+                        nearestHardFailReason = WorldHelper.canBreakFailReason(mod, pos);
+                    }
+                    continue;
+                }
                 valid++;
                 if (VisibilityHelper.isBlockPerceivable(mod, pos)) {
                     perceivable++;
                     continue;
                 }
-                double dSq = pos.getSquaredDistance(mod.getPlayer().getBlockPos());
                 if (dSq < nearestRejectedDistSq) {
                     nearestRejectedDistSq = dSq;
                     nearestRejected = pos;
@@ -1389,9 +1410,16 @@ public class MineAndCollectTask extends ResourceTask {
                     .append(": cached=").append(known.size())
                     .append(" valid=").append(valid)
                     .append(" perceivable=").append(perceivable)
+                    .append(" blacklisted=").append(blacklisted)
+                    .append(" unbreakable=").append(unbreakable)
                     .append(" oreMemory=").append(mod.getWorldMemory().getOreLocations(_blocks).size())
                     .append(" caveAir=").append(air[0])
                     .append(" air=").append(air[1]);
+            if (nearestHardFail != null) {
+                sb.append(" | nearest hard-fail ").append(nearestHardFail.toShortString())
+                        .append(" (").append((int) Math.sqrt(nearestHardFailDistSq)).append("m): ")
+                        .append(nearestHardFailReason);
+            }
             if (nearestRejected != null) {
                 sb.append(" | nearest rejected ").append(nearestRejected.toShortString())
                         .append(" (").append((int) Math.sqrt(nearestRejectedDistSq)).append("m): ")

@@ -19,6 +19,26 @@ public class Debug {
     private static volatile PrintWriter _fileLogWriter;
     private static volatile String _fileLogPath;
 
+    // (2026-09-09 分会话日志轮转, 用户"总和 diag 68MB 全是以前没用现象") 每个
+    // JVM 会话固定一个时间戳, logToFile 把 "xxx.log" 落盘为 "xxx-<stamp>.log" —
+    // diag/debugstate/trace/craftclick 等从此按会话分文件, 与 tasks 日志同款,
+    // 不再跨会话往同一文件堆历史。
+    public static final String SESSION_STAMP = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
+    // 构建标识: 写进每个新日志文件头 + 床链诊断行。用于秒判"运行的 class 是不是
+    // 新构建" (2026-09-09 22:58 场次: 行为特征=旧 jar 但 mods jar 字节含新代码,
+    // 无法定案, 只能用运行时标记直接对质)。
+    public static final String BUILD_ID = "beddiag-20260909-2320";
+    private static final java.util.Set<String> _sessionHeaderWritten = new java.util.HashSet<>();
+
+    private static String toSessionFile(String filename) {
+        if (filename == null) return null;
+        int dot = filename.lastIndexOf('.');
+        if (dot <= 0) return filename;
+        String ext = filename.substring(dot);
+        if (ext.length() > 6) return filename; // 非常规扩展名不动
+        return filename.substring(0, dot) + "-" + SESSION_STAMP + ext;
+    }
+
     public static void logInternal(String message) {
         System.out.println("ALTO CLEF: " + message);
     }
@@ -37,18 +57,24 @@ public class Debug {
     public static void logToFile(String filename, String message) {
         synchronized (_fileLogMutex) {
             try {
-                if (_fileLogWriter == null || !filename.equals(_fileLogPath)) {
+                String sessionFile = toSessionFile(filename);
+                if (_fileLogWriter == null || !sessionFile.equals(_fileLogPath)) {
                     if (_fileLogWriter != null) {
                         _fileLogWriter.flush();
                         _fileLogWriter.close();
                     }
-                    File file = new File(filename);
+                    File file = new File(sessionFile);
                     File parent = file.getParentFile();
                     if (parent != null && !parent.exists()) {
                         parent.mkdirs();
                     }
                     _fileLogWriter = new PrintWriter(new BufferedWriter(new FileWriter(file, true), 8192), true);
-                    _fileLogPath = filename;
+                    _fileLogPath = sessionFile;
+                    // 每会话每文件只写一次头行: 会话起点 + 构建标识。
+                    if (_sessionHeaderWritten.add(sessionFile)) {
+                        String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
+                        _fileLogWriter.println("==== SESSION START " + ts + " build=" + BUILD_ID + " ====");
+                    }
                 }
                 String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
                 _fileLogWriter.println(ts + "  " + message);
