@@ -188,7 +188,9 @@ public class PlayerExtraController {
      * 里十字准星的判定结果 (实体/方块/MISS), bot 出刀条件因此和真人玩家
      * 点鼠标的条件完全一致。
      */
-    private boolean isCrosshairOn(Entity entity) {
+    // (2026-09-09 public) 猪灵交易也复用同一套准心校验 (用户"必须准心指向猪灵
+    // 无遮挡才允许交易, 使用通用的自动瞄准") — 与战斗出刀同一判定来源。
+    public boolean isCrosshairOn(Entity entity) {
         HitResult result = MinecraftClient.getInstance().crosshairTarget;
         return result instanceof EntityHitResult && ((EntityHitResult) result).getEntity() == entity;
     }

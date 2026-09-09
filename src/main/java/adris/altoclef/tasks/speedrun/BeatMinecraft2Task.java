@@ -151,6 +151,18 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
+     * (2026-09-09 进下界前必须持盾, 用户"bot 进下界前没有先做一个盾牌, 这不对")
+     * 漏洞: OVERWORLD case 里铁装门槛是 `!gearMinMet && !eyeGearSatisfied` —
+     * 钻石装达标后整段铁装阶段被跳过, IRON_GEAR_MIN 的盾牌要求失效, 两处钻石
+     * 放弃分支 + 主路径直接 return _goToNetherTask 都没有再查盾 → 裸盾进下界。
+     * 补一道进下界前的最后一道闸: 缺盾就补做 (铁锭/木板链由合成任务自动续)。
+     */
+    private static Task getPreNetherShieldTask(AltoClef mod) {
+        if (shieldMet(mod)) return null;
+        return TaskCatalogue.getItemTask(Items.SHIELD, 1);
+    }
+
+    /**
      * (2026-08-30 铁套保护, 用户 "获得工具后再做一个铁套保护自己, 不然太容易死")
      * 铁甲四件是否全部【穿在身上】。只有穿上才算完成, 保证收集到的铁甲会被
      * EquipArmorTask 实际装备, 而不只是躺在背包里。
@@ -1664,15 +1676,20 @@ public class BeatMinecraft2Task extends Task {
                     // 累计超限则永久放弃, 不再返回钻石收集任务 (落空往下走去下界)。
                     if (_gearTaskIsDiamond) {
                         recordDiamondCollectActive(mod);
-                        if (_diamondCollectGivenUp) {
-                            // (2026-09-04 补金靴) 放弃钻石后进下界前只补金靴, 不碰钻石件
-                            Task bootsTask = getPreNetherGoldenBootsTask(mod);
-                            if (bootsTask != null) {
-                                return bootsTask;
-                            }
-                            setDebugState("Giving up diamond gear, proceeding forward (limit reached)");
-                            return _goToNetherTask;
+                    if (_diamondCollectGivenUp) {
+                        // (2026-09-04 补金靴) 放弃钻石后进下界前只补金靴, 不碰钻石件
+                        Task bootsTask = getPreNetherGoldenBootsTask(mod);
+                        if (bootsTask != null) {
+                            return bootsTask;
                         }
+                        // (2026-09-09 进下界前必须持盾) 缺盾先补, 见 getPreNetherShieldTask。
+                        Task preNetherShield = getPreNetherShieldTask(mod);
+                        if (preNetherShield != null) {
+                            return preNetherShield;
+                        }
+                        setDebugState("Giving up diamond gear, proceeding forward (limit reached)");
+                        return _goToNetherTask;
+                    }
                     }
                     setDebugState("Getting gear for Ender Eye journey");
                     return _gearTask;
@@ -1865,6 +1882,11 @@ public class BeatMinecraft2Task extends Task {
                         if (preNetherDrain != null) {
                             return preNetherDrain;
                         }
+                        // (2026-09-09 进下界前必须持盾) 缺盾先补, 见 getPreNetherShieldTask。
+                        Task preNetherShield = getPreNetherShieldTask(mod);
+                        if (preNetherShield != null) {
+                            return preNetherShield;
+                        }
                         setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
                         return _goToNetherTask;
                     }
@@ -1882,6 +1904,11 @@ public class BeatMinecraft2Task extends Task {
                 Task preNetherDrain = getPreNetherFurnaceDrainTask(mod);
                 if (preNetherDrain != null) {
                     return preNetherDrain;
+                }
+                // (2026-09-09 进下界前必须持盾) 缺盾先补, 见 getPreNetherShieldTask。
+                Task preNetherShield = getPreNetherShieldTask(mod);
+                if (preNetherShield != null) {
+                    return preNetherShield;
                 }
                 setDebugState("Going to Nether");
                 return _goToNetherTask;

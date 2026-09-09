@@ -90,6 +90,21 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 外围探索连续失败的容忍次数 (超过后本任务结束, 交给上层重决策/兜底)。
     private static final int MAX_FAIL_COUNT = 10;
 
+    // =========================================================================
+    // (2026-09-09 探深后再巡逻, 用户"还没探索完整怎么就触发巡逻了, 连刷怪笼
+    // 都没找到") 根因: 走廊格子扫描半径只有 FLOOR_SCAN_RADIUS=48, bot 站在
+    // 堡垒入口时"没走过的格子"只统计 48 格内的 — 前沿很快走空就被误判"探索
+    // 完了"转入最久没走巡逻, 深处走廊/刷怪笼根本没进过扫描视野。
+    // 修法: 前沿走空时先"探深" — 朝最远已走格再往外探 EXPLORE_EXTEND_BLOCKS,
+    // 把更深的走廊拉进扫描半径; 连续 EXPAND_MAX_FAIL 次探深都没发现新格子,
+    // 才承认真的走完了, 转入轮换巡逻。
+    // =========================================================================
+    private static final int EXPLORE_EXTEND_BLOCKS = 16;
+    private static final int EXPAND_MAX_FAIL = 3;
+    private int _expandFailStreak = 0;
+    // 当前目标是否为"探深"目标 (不是真实走廊格, 到达/失败都不记 visited)。
+    private boolean _currentIsProbe = false;
+
     private final MovementProgressChecker _progress = new MovementProgressChecker();
 
     // 走廊格子状态: 已走集合 + 最近一次走的时间戳 (用于"最久没走"巡逻轮换)。
@@ -156,6 +171,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _failCounter = 0;
         _currentTarget = null;
         _corridorMode = false;
+        // (2026-09-09) 探深状态随任务重开复位 (走廊记忆 _visitedCells 仍保留)。
+        _expandFailStreak = 0;
+        _currentIsProbe = false;
         // 注意: _visitedCells / _lastVisitTicks 故意不清空 —— 上层在超时兜底
         // 与人类式探索间切换重跑本任务时, "走过的路"是人类式记忆, 不该失忆。
         // (2026-09-05 跨会话) 走廊模式再把上次会话走过的格子从文件里读回来
@@ -224,16 +242,27 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         // 到达: 记账, 换下一个格子。
+        // (2026-09-09) 探深目标不是走廊格: 到达不记 visited (避免垃圾格子落盘),
+        // 等 ≤2s 后的周期扫描把更深走廊拉进 _floorTargets 再选目标。
         if (player.isWithinDistance(_currentTarget, CORRIDOR_ARRIVED_DISTANCE)) {
-            markVisited(_currentTarget);
+            if (_currentIsProbe) {
+                _currentIsProbe = false;
+            } else {
+                markVisited(_currentTarget);
+            }
             _currentTarget = null;
             return null;
         }
 
         // 卡住: 记账跳过, 换方向 (不重走同一条死路)。
+        // (2026-09-09) 探深目标卡住只放弃该目标, 不记 visited。
         if (!_progress.check(mod)) {
             Debug.logMessage("[FortressExplore] corridor step failed, marking visited and re-picking.");
-            markVisited(_currentTarget);
+            if (_currentIsProbe) {
+                _currentIsProbe = false;
+            } else {
+                markVisited(_currentTarget);
+            }
             _currentTarget = null;
             _failCounter++;
             return null;
@@ -278,7 +307,52 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 }
             }
         }
-        return frontier != null ? frontier : oldest;
+        if (frontier != null) {
+            // 有前沿 = 扫描半径内还有没走过的走廊, 探深失败计数清零。
+            _expandFailStreak = 0;
+            _currentIsProbe = false;
+            return frontier;
+        }
+        // (2026-09-09 探深后再巡逻) 前沿走空 ≠ 城堡走完 — 48 格扫描半径外的
+        // 深处走廊还看不见。先朝"最远已走格"再往外探一段, 把新走廊拉进扫描
+        // 视野; 连续 EXPAND_MAX_FAIL 次都没探出新格子才承认走完, 转轮换巡逻。
+        if (_expandFailStreak < EXPAND_MAX_FAIL) {
+            BlockPos farthest = null;
+            double bestSq = -1;
+            for (BlockPos cell : _floorTargets) {
+                double sq = cell.getSquaredDistance(player);
+                if (sq > bestSq) {
+                    bestSq = sq;
+                    farthest = cell;
+                }
+            }
+            if (farthest != null) {
+                double dx = farthest.getX() - player.getX();
+                double dz = farthest.getZ() - player.getZ();
+                double len = Math.sqrt(dx * dx + dz * dz);
+                BlockPos probe;
+                if (len < 1.0) {
+                    probe = farthest;
+                } else {
+                    probe = new BlockPos(
+                            farthest.getX() + (int) Math.round(dx / len * EXPLORE_EXTEND_BLOCKS),
+                            farthest.getY(),
+                            farthest.getZ() + (int) Math.round(dz / len * EXPLORE_EXTEND_BLOCKS));
+                }
+                _expandFailStreak++;
+                _currentIsProbe = true;
+                Debug.logMessage("[FortressExplore] corridor frontier empty within scan radius, probing deeper to "
+                        + probe.toShortString() + " (attempt " + _expandFailStreak + "/" + EXPAND_MAX_FAIL + ")");
+                return probe;
+            }
+        }
+        if (_expandFailStreak >= EXPAND_MAX_FAIL) {
+            Debug.logMessage("[FortressExplore] no new corridors after " + EXPAND_MAX_FAIL
+                    + " deeper probes, switching to oldest-visit patrol.");
+            _expandFailStreak = 0;
+        }
+        _currentIsProbe = false;
+        return oldest;
     }
 
     private void markVisited(BlockPos cell) {

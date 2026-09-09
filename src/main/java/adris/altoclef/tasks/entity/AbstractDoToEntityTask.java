@@ -9,13 +9,17 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.GoalRunAway;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.Optional;
 
@@ -38,6 +42,16 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     // (日志: Getting to block <-> Getting to block 6x thrash, 近战不持续贴近)。
     private BlockPos _repositionTarget = null;
     private final TimerGame _repositionSwitchTimer = new TimerGame(3);
+
+    // =========================================================================
+    // (2026-09-09 遮挡消除钩子, 用户"猪灵交易被挡时先走动, 绕不开就挖掉眼前方块")
+    // LOS 被挡先走既有绕位逻辑; 持续 OBSTRUCTION_PERSIST_SECONDS 仍没绕开 → 调
+    // onObstructionPersistent 钩子, 子类可接管消除遮挡 (如挖方块)。默认返回 null
+    // = 维持绕位, 战斗等其他任务行为完全不变 (scope 收敛)。
+    // =========================================================================
+    private static final double OBSTRUCTION_PERSIST_SECONDS = 8;
+    private long _losBlockedSinceTick = Long.MIN_VALUE;
+    private long _lastObstructionLogTick = Long.MIN_VALUE;
 
     public AbstractDoToEntityTask(double maintainDistance, double combatGuardLowerRange, double combatGuardLowerFieldRadius) {
         _maintainDistance = maintainDistance;
@@ -120,9 +134,27 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             if (result == null || result.getType() != HitResult.Type.ENTITY) {
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
+                // (2026-09-09 遮挡消除钩子) 绕位 8s 仍被挡 → 交子类决定是否挖除。
+                long now = WorldHelper.getTicks();
+                if (_losBlockedSinceTick == Long.MIN_VALUE) {
+                    _losBlockedSinceTick = now;
+                } else if (now - _losBlockedSinceTick > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
+                    BlockPos obstruction = findObstructingBlock(mod, entity);
+                    if (obstruction != null) {
+                        if (now - _lastObstructionLogTick > 100) {
+                            _lastObstructionLogTick = now;
+                            Debug.logToFile("altoclef_diag.log", "[LOS-Obstruction]\tblocked >"
+                                    + (int) OBSTRUCTION_PERSIST_SECONDS + "s, obstruction="
+                                    + obstruction.toShortString() + ", asking task to clear");
+                        }
+                        Task clearTask = onObstructionPersistent(mod, entity, obstruction);
+                        if (clearTask != null) return clearTask;
+                    }
+                }
                 return repositionForLineOfSight(mod, entity);
             }
             _progress.reset();
+            _losBlockedSinceTick = Long.MIN_VALUE;
             return onEntityInteract(mod, entity);
         } else {
             _withinInteract = false;
@@ -146,6 +178,28 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
 
     // Called every tick while we're still approaching the target (outside interact range).
     protected void onEntityApproach(AltoClef mod, Entity entity) {
+    }
+
+    /**
+     * (2026-09-09 遮挡消除钩子) 视线被方块挡住且绕位持续无效 (≥8s) 时调用。
+     * 返回一个任务接管消除遮挡 (如 DestroyBlockTask 挖掉遮挡方块); 返回 null
+     * = 默认行为, 继续绕位。挡住的具体方块由 findObstructingBlock 给出。
+     */
+    protected Task onObstructionPersistent(AltoClef mod, Entity entity, BlockPos obstruction) {
+        return null;
+    }
+
+    /**
+     * (2026-09-09) 相机到目标包围盒中心的射线上, 第一个挡住视线的方块;
+     * 视线通畅返回 null。
+     */
+    private BlockPos findObstructingBlock(AltoClef mod, Entity entity) {
+        Vec3d from = mod.getPlayer().getCameraPosVec(1.0F);
+        Vec3d to = entity.getBoundingBox().getCenter();
+        BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(from, to,
+                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+        if (hit.getType() == HitResult.Type.BLOCK) return hit.getBlockPos();
+        return null;
     }
 
     /**
@@ -223,6 +277,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         mod.getMobDefenseChain().setTargetEntity(null);
         mod.getMobDefenseChain().resetForceField();
         _repositionTarget = null; // (2026-08-31) 长任务停止时清掉绕位记忆, 避免遗留下次误用
+        _losBlockedSinceTick = Long.MIN_VALUE; // (2026-09-09) 遮挡计时一并清掉
     }
 
     protected abstract Optional<Entity> getEntityTarget(AltoClef mod);

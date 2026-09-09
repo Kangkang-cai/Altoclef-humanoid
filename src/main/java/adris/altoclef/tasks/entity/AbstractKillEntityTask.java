@@ -18,6 +18,7 @@ import net.minecraft.entity.mob.AbstractSkeletonEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.EndermanEntity;
+import net.minecraft.entity.mob.WitherSkeletonEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
@@ -86,6 +87,20 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // "高一格到一格半" (约 1.5 格), 让准心落在头/眼睛区域 — 激怒末影人 +
     // 打到本体。当前 aim 点是 getPos() (脚底), 所以加 1.5。
     private static final double ENDERMAN_AIM_OFFSET = 1.5;
+
+    /**
+     * (2026-09-09 凋零骷髅特殊对待, 用户"打凋零靠的太近了, 必须控制靠近距离")
+     * 凋零骷髅近战带凋零效果, 贴身白挨凋零太亏。它不参与小白那套"贴身 3.0":
+     * 接近距离 = 攻击射程 (entityReachRange, 默认 3.2), 一进射程就停, 绝不往它
+     * 身上凑; 它自己冲脸时原地举盾硬打, 不后退 (用户确认不后退)。其余生物维持
+     * MELEE_HUG_DISTANCE 不变。
+     */
+    private static double approachDistance(AltoClef mod, Entity entity) {
+        if (entity instanceof WitherSkeletonEntity) {
+            return Math.max(2.6, mod.getModSettings().getEntityReachRange());
+        }
+        return MELEE_HUG_DISTANCE;
+    }
 
     private static final Item[] WEAPON_ITEMS = new Item[]{
             Items.DIAMOND_SWORD,
@@ -253,7 +268,9 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // MELEE_HUG_DISTANCE=1.5, 与盾战一致), 到达攻击判定且攻击冷却到位时用
         // attack() 作为【侧写】叠加在移动之上 — 不再"靠近→停→打一下→靠近"的交替
         // (用户实测杀小白/羊/牛无盾时交替停顿)。到射程内才抬手, 避免空挥。
-        Task move = new GetToEntityTask(entity, MELEE_HUG_DISTANCE);
+        // (2026-09-09 凋零骷髅) 接近距离按目标类型区分: 凋零骷髅=射程即停,
+        // 其余维持 MELEE_HUG_DISTANCE 贴身。
+        Task move = new GetToEntityTask(entity, approachDistance(mod, entity));
         double reach = mod.getModSettings().getEntityReachRange();
         boolean inReach = entity.squaredDistanceTo(mod.getPlayer()) <= reach * reach;
         // Equip weapon
@@ -322,7 +339,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // 持续的"往小白脸前贴"(0.8)子任务 —— GetToEntityTask 只是子动作, 不会顶掉
     // 杀怪父任务; 盾的 hold / 挥剑作为侧写叠加在移动之上跨 tick 生效。这样小白
     // 后退时 bot 始终粘着贴, 不会停原地眼睁睁掉距。
-    Task move = new GetToEntityTask(entity, MELEE_HUG_DISTANCE);
+    // (2026-09-09 凋零骷髅) 盾战逼近同样按类型区分: 凋零骷髅=射程即停不贴身。
+    Task move = new GetToEntityTask(entity, approachDistance(mod, entity));
 
     if (!inReach) {
         _counterHitsLeft = 0;

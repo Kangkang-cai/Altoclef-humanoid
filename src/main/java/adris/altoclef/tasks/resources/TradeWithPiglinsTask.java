@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.entity.AbstractDoToEntityTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
@@ -13,7 +14,11 @@ import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
+import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
@@ -23,6 +28,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
+import net.minecraft.util.math.BlockPos;
 
 import java.util.HashSet;
 import java.util.Optional;
@@ -148,6 +154,9 @@ public class TradeWithPiglinsTask extends ResourceTask {
         @Override
         protected void onStart(AltoClef mod) {
             super.onStart(mod);
+            // (2026-09-09) 准心等待/挖除状态不跨轮残留。
+            _aimWaitStartTick = Long.MIN_VALUE;
+            _clearTask = null;
 
             mod.getBehaviour().push();
 
@@ -243,6 +252,29 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 }
             }
 
+            // (2026-09-09 交易拟人化, 用户"必须准心指向猪灵无遮挡才允许交易,
+            // 使用通用的自动瞄准") 通用自动瞄准 = 战斗出刀同款: 先 LookHelper.lookAt
+            // 猪灵身体中心, 再用客户端 crosshairTarget 校验准心真的落在猪灵身上
+            // (与玩家画面看到的准心一致, 隐含视线无遮挡) 才丢金锭 interactEntity。
+            // 准心没落上就等待转头, 等待期不拉黑猪灵 (barterTimeout 持续重置)。
+            LookHelper.lookAt(mod, entity.getBoundingBox().getCenter());
+            if (!mod.getControllerExtras().isCrosshairOn(entity)) {
+                long now = WorldHelper.getTicks();
+                if (_aimWaitStartTick == Long.MIN_VALUE) _aimWaitStartTick = now;
+                _barterTimeout.reset();
+                if (now - _aimWaitStartTick > 60) {
+                    // 3s 准心仍未落上: 多半准线路径被方块挡 (父层 LOS 判定 COLLIDER
+                    // 口径与准心 raycast 有差异) 或转头太慢。每 3s 节流记一条诊断;
+                    // 持续被挡 8s 后父层 onObstructionPersistent 会接管挖除。
+                    Debug.logToFile("altoclef_diag.log",
+                            "[PiglinTrade]\tcrosshair not on piglin for 3s (waiting rotation / possibly obstructed)");
+                    _aimWaitStartTick = now;
+                }
+                setDebugState("Aiming crosshair at piglin before trading");
+                return null;
+            }
+            _aimWaitStartTick = Long.MIN_VALUE;
+
             setDebugState("Trading with piglin");
 
             if (mod.getSlotHandler().forceEquipItem(Items.GOLD_INGOT)) {
@@ -250,6 +282,41 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 _intervalTimeout.reset();
             }
             return null;
+        }
+
+        // (2026-09-09 交易遮挡消除, 用户"先走动, 卡住才挖") 父层绕位 8s 仍被同一
+        // 遮挡挡住 → 挖掉它。传送门本体/门框/死门记忆邻域/箱子/木桶/刷怪笼绝不挖。
+        private Task _clearTask = null;
+        private long _aimWaitStartTick = Long.MIN_VALUE;
+
+        @Override
+        protected Task onObstructionPersistent(AltoClef mod, Entity entity, BlockPos obstruction) {
+            if (!isSafeToMineForTrade(mod, obstruction)) {
+                Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tobstruction "
+                        + obstruction.toShortString() + " is protected, keep repositioning");
+                return null; // 维持父层绕位
+            }
+            setDebugState("Mining obstructing block for trade LOS: " + obstruction.toShortString());
+            if (_clearTask == null || !_clearTask.isActive()) {
+                _clearTask = new DestroyBlockTask(obstruction);
+            }
+            return _clearTask;
+        }
+
+        /**
+         * (2026-09-09) 交易挖除遮挡的安全闸: 与 BotBehaviour.isPortalBodyBlock
+         * 对齐 (传送门/门框/死门记忆邻域黑曜石), 另加战利品容器与刷怪笼。
+         */
+        private static boolean isSafeToMineForTrade(AltoClef mod, BlockPos pos) {
+            Block b = mod.getWorld().getBlockState(pos).getBlock();
+            if (b == Blocks.NETHER_PORTAL || b == Blocks.END_PORTAL || b == Blocks.END_PORTAL_FRAME
+                    || b == Blocks.OBSIDIAN || b == Blocks.CRYING_OBSIDIAN) return false;
+            if (b == Blocks.CHEST || b == Blocks.TRAPPED_CHEST || b == Blocks.BARREL
+                    || b == Blocks.SPAWNER) return false;
+            for (BlockPos lost : mod.getWorldMemory().getLostPortalLocations()) {
+                if (lost.isWithinDistance(pos, 1.0)) return false;
+            }
+            return true;
         }
 
         @Override
