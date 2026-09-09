@@ -7,6 +7,7 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.ItemStack;
+import net.minecraft.screen.slot.SlotActionType;
 
 public class EnsureFreePlayerCraftingGridTask extends Task {
     @Override
@@ -34,6 +35,21 @@ public class EnsureFreePlayerCraftingGridTask extends Task {
             if(!items.isEmpty()){
                 return new ClickSlotTask(slot);
             }
+        }
+        // (2026-09-09 收成品残留) 输入格已空后, 输出格若还有残留成品(上一个
+        // craftAll 批量合成收第一批即达标滞留的, 17:29:53 实锤 oak_planksx4)
+        // 一并收走: 输入格已空, 取输出不会触发再合成。光标被占先清光标; 背包
+        // 放不下先走腾位级联(全程过保留闸门)。
+        ItemStack outStack = StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT);
+        if (!outStack.isEmpty()) {
+            if (!StorageHelper.getItemStackInCursorSlot().isEmpty()) {
+                return new EnsureFreeCursorSlotTask();
+            }
+            if (!mod.getItemStorage().getSlotThatCanFitInPlayerInventory(outStack, true).isPresent()) {
+                setDebugState("Freeing space for leftover crafting output");
+                return new EnsureFreeInventorySlotTask();
+            }
+            return new ClickSlotTask(PlayerSlot.CRAFT_OUTPUT_SLOT, SlotActionType.QUICK_MOVE);
         }
         // 格子已空: 立即释放租约, 配方链马上可以接手(不等 3s 过期)。
         CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CLEAR);

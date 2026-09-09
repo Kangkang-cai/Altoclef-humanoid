@@ -4,9 +4,13 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.ResourceTask;
+import adris.altoclef.tasks.slot.EnsureFreePlayerCraftingGridTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.*;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.slots.PlayerSlot;
+import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.Item;
 
 import java.util.ArrayList;
@@ -62,6 +66,14 @@ public class CollectPlanksTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+        // (2026-09-09 收尾防残留) 木板目标已达成但 2x2 格还有残留(craftAll 批量
+        // 合成收第一批即达标: 输入格滞留原木、输出格滞留木板, 17:29:53 实锤
+        // 原木x30 + oak_planksx4) → 先收尾清格再结束, 不继续合成。否则残留死格
+        // 阻塞下一个配方填充(背包满时 crafting_table 填充死等 26s)。
+        if (super.isFinished(mod)) {
+            setDebugState("Planks target met, cleaning 2x2 grid leftovers");
+            return new EnsureFreePlayerCraftingGridTask();
+        }
 
         // (2026-08-31 采集粘滞) 正在砍原木子任务进行中: 保持采集, 不因
         // "已有原木够转木板"切回合成 (不合而打断采集节奏)。
@@ -137,6 +149,19 @@ public class CollectPlanksTask extends ResourceTask {
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
 
+    }
+
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        if (!super.isFinished(mod)) return false;
+        // (2026-09-09 收尾防残留) 木板达标不算完: 2x2 格残留(craftAll 批量合成
+        // 收第一批即达标: 输入格原木 + 输出格木板)必须先清, 否则阻塞下一个
+        // 配方填充 (17:29:53-17:30:20 crafting_table 死等实锤)。
+        if (!StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT).isEmpty()) return false;
+        for (Slot s : PlayerSlot.CRAFT_INPUT_SLOTS) {
+            if (!StorageHelper.getItemStackInSlot(s).isEmpty()) return false;
+        }
+        return true;
     }
 
     @Override

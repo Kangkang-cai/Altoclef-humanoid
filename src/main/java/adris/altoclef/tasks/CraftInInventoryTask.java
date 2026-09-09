@@ -2,7 +2,10 @@ package adris.altoclef.tasks;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.resources.CollectRecipeCataloguedResourcesTask;
+import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
+import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
+import adris.altoclef.tasks.slot.EnsureFreePlayerCraftingGridTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasksystem.CraftingGridArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
@@ -14,6 +17,7 @@ import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.screen.slot.SlotActionType;
 
 /**
  * Crafts an item within the 2x2 inventory crafting grid.
@@ -76,6 +80,18 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+        // (2026-09-09 收尾防残留) 目标数量已达成 → 收尾模式: 不持 CRAFT 租约
+        // (清格链需要 CLEAR), 也绝不再发配方填充 — 配方书填充带 craftAll, 会把
+        // 剩余材料继续转光 = 过度合成。只做收尾: 输入格材料退回背包 → 输出格
+        // 残留收走 → 全清后 isFinished 放行。
+        // 17:29:53 实锤: 木板 craftAll 一次塞 30 原木进格, 收第一批即达标停链,
+        // 输出格 oak_planksx4 + 输入格原木x30 滞留, 阻死下一个 crafting_table
+        // 配方填充 (背包满无法退料 → "Waiting for recipe book click..." 死等 26s)。
+        if (super.isFinished(mod)) {
+            setDebugState("Targets met: cleaning up 2x2 grid (no more crafting)");
+            return new EnsureFreePlayerCraftingGridTask();
+        }
+
         // (2026-09-09 [GridWar] 根修) 本任务的收成品/正式合成阶段都在操作 2x2
         // 格, 与清格链互斥: 清格(CLEAR)持有时整体等待, 防止收成品时输入格被
         // 抽走。材料收集阶段被顺带等待无碍(有界 ≤3s)。子任务 CraftGeneric*
@@ -151,6 +167,19 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
         mod.getBehaviour().pop();
+    }
+
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        if (!super.isFinished(mod)) return false;
+        // (2026-09-09 收尾防残留) 目标数量够了还不算完: 2x2 输入格/输出格必须
+        // 全清 (收尾由 onResourceTick 的收尾模式完成), 防止"主体完成即停"把
+        // 残留死格留给下一个配方。
+        if (!StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT).isEmpty()) return false;
+        for (Slot s : PlayerSlot.CRAFT_INPUT_SLOTS) {
+            if (!StorageHelper.getItemStackInSlot(s).isEmpty()) return false;
+        }
+        return true;
     }
 
     @Override
