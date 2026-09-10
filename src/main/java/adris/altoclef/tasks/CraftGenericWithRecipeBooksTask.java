@@ -3,6 +3,7 @@ package adris.altoclef.tasks;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.slot.ClickSlotTask;
+import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
@@ -47,6 +48,10 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
     private static long _giveUpUntilMs = 0;
     private String _progressKey = "";
     private long _progressSinceMs = 0;
+
+    // (2026-09-10 残留兜底) "非本配方残留成品已单拿一份"标志, 防止收成品↔
+    // 新产出循环(输入格还有料时输出格会立刻再产出一份)。全清后复位。
+    private boolean _leftoverOutputTaken = false;
 
     public CraftGenericWithRecipeBooksTask(RecipeTarget target) {
         _target = target;
@@ -132,15 +137,51 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         // 输出格不再就绪 → 重置哑火计时
         _gettingOutputSinceMs = 0;
 
-        // (2026-09-09 配方填充死锁修复 #1 残留成品接收) 输出格有【非本配方目标】
-        // 的残留成品(上一个 craftAll 批量合成收第一批就达标滞留的, 如
-        // oak_planksx4) — 旧逻辑直接掉到下方发配方填充, 而输出格被占着, 本配方
-        // 产出永不出现 → "Waiting for recipe book click..." 死等 (17:29:54
-        // 实锤)。先把残留收进背包; 放不下时 ReceiveCraftingOutputSlotTask 内部
-        // 会走 EnsureFreeInventorySlotTask 腾位级联(全程过保留闸门)。
+        // (2026-09-10 铁剑超量合成修复 #2 残留兜底改退料) 输出格有【非本配方目标】
+        // 的残留成品 — 91b0408d 旧逻辑 ReceiveCraftingOutputSlotTask(outputSlot, true)
+        // 走 all=true → takeAll 恒 true → QUICK_MOVE 输出格 = vanilla 按格内余料
+        // 连续合成到清空, 格内超量材料(配方书 craftAll 填的整堆铁/棍)一口气全变成
+        // 残留品(铁剑 5 把连出, 15:56 场次实锤)。改为四步状态机:
+        //  ① 光标有料先放回背包(③退料 PICKUP 的后续);
+        //  ② 先赚一份: 单拿(PICKUP)残留成品一次, flag 防循环;
+        //  ③ 逐格清输入格退料回背包 — 退第一格即破坏配方, 输出格新产出随之消失
+        //     (净损 1 份材料, 相比旧逻辑"全部超量制作"可接受);
+        //  ④ 输入格已空后输出格若仍有成品, 单拿收尾(输入格空, 取输出不会触发
+        //     再合成 — 同 EnsureFreePlayerCraftingGridTask 09-09 原则)。
+        //  全清后 flag 复位, 掉到下方正常发填充。放不下背包一律先走腾位级联。
         if (!output.isEmpty() && _target.getOutputItem() != output.getItem()) {
-            setDebugState("Receiving leftover output (not ours): " + output.getItem().getTranslationKey());
-            return new ReceiveCraftingOutputSlotTask(outputSlot, true);
+            setDebugState("Draining leftover output + grid (not ours): " + output.getItem().getTranslationKey());
+            ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
+            if (!cursorNow.isEmpty()) {
+                Optional<Slot> fitCursor = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursorNow, false);
+                if (fitCursor.isPresent()) {
+                    return new ClickSlotTask(fitCursor.get());
+                }
+                return new EnsureFreeCursorSlotTask();
+            }
+            if (!_leftoverOutputTaken) {
+                if (!mod.getItemStorage().getSlotThatCanFitInPlayerInventory(output, true).isPresent()) {
+                    setDebugState("Freeing space for leftover output");
+                    return new EnsureFreeInventorySlotTask();
+                }
+                _leftoverOutputTaken = true;
+                return new ClickSlotTask(outputSlot);
+            }
+            Slot[] drainSlots = bigCrafting ? CraftingTableSlot.INPUT_SLOTS : PlayerSlot.CRAFT_INPUT_SLOTS;
+            for (Slot drainSlot : drainSlots) {
+                if (!StorageHelper.getItemStackInSlot(drainSlot).isEmpty()) {
+                    return new ClickSlotTask(drainSlot);
+                }
+            }
+            ItemStack outNow = StorageHelper.getItemStackInSlot(outputSlot);
+            if (!outNow.isEmpty()) {
+                if (!mod.getItemStorage().getSlotThatCanFitInPlayerInventory(outNow, true).isPresent()) {
+                    setDebugState("Freeing space for drained output");
+                    return new EnsureFreeInventorySlotTask();
+                }
+                return new ClickSlotTask(outputSlot);
+            }
+            _leftoverOutputTaken = false;
         }
 
         // If a material is found in cursor, move it to the inventory.
@@ -189,9 +230,16 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         }
 
         // Request to fill in a recipe. Just piggy back off of the slot delay system.
+        // (2026-09-10 铁剑超量合成修复) craftAll=true = shift 点配方书 = 按背包
+        // 材料尽量填满格子(10 铁+整堆棍全进 3x3)。目标只要 1 把剑时, 收 1 把达标
+        // 后格内余料经"残留成品接收"分支被 QUICK_MOVE 连续合成榨干 — 全部铁锭
+        // 变铁剑(用户实测 15:56 场次)。以前不暴露是因为旧逻辑残留时死等 12s 关台,
+        // 关台副作用把超量材料退回背包; 91b0408d 修死循环后副作用消失。
+        // 改 craftAll=false: fill 只填精确 1 份配方, 格子永不超量, 下游收货/清格
+        // 全部自然安全。速度损失 = 每份多一轮 fill 点击, 目标数量普遍 ≤2, 可忽略。
         if (mod.getSlotHandler().canDoSlotAction()) {
             mod.getSlotHandler().registerSlotAction();
-            StorageHelper.instantFillRecipeViaBook(mod, _target.getRecipe(), _target.getOutputItem(), true);
+            StorageHelper.instantFillRecipeViaBook(mod, _target.getRecipe(), _target.getOutputItem(), false);
         }
 
 
