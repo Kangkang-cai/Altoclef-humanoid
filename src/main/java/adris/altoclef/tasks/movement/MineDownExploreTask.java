@@ -55,6 +55,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int DEFAULT_TARGET_Y = 10;
     // Maximum number of staircase steps before giving up.
     private static final int MAX_DIG_STEPS = 40;
+    // (2026-09-10 空跳修复) 每步入队 2 格 (ground.up() + ground), 预算按
+    // 【真实挖掉方块数】计, 步数预算 = MAX_*_DIG_STEPS * BLOCKS_PER_STEP。
+    private static final int BLOCKS_PER_STEP = 2;
+    // (2026-09-10 空跳修复) 单 tick 空跳步数上限: 防巨型空腔(沿路径成百上千格
+    // 全空气)下 fast-forward while 真死循环。跨 tick 可继续跳, 不影响正确性。
+    private static final int SKIP_STEPS_PER_TICK = 512;
     // How far around the player we look for a cave while digging (blocks).
     // 8 (was 5): diag logs showed the bot mining straight past caves whose
     // mouths were 6-7 blocks away — a human would notice and walk in.
@@ -177,6 +183,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     private BlockPos _digStart;
     private int _step = 0;
+    // (2026-09-10 空跳修复) 本实例【真实挖掉】的方块数 = 本轮挖掘预算的消耗量。
+    // 与几何路径索引 _step 严格分离: _step 会被 FAST-FORWARD 空跳刷高, 不代表
+    // 任何真实挖掘; reachedBottom 的步数上限只看 _realDigs — 空跳不能再替
+    // "一镐没挖"的实例宣告 "Shaft done" (10:47 场次死循环根因)。
+    private int _realDigs = 0;
+    // 上一 tick 派发 DestroyBlockTask 的目标格。下个 tick 确认它已变空气
+    // ⇒ 真的被挖掉了, 记 1 格预算 (判定必须先于 skipAirAndWater 弹队首)。
+    private BlockPos _miningTarget = null;
+    // 连续空跳步数计数 (跨 tick 累计, 找到实体方块后清零), 用于诊断日志与
+    // 单 tick 空跳上限。
+    private int _skipStreak = 0;
     private boolean _inCave = false;
     private Task _subTask;
     // (2026-09-06 闸门级诊断) 本实例是否已打过首次 [CaveScan] 评估行。
@@ -268,6 +285,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
         _digStart = mod.getPlayer().getBlockPos().down();
         _step = 0;
+        _realDigs = 0;
+        _miningTarget = null;
+        _skipStreak = 0;
         _inCave = false;
         _waterSkipped = 0;
         _liquidRetreats = 0;
@@ -487,14 +507,21 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // freeze forever trying to dig it. Water/air blocks at the head are
         // simply skipped — we dig the solid blocks BEHIND the water instead
         // (slow but works underwater).
+        // (2026-09-10 空跳修复) 先记账再弹队列: 上一 tick 派发的 DestroyBlockTask
+        // 目标格此刻已变空气 ⇒ 真实挖掉, 消耗 1 格预算。必须放在 skipAirAndWater
+        // 之前 — 被挖掉的格马上会从队首弹走, 错过这次判定预算就永远不消耗。
+        if (_miningTarget != null) {
+            if (WorldHelper.isAir(mod, _miningTarget)) {
+                _realDigs++;
+            }
+            _miningTarget = null;
+        }
         skipAirAndWater(mod);
         // FAST-FORWARD: if the whole step was already mined (re-entering our
         // own tunnel), advance immediately instead of one step per tick.
-        while (_digQueue.isEmpty() && !reachedBottom(mod)) {
-            _step++;
-            enqueueNextStep();
-            skipAirAndWater(mod);
-        }
+        // (2026-09-10 空跳修复) 空跳只推进几何路径 _step, 不消耗真实挖掘预算;
+        // 单 tick 空跳有上限, 巨型空腔分多个 tick 跳, 不挂死单 tick。
+        advanceToSolid(mod);
         // 远离液体策略（用户原则）：挖开贴着水/岩浆的方块会让液体灌进
         // 通道（bot 在水里移动极慢 → 卡顿；岩浆 → 伤害+掉落物被烧）。
         // 精确堵水需要流体 BFS 找全部源头 + 放置规划 + 失败重试，复杂度
@@ -504,7 +531,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (_liquidRetreats >= MAX_LIQUID_RETREATS) {
                 Debug.logMessage("[Liquid-avoid] too many liquid encounters, ending this dig run.");
                 _digQueue.clear();
-                _step = MAX_DIG_STEPS;
+                // (2026-09-10 空跳修复) 结束 run 改为耗尽真实挖掘预算 (原 _step=MAX
+                // 依赖几何索引触发 reachedBottom, 预算语义改后不再成立)。
+                _realDigs = (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) * BLOCKS_PER_STEP;
                 return null;
             }
             _liquidRetreats++;
@@ -513,11 +542,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + _liquidRetreats + "/" + MAX_LIQUID_RETREATS + ")");
             retreatAndRedig(mod);
             skipAirAndWater(mod);
-            while (_digQueue.isEmpty() && !reachedBottom(mod)) {
-                _step++;
-                enqueueNextStep();
-                skipAirAndWater(mod);
-            }
+            advanceToSolid(mod);
         }
         if (_digQueue.isEmpty()) {
             return null;
@@ -532,10 +557,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             return new SatisfyMiningRequirementTask(MiningRequirement.WOOD);
         }
 
-        setDebugState((_ascendMode ? "Climbing back up to target Y (step "
-                : _tunnelMode ? "Digging a tunnel to find ores (step "
-                : "Digging down to find ores (step ") + _step + "/" + (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) + ")");
-        return new DestroyBlockTask(_digQueue.peek());
+        // (2026-09-10 空跳修复) 进度显示改为真实挖掘预算消耗 (dug X/Y),
+        // _step 已是几何路径索引, 空跳后会远超步数上限, 显示出来有误导性。
+        int budget = (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) * BLOCKS_PER_STEP;
+        setDebugState((_ascendMode ? "Climbing back up to target Y (dug "
+                : _tunnelMode ? "Digging a tunnel to find ores (dug "
+                : "Digging down to find ores (dug ") + _realDigs + "/" + budget + ")");
+        _miningTarget = _digQueue.peek();
+        return new DestroyBlockTask(_miningTarget);
     }
 
     /**
@@ -546,6 +575,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private void retreatAndRedig(AltoClef mod) {
         _digQueue.clear();
         _step = 0;
+        _skipStreak = 0;
+        _miningTarget = null;
         _digStart = mod.getPlayer().getBlockPos().down();
         int[] newDir;
         do {
@@ -553,6 +584,35 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         } while (newDir[0] == _dirX && newDir[1] == _dirZ);
         _dirX = newDir[0];
         _dirZ = newDir[1];
+    }
+
+    /**
+     * (2026-09-10 空跳修复) 沿几何路径推进, 直到队首是实体方块 (或预算耗尽 /
+     * 单 tick 空跳上限)。核心不变量: 空跳只 _step++ (几何路径索引), 绝不动
+     * _realDigs (真实挖掘预算) — 旧实现 "重入旧自挖隧道 → 空 40 步一 tick
+     * 刷完 → reachedBottom 判到底 → 'Shaft done' 收工 → 父层 5s 重建 →
+     * 无限空转" 的死循环由此根除: 预算未耗尽时路径会一直延伸, 挖到路径上
+     * 第一块实体方块为止。
+     */
+    private void advanceToSolid(AltoClef mod) {
+        while (_digQueue.isEmpty() && !reachedBottom(mod) && _skipStreak < SKIP_STEPS_PER_TICK) {
+            _step++;
+            _skipStreak++;
+            enqueueNextStep();
+            skipAirAndWater(mod);
+        }
+        if (!_digQueue.isEmpty()) {
+            // 跳了很远才摸到实体方块: 打一条诊断, 便于现场确认空跳修复生效。
+            if (_skipStreak >= MAX_DIG_STEPS) {
+                Debug.logToFile("altoclef_diag.log", "[MineDown-FF] skipped " + _skipStreak
+                        + " air steps, first solid at " + _digQueue.peek().toShortString()
+                        + " (realDigs=" + _realDigs + ", step=" + _step + ")");
+            }
+            _skipStreak = 0;
+        } else if (_skipStreak >= SKIP_STEPS_PER_TICK) {
+            // 单 tick 上限打满仍未摸到实体: 清零, 下个 tick 继续跳。
+            _skipStreak = 0;
+        }
     }
 
     private void skipAirAndWater(AltoClef mod) {
@@ -666,7 +726,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // unstarted shaft is by definition not at the bottom yet.
         if (_digStart == null) return false;
         // (2026-09-05 上行模式步数上限更宽: 从 y≈5 爬回 y=70 需约 66 步)
-        if (_step >= (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS)) return true;
+        // (2026-09-10 空跳修复) 预算按【真实挖掉方块数】计 (每步 2 格):
+        // 几何索引 _step 会被 FAST-FORWARD 空跳刷高, 不代表任何真实挖掘 —
+        // 10:47 场次: 重入旧自挖隧道, 空 40 步一 tick 刷完 → 旧逻辑判"到底"
+        // → "Shaft done" → 父层 5s 重建 → 无限空转。空跳不再能宣告完工。
+        if (_realDigs >= (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) * BLOCKS_PER_STEP) return true;
         // Tunnel mode: only the step limit applies (we're already at depth).
         if (_tunnelMode) return false;
         // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成。
