@@ -7,6 +7,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.util.math.BlockPos;
@@ -44,6 +45,12 @@ public class DeathRecoveryTask extends Task {
     // (2026-09-09 10→5, 用户"捡完了任务还不更新") 最后一件捡完后的空窗等待,
     // 5s 足够确认没有新掉落, 不用陪掉落物消失窗口耗满 10s。
     private static final int NO_DROPS_GIVE_UP_SECONDS = 5;
+    // (2026-09-10 降级扫描) 从未感知到掉落物时, 降级扫描也连续扫不到这么久
+    // 才承认掉落物真没了 (岩浆烧毁/被别的实体捡走)。
+    private static final int DEGRADE_SCAN_GIVE_UP_SECONDS = 30;
+    // (2026-09-10 陈旧坐标复核) PICKUP 阶段发现玩家离墓碑超过拾取半径+余量,
+    // 说明当前坐标不是真到了墓碑 (重生瞬间的陈旧坐标), 退回 GOTO 重新导航。
+    private static final int PICKUP_POSITION_MARGIN = 4;
 
     private enum Phase { GOTO_GRAVE, PICKUP, DONE }
 
@@ -59,6 +66,12 @@ public class DeathRecoveryTask extends Task {
     private final TimerGame _noDropsTimer;
     // (2026-09-09 空窗僵住修复) 空窗 Wander 用缓存实例 keep-alive, 不反复 new。
     private final TimeoutWanderTask _noDropsWander = new TimeoutWanderTask(20);
+    // (2026-09-10 水下感知盲区) 拟人感知 (EntityTracker 视线+FOV/声音) 从未
+    // 发现过任何掉落物时为 false; 一旦发现过 (含降级扫描命中) 为 true。
+    private boolean _everSawDropNearGrave = false;
+    // (2026-09-10 降级扫描) 感知闸门始终建立不起来时的直接扫描模式。
+    private boolean _degradeScanActive = false;
+    private final TimerGame _degradeScanTimer = new TimerGame(DEGRADE_SCAN_GIVE_UP_SECONDS);
     // Track whether the first onTick has logged the header.
     private boolean _started = false;
 
@@ -81,6 +94,9 @@ public class DeathRecoveryTask extends Task {
         _currentSub = null;
         _overallTimer.reset();
         _noDropsTimer.reset();
+        _everSawDropNearGrave = false;
+        _degradeScanActive = false;
+        _degradeScanTimer.reset();
     }
 
     @Override
@@ -113,6 +129,29 @@ public class DeathRecoveryTask extends Task {
                     _graveDim, WorldHelper.getCurrentDimension(), _gravePos));
             _phase = Phase.DONE;
             return null;
+        }
+
+        // (2026-09-10 陈旧坐标修复, 用户"死亡地点是重生点这绝对是错的")
+        // requestRespawn() 后服务端重生包未应用时, 客户端玩家坐标仍是死亡点
+        // (DeathMenuChain L82-84 注释自证), graveReached 误判"已到墓碑"直接
+        // 进 PICKUP, 实际 bot 在重生点瞎逛 (13:15 场次: ACTIVATE dist=0.0 →
+        // PICKUP → 5s 无掉落 → 清墓碑记忆, 从此不再恢复; 22:27 场次
+        // [ACTIVATE] dist=0.0 后 51ms 真实距离 289.1 为陈旧坐标铁证)。
+        // PICKUP 阶段复核: 玩家离墓碑超出拾取半径+余量 → 退回 GOTO 重新导航。
+        // 余量 4 格防止追边界掉落物时正常抖动触发回退。
+        if (_phase == Phase.PICKUP
+                && horizontalDistanceXZ(mod) > PICKUP_RADIUS + PICKUP_POSITION_MARGIN) {
+            double dist = horizontalDistanceXZ(mod);
+            Debug.logWarning(String.format(
+                    "Death recovery: PICKUP phase but player is %.1f blocks from grave — stale respawn position, re-navigating.", dist));
+            Debug.logToFile("death_recovery.log", String.format(
+                    "[STALE POS] PICKUP but player %.1f from grave=%s; back to GOTO",
+                    dist, _gravePos));
+            _phase = Phase.GOTO_GRAVE;
+            _noDropsTimer.reset();
+            _degradeScanTimer.reset();
+            _degradeScanActive = false;
+            _currentPickupTarget = null;
         }
 
         // Overall timeout safety net.
@@ -164,15 +203,56 @@ public class DeathRecoveryTask extends Task {
         List<ItemEntity> allDrops = mod.getEntityTracker().getDroppedItems();
         Optional<ItemEntity> closest = findClosestDropNearGrave(mod, allDrops);
 
+        // (2026-09-10 水下掉落物感知盲区, 用户"死亡地点在水里") 拟人感知闸门
+        // (EntityTracker: 视线射线+FOV 或 声音) 在水下洞穴对掉落物全线失效:
+        // 掉落物无声, FOV 随重生朝向随机, LOS 被洞壁挡 → getDroppedItems() 恒空
+        // (13:15 场次: 墓碑旁 5s 零感知)。降级扫描: bot 站在自己刚死的墓碑旁,
+        // "我的东西就在这附近"是人类合法知识 (WorldMemory 记忆), 不依赖感知,
+        // 直接扫已加载实体。范围锁死 PICKUP_RADIUS, 开关
+        // deathRecoveryDegradeScan (默认 true), 全程带 [DEGRADE SCAN] 日志。
+        // 激活后每 tick 都扫 (只受感知为空门控), 否则水底逐件拾取会每件卡 5s。
+        if (closest.isEmpty() && mod.getModSettings().shouldDeathRecoveryDegradeScan()) {
+            boolean activateNow = !_everSawDropNearGrave && _noDropsTimer.elapsed();
+            if (_degradeScanActive || activateNow) {
+                if (!_degradeScanActive) {
+                    _degradeScanActive = true;
+                    _degradeScanTimer.reset();
+                    Debug.logToFile("death_recovery.log", String.format(
+                            "[DEGRADE SCAN START] perception found nothing for %ds near grave=%s; scanning loaded entities directly",
+                            NO_DROPS_GIVE_UP_SECONDS, _gravePos));
+                }
+                closest = findClosestDropNearGrave(mod, scanLoadedDropsNearGrave(mod));
+                if (closest.isPresent()) {
+                    ItemEntity hit = closest.get();
+                    Debug.logToFile("death_recovery.log", String.format(
+                            "[DEGRADE SCAN HIT] %s x%d (perception was blind)",
+                            hit.getStack().getItem().getTranslationKey(), hit.getStack().getCount()));
+                }
+            }
+        }
+
         if (closest.isEmpty()) {
-            if (_noDropsTimer.elapsed()) {
+            boolean giveUp;
+            if (_everSawDropNearGrave) {
+                // 见过掉落物 (感知曾正常工作) → 现在没了 = 捡完/消失, 5s 收工。
+                giveUp = _noDropsTimer.elapsed();
+            } else if (_degradeScanActive) {
+                // 降级扫描也连续扫不到 → 掉落物真没了 (岩浆烧毁/被捡走)。
+                giveUp = _degradeScanTimer.elapsed();
+            } else {
+                // 降级开关关闭: 维持旧的 5s 收工行为。
+                giveUp = _noDropsTimer.elapsed();
+            }
+            if (giveUp) {
                 Debug.logMessage(String.format(
-                        "No item drops found within %d blocks of grave (%d,%d,%d) for %ds — giving up.",
+                        "No item drops found within %d blocks of grave (%d,%d,%d) — giving up.%s",
                         PICKUP_RADIUS, _gravePos.getX(), _gravePos.getY(), _gravePos.getZ(),
-                        NO_DROPS_GIVE_UP_SECONDS));
+                        _everSawDropNearGrave ? " (drops were seen & handled)"
+                                : (_degradeScanActive ? " (degrade scan also exhausted)"
+                                      : " (perception never saw any; degrade scan off)")));
                 Debug.logToFile("death_recovery.log", String.format(
-                        "[PICKUP DONE] no drops for %ds; grave=%s dim=%s",
-                        NO_DROPS_GIVE_UP_SECONDS, _gravePos, _graveDim));
+                        "[PICKUP DONE] grave=%s dim=%s everSaw=%s degradeScan=%s",
+                        _gravePos, _graveDim, _everSawDropNearGrave, _degradeScanActive));
                 _phase = Phase.DONE;
                 return null;
             }
@@ -196,9 +276,13 @@ public class DeathRecoveryTask extends Task {
             return _currentSub;
         }
 
-        // We have a target. Restart the "no drops" timer — as long as we
+        // We have a target. Restart the "no drops" timers — as long as we
         // keep finding stuff we keep going.
         _noDropsTimer.reset();
+        _degradeScanTimer.reset();
+        if (!_everSawDropNearGrave) {
+            _everSawDropNearGrave = true;
+        }
         ItemEntity target = closest.get();
 
         // (2026-09-08 腾位接入, 用户"背包满了为什么不丢东西") 满背包时走近
@@ -269,6 +353,27 @@ public class DeathRecoveryTask extends Task {
         double dx = p.getX() - _gravePos.getX();
         double dz = p.getZ() - _gravePos.getZ();
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    /**
+     * (2026-09-10 降级扫描) 绕过 EntityTracker 的拟人感知闸门, 直接扫描
+     * 已加载实体中墓碑 PICKUP_RADIUS 范围内的掉落物。仅用于"感知从未建立"
+     * 的墓碑场景 ("我死在这, 东西就在附近" = WorldMemory 人类合法知识),
+     * 不是通用 X-ray: 范围锁死半径, 只在 deathRecoveryDegradeScan 开启且
+     * 感知短窗口到期后才启用, 每次启用/命中都落盘 [DEGRADE SCAN] 日志。
+     */
+    private List<ItemEntity> scanLoadedDropsNearGrave(AltoClef mod) {
+        List<ItemEntity> result = new ArrayList<>();
+        if (MinecraftClient.getInstance().world == null) return result;
+        Vec3d centre = Vec3d.ofCenter(_gravePos);
+        double radiusSq = (double) PICKUP_RADIUS * PICKUP_RADIUS;
+        for (Entity entity : MinecraftClient.getInstance().world.getEntities()) {
+            if (entity instanceof ItemEntity item && item.isAlive()
+                    && item.squaredDistanceTo(centre) <= radiusSq) {
+                result.add(item);
+            }
+        }
+        return result;
     }
 
     /** True once the player is close enough to the grave that nearby drops are in render range. */

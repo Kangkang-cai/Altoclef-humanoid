@@ -401,6 +401,17 @@ public class Settings implements IFailableConfigFile {
     private boolean deathRecoveryRequireStonePickaxe = true;
 
     /**
+     * (2026-09-10) 水下/洞内死亡时, 拟人感知闸门 (视线射线+FOV 或 声音) 可能
+     * 始终建立不起对掉落物的感知 → DeathRecoveryTask 站在墓碑旁也"看不见"
+     * 自己的掉落物 (13:15 场次: 水底墓碑旁 5s 零感知 → 误判无掉落 → 清记忆)。
+     * 开启后, 从未感知到掉落物且短窗口到期时, 降级为直接扫描墓碑
+     * PICKUP_RADIUS 内的已加载 ItemEntity —— "我知道我死在这, 东西就在附近"
+     * 属于人类合法知识 (WorldMemory), 符合"超时可降级透视兜底"约定。
+     * 范围锁死墓碑半径, 每次启用/命中都写 [DEGRADE SCAN] 日志。
+     */
+    private boolean deathRecoveryDegradeScan = true;
+
+    /**
      * Maximum time (in real-game seconds) we will spend on a single recovery
      * attempt (navigation + picking up drops). If we haven't finished by
      * then the grave is abandoned and the memory is cleared.
@@ -759,6 +770,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean shouldDeathRecoveryRequireStonePickaxe() {
         return deathRecoveryRequireStonePickaxe;
+    }
+
+    public boolean shouldDeathRecoveryDegradeScan() {
+        return deathRecoveryDegradeScan;
     }
 
     public int getDeathRecoveryTimeoutSeconds() {
