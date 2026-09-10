@@ -45,6 +45,13 @@ public class SatisfyMiningRequirementTask extends Task {
                 break;
             case WOOD:
             case STONE:
+                // (2026-09-10 钻石镐优先, 用户"有钻石应做钻石镐而非石镐/铁镐")
+                // 钻石 ≥3 + 棒料够 → 直接钻石镐: 全档位天花板(耐久 1562), 且主线
+                // 后期挖黑曜石本就需要钻石镐, 早做不亏。
+                if (shouldPreferDiamondPickaxe(mod)) {
+                    setDebugState("Preferring DIAMOND pickaxe (diamonds+wood at hand, skip lower tiers)");
+                    return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
+                }
                 // (2026-09-09 铁镐优先, 用户"背包里有生铁和木头, 有能力制作铁镐
                 // 但没有触发") 下界没有圆石, STONE 档默认做石镐 → 挖竖井找圆石
                 // → "Shaft done, no ores found" 死循环 (14:25-14:27 tasks log ×3 轮)。
@@ -60,6 +67,10 @@ public class SatisfyMiningRequirementTask extends Task {
                 }
                 return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
             case IRON:
+                if (shouldPreferDiamondPickaxe(mod)) {
+                    setDebugState("Preferring DIAMOND pickaxe (diamonds+wood at hand, skip iron tier)");
+                    return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
+                }
                 return TaskCatalogue.getItemTask(Items.IRON_PICKAXE, 1);
             case DIAMOND:
                 return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
@@ -84,6 +95,23 @@ public class SatisfyMiningRequirementTask extends Task {
         int ingots = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.IRON_INGOT);
         int rawIron = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.RAW_IRON);
         if (ingots < 3 && rawIron < 3) return false;
+        return hasStickMaterial(mod);
+    }
+
+    /**
+     * (2026-09-10, 用户"有钻石应做钻石镐而非石镐/铁镐") 钻石 ≥3 且棒料够 →
+     * 直接走钻石镐任务链 (WOOD/STONE/IRON 档统一适用)。钻石镐是全档位天花板
+     * (挖速最快/耐久 1562), 主线后期挖黑曜石本来就必须钻石镐 — 有钻早做不亏,
+     * 避免铁/石镐损耗后反复重做。棒料判定与铁镐优先共用, 含 2x2 合成格口径
+     * (防配方中间态计数翻假 → 档位选择抖动, 同 shouldPreferIronPickaxe 教训)。
+     */
+    private boolean shouldPreferDiamondPickaxe(AltoClef mod) {
+        int diamonds = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.DIAMOND);
+        return diamonds >= 3 && hasStickMaterial(mod);
+    }
+
+    /** 棒料: 木棍 ≥2, 或 木板 ≥2, 或 任一原木 ≥1 (均可合成出 2 根棒子)。 */
+    private boolean hasStickMaterial(AltoClef mod) {
         if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.STICK) >= 2) return true;
         if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS) >= 2) return true;
         for (Item log : ItemHelper.LOG) {
