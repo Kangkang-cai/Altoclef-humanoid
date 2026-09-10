@@ -2,12 +2,7 @@ package adris.altoclef.tasksystem;
 
 import adris.altoclef.Debug;
 
-import java.io.File;
-import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.Date;
 import java.util.HashMap;
 
 /**
@@ -34,11 +29,22 @@ import java.util.HashMap;
  */
 public final class TaskSwitchLogger {
 
-    // (2026-08-30 每会话新文件) 不再是固定 "altoclef_tasks.log" 持续追加 —
-    // 每次 SESSION START 换成一个带时间戳的文件, 避免 20MB+ 越滚越大。
-    private static String LOG_FILE = "altoclef_tasks.log";
-    // 目录里保留最近多少份任务日志, 更旧的自动删除。
-    private static final int KEEP_SESSIONS = 20;
+    // (2026-09-10 会话目录, 用户"日志系统太乱七八糟") 文件名固定 tasks.log,
+    // 落在 logs/altoclef/<会话时间戳>/ 里 — 目录本身就是会话隔离, 不再需要
+    // 文件名时间戳与本地 prune (旧目录由 Debug.pruneOldSessionsOnce 统一清)。
+    private static final String LOG_FILE = "tasks.log";
+
+    // (2026-09-10 连续重复折叠, 用户"任务切换日志一定要真实清晰") 任务每 tick
+    // 重跑调度时会产生大量逐字相同的事件行 (START/STOP/SUB 同一行刷几十条),
+    // 真正的切换被淹没。同一事件连续出现时只写首条 + 每 REPEAT_FLUSH_MS 一条
+    // "(同上 xN)" 计数行; 事件一变立即补一条收尾计数。抖动 (A<->B 交替) 两行
+    // 内容不同, 不受折叠影响, 照常全量可见 + TaskPingPong 告警。
+    private static final long REPEAT_FLUSH_MS = 5000;
+
+    private static String _lastEvent = null;
+    private static long _lastEventTick = -1;
+    private static int _repeatCount = 0;
+    private static long _lastRepeatFlushMs = 0;
 
     // If the same switch pair happens this many times within the window, warn.
     private static final int OSCILLATION_THRESHOLD = 6;
@@ -63,36 +69,10 @@ public final class TaskSwitchLogger {
 
     /** Session separator, written when the task runner (re)enables. */
     public static void sessionStart() {
-        // (2026-08-30 每会话新日志文件, 用户) 每次测试生成 altoclef_tasks-yyyyMMdd-HHmmss.log,
-        // 清理到保留最近 KEEP_SESSIONS 份。Debug.logToFile 见新文件名会自动关旧开新(appendix
-        // 改为新文件), 天然形成"每测试一份、按时间定位"。
-        String ts = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
-        LOG_FILE = "altoclef_tasks-" + ts + ".log";
-        pruneOldTaskLogs();
+        _lastEvent = null;
+        _repeatCount = 0;
         Debug.logToFile(LOG_FILE, "");
         Debug.logToFile(LOG_FILE, "==== SESSION START ====");
-    }
-
-    /**
-     * (2026-08-30) 删除最早的任务日志, 目录里只保留最近 KEEP_SESSIONS-1 份旧的
-     * (本次会话马上会新开第 KEEP_SESSIONS 份)。删除失败被忽略, 不影响运行。
-     */
-    private static void pruneOldTaskLogs() {
-        try {
-            File dir = new File(LOG_FILE).getAbsoluteFile().getParentFile();
-            File base = dir != null ? dir : new File(".");
-            File[] logs = base.listFiles(f -> f.isFile()
-                    && f.getName().startsWith("altoclef_tasks") && f.getName().endsWith(".log"));
-            if (logs == null || logs.length <= KEEP_SESSIONS - 1) return;
-            Arrays.sort(logs, Comparator.comparingLong(File::lastModified).reversed());
-            for (int i = KEEP_SESSIONS - 1; i < logs.length; i++) {
-                if (!logs[i].getName().equals(new File(LOG_FILE).getName())) {
-                    logs[i].delete();
-                }
-            }
-        } catch (Exception ignored) {
-            // 清理失败不阻塞日志写入
-        }
     }
 
     /** Chain ownership change: who controls the bot now. */
@@ -149,6 +129,25 @@ public final class TaskSwitchLogger {
     // ------------------------------------------------------------------
 
     private static void write(String message) {
+        // (2026-09-10 连续重复折叠) 折叠键不含 tick — 同一事件逐 tick 重发时
+        // 内容逐字相同, 只有计数行刷新时才用最新 tick 落盘。
+        if (message.equals(_lastEvent)) {
+            _repeatCount++;
+            long now = System.currentTimeMillis();
+            if (now - _lastRepeatFlushMs >= REPEAT_FLUSH_MS) {
+                Debug.logToFile(LOG_FILE, "[t=" + _tick + "] (同上 x" + _repeatCount + ")");
+                _lastRepeatFlushMs = now;
+                _repeatCount = 0;
+            }
+            return;
+        }
+        if (_repeatCount > 0) {
+            Debug.logToFile(LOG_FILE, "[t=" + _lastEventTick + "] (同上 x" + _repeatCount + ")");
+            _repeatCount = 0;
+        }
+        _lastEvent = message;
+        _lastEventTick = _tick;
+        _lastRepeatFlushMs = System.currentTimeMillis();
         Debug.logToFile(LOG_FILE, "[t=" + _tick + "] " + message);
     }
 
@@ -184,7 +183,9 @@ public final class TaskSwitchLogger {
     private static String desc(Object task) {
         if (task == null) return "null";
         String s = task.toString();
-        if (s.length() > 110) s = s.substring(0, 110) + "...";
+        // (2026-09-10 用户"看不懂") 110 -> 80: toString 常有超长参数列表,
+        // 截断点收紧让每行任务描述在终端里一屏可读。
+        if (s.length() > 80) s = s.substring(0, 80) + "...";
         return s;
     }
 

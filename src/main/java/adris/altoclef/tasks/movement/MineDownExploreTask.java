@@ -829,8 +829,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private static java.nio.file.Path selfDugFile() {
-        // 必须用 runDirectory(游戏目录 D:\minecraft\.minecraft), 相对 CWD 会找不到文件。
-        return MinecraftClient.getInstance().runDirectory.toPath().resolve(SELF_DUG_FILE);
+        // (2026-09-10) 迁入 logs/altoclef/memory/, 旧根目录文件自动迁移。
+        return adris.altoclef.Debug.memoryFile(SELF_DUG_FILE, "selfdug.log");
     }
 
     private static void ensureSelfDugLoaded() {
@@ -913,7 +913,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private static java.nio.file.Path exploredCaveFile() {
-        return MinecraftClient.getInstance().runDirectory.toPath().resolve(EXPLORED_CAVE_FILE);
+        // (2026-09-10) 迁入 logs/altoclef/memory/, 旧根目录文件自动迁移。
+        return adris.altoclef.Debug.memoryFile(EXPLORED_CAVE_FILE, "explored.log");
     }
 
     private static void ensureExploredCaveLoaded() {

@@ -35,6 +35,8 @@ import java.util.Set;
  */
 public final class PortalMemoryStore {
 
+    // (2026-09-10 记忆文件迁入 logs/altoclef/memory/, 旧根目录文件由
+    // Debug.memoryFile 首次调用时自动迁移) FILE 仅作旧文件迁移名。
     private static final String FILE = "altoclef_portals.log";
     private static final int MAX_SEEN_PER_KEY = 64;
 
@@ -67,7 +69,7 @@ public final class PortalMemoryStore {
     }
 
     private static Path file() {
-        return MinecraftClient.getInstance().runDirectory.toPath().resolve(FILE);
+        return adris.altoclef.Debug.memoryFile(FILE, "portals.log");
     }
 
     private static void ensureLoaded() {

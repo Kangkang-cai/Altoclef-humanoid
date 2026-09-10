@@ -391,7 +391,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private static java.nio.file.Path fortressVisitedFile() {
-        return MinecraftClient.getInstance().runDirectory.toPath().resolve(FORTRESS_VISITED_FILE);
+        // (2026-09-10) 迁入 logs/altoclef/memory/, 旧根目录文件自动迁移。
+        return adris.altoclef.Debug.memoryFile(FORTRESS_VISITED_FILE, "fortress_visited.log");
     }
 
     private static void ensureVisitedCellsLoaded() {

@@ -16,27 +16,82 @@ public class Debug {
 
     // Cached file writer for our on-disk debug log (creates the file lazily).
     private static final Object _fileLogMutex = new Object();
-    private static volatile PrintWriter _fileLogWriter;
-    private static volatile String _fileLogPath;
 
-    // (2026-09-09 分会话日志轮转, 用户"总和 diag 68MB 全是以前没用现象") 每个
-    // JVM 会话固定一个时间戳, logToFile 把 "xxx.log" 落盘为 "xxx-<stamp>.log" —
-    // diag/debugstate/trace/craftclick 等从此按会话分文件, 与 tasks 日志同款,
-    // 不再跨会话往同一文件堆历史。
+    // (2026-09-10 会话目录, 用户"日志系统太乱七八糟") 一次会话一个目录:
+    // logs/altoclef/<stamp>/, 所有会话日志 (diag/tasks/chat/trace/debugstate/...)
+    // 都落在这里, 游戏根目录不再堆文件。文件名里的 altoclef_ 前缀与
+    // "-<stamp>" 后缀一并去掉 (目录本身就是会话标识)。
     public static final String SESSION_STAMP = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
+    public static final String SESSION_DIR = "logs/altoclef/" + SESSION_STAMP;
+    // 持久记忆目录: 跨会话记忆文件 (传送门/要塞走廊/矿洞/自挖区块), 不是日志,
+    // 不随会话目录清理。
+    public static final String MEMORY_DIR = "logs/altoclef/memory";
     // 构建标识: 写进每个新日志文件头 + 床链诊断行。用于秒判"运行的 class 是不是
     // 新构建" (2026-09-09 22:58 场次: 行为特征=旧 jar 但 mods jar 字节含新代码,
     // 无法定案, 只能用运行时标记直接对质)。
-    public static final String BUILD_ID = "beddiag-20260909-2320";
+    public static final String BUILD_ID = "logdir-20260910-1930";
     private static final java.util.Set<String> _sessionHeaderWritten = new java.util.HashSet<>();
+    // (2026-09-10) 每文件的常开 writer 缓存。旧实现只缓存一个 writer, diag 与
+    // chat 每 tick 交替写 = 每条日志都关旧开新文件句柄, 纯浪费。每会话文件数
+    // 个位数, 缓存无上限压力。
+    private static final java.util.Map<String, PrintWriter> _writers = new java.util.HashMap<>();
+    private static boolean _prunedOldSessions = false;
+
+    /** 每会话目录只保留最近 KEEP_SESSIONS 份, 更旧的整目录删除 (首次写日志时执行一次)。 */
+    private static final int KEEP_SESSIONS = 10;
 
     private static String toSessionFile(String filename) {
-        if (filename == null) return null;
-        int dot = filename.lastIndexOf('.');
-        if (dot <= 0) return filename;
-        String ext = filename.substring(dot);
-        if (ext.length() > 6) return filename; // 非常规扩展名不动
-        return filename.substring(0, dot) + "-" + SESSION_STAMP + ext;
+        String name = filename == null ? "unnamed.log" : filename;
+        if (name.startsWith("altoclef_")) name = name.substring("altoclef_".length());
+        return SESSION_DIR + "/" + name;
+    }
+
+    private static void pruneOldSessionsOnce() {
+        if (_prunedOldSessions) return;
+        _prunedOldSessions = true;
+        try {
+            java.io.File base = new File("logs/altoclef");
+            File[] dirs = base.listFiles(File::isDirectory);
+            if (dirs == null || dirs.length <= KEEP_SESSIONS) return;
+            Arrays.sort(dirs, java.util.Comparator.comparingLong(File::lastModified).reversed());
+            for (int i = KEEP_SESSIONS; i < dirs.length; i++) {
+                File cur = dirs[i];
+                if (cur.getName().equals(SESSION_STAMP)) continue;
+                deleteRecursively(cur);
+            }
+        } catch (Exception ignored) {
+            // 清理失败不阻塞日志
+        }
+    }
+
+    private static void deleteRecursively(File f) {
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteRecursively(c);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+    }
+
+    /**
+     * 持久记忆文件解析: logs/altoclef/memory/<newName>。首次调用时把旧的游戏
+     * 根目录文件 (<legacyName>) 自动迁过来, 跨会话记忆 (门/要塞/矿洞) 不丢。
+     */
+    public static java.nio.file.Path memoryFile(String legacyName, String newName) {
+        java.nio.file.Path base = MinecraftClient.getInstance() != null
+                ? MinecraftClient.getInstance().runDirectory.toPath()
+                : java.nio.file.Paths.get(".");
+        java.nio.file.Path target = base.resolve(MEMORY_DIR).resolve(newName);
+        try {
+            java.nio.file.Files.createDirectories(target.getParent());
+            java.nio.file.Path legacy = base.resolve(legacyName);
+            if (!java.nio.file.Files.exists(target) && java.nio.file.Files.exists(legacy)) {
+                java.nio.file.Files.move(legacy, target);
+            }
+        } catch (Exception ignored) {
+            // 迁移失败不影响读取/追加
+        }
+        return target;
     }
 
     public static void logInternal(String message) {
@@ -57,27 +112,25 @@ public class Debug {
     public static void logToFile(String filename, String message) {
         synchronized (_fileLogMutex) {
             try {
-                String sessionFile = toSessionFile(filename);
-                if (_fileLogWriter == null || !sessionFile.equals(_fileLogPath)) {
-                    if (_fileLogWriter != null) {
-                        _fileLogWriter.flush();
-                        _fileLogWriter.close();
-                    }
-                    File file = new File(sessionFile);
+                pruneOldSessionsOnce();
+                String path = toSessionFile(filename);
+                PrintWriter writer = _writers.get(path);
+                if (writer == null) {
+                    File file = new File(path);
                     File parent = file.getParentFile();
                     if (parent != null && !parent.exists()) {
                         parent.mkdirs();
                     }
-                    _fileLogWriter = new PrintWriter(new BufferedWriter(new FileWriter(file, true), 8192), true);
-                    _fileLogPath = sessionFile;
+                    writer = new PrintWriter(new BufferedWriter(new FileWriter(file, true), 8192), true);
+                    _writers.put(path, writer);
                     // 每会话每文件只写一次头行: 会话起点 + 构建标识。
-                    if (_sessionHeaderWritten.add(sessionFile)) {
+                    if (_sessionHeaderWritten.add(path)) {
                         String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
-                        _fileLogWriter.println("==== SESSION START " + ts + " build=" + BUILD_ID + " ====");
+                        writer.println("==== SESSION START " + ts + " build=" + BUILD_ID + " ====");
                     }
                 }
                 String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
-                _fileLogWriter.println(ts + "  " + message);
+                writer.println(ts + "  " + message);
             } catch (Exception e) {
                 System.err.println("ALTO CLEF: failed to write debug log " + filename + ": " + e);
             }
