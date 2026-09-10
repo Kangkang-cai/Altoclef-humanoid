@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasksystem.TaskRunner;
@@ -17,10 +18,12 @@ import net.minecraft.block.AbstractFireBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.FluidBlock;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Optional;
 
@@ -43,7 +46,8 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private static final double DROWN_ESCAPE_AIR_FRACTION = 0.25;
     private static final int DROWN_ESCAPE_SEARCH_RADIUS = 16;
     private static final float DROWN_ESCAPE_PRIORITY = 95; // 低于岩浆/火焰(100), 高于常规任务
-    private final TimerGame _drownReissueTimer = new TimerGame(2);
+    private final TimerGame _drownReissueTimer = new TimerGame(1); // 溺水时限紧, 1s 重发冷却
+    private final TimerGame _drownPathlessTimer = new TimerGame(1.5); // baritone 无路径观察期
     private boolean _loggedNoBreathable = false;
 
     public WorldSurvivalChain(TaskRunner runner) {
@@ -167,10 +171,14 @@ public class WorldSurvivalChain extends SingleTaskChain {
 
     /**
      * 防溺水"找空气"逃生 (2026-09-10)：水中且空气 <25% 时，以 DROWN_ESCAPE_PRIORITY
-     * 导航到最近可呼吸方块。目标要求所在区块已加载、六邻至少一格是空气/水
-     * (排除全封闭空气囊，避免选到不可达目标)。任务在跑期间不换目标防抖动；
-     * 失败/被打断后经 2s 重发冷却再重找。找不到目标时不动 (留旧 handleDrowning
-     * 的按跳上浮兜底)。
+     * 导航/挖穿到最近可呼吸方块。
+     * (2026-09-10 13:52 场次补强) 目标空气被封在石头后时 baritone 水下寻路
+     * 长期 path[present=false] (8s+ 实证)，bot 原地漂浮淹死。补两类能力:
+     *  (a) GetToBlockTask 无路径持续 >1.5s → 转直线挖穿 (eye→目标连线上
+     *      reach 内第一块实体方块交给 DestroyBlockTask，挖掉一块重评，逐块打穿);
+     *  (b) DestroyBlockTask 挖穿期间粘性 (setTask 等值去重防重启)。
+     * 任务在跑期间不换目标防抖动；失败/被打断后经 1s 重发冷却再重找。
+     * 找不到目标时不动 (留旧 handleDrowning 的按跳上浮兜底)。
      */
     private float tryDrowningEscape(AltoClef mod) {
         var p = mod.getPlayer();
@@ -182,14 +190,31 @@ public class WorldSurvivalChain extends SingleTaskChain {
             _loggedNoBreathable = false;
             return Float.NEGATIVE_INFINITY;
         }
-        // 逃生任务正在跑: 不换目标，防逐 tick 重算/重设任务抖动。
-        if (_mainTask instanceof GetToBlockTask && isCurrentlyRunning(mod)) {
-            return DROWN_ESCAPE_PRIORITY;
+
+        // 已有逃生任务在跑:
+        if (isCurrentlyRunning(mod)) {
+            if (_mainTask instanceof DestroyBlockTask) {
+                // 挖穿障碍中: 粘性直至挖掉或任务自身放弃 (6s 无进度自兜底)。
+                return DROWN_ESCAPE_PRIORITY;
+            }
+            if (_mainTask instanceof GetToBlockTask) {
+                if (mod.getClientBaritone().getPathingBehavior().isPathing()) {
+                    _drownPathlessTimer.reset();
+                    return DROWN_ESCAPE_PRIORITY; // 正常导航中
+                }
+                if (!_drownPathlessTimer.elapsed()) {
+                    return DROWN_ESCAPE_PRIORITY; // 短暂无路径(重算中), 再观察
+                }
+                // 无路径超 1.5s → 掉到下方重评: 直线挖穿
+            } else {
+                // 其他未知任务在跑, 不干预。
+                return DROWN_ESCAPE_PRIORITY;
+            }
+        } else if (!_drownReissueTimer.elapsed()) {
+            // 冷却中: 手上有活就继续拿着 (避免让权→onInterrupt→重派 的抖动)。
+            return _mainTask != null ? DROWN_ESCAPE_PRIORITY : Float.NEGATIVE_INFINITY;
         }
-        // 任务不在跑 (刚完成/被打断/失败): 2s 冷却防 setTask 抖动。
-        if (!_drownReissueTimer.elapsed()) {
-            return Float.NEGATIVE_INFINITY;
-        }
+
         BlockPos air = findNearestBreathable(mod);
         if (air == null) {
             if (!_loggedNoBreathable) {
@@ -202,14 +227,49 @@ public class WorldSurvivalChain extends SingleTaskChain {
             return Float.NEGATIVE_INFINITY;
         }
         _loggedNoBreathable = false;
-        setTask(new GetToBlockTask(air));
-        _drownReissueTimer.reset();
-        String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
-                + " -> navigate to breathable " + air.toShortString()
-                + " player=" + p.getBlockPos();
-        Debug.logMessage(m);
-        Debug.logToFile("altoclef_diag.log", m);
+        BlockPos blocker = findBlockerOnLine(mod, air);
+        if (blocker != null) {
+            setTask(new DestroyBlockTask(blocker));
+            _drownReissueTimer.reset();
+            _drownPathlessTimer.reset();
+            String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                    + " -> DIG THROUGH blocker " + blocker.toShortString()
+                    + " (target air " + air.toShortString() + ") player=" + p.getBlockPos();
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        } else {
+            setTask(new GetToBlockTask(air));
+            _drownReissueTimer.reset();
+            _drownPathlessTimer.reset();
+            String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                    + " -> navigate to breathable " + air.toShortString()
+                    + " player=" + p.getBlockPos();
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
         return DROWN_ESCAPE_PRIORITY;
+    }
+
+    /**
+     * 直线视线 eye→target 上、reach 内的第一块实体方块 (需挖穿的障碍)。
+     * 中途全为空气/水 → null (baritone 可直接寻路)。
+     */
+    private BlockPos findBlockerOnLine(AltoClef mod, BlockPos target) {
+        Vec3d eye = mod.getPlayer().getEyePos();
+        Vec3d to = Vec3d.ofCenter(target).subtract(eye);
+        double len = to.length();
+        if (len < 0.5) return null;
+        Vec3d dir = to.normalize();
+        for (double d = 0.6; d <= Math.min(len, 4.5); d += 0.4) {
+            BlockPos bp = new BlockPos(eye.add(dir.multiply(d)));
+            if (bp.equals(target)) break;
+            if (!mod.getChunkTracker().isChunkLoaded(bp)) continue;
+            BlockState st = mod.getWorld().getBlockState(bp);
+            if (!st.isAir() && !(st.getBlock() instanceof FluidBlock) && WorldHelper.canBreak(mod, bp)) {
+                return bp.toImmutable();
+            }
+        }
+        return null;
     }
 
     /** 最近可呼吸方块: iterateOutwards 按距离递增遍历, 命中即返回 = 最近优先。 */

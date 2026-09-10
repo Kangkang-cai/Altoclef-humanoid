@@ -208,6 +208,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
     private int _waterSkipped = 0;
+
+    // ==== (2026-09-10 遇水改道) 挖掘路径真的出现水 → 不再涉水直穿 ====
+    // 13:15/13:52 场次实证: 涉水直穿 → bot 在水下方块前卡死 → 下潜 → 溺水
+    // 连锁。改为: 路径真实水块累计达标 (挖开才见, 反透视合规) → 有界改道
+    // (RunAwayFromPositionTask 远离水体, 不严格避水, 任意方向) → 超时/完成后
+    // retreatAndRedig 换向回到正常挖通道。
+    private static final int WATER_DETOUR_TRIGGER_SKIPS = 2;
+    private static final double WATER_DETOUR_RUN_DISTANCE = 10.0;
+    private static final double WATER_DETOUR_TIMEOUT = 20.0;
+    private boolean _inWaterDetour = false;
+    private final TimerGame _waterDetourTimer = new TimerGame(WATER_DETOUR_TIMEOUT);
+    private int _lastDetourWaterMark = 0;
+
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
     // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
@@ -339,6 +352,23 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
         if (_caveExploreCooldownSteps > 0) {
             _caveExploreCooldownSteps--;
+        }
+
+        // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
+        // 放在洞穴探索之前——水是当前挖掘路径的直接危险源, 优先于洞穴分心。
+        if (_inWaterDetour) {
+            if (_subTask != null && !_subTask.isFinished(mod) && !_waterDetourTimer.elapsed()) {
+                setDebugState("Water detour: moving away from flooded dig path");
+                return _subTask;
+            }
+            Debug.logMessage("[MineDown-WaterDetour] detour "
+                    + (_waterDetourTimer.elapsed() ? "timed out" : "finished")
+                    + ", retreating to a fresh direction.");
+            Debug.logToFile("altoclef_diag.log", "[MineDown-WaterDetour] detour done at "
+                    + mod.getPlayer().getBlockPos().toShortString() + ", retreatAndRedig.");
+            _inWaterDetour = false;
+            _subTask = null;
+            retreatAndRedig(mod);
         }
 
         if (_inCave) {
@@ -646,6 +676,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + " player=" + mod.getPlayer().getBlockPos().toShortString()
                     + " mode=" + (_tunnelMode ? "tunnel" : "staircase")
                     + " step=" + _step + "/" + MAX_DIG_STEPS;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
+        // (2026-09-10 遇水改道) 路径真实水块累计达标 → 有界改道一轮。
+        if (!_inWaterDetour && _waterSkipped - _lastDetourWaterMark >= WATER_DETOUR_TRIGGER_SKIPS) {
+            _lastDetourWaterMark = _waterSkipped;
+            _inWaterDetour = true;
+            _waterDetourTimer.reset();
+            _subTask = new RunAwayFromPositionTask(WATER_DETOUR_RUN_DISTANCE, pos.toImmutable());
+            String m = "[MineDown-WaterDetour] dig path hit water (total " + _waterSkipped
+                    + ") -> detour away from " + pos.toShortString()
+                    + " (run " + (int) WATER_DETOUR_RUN_DISTANCE + " blocks, max "
+                    + (int) WATER_DETOUR_TIMEOUT + "s)";
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         }
