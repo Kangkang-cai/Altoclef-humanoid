@@ -45,17 +45,25 @@ public final class PortalMemoryStore {
     private PortalMemoryStore() {
     }
 
-    /** key = 存档名(去空格) + ':' + 维度名，与 exploredCaveKey 同思路但按 Dimension 枚举，便于回填。 */
+    /** key = "w2:" + 存档目录名 + ':' + 维度名。
+     * (2026-09-10 跨世界污染修复, 2026-09-10 17:02 场次实锤) 旧 key 用 levelName
+     * (存档显示名): 新建世界同名 (默认"新的世界"系列) 就互相灌门记录 —— 本世界从未
+     * 造过门, 却拿上个世界的门坐标当导航目标 (650 格外假寻路卡死 29s)。改用存档
+     * 目录名 (每个新世界自动递增, 物理唯一) + "w2:" 版本前缀, 旧格式 key 永不匹配,
+     * 存量脏记录自动作废。 */
     private static String key(AltoClef mod, Dimension dim) {
-        String levelName = "?";
+        String worldId = "?";
         try {
             var server = MinecraftClient.getInstance().getServer();
-            if (server != null && server.getSaveProperties() != null && server.getSaveProperties().getLevelName() != null) {
-                levelName = server.getSaveProperties().getLevelName();
+            if (server != null) {
+                Path root = server.getSavePath(net.minecraft.util.WorldSavePath.ROOT);
+                if (root != null && root.getFileName() != null) {
+                    worldId = root.getFileName().toString();
+                }
             }
         } catch (Exception ignored) {
         }
-        return levelName.replace(' ', '_') + ":" + dim.name();
+        return "w2:" + worldId + ":" + dim.name();
     }
 
     private static Path file() {

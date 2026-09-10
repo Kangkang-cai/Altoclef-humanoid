@@ -70,7 +70,13 @@ public class MiscBlockTracker {
         // 回填该维度最近一次亲手穿过的门。人类穿过一扇门就不会忘。
         if (!_lastNetherPortalsUsed.containsKey(dimension)) {
             PortalMemoryStore.loadLatestUsed(_mod, dimension)
-                    .ifPresent(pos -> _lastNetherPortalsUsed.put(dimension, pos));
+                    .ifPresent(pos -> {
+                        _lastNetherPortalsUsed.put(dimension, pos);
+                        // (2026-09-10) 回填来源显式落日志, 便于排查"导航目标来自旧世界
+                        // 脏记忆"类事故 (key 已改存档目录名隔离, 此日志用于核对)。
+                        adris.altoclef.Debug.logMessage("[PortalMemory] backfilled used portal for "
+                                + dimension + " @ " + pos.toShortString());
+                    });
         }
         if (_lastNetherPortalsUsed.containsKey(dimension)) {
             BlockPos portalPos = _lastNetherPortalsUsed.get(dimension);

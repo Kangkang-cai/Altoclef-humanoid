@@ -78,6 +78,17 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private final TimerGame _breathPaceTimer = new TimerGame(2);
     private boolean _breathJumpPhase = true;
 
+    // ===== active-stale 假寻路闸门 (2026-09-10) =====
+    // 2026-09-10 17:02 场次实锤: GetToChunkTask 走向 650 格外的目标区块, wander
+    // 结束后 baritone CustomGoalProcess 自称 active(customGoal=true) 但 pathing=false
+    // 且 path[present=false], 四输入全 false, bot 原地冻结 29s 直到用户手动停止。
+    // 原逻辑只在 !isActive() 时重发 setGoalAndPath, active-stale 态永远卡在
+    // L221 闸门外。修复: 目标未达成时, 连续 4s 既不在算路也无路径 → 强制
+    // onLostControl + 重发寻路; 期间 baritone 真在干活 (pathing 或 path 存在)
+    // 则重新武装计时。4s 窗口留足远距离分段算路时间, 不误杀正常 path calc。
+    private final TimerGame _staleActiveTimer = new TimerGame(4);
+    private boolean _staleActiveArmed = false;
+
     public CustomBaritoneGoalTask(boolean wander) {
         _wander = wander;
     }
@@ -220,6 +231,28 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
 
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
             mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(_cachedGoal);
+            _staleActiveArmed = false;
+        } else if (!_cachedGoal.isInGoal(mod.getPlayer().getBlockPos())) {
+            // (2026-09-10 active-stale 假寻路闸门, 见字段注释)
+            try {
+                boolean pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+                boolean pathPresent = mod.getClientBaritone().getPathingBehavior().getPath().isPresent();
+                if (pathing || pathPresent) {
+                    _staleActiveArmed = false;
+                } else if (!_staleActiveArmed) {
+                    _staleActiveArmed = true;
+                    _staleActiveTimer.reset();
+                } else if (_staleActiveTimer.elapsed()) {
+                    _staleActiveArmed = false;
+                    _failCount++;
+                    Debug.logMessage("[FakePath] baritone active-stale (isActive but not pathing & no path) 4s, forcing re-path to " + _cachedGoal);
+                    mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+                    mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(_cachedGoal);
+                }
+            } catch (Throwable t) {
+                // baritone 状态读取异常时按"在干活"处理, 不强推重寻路
+                _staleActiveArmed = false;
+            }
         }
         setDebugState("Completing goal.");
         return null;
