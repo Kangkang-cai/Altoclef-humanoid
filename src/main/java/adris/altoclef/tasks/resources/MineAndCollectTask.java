@@ -1325,8 +1325,21 @@ public class MineAndCollectTask extends ResourceTask {
                         return _lookAroundTask;
                     }
                 }
+                // (2026-09-10 探索断裂诊断, 用户"挖到地下矿坑却不触发矿洞探索")
+                // 重建决策打点: 重点抓"上一实例 isFinished=true 且 bot 空中"的瞬间 —
+                // 坠入矿坑时 isFinished 在 FIRE 前瞬时翻转, 此处若在空中重建, 全新
+                // 实例会顶掉正在坠落实例手里还没来得及启动的洞探索。
+                String prevDesc = _explorationTask == null ? "null"
+                        : _explorationTask.toDebugString() + "@" + Integer.toHexString(System.identityHashCode(_explorationTask));
+                boolean prevFinished = finished;
                 _explorationTask = createNextExplorationTask(mod);
                 _lastExploreCreateTick = nowTick;
+                Debug.logToFile("altoclef_diag.log",
+                        "[MineDown-WaitDiag]\texploration recreated: prev=" + prevDesc
+                                + " prevFinished=" + prevFinished
+                                + " grounded=" + MineDownExploreTask.isPlayerGrounded(mod)
+                                + " new=" + _explorationTask.toDebugString()
+                                + "@" + Integer.toHexString(System.identityHashCode(_explorationTask)));
             }
             return _explorationTask;
         }
@@ -1517,14 +1530,34 @@ public class MineAndCollectTask extends ResourceTask {
             // 同维度且玩家仍在最近 FIRE 锚点 64 格内 → 原样复用(MineDownExploreTask
             // 的 isEqual 是 identity, 同一对象不会被框架重启重置), 探索无缝继续;
             // 玩家已远离/维度已变/探索已结束 → 正常新建。
-            if (_lastCaveExploration != null && _lastCaveExploration.isExploringCave()
-                    && _lastCaveExploration.isNetherTask() == (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER)) {
+            // (2026-09-10 探索断裂诊断) 闸门结果与失败原因打点 — 定位"坠落窗口
+            // 内 prev 尚未 FIRE(isExploringCave=false) → 交接失败 → 全新实例"。
+            boolean dimNowNether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
+            String handoffFail = null;
+            if (_lastCaveExploration == null) {
+                handoffFail = "no-prev";
+            } else if (!_lastCaveExploration.isExploringCave()) {
+                handoffFail = "prev-not-exploring(inCave=false)";
+            } else if (_lastCaveExploration.isNetherTask() != dimNowNether) {
+                handoffFail = "dim-changed";
+            } else {
                 BlockPos fireAnchor = MineDownExploreTask.getLastFireAnchor();
-                if (fireAnchor == null || mod.getPlayer() == null
-                        || fireAnchor.getSquaredDistance(mod.getPlayer().getBlockPos()) < 64 * 64) {
-                    return _lastCaveExploration;
+                if (fireAnchor != null && mod.getPlayer() != null
+                        && fireAnchor.getSquaredDistance(mod.getPlayer().getBlockPos()) >= 64 * 64) {
+                    handoffFail = "anchor-far";
                 }
             }
+            if (handoffFail == null) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[MineDown-WaitDiag]\thandoff: reusing exploring instance @"
+                                + Integer.toHexString(System.identityHashCode(_lastCaveExploration)));
+                return _lastCaveExploration;
+            }
+            Debug.logToFile("altoclef_diag.log",
+                    "[MineDown-WaitDiag]\thandoff gate FAIL: " + handoffFail
+                            + " -> NEW instance (prev @"
+                            + (_lastCaveExploration == null ? "null" : Integer.toHexString(System.identityHashCode(_lastCaveExploration)))
+                            + ")");
             MineDownExploreTask exploration = new MineDownExploreTask(band[0], band[1]);
             _lastCaveExploration = exploration;
             return exploration;

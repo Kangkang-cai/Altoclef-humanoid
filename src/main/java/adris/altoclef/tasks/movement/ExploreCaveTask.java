@@ -65,6 +65,12 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStart(AltoClef mod) {
+        // (2026-09-10 探索断裂诊断) 实际启动打点: 对照 [CaveScan] FIRE 时刻,
+        // 若 FIRE 后本行迟迟不出现, 说明探索任务被返回了但框架换入被挡
+        // (ITaskRequiresGrounded 空中保护) 或被父任务换掉。
+        Debug.logToFile("altoclef_diag.log",
+                "[CaveExploreDiag]\tExploreCaveTask STARTED at "
+                        + mod.getPlayer().getBlockPos().toShortString());
         _progressChecker.reset();
         _visited.clear();
         _failedTargets.clear();

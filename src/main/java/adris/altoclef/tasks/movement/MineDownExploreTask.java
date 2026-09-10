@@ -197,6 +197,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _skipStreak = 0;
     private boolean _inCave = false;
     private Task _subTask;
+    // (2026-09-10 探索断裂诊断, 用户"挖到地下矿坑却不触发矿洞探索") isFinished
+    // 翻转诊断: 只在 true/false 翻转沿打一行。怀疑链: 坠入矿坑瞬间玩家 Y 穿越
+    // targetY → isFinished(!inCave && reachedBottom) 在 FIRE 之前瞬时为 true →
+    // 父任务 getWanderTask 判"挖完一轮"重建全新实例, 正在坠落的本实例(空中
+    // ITaskRequiresGrounded 换入被挡)手里攥着的洞探索作废。
+    private boolean _finishedDiagLastState = false;
     // (2026-09-06 闸门级诊断) 本实例是否已打过首次 [CaveScan] 评估行。
     private boolean _caveScanDiagLogged = false;
     // Tunnel mode: we're already at the target depth, dig horizontally instead.
@@ -1268,7 +1274,28 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // FIX (stuck bug): once we've hit the bottom the shaft's job is done.
         // Requiring an empty queue here could deadlock the task (and the bot)
         // forever when leftover blocks remained from an interrupted final step.
-        return !_inCave && reachedBottom(mod);
+        boolean result = !_inCave && reachedBottom(mod);
+        // (2026-09-10 探索断裂诊断) 翻转沿打点, 重点抓"空中宣告到底"瞬间。
+        if (result != _finishedDiagLastState) {
+            _finishedDiagLastState = result;
+            if (result) {
+                var p = mod.getPlayer();
+                boolean grounded = isPlayerGrounded(mod);
+                Debug.logToFile("altoclef_diag.log",
+                        "[MineDown-WaitDiag]\tisFinished -> TRUE at "
+                                + (p != null ? p.getBlockPos().toShortString() : "?")
+                                + " grounded=" + grounded + " inCave=" + _inCave
+                                + " targetY=" + _targetY
+                                + (grounded ? "" : "  << AIRBORNE: parent may recreate now & strand pending cave scan"));
+            }
+        }
+        return result;
+    }
+
+    /** (2026-09-10 诊断) 与 ITaskRequiresGrounded 同口径的落地判定。 */
+    public static boolean isPlayerGrounded(AltoClef mod) {
+        var p = mod.getPlayer();
+        return p != null && (p.isOnGround() || p.isSwimming() || p.isTouchingWater() || p.isClimbing());
     }
 
     @Override
