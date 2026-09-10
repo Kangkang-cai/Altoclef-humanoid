@@ -460,7 +460,11 @@ public class TaskCatalogue {
             }
             shapedRecipe3x3("chest", Items.CHEST, 1, p, p, p, p, o, p, p, p, p).dontMineIfPresent();
             shapedRecipe2x2("torch", Items.TORCH, 4, "coal", o, s, o);
-            simple("bed", ItemHelper.BED, CollectBedTask::new);
+            // (2026-09-10) 床不走基类 mineIfPresent 捷径 — 捷径在 ResourceTask.onTick
+            // 提前 return MineAndCollectTask, 绕过 CollectBedTask 的 96 格闸门/
+            // gaveUpWandering 放弃兜底/冷却回落 (2026-09-08 A 修) — 兜底全成死代码,
+            // 挖床锁不到目标时站桩整晚 (23:23 场次 tick 行静默实锤)。同 chest 先例。
+            simple("bed", ItemHelper.BED, CollectBedTask::new).dontMineIfPresent();
             colorfulTasks("bed", colors -> colors.bed, (colors, count) -> new CollectBedTask(colors.bed, colors.colorName + "_wool", count));
             {
                 String i = "iron_ingot";

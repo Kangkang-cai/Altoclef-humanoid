@@ -187,8 +187,15 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     if (base.equals(pos)) return true;
                 }
             }
-            // Don't ever break beds. If one exists, we will sleep in it.
-            return mod.getWorld().getBlockState(pos).getBlock() instanceof BedBlock;
+            // (2026-09-10 根因修复) 删除上游 "Don't ever break beds" — 无条件禁挖
+            // 任何床。本任务在没有可睡床时会自己派发"拿床"(Getting a bed first →
+            // CollectBedTask → 挖 96 格内现成床), 该谓词把所有床判 avoidBreaking
+            // → MineAndCollect 内层 canBreak 恒 false (Diag-blind unbreakable=22
+            // 全部 avoidBreaking, 18:04/22:58/23:23 三场次站桩实锤) → valid=0 →
+            // "Waiting for calculations (wandering)" 站桩整晚。自放床与身边床
+            // 仍有双层保护: 上方 BED_BOTTOM_PLATFORM 平台 + CollectBedTask
+            // .markProtectedBedsUnreachable (8 格内床拉黑 + 自放床 3x3)。
+            return false;
         });
 
         mod.getBlockTracker().trackBlock(BEDS);
