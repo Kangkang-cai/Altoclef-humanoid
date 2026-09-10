@@ -57,9 +57,24 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         _target = target;
     }
 
+    // (2026-09-10 台格属主标记) 当前占据工作台 3x3 合成格内容的配方的输出物品,
+    // null = 无属主 (格空或历史遗留)。存储层 hasRecipeMaterialsOrTarget 只把台格
+    // 里的物品计入"属主配方"的材料 —— 否则镐合成放进台格的 3 颗钻会被胸甲的
+    // 缺料判定当成自己的第 6/7/8 颗 (背包 5 + 台格 3 = 8) → 胸甲抢切镐合成 →
+    // 格被清 → 又缺料 → 循环 (19:42 场次 tasks.log t=99~523 四轮实锤)。
+    // 用输出物品而非 RecipeTarget 实例做属主: 任务链每 tick 可能重建任务,
+    // 同一配方的实例不同但输出物品恒定。
+    private static volatile Item _gridOwnerOutput = null;
+
+    /** 台格无属主 (视为可自由计入) 或属主即本配方时返回 true。 */
+    public static boolean isCraftGridOwnedBy(RecipeTarget target) {
+        Item owner = _gridOwnerOutput;
+        return owner == null || (target != null && target.getOutputItem() == owner);
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
-
+        _gridOwnerOutput = _target.getOutputItem();
     }
 
     @Override
@@ -249,7 +264,10 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
+        // 仅在仍是本配方属主时清除, 避免清掉后继同物品配方的标记。
+        if (_gridOwnerOutput == _target.getOutputItem()) {
+            _gridOwnerOutput = null;
+        }
     }
 
     /** 停滞看门狗的进度签名: 输出格 + 输入格 + 光标 + 背包空位数。 */

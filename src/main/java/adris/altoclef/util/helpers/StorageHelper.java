@@ -1087,14 +1087,21 @@ public class StorageHelper {
                     // Other slots may have our crafting supplies.
                     ScreenHandler screen = mod.getPlayer().currentScreenHandler;
                     if (screen instanceof PlayerScreenHandler || screen instanceof CraftingScreenHandler) {
-                        // Check crafting slots
-                        boolean bigCrafting = (screen instanceof CraftingScreenHandler);
-                        boolean bigRecipe = recipe.isBig();
-                        for (int craftSlotIndex = 0; craftSlotIndex < (bigCrafting ? 9 : 4); ++craftSlotIndex) {
-                            Slot craftSlot = bigCrafting ? CraftingTableSlot.getInputSlot(craftSlotIndex, bigRecipe) : PlayerSlot.getCraftInputSlot(craftSlotIndex);
-                            ItemStack stack = StorageHelper.getItemStackInSlot(craftSlot);
-                            if (needs.matches(stack.getItem())) {
-                                slotsWithItem.add(craftSlot);
+                        // (2026-09-10 台格属主闸门) 合成格里的物品只计入"属主配方"
+                        // 的材料。无属主标记时维持旧口径全计 (2x2 中间合成没有标记,
+                        // 行为不变)。否则镐合成放进台格的 3 颗钻会被胸甲缺料判定
+                        // 当成自己的料 → 抢切镐合成 → 又缺料 → 死循环 (19:42 场次
+                        // tasks.log t=99~523 四轮实锤)。
+                        if (adris.altoclef.tasks.CraftGenericWithRecipeBooksTask.isCraftGridOwnedBy(target)) {
+                            // Check crafting slots
+                            boolean bigCrafting = (screen instanceof CraftingScreenHandler);
+                            boolean bigRecipe = recipe.isBig();
+                            for (int craftSlotIndex = 0; craftSlotIndex < (bigCrafting ? 9 : 4); ++craftSlotIndex) {
+                                Slot craftSlot = bigCrafting ? CraftingTableSlot.getInputSlot(craftSlotIndex, bigRecipe) : PlayerSlot.getCraftInputSlot(craftSlotIndex);
+                                ItemStack stack = StorageHelper.getItemStackInSlot(craftSlot);
+                                if (needs.matches(stack.getItem())) {
+                                    slotsWithItem.add(craftSlot);
+                                }
                             }
                         }
                     }
