@@ -31,7 +31,11 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3i;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Left or Right click on a block on a particular (or any) side of the block.
@@ -58,6 +62,23 @@ public class InteractWithBlockTask extends Task {
     private final int reachDistance = 0;
 
     private ClickResponse _cachedClickStatus = ClickResponse.CANT_REACH;
+
+    // (2026-09-10 清上方方块止损+持久化) 15:13 场次实锤: 清上方方块的
+    // DestroyBlockTask 每次只活 1 tick — 下一 tick reach 状态翻转后 onTick
+    // 走了别的分支 return null, 子任务被抛弃, 方块永远挖不掉, "点击 2s 超时
+    // → 清上方"每 6s 一轮死循环 70s+。两层修复:
+    // ① 实例层持久化: 清理子任务在飞期间持续返回它, 不被分支切换抛弃, 10s
+    //   超时兜底 (防保护块上无限挖)。
+    // ② 触发层 static 冷却 (老规矩: 实例层计数会被父级每轮重建绕过): 同一
+    //   目标上方方块清理尝试超 3 次后不再清, 直接走 requestBlockUnreachable
+    //   + wander 放弃路径。附带记上方方块身份 (是否门框/保护块, 定案用)。
+    private static final Map<BlockPos, Integer> _clearAboveAttempts = new HashMap<>();
+    private static final Set<BlockPos> _clearAboveCapLogged = new HashSet<>();
+    private static final int CLEAR_ABOVE_MAX_ATTEMPTS = 3;
+    private static final long CLEAR_ABOVE_PERSIST_MS = 10_000;
+    private DestroyBlockTask _clearAboveTask = null;
+    private BlockPos _clearAbovePos = null;
+    private long _clearAboveSinceMs = 0;
 
     public InteractWithBlockTask(ItemTarget toUse, Direction direction, BlockPos target, Input interactInput, boolean walkInto, Vec3i interactOffset, boolean shiftClick) {
         _toUse = toUse;
@@ -175,6 +196,25 @@ public class InteractWithBlockTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
 
+        // (2026-09-10) 清上方方块子任务在飞: 持续返回同一子任务, 不被 reach
+        // 翻转/分支切换一 tick 抛弃 (15:13 场次死循环根因)。完成或 10s 超时
+        // 后放行, 回到正常交互流程。
+        if (_clearAboveTask != null) {
+            if (_clearAboveTask.isFinished(mod)) {
+                _clearAboveTask = null;
+                _clearAbovePos = null;
+            } else if (System.currentTimeMillis() - _clearAboveSinceMs > CLEAR_ABOVE_PERSIST_MS) {
+                Debug.logMessage("(InteractWithBlockTask) clear-above "
+                        + aboveShortString() + " not finished in "
+                        + (CLEAR_ABOVE_PERSIST_MS / 1000) + "s, dropping (may be protected/unreachable)");
+                _clearAboveTask = null;
+                _clearAbovePos = null;
+            } else {
+                setDebugState("Clearing block above interaction target");
+                return _clearAboveTask;
+            }
+        }
+
         _cachedClickStatus = ClickResponse.CANT_REACH;
 
         // Get our use item first
@@ -201,13 +241,8 @@ public class InteractWithBlockTask extends Task {
             // 而不是扭头游走。判定口径与下方 WAIT_FOR_CLICK 分支的 isSolid+canBreak 一致,
             // 只碰 _target.up()(绝不清目标本体), 且只有真走不到(卡住)才触发, 不误伤。
             if (_interactInput == Input.CLICK_RIGHT) {
-                BlockPos above = _target.up();
-                if (WorldHelper.isSolid(mod, above) && WorldHelper.canBreak(mod, above)) {
-                    Debug.logMessage("(InteractWithBlockTask) CANT_REACH stuck, clearing solid above "
-                            + _target.toShortString() + " -> " + above.toShortString());
-                    setDebugState("Clearing block above interaction target");
-                    return new DestroyBlockTask(above);
-                }
+                Task clear = clearAboveOrGiveUp(mod, "CANT_REACH stuck, clearing solid above");
+                if (clear != null) return clear;
             }
             Debug.logMessage("Failed, blacklisting and wandering.");
             mod.getBlockTracker().requestBlockUnreachable(_target);
@@ -242,13 +277,8 @@ public class InteractWithBlockTask extends Task {
                     _clickStuckTiming = false;
                     // 床/箱子等上方有实体方块会被 MC 拒绝使用 → 撸掉它再试。
                     if (_interactInput == Input.CLICK_RIGHT) {
-                        BlockPos above = _target.up();
-                        if (WorldHelper.isSolid(mod, above) && WorldHelper.canBreak(mod, above)) {
-                            Debug.logMessage("(InteractWithBlockTask) Click stuck for 2s, clearing block above "
-                                    + _target.toShortString() + " -> " + above.toShortString());
-                            setDebugState("Clearing block above interaction target");
-                            return new DestroyBlockTask(above);
-                        }
+                        Task clear = clearAboveOrGiveUp(mod, "Click stuck for 2s");
+                        if (clear != null) return clear;
                     }
                     // (2026-09-01 人类化 H2: 右键 2s 卡住, 上方又没大实心方块, 还可能是
                     // 草/花/藤/双植物这种"非实心非空气非流体"但 MC 仍 reject 放方块/点床的植被
@@ -329,6 +359,47 @@ public class InteractWithBlockTask extends Task {
 
     public ClickResponse getClickStatus() {
         return _cachedClickStatus;
+    }
+
+    /**
+     * (2026-09-10) 发起"清目标上方方块"。返回要执行的子任务; null = 放弃清理
+     * (超限/不可破坏), 调用方走原有 requestBlockUnreachable + wander 放弃路径。
+     * 日志携带上方方块身份 (block=), 用于定案"清不掉"是不是门框/保护方块。
+     */
+    private Task clearAboveOrGiveUp(AltoClef mod, String reason) {
+        BlockPos above = _target.up();
+        BlockState bs = mod.getWorld().getBlockState(above);
+        if (!WorldHelper.isSolid(mod, above) || !WorldHelper.canBreak(mod, above)) {
+            return null;
+        }
+        if (_clearAboveAttempts.size() > 256) {
+            // 粗粒度防泄漏: 跨场次累计过大直接清零重新计数。
+            _clearAboveAttempts.clear();
+            _clearAboveCapLogged.clear();
+        }
+        int attempts = _clearAboveAttempts.merge(above, 1, Integer::sum);
+        if (attempts > CLEAR_ABOVE_MAX_ATTEMPTS) {
+            if (_clearAboveCapLogged.add(above)) {
+                Debug.logMessage("(InteractWithBlockTask) clear-above cap " + CLEAR_ABOVE_MAX_ATTEMPTS
+                        + " reached @" + above.toShortString() + " block=" + bs.getBlock()
+                        + " — 反复清不掉(疑保护块/够不着), 之后直接走放弃路径");
+                Debug.logToFile("altoclef_diag.log", "[ClearAboveCap]\t" + above.toShortString()
+                        + " block=" + bs.getBlock() + " interactTarget=" + _target.toShortString());
+            }
+            return null;
+        }
+        Debug.logMessage("(InteractWithBlockTask) " + reason + ", clearing block above "
+                + _target.toShortString() + " -> " + above.toShortString()
+                + " block=" + bs.getBlock() + " attempt=" + attempts + "/" + CLEAR_ABOVE_MAX_ATTEMPTS);
+        _clearAboveTask = new DestroyBlockTask(above);
+        _clearAbovePos = above;
+        _clearAboveSinceMs = System.currentTimeMillis();
+        setDebugState("Clearing block above interaction target");
+        return _clearAboveTask;
+    }
+
+    private String aboveShortString() {
+        return _clearAbovePos != null ? _clearAbovePos.toShortString() : "?";
     }
 
     private ClickResponse rightClick(AltoClef mod) {
