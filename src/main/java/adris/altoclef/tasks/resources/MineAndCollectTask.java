@@ -352,8 +352,13 @@ public class MineAndCollectTask extends ResourceTask {
         // 掉落物出现后又消失(已捡/已毁)或窗口超时(掉岩浆/despawn)则照常结束。
         // 仅 _greedy 生效: 非贪婪收集的目标数通常未达标 (super.isFinished=false),
         // 走不到这条路径, 行为不变。
+        // (2026-09-10 23:14 布尔反转修复) 上一版写成 `!hasNearby || hold` — 宽限挂住
+        // 时 (!hasNearby=true, hold=true) 恰好返回 true 判完成, 与挂住意图完全相反,
+        // 且比修复前更糟: 23:05:07 实锤破坏后 50ms 整链被父层抢占 (diag 07.913
+        // [GreedyPickup] hold 日志刚打, 07.914 整链 STOP by 钻石链)。正确语义:
+        // 完成 = 没有近场活 且 不在宽限挂住期。
         if (_greedy) {
-            return !hasNearbyMineableTarget(mod) || holdGreedyForDrop(mod);
+            return !hasNearbyMineableTarget(mod) && !holdGreedyForDrop(mod);
         }
         return !hasNearbyMineableTarget(mod);
     }
@@ -534,6 +539,8 @@ public class MineAndCollectTask extends ResourceTask {
         // (UserTask 里 ResourceTask 的 shouldAvoidPickingUp=true 已绕过父类冷却)。
         private long _lastDropPickupMs = 0;
         private static final long DROP_PICKUP_COOLDOWN_MS = 2000;
+        // (2026-09-10 空中不重建) 空中跳过重建的节流日志锚点。
+        private long _lastAirborneSkipLogTick = -100;
         // (2026-09-06 重启启用, 原为死代码) 捡取粘性窗口: 追过掉落物后 2 秒内
         // 不开新隧道/环顾 (见 getWanderTask)。作用方向与旧注释相反 — 不是让
         // 掉落物不参与目标竞争, 而是刚追过掉落物时【等一等】, 别让探索分支
@@ -1315,6 +1322,23 @@ public class MineAndCollectTask extends ResourceTask {
             boolean finished = _explorationTask != null && _explorationTask.isFinished(mod);
             boolean cooledDown = nowTick - _lastExploreCreateTick >= EXPLORE_RECREATE_COOLDOWN_TICKS;
             if (_explorationTask == null || (finished && cooledDown)) {
+                // (2026-09-10 空中不重建, 22:23:52 场次实锤) 挖穿坠入矿坑的瞬间玩家
+                // Y 穿越 targetY → 探索实例 isFinished 在 CaveScan FIRE 前瞬时翻 true,
+                // 若此刻在空中重建, 全新实例会顶掉原实例 — 落地换入解除后父层返回的
+                // 已是新实例, 原实例手里待启动的洞探索连同 FIRE 标记一起被丢弃, 整洞
+                // 被判"已探索"永不重试。空中时框架本来就拒绝一切换入 (ITaskRequires
+                // Grounded), 重建只会白造实例; 返回 null 站等 <1s 落地, 落地后若原实例
+                // 已 FIRE(_inCave=true, isFinished=false) 自然续跑探索链。
+                if (!MineDownExploreTask.isPlayerGrounded(mod)) {
+                    if (WorldHelper.getTicks() - _lastAirborneSkipLogTick >= 20) {
+                        _lastAirborneSkipLogTick = WorldHelper.getTicks();
+                        Debug.logToFile("altoclef_diag.log",
+                                "[MineDown-Wait]\tskip exploration rebuild while airborne (prev="
+                                        + (_explorationTask == null ? "null" : "held")
+                                        + ", prevFinished=" + finished + ") — waiting for landing");
+                    }
+                    return null;
+                }
                 if (_lookAroundCooldown.elapsed()) {
                     Optional<BlockPos> rejected = findFovRejectedOre(mod, NEAR_ORE_NO_FOV_RANGE);
                     if (rejected.isPresent()) {
