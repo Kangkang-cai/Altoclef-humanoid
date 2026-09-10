@@ -101,7 +101,9 @@ public class BeatMinecraft2Task extends Task {
     private static final Item[] COLLECT_EYE_ARMOR_END = ItemHelper.DIAMOND_ARMORS;
     private static final ItemTarget[] COLLECT_EYE_GEAR = combine(
             toItemTargets(Items.DIAMOND_SWORD),
-            toItemTargets(Items.DIAMOND_PICKAXE, 3),
+            // (2026-09-10 用户确认 3 是改错的) 1 把钻石镐足够, 与 COLLECT_EYE_GEAR_MIN 对齐;
+            // 3 把=9 颗钻, 是"挖 26 颗钻"需求虚高的主要来源。
+            toItemTargets(Items.DIAMOND_PICKAXE, 1),
             toItemTargets(Items.CRAFTING_TABLE)
     );
     private static final ItemTarget[] COLLECT_EYE_GEAR_MIN = combine(
