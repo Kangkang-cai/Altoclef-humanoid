@@ -133,13 +133,16 @@ public class SwimDiveChain extends TaskChain {
 
         // 触发条件 (1)：不在水中 => 无需下潜，重置。
         if (!inWater) {
-            // (2026-09-10 浮动闪烁宽限) 原地浮动时 isTouchingWater 每 0.5-1s 闪
-            // false (13:52:29-41 场次实证 WINDOW_START↔NOT_IN_WATER 交替) →
-            // 窗口反复清零，下潜被拖延 10s+。窗口已开时脱水 ≤20 tick 视为
-            // 浮动闪烁：保留窗口暂停累积，超时才真重置。
+            // (2026-09-10 浮动闪烁宽限，两档) 原地浮动时 isTouchingWater 闪 false：
+            // 小幅水波每 0.5-1s 一次(13:52:29-41 场次实证)，大幅上下浮动脱水可
+            // 达 1-2s(20-40t)——单纯时间宽限不够。判据改为【时长+着地状态】：
+            // 浮动=脱水但悬空(onGround=false)；真离开水=爬上岸即着地。
+            // 脱水 ≤60t 且悬空 → 保留窗口暂停累积；着地或超时 → 真重置。
             if (_windowStartTick >= 0 && _windowStartPos != null
                     && _lastInWaterTick != Long.MIN_VALUE
-                    && nowTick - _lastInWaterTick <= 20) {
+                    && nowTick - _lastInWaterTick <= 60
+                    && !mod.getPlayer().isOnGround()) {
+                diagGate(mod, "NOT_IN_WATER_BOB_AIRBORNE");
                 return;
             }
             // 只在"刚离开水"(≤60 tick) 时记录——正常陆地行走不刷屏。
