@@ -125,6 +125,11 @@ public class MoveItemToSlotTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-10 x0 挂死修复) 目标数量 <= 0 = 没东西可搬, 立即视为完成。
+        // 旧判定要求目标槽已有该物品才算完, count=0 时目标槽为空 → matches
+        // 恒 false → 任务挂死不结束 (15:14 场次: <Moving [raw_iron,iron_ore]
+        // x 0> 起来后 29s 零动作, 光标还被 fuel 残留的橡木板占住)。
+        if (_toMove.getTargetCount() <= 0) return true;
         ItemStack atDestination = StorageHelper.getItemStackInSlot(_destination);
         return (_toMove.matches(atDestination.getItem()) && atDestination.getCount() >= _toMove.getTargetCount());
     }

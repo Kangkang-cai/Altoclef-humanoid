@@ -514,7 +514,12 @@ public class SmeltInFurnaceTask extends ResourceTask {
             // 至少保持槽里已有, 且不超 64
             neededMaterialsInSlot = Math.min(64, Math.max(neededMaterialsInSlot, materialsAlreadyIn));
             // We don't have the right material or we need more
-            if (!_allMaterials.matches(material.getItem()) || neededMaterialsInSlot > material.getCount()) {
+            // (2026-09-10 x0 派发守卫) 需要补入量 <= 0 (目标已由背包/炉内满足)
+            // 时不再派发 MoveItemToSlotFromInventoryTask — 旧逻辑材料槽为空
+            // 就无条件进分支, 算出 x0 任务: 子任务没料可拿 → logError + return
+            // null 死等 (isFinished 又要求目标槽出现材料, 永不成立)。
+            if ((!_allMaterials.matches(material.getItem()) || neededMaterialsInSlot > material.getCount())
+                    && neededMaterialsInSlot - materialsAlreadyIn > 0) {
                 setDebugState("Moving Materials");
                 return new MoveItemToSlotFromInventoryTask(new ItemTarget(materialTarget, neededMaterialsInSlot - materialsAlreadyIn), FurnaceSlot.INPUT_SLOT_MATERIALS);
             }
