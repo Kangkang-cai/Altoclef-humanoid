@@ -1533,6 +1533,15 @@ public class MineAndCollectTask extends ResourceTask {
                 return new int[]{MineDownExploreTask.NETHER_MINING_MIN_Y, MineDownExploreTask.NETHER_MINING_MAX_Y};
             }
             for (Block block : _blocks) {
+                if (block == Blocks.IRON_ORE || block == Blocks.DEEPSLATE_IRON_ORE) {
+                    // (2026-09-10, 用户"挖铁不应始终呆在 y=负值, 应往上走回 y=5~30,
+                    // 非严格值") 铁带取 [5, 30]: 探索隧道被带下限兜住不再沉到负值
+                    // (旧 {50,50} + TUNNEL_MIN_Y=-24 会一路缓沉到 -24 平挖), 深陷
+                    // 负值时上行楼梯爬回带内 (MineDownExploreTask 主世界上行)。
+                    return new int[]{5, 30};
+                }
+            }
+            for (Block block : _blocks) {
                 if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
                     // 1.18 diamond band: dig down to y=-24, then MineDownExploreTask
                     // switches to horizontal branch-mining at that depth
@@ -1541,7 +1550,7 @@ public class MineAndCollectTask extends ResourceTask {
                     return new int[]{-24, -24};
                 }
             }
-            return new int[]{50, 50}; // Iron/coal/stone don't need deep shafts.
+            return new int[]{50, 50}; // Coal/stone fallback (铁已专属 [5,30] 带, 见上).
         }
 
         @Override

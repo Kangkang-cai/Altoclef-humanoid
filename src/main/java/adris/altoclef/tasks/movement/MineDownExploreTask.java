@@ -146,9 +146,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 下界玩家 y 低于此值 → 紧急进入上行模式: 45° 楼梯向上挖回目标高度。
     // 基岩顶面 y=4, 取 10 留出安全缓冲。
     private static final int NETHER_ESCAPE_Y = 10;
-    // 上行模式的最大楼梯步数 (从 y≈5 爬回 y=70 需约 66 步, 80 留余量;
-    // 普通下挖 MAX_DIG_STEPS=40 不变)。
-    private static final int MAX_ASCEND_DIG_STEPS = 80;
+    // 上行模式的最大楼梯步数 (下界从 y≈5 爬回 y=70 需约 66 步; 2026-09-10 主世界
+    // 浅带上行: 从 y≈-40 爬回 y=30 需约 70 步, 深洞 -60 爬回需约 90 步 — 提到 100
+    // 留余量。普通下挖 MAX_DIG_STEPS=40 不变)。
+    private static final int MAX_ASCEND_DIG_STEPS = 100;
     // (上行触发缓冲) 下界任务开始时, 玩家低于 目标高度-16 才进入上行模式:
     // 避免 y=69 这种贴着目标高度的位置反复触发"上爬1格"的抖动。
     private static final int NETHER_ASCEND_BUFFER = 16;
@@ -304,7 +305,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
         // (2026-09-05 下界基岩层逃生) 任务开始时已被压到目标高度之下很深 (如上一轮
         // 挖到 y≈5 被基岩挡) → 直接上行模式, 45° 楼梯挖回目标高度, 不再向下。
-        _ascendMode = _nether && _digStart.getY() <= _targetY - NETHER_ASCEND_BUFFER;
+        // (2026-09-10 主世界浅带上行, 用户"挖铁不应始终呆在 y=负值, 应往回 y=5~30")
+        // 目标带下限为正 (铁 [5,30] 等浅带) 且玩家深陷带下 → 同样上行爬回带内;
+        // 钻石 {-24,-24} 等负带任务不触发, 保持原隧道平挖语义不变。
+        _ascendMode = _digStart.getY() <= ascendTriggerY();
         // Already at mining depth? Don't dig a pointless 1-block "shaft" that
         // finishes instantly and leaves the bot wandering — dig a tunnel instead.
         _tunnelMode = !_ascendMode && _digStart.getY() <= _targetY;
@@ -328,6 +332,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _dirX = STAIR_DIR_X;
             _dirZ = STAIR_DIR_Z;
         }
+    }
+
+    /**
+     * (2026-09-10 主世界浅带上行) 上行模式触发线:
+     * - 下界: 玩家低于 本轮目标高度-16 (原语义不变);
+     * - 主世界: 仅当目标带下限为正 (铁 [5,30] 等浅带任务) 时, 玩家低于 带下限-16
+     *   触发上行爬回带内; 钻石 {-24,-24} 等负带任务返回 MIN_VALUE 永不触发,
+     *   保持原隧道平挖语义不变。
+     */
+    private int ascendTriggerY() {
+        if (_nether) return _targetY - NETHER_ASCEND_BUFFER;
+        return _targetYMin > 0 ? _targetYMin - NETHER_ASCEND_BUFFER : Integer.MIN_VALUE;
     }
 
     @Override
@@ -650,7 +666,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // clamped at the floor so we sink toward the target band and then
             // branch-mine flat. (2026-09-05 下界高度概念) 下界 floor=目标高度 → 不缓降,
             // 平挖 — 主世界 TUNNEL_MIN_Y=-24 是钻石层逻辑, 下界照搬会一路挖到基岩。
-            int floorY = _nether ? _targetY : TUNNEL_MIN_Y;
+            // (2026-09-10 带感知下限, 用户"挖铁不应始终呆在 y=负值") 主世界 floor =
+            // max(TUNNEL_MIN_Y, 带下限): 铁带 [5,30] 隧道缓降到 y=5 为止, 不再一路
+            // 沉到 -24 平挖; 钻石带 {-24,-24} 下限不变; {50,50} 兜底带回到"平挖在
+            // 50"的原意 (旧实现会意外缓沉到 -24)。
+            int floorY = _nether ? _targetY : Math.max(TUNNEL_MIN_Y, _targetYMin);
             int drop = Math.max(0, Math.min(_digStart.getY() - floorY, k / TUNNEL_DESCEND_EVERY));
             ground = _digStart.add(k * _dirX, -drop, k * _dirZ);
         } else {
