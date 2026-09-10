@@ -1330,7 +1330,7 @@ public class MineAndCollectTask extends ResourceTask {
                 // 坠入矿坑时 isFinished 在 FIRE 前瞬时翻转, 此处若在空中重建, 全新
                 // 实例会顶掉正在坠落实例手里还没来得及启动的洞探索。
                 String prevDesc = _explorationTask == null ? "null"
-                        : _explorationTask.toDebugString() + "@" + Integer.toHexString(System.identityHashCode(_explorationTask));
+                        : _explorationTask + "@" + Integer.toHexString(System.identityHashCode(_explorationTask));
                 boolean prevFinished = finished;
                 _explorationTask = createNextExplorationTask(mod);
                 _lastExploreCreateTick = nowTick;
@@ -1338,7 +1338,7 @@ public class MineAndCollectTask extends ResourceTask {
                         "[MineDown-WaitDiag]\texploration recreated: prev=" + prevDesc
                                 + " prevFinished=" + prevFinished
                                 + " grounded=" + MineDownExploreTask.isPlayerGrounded(mod)
-                                + " new=" + _explorationTask.toDebugString()
+                                + " new=" + _explorationTask
                                 + "@" + Integer.toHexString(System.identityHashCode(_explorationTask)));
             }
             return _explorationTask;
