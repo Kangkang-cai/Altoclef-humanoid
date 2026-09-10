@@ -342,7 +342,43 @@ public class MineAndCollectTask extends ResourceTask {
         // 会把整棵树甚至旁边树全砍掉 — 即使背包已够也是 (用户实测: 背包明明
         // 有木头还去砍一整批)。木头数量到了就停。
         if (_subtask.isTargetingWood()) return true;
+        // (2026-09-10 贪婪掉落宽限, 用户"挖掉一个还没拾取就被钻石任务抢去") POSSESS
+        // 已达标(背包已有同类)时, 本任务能挂住全靠扫尾语义 hasNearbyMineableTarget;
+        // 方块刚破坏的 1-2 tick 内掉落物未落地/未过 EntityTracker 感知过滤 →
+        // itemDropped=false → 扫尾两条件(近场矿/掉落物)同时为 false → 立即判完成,
+        // 整链退出, 掉落物留在地上 (tasks.log 2026-09-10 20:14:57 实锤: raw_iron
+        // have=3, 破坏后 50ms (clean) 退出, 钻石链接管走人)。贪婪模式下: 刚挖掉目标
+        // 方块后的宽限窗口内挂住, 等 EntityTracker 回册掉落物 → getClosestTo 去捡;
+        // 掉落物出现后又消失(已捡/已毁)或窗口超时(掉岩浆/despawn)则照常结束。
+        // 仅 _greedy 生效: 非贪婪收集的目标数通常未达标 (super.isFinished=false),
+        // 走不到这条路径, 行为不变。
+        if (_greedy) {
+            return !hasNearbyMineableTarget(mod) || holdGreedyForDrop(mod);
+        }
         return !hasNearbyMineableTarget(mod);
+    }
+
+    // (2026-09-10 贪婪掉落宽限) 掉落物落地+感知回册的宽限窗口。落地约 0.5s,
+    // 回册再 1 tick, 2.5s 足够; 上限防"掉落物永远感知不到"(掉岩浆/滚远)时无限挂住。
+    // 本方法只在 !hasNearbyMineableTarget 时被调 (itemDropped 已为 false, 掉落物
+    // 尚未回册), 所以只需按破坏时刻计时; 掉落物一旦回册, hasNearbyMineableTarget
+    // 的 itemDropped 条款自动接管挂住/捡取。
+    private static final long GREEDY_DROP_GRACE_MS = 2500;
+    private long _greedyGraceBrokenMs = 0;
+    private long _greedyGraceLogEpisodeMs = 0;
+
+    private boolean holdGreedyForDrop(AltoClef mod) {
+        long brokenMs = _subtask.miningTargetBrokenMs();
+        if (brokenMs == 0) return false;
+        _greedyGraceBrokenMs = brokenMs;
+        boolean holding = System.currentTimeMillis() - brokenMs < GREEDY_DROP_GRACE_MS;
+        if (holding && _greedyGraceLogEpisodeMs != brokenMs) {
+            _greedyGraceLogEpisodeMs = brokenMs;
+            Debug.logToFile("altoclef_diag.log",
+                    "[GreedyPickup]\thold after ore break (grace " + GREEDY_DROP_GRACE_MS
+                            + "ms) — waiting for drop landing/perception");
+        }
+        return holding;
     }
 
     private static final double MINE_EVERYTHING_RANGE = 16;
@@ -504,6 +540,13 @@ public class MineAndCollectTask extends ResourceTask {
         // 抢断捡取 (用户实测 18:32 铁掉落物两次被 Digging a tunnel 顶停)。
         private Task _explorationTask;
         private BlockPos _miningPos;
+        // (2026-09-10 贪婪掉落宽限, 用户"挖掉一个还没拾取就被钻石任务抢去") 目标方块
+        // 被挖掉的墙钟时刻。EntityTracker 只收录 GROUNDED(onGround) 的掉落物, 方块刚
+        // 破坏后的 1-2 tick 内掉落物还在空中/未过人类感知过滤 → itemDropped=false →
+        // 外层 isFinished (super.isFinished 恒真 + 扫尾两条件同时 false) 立即判完成,
+        // 掉落物被扔在地上 (tasks.log 20:14:57 实锤: raw_iron have=3 超目标 x1, 破坏
+        // 后 50ms 整链退出)。记录破坏时刻供外层挂住等掉落物落地回册。
+        private long _miningTargetBrokenMs = 0;
         private AltoClef _mod;
         // (2026-09-04 用户"卡住时左键挥几tick清草, 会被草卡住") 挖不动(ProgressChecker
         // 失败)先长按左键 SWING_TICKS 清掉挡路小草/藤蔓, 挥完仍失败才 blacklist 换目标。
@@ -699,6 +742,9 @@ public class MineAndCollectTask extends ResourceTask {
                 // 的 getBlockState 恒 air, 直接判会误清远处合法目标)。
                 if (mod.getChunkTracker().isChunkLoaded(_miningPos)
                         && mod.getWorld().getBlockState(_miningPos).isAir()) {
+                    // (2026-09-10 贪婪掉落宽限) 方块刚被挖掉 → 记录时刻, 供外层
+                    // isFinished 在贪婪模式下挂住等掉落物落地回册。
+                    _miningTargetBrokenMs = System.currentTimeMillis();
                     _miningPos = null;
                 } else if (isValid(mod, _miningPos)) {
                     return Optional.of(_miningPos);
@@ -1678,6 +1724,11 @@ public class MineAndCollectTask extends ResourceTask {
 
         public BlockPos miningPos() {
             return _miningPos;
+        }
+
+        /** (2026-09-10 贪婪掉落宽限) 最近一次目标方块被挖掉的墙钟时刻 (0=无)。 */
+        public long miningTargetBrokenMs() {
+            return _miningTargetBrokenMs;
         }
     }
 
