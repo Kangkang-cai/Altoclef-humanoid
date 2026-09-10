@@ -275,8 +275,26 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                 Slot outSlotId = bigCraftingNow ? CraftingTableSlot.OUTPUT_SLOT : PlayerSlot.CRAFT_OUTPUT_SLOT;
                 ItemStack outNow = StorageHelper.getItemStackInSlot(outSlotId);
                 ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
-                boolean craftInFlight = (!outNow.isEmpty() && isCursorPartOfCraftOrOutput(outNow.getItem()))
-                        || (!cursorNow.isEmpty() && isCursorPartOfCraft(cursorNow));
+                // (2026-09-10 属主收紧, 19:52 场次 tasks.log t=310 实锤) 输出格/光标
+                // 上的物品只认【第一个未满足目标】的 —— 旧口径扫全部 _targets, 多目标
+                // 列表 (全套装备含 diamond_pickaxe) 时, 子合成 (镐) 放进输出格的成品
+                // 被当成"本任务合成在飞" → materialsReady 被旁路放行 → 下方
+                // containerSubTask 按序开工第一目标 (胸甲) → 打断镐的台格 → 循环。
+                // 收紧后子合成产物不再放行, materialsReady=false → 返回 _collectTask,
+                // 子链 (镐) 自然继续收尾; 单目标任务行为不变。
+                RecipeTarget firstNeeded = null;
+                for (RecipeTarget target : _targets) {
+                    if (target.getOutputItem() == null) continue;
+                    if (StorageHelper.countItemInInventoryReal(mod, target.getOutputItem()) < target.getTargetCount()) {
+                        firstNeeded = target;
+                        break;
+                    }
+                }
+                boolean craftInFlight = false;
+                if (firstNeeded != null) {
+                    craftInFlight = (!outNow.isEmpty() && outNow.getItem() == firstNeeded.getOutputItem())
+                            || (!cursorNow.isEmpty() && isCursorPartOfTargetCraft(cursorNow, firstNeeded));
+                }
                 if (craftInFlight) {
                     materialsReady = true;
                 }
@@ -326,21 +344,18 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     private boolean isCursorPartOfCraft(ItemStack cursor) {
         Item item = cursor.getItem();
         for (RecipeTarget target : _targets) {
-            if (target.getOutputItem() == item) return true;
-            for (int slot = 0; slot < target.getRecipe().getSlotCount(); ++slot) {
-                ItemTarget slotTarget = target.getRecipe().getSlot(slot);
-                if (slotTarget != null && !slotTarget.isEmpty() && slotTarget.matches(item)) return true;
-            }
+            if (isCursorPartOfTargetCraft(cursor, target)) return true;
         }
         return false;
     }
 
-    /**
-     * [2026-09-06 死锁修复护栏b] 物品是否为任一目标的成品(输出格待收判定用)。
-     */
-    private boolean isCursorPartOfCraftOrOutput(Item item) {
-        for (RecipeTarget target : _targets) {
-            if (target.getOutputItem() == item) return true;
+    /** (2026-09-10 属主收紧) 光标物品是否属于【单个目标】配方的流程(材料或输出)。 */
+    private boolean isCursorPartOfTargetCraft(ItemStack cursor, RecipeTarget target) {
+        Item item = cursor.getItem();
+        if (target.getOutputItem() == item) return true;
+        for (int slot = 0; slot < target.getRecipe().getSlotCount(); ++slot) {
+            ItemTarget slotTarget = target.getRecipe().getSlot(slot);
+            if (slotTarget != null && !slotTarget.isEmpty() && slotTarget.matches(item)) return true;
         }
         return false;
     }

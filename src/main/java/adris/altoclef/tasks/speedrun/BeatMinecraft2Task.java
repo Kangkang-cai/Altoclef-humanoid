@@ -1584,9 +1584,14 @@ public class BeatMinecraft2Task extends Task {
                 // (用户实测: 材料够了迟迟不做装备)。顺序胸甲(8)>护腿(7)>
                 // 头盔(5), 金靴不耗钻石不在列; 做完由上方 EquipArmorTask 穿上。
                 {
+                    // (2026-09-10 合成在飞不开火, 19:52 场次 t=311 实锤) 有合成占据
+                    // 台格 (如镐正在做) 时本分支不开火: accessible 口径含台格槽位,
+                    // 镐的 3 颗钻在格子里会被算成 5+3=8"够做胸甲" → 开出胸甲任务
+                    // 抢切镐合成。等在飞合成收尾 (格空) 后再按真实材料判。
+                    boolean craftBusy = adris.altoclef.tasks.CraftGenericWithRecipeBooksTask.isCraftInFlight();
                     Item[] diamondOrder = {Items.DIAMOND_CHESTPLATE, Items.DIAMOND_LEGGINGS, Items.DIAMOND_HELMET};
                     int[] diamondCosts = {8, 7, 5};
-                    for (int i = 0; i < diamondOrder.length; i++) {
+                    for (int i = 0; !craftBusy && i < diamondOrder.length; i++) {
                         Item piece = diamondOrder[i];
                         boolean owned = mod.getItemStorage().hasItem(piece) || StorageHelper.isArmorEquipped(mod, piece);
                         // (2026-09-10 横跳修复) 钻石计数含打开容器自有槽位: 钻石镐合成

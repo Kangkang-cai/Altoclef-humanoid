@@ -72,6 +72,11 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         return owner == null || (target != null && target.getOutputItem() == owner);
     }
 
+    /** (2026-09-10) 是否有合成正占据工作台/随身合成格 (任何配方的填充/收尾在飞)。 */
+    public static boolean isCraftInFlight() {
+        return _gridOwnerOutput != null;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _gridOwnerOutput = _target.getOutputItem();
