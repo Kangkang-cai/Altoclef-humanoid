@@ -60,6 +60,15 @@ public class SwimDiveChain extends TaskChain {
     private int _diveTicksLeft = 0;
     private long _lastDiveTick = Long.MIN_VALUE;
 
+    // ==== [SWIM-DIVE-DIAG] 2026-09-10 零行为改动诊断 ====
+    // 现场：水中卡住全靠 NAV-STUCK/超时兜底，整场日志 0 条 [SWIM-DIVE]。
+    // 怀疑点：(a) 原地浮动 (water-bob) 时 isTouchingWater 逐 tick 闪烁为
+    // false（11:52:02/11:52:04 两帧实证）→ 条件(1) resetState 反复清零
+    // 60 tick 连续窗口，永远攒不满；(b) 空气 <50% 闸门误拦。本日志定位。
+    private long _lastInWaterTick = Long.MIN_VALUE;
+    private long _lastDiagTick = Long.MIN_VALUE;
+    private String _lastDiagReason = null;
+
     public SwimDiveChain(TaskRunner runner) {
         super(runner);
     }
@@ -116,29 +125,44 @@ public class SwimDiveChain extends TaskChain {
         long nowTick = WorldHelper.getTicks();
         Vec3d pos = mod.getPlayer().getPos();
 
+        // [SWIM-DIVE-DIAG] 记录最近一次在水中的 tick，用于识别"浮动瞬间脱离水"。
+        boolean inWater = mod.getPlayer().isTouchingWater();
+        if (inWater) {
+            _lastInWaterTick = nowTick;
+        }
+
         // 触发条件 (1)：不在水中 => 无需下潜，重置。
-        if (!mod.getPlayer().isTouchingWater()) {
+        if (!inWater) {
+            // 只在"刚离开水"(≤60 tick) 时记录——这正是原地浮动闪烁的场景；
+            // 正常陆地行走不刷屏。
+            if (_lastInWaterTick != Long.MIN_VALUE && nowTick - _lastInWaterTick <= 60) {
+                diagGate(mod, "NOT_IN_WATER");
+            }
             resetState();
             return;
         }
         // 触发条件 (1b)：在船上 => 绝不注入（会下船破坏划船），重置。
         if (mod.getPlayer().getVehicle() instanceof BoatEntity) {
+            diagGate(mod, "IN_BOAT");
             resetState();
             return;
         }
         // 触发条件 (2)：空气不足 => 交给 handleDrowning 上浮，不下潜，重置。
         if (mod.getPlayer().getMaxAir() > 0
                 && (double) mod.getPlayer().getAir() / mod.getPlayer().getMaxAir() < MIN_AIR_FRACTION) {
+            diagGate(mod, "AIR_LOW");
             resetState();
             return;
         }
         // 触发条件 (3)：只对导航/挖掘类主任务生效。
         if (!isNavigating(mod)) {
+            diagGate(mod, "TASK_NOT_MOVEMENT");
             resetState();
             return;
         }
         // 战斗不触发（别在打斗里贸然注入潜行移动）。
         if (mod.getMobDefenseChain().isInCombat()) {
+            diagGate(mod, "IN_COMBAT");
             resetState();
             return;
         }
@@ -147,6 +171,7 @@ public class SwimDiveChain extends TaskChain {
         if (_windowStartTick < 0 || _windowStartPos == null) {
             _windowStartTick = nowTick;
             _windowStartPos = pos;
+            diagGate(mod, "WINDOW_START");
             return;
         }
 
@@ -154,15 +179,50 @@ public class SwimDiveChain extends TaskChain {
         double dx = pos.x - _windowStartPos.x;
         double dz = pos.z - _windowStartPos.z;
         if (dx * dx + dz * dz >= STUCK_MIN_MOVE_SQR) {
+            diagGate(mod, "WINDOW_RESET_MOVED");
             resetWindow();
             return;
         }
 
-        // 连续卡满阈值 tick，且距上次下潜已过冷却 => 触发下潜。
+        // 连续卡满阈值 tick => 触发下潜（冷却未到则记录拦截原因）。
         long stuckForTicks = nowTick - _windowStartTick;
-        if (stuckForTicks >= SWIM_STUCK_WINDOW_TICKS
-                && (nowTick - _lastDiveTick) >= RE_DIVE_COOLDOWN_TICKS) {
+        if (stuckForTicks < SWIM_STUCK_WINDOW_TICKS) {
+            // [SWIM-DIVE-DIAG] 独立 40 tick 节流，观察窗口累积进度。
+            if (nowTick - _lastDiagTick >= 40) {
+                _lastDiagTick = nowTick;
+                writeDiag(mod, "ACCUMULATING streak=" + stuckForTicks
+                        + "/" + SWIM_STUCK_WINDOW_TICKS);
+            }
+        } else if ((nowTick - _lastDiveTick) < RE_DIVE_COOLDOWN_TICKS) {
+            diagGate(mod, "COOLDOWN_BLOCKING");
+        } else {
             triggerDive(mod, stuckForTicks);
+        }
+    }
+
+    // ==== [SWIM-DIVE-DIAG] 诊断出口：换原因即记录，同原因最多 60 tick 一条 ====
+    private void diagGate(AltoClef mod, String reason) {
+        long nowTick = WorldHelper.getTicks();
+        if (reason.equals(_lastDiagReason) && nowTick - _lastDiagTick < 60) return;
+        _lastDiagTick = nowTick;
+        _lastDiagReason = reason;
+        writeDiag(mod, reason);
+    }
+
+    private void writeDiag(AltoClef mod, String tag) {
+        try {
+            var p = mod.getPlayer();
+            if (p == null) return;
+            double airFrac = p.getMaxAir() > 0 ? (double) p.getAir() / p.getMaxAir() : 1.0;
+            Task main = mod.getUserTaskChain().getCurrentTask();
+            String m = "[SWIM-DIVE-DIAG] gate=" + tag
+                    + " inWater=" + p.isTouchingWater()
+                    + String.format(" air=%.2f", airFrac)
+                    + " pos=" + p.getBlockPos()
+                    + " task=" + (main == null ? "null" : main.toString());
+            Debug.logToFile("altoclef_diag.log", m);
+        } catch (Throwable ignored) {
+            // 诊断绝不影响主逻辑
         }
     }
 
