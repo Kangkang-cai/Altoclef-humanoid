@@ -185,6 +185,10 @@ public class SwimDiveChain extends TaskChain {
         }
 
         // 连续卡满阈值 tick => 触发下潜（冷却未到则记录拦截原因）。
+        // (2026-09-10 定案) 旧写法 (nowTick - _lastDiveTick) >= COOLDOWN 在
+        // _lastDiveTick=Long.MIN_VALUE 哨兵时 long 减法下溢为负 → "冷却中"
+        // 恒成立 → 首次下潜永不触发（现场：COOLDOWN_BLOCKING 从窗口攒满起
+        // 连刷 34s，全程 0 条 SWIM-DIVE）。哨兵值必须显式豁免。
         long stuckForTicks = nowTick - _windowStartTick;
         if (stuckForTicks < SWIM_STUCK_WINDOW_TICKS) {
             // [SWIM-DIVE-DIAG] 独立 40 tick 节流，观察窗口累积进度。
@@ -193,7 +197,8 @@ public class SwimDiveChain extends TaskChain {
                 writeDiag(mod, "ACCUMULATING streak=" + stuckForTicks
                         + "/" + SWIM_STUCK_WINDOW_TICKS);
             }
-        } else if ((nowTick - _lastDiveTick) < RE_DIVE_COOLDOWN_TICKS) {
+        } else if (_lastDiveTick != Long.MIN_VALUE
+                && (nowTick - _lastDiveTick) < RE_DIVE_COOLDOWN_TICKS) {
             diagGate(mod, "COOLDOWN_BLOCKING");
         } else {
             triggerDive(mod, stuckForTicks);
