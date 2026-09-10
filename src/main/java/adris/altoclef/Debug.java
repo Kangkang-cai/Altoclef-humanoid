@@ -53,7 +53,7 @@ public class Debug {
             java.io.File base = new File("logs/altoclef");
             File[] dirs = base.listFiles(File::isDirectory);
             if (dirs == null || dirs.length <= KEEP_SESSIONS) return;
-            Arrays.sort(dirs, java.util.Comparator.comparingLong(File::lastModified).reversed());
+            java.util.Arrays.sort(dirs, java.util.Comparator.comparingLong(File::lastModified).reversed());
             for (int i = KEEP_SESSIONS; i < dirs.length; i++) {
                 File cur = dirs[i];
                 if (cur.getName().equals(SESSION_STAMP)) continue;
