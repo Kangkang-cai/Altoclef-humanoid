@@ -132,6 +132,15 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private static final long SLEEP_GIVEUP_COOLDOWN_MS = 30_000;
     private static final long BLOCKER_CLEAR_TIMEOUT_MS = 8_000;
 
+    // (2026-09-10 分级睡床, 用户: "人看到 48m 外有床会直接走过去睡, 不是拆了扛
+    // 回来") 30 格内无可睡床时, 30~96 格内感知到床 → 直接导航过去睡。static 同上:
+    // SleepThroughNightTask 每 tick new 实例, 实例字段会被重建绕过。
+    private static final long MID_RANGE_SLEEP_NAV_TIMEOUT_MS = 60_000;
+    private static final long MID_RANGE_SLEEP_GIVEUP_COOLDOWN_MS = 30_000;
+    private static volatile long s_midRangeSleepGiveUpUntilMs = 0;
+    private static BlockPos s_midRangeSleepTarget = null;
+    private static long s_midRangeSleepNavStartMs = 0;
+
     public static boolean isSleepGiveUpCooldown() {
         return System.currentTimeMillis() < s_sleepGiveUpUntilMs;
     }
@@ -645,6 +654,42 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 return new TimeoutWanderTask(1, true);
             }
             return null;
+        }
+
+        // (2026-09-10 分级睡床) 30 格内无可睡床(shouldGoToBed=false)且背包没床成品:
+        // 30~96 格内感知到床 → 直接导航过去睡。走到 30 格内自然进入上方正常睡床流程
+        // (站侧预判/瞄点/超时全套复用); 挖床只留给睡不了的情形 — 挖床同样要走 48m,
+        // 直接睡省"挖+背回+放"三步。60s 导航超时 → 触发层 static 冷却 30s(6eedb369:
+        // 实例冷却会被任务重建绕过) → 回落下方拿床路径(挖床/做床), 不站桩。
+        if (!hasBedItem && nearestBed != null
+                && System.currentTimeMillis() >= s_midRangeSleepGiveUpUntilMs) {
+            boolean midRangeBed = !nearestBed.isWithinDistance(mod.getPlayer().getPos(), 30)
+                    && nearestBed.isWithinDistance(mod.getPlayer().getPos(), 96);
+            if (midRangeBed) {
+                if (!nearestBed.equals(s_midRangeSleepTarget)) {
+                    s_midRangeSleepTarget = nearestBed;
+                    s_midRangeSleepNavStartMs = System.currentTimeMillis();
+                    String m = "[Diag-bed] mid-range sleep: walking to bed "
+                            + nearestBed.toShortString() + " ("
+                            + (int) Math.sqrt(nearestBed.getSquaredDistance(mod.getPlayer().getBlockPos()))
+                            + "m) — sleep-first, mine only if unreachable";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+                if (System.currentTimeMillis() - s_midRangeSleepNavStartMs > MID_RANGE_SLEEP_NAV_TIMEOUT_MS) {
+                    s_midRangeSleepGiveUpUntilMs = System.currentTimeMillis() + MID_RANGE_SLEEP_GIVEUP_COOLDOWN_MS;
+                    s_midRangeSleepTarget = null;
+                    String m = "[Diag-bed] mid-range sleep nav timeout " + (MID_RANGE_SLEEP_NAV_TIMEOUT_MS / 1000)
+                            + "s, cooldown " + (MID_RANGE_SLEEP_GIVEUP_COOLDOWN_MS / 1000)
+                            + "s -> getting a bed instead (mine/craft)";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    return null;
+                }
+                setDebugState("Bed within 96 but >30 — walking over to sleep it (sleep-first)");
+                return new GetToBlockTask(nearestBed);
+            }
+            s_midRangeSleepTarget = null;
         }
 
         // Get a bed if we don't have one.
