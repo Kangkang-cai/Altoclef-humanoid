@@ -208,10 +208,6 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
     private int _waterSkipped = 0;
-    // 远离液体策略：因队列头贴着水/岩浆而放弃轨迹、换方向重挖的次数。
-    // 上限防止在湖泊/岩浆湖上方无限横跳。
-    private int _liquidRetreats = 0;
-    private static final int MAX_LIQUID_RETREATS = 8;
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
     // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
@@ -290,7 +286,6 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _skipStreak = 0;
         _inCave = false;
         _waterSkipped = 0;
-        _liquidRetreats = 0;
         _digQueue.clear();
         // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
@@ -522,28 +517,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-10 空跳修复) 空跳只推进几何路径 _step, 不消耗真实挖掘预算;
         // 单 tick 空跳有上限, 巨型空腔分多个 tick 跳, 不挂死单 tick。
         advanceToSolid(mod);
-        // 远离液体策略（用户原则）：挖开贴着水/岩浆的方块会让液体灌进
-        // 通道（bot 在水里移动极慢 → 卡顿；岩浆 → 伤害+掉落物被烧）。
-        // 精确堵水需要流体 BFS 找全部源头 + 放置规划 + 失败重试，复杂度
-        // 过高不实现。这里直接回避：放弃当前轨迹，从当前位置换个方向
-        // 重新挖。重试有上限，防在液体区域上方无限换向。
-        while (!_digQueue.isEmpty() && WorldHelper.isAdjacentToLiquid(mod, _digQueue.peek())) {
-            if (_liquidRetreats >= MAX_LIQUID_RETREATS) {
-                Debug.logMessage("[Liquid-avoid] too many liquid encounters, ending this dig run.");
-                _digQueue.clear();
-                // (2026-09-10 空跳修复) 结束 run 改为耗尽真实挖掘预算 (原 _step=MAX
-                // 依赖几何索引触发 reachedBottom, 预算语义改后不再成立)。
-                _realDigs = (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) * BLOCKS_PER_STEP;
-                return null;
-            }
-            _liquidRetreats++;
-            Debug.logMessage("[Liquid-avoid] tunnel head at " + _digQueue.peek().toShortString()
-                    + " is adjacent to liquid, retreating and changing direction ("
-                    + _liquidRetreats + "/" + MAX_LIQUID_RETREATS + ")");
-            retreatAndRedig(mod);
-            skipAirAndWater(mod);
-            advanceToSolid(mod);
-        }
+        // (2026-09-10 液体预判闸门删除, 用户"就算有水也要直直挖, 真的看到水了才躲开")
+        // 旧闸门用 isAdjacentToLiquid 检查挖掘目标 6 个相邻格的流体 —— 这是隔墙
+        // 透视: 水藏在未挖的石头后面 bot 也"知道", 违反反透视原则。实况
+        // (altoclef_chat-20260910-114004): bot 重入被水灌满的旧隧道网, 队首跳过水
+        // 块后落到的实体石头周围全是水 → 四方向全命中 → 一 tick 内 8 次退避打满
+        // → "too many liquid encounters" 放弃 → 父层 5s 重建 → 站桩死循环。
+        // 新语义: 直直挖。水出现在挖掘路径上由 skipAirAndWater 处理 (走过去 +
+        // [Diag-water] 记录) —— 这才是"真的看到水"。隐藏在水后石头里的液体照
+        // 人类认知处理: 不知道, 挖穿了再说。
         if (_digQueue.isEmpty()) {
             return null;
         }
@@ -568,9 +550,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * 远离液体：放弃当前挖掘轨迹，从玩家当前位置随机换一个水平方向
-     * （与旧方向不同）重新开始楼梯/隧道。四种方向都有液体时由
-     * MAX_LIQUID_RETREATS 上限兜底终止。
+     * 放弃当前挖掘轨迹，从玩家当前位置随机换一个水平方向
+     * （与旧方向不同）重新开始楼梯/隧道。
      */
     private void retreatAndRedig(AltoClef mod) {
         _digQueue.clear();
