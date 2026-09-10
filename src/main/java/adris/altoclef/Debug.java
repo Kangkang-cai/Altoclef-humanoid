@@ -112,7 +112,17 @@ public class Debug {
         return "[Alto Clef] ";
     }
 
+    // (2026-09-10 聊天输出落盘) 聊天屏只留最后约 100 条且退出即失, 用户在
+    // 聊天栏看到的现场线索 (如 [Liquid-avoid] 刷屏) 从未进过任何文件——
+    // logMessage 有玩家时只走 player.sendMessage, 不经过 logInternal/stdout。
+    // 从此每条聊天输出同步写 altoclef_chat.log (在 .minecraft, 分会话), 与
+    // 聊天栏一一对应, 排查"聊天里看见了但日志里没有"的问题。
+    private static String stripFormatting(String message) {
+        return message == null ? "null" : message.replaceAll("\u00a7.", "");
+    }
+
     public static void logMessage(String message, boolean prefix) {
+        logToFile("altoclef_chat.log", "[CHAT] " + stripFormatting(message));
         if (MinecraftClient.getInstance() != null && MinecraftClient.getInstance().player != null) {
             if (prefix) {
                 message = "\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7r" + message;
@@ -134,6 +144,7 @@ public class Debug {
 
     public static void logWarning(String message) {
         logInternal("WARNING: " + message);
+        logToFile("altoclef_chat.log", "[WARN] " + stripFormatting(message));
         if (jankModInstance != null && !jankModInstance.getModSettings().shouldHideAllWarningLogs()) {
             if (MinecraftClient.getInstance() != null && MinecraftClient.getInstance().player != null) {
                 String msg = "\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7c" + message + "\u00A7r";
