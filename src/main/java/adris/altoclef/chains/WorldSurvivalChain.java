@@ -1,6 +1,7 @@
 package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
@@ -14,6 +15,7 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.AbstractFireBlock;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.Items;
@@ -32,6 +34,17 @@ public class WorldSurvivalChain extends SingleTaskChain {
 
     // 着火期间为"找附近的水"临时跟踪 WATER 方块，火灭后停止（引用计数）。
     private boolean _wasTrackingWaterForFire = false;
+
+    // ==== 防溺水"找空气" (2026-09-10, 13:15 场次) ====
+    // 旧 handleDrowning 双重失效: (a) isPathing 闸门——baritone 寻路中完全不生效
+    // (现场 pathing=true 全程); (b) 只会 hold(JUMP) 上浮, 隧道顶封死时按跳无效,
+    // bot 在水下 air=-0.04 掉血 18s 淹死。新增: 空气危急(<25%)且在水中时,
+    // 以高优先级导航到最近可呼吸方块 (AIR/CAVE_AIR/VOID_AIR)。
+    private static final double DROWN_ESCAPE_AIR_FRACTION = 0.25;
+    private static final int DROWN_ESCAPE_SEARCH_RADIUS = 16;
+    private static final float DROWN_ESCAPE_PRIORITY = 95; // 低于岩浆/火焰(100), 高于常规任务
+    private final TimerGame _drownReissueTimer = new TimerGame(2);
+    private boolean _loggedNoBreathable = false;
 
     public WorldSurvivalChain(TaskRunner runner) {
         super(runner);
@@ -75,6 +88,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
             setTask(new DoToClosestBlockTask(PutOutFireTask::new, Blocks.FIRE, Blocks.SOUL_FIRE));
             return 100;
         }
+
+        // Drowning escape: 找空气 (置于岩浆/火焰之后, 那两者死得更快)
+        float drownEscape = tryDrowningEscape(mod);
+        if (drownEscape != Float.NEGATIVE_INFINITY) return drownEscape;
 
         // Extinguish with water
         if (mod.getModSettings().shouldExtinguishSelfWithWater()) {
@@ -146,6 +163,76 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
 
         return Float.NEGATIVE_INFINITY;
+    }
+
+    /**
+     * 防溺水"找空气"逃生 (2026-09-10)：水中且空气 <25% 时，以 DROWN_ESCAPE_PRIORITY
+     * 导航到最近可呼吸方块。目标要求所在区块已加载、六邻至少一格是空气/水
+     * (排除全封闭空气囊，避免选到不可达目标)。任务在跑期间不换目标防抖动；
+     * 失败/被打断后经 2s 重发冷却再重找。找不到目标时不动 (留旧 handleDrowning
+     * 的按跳上浮兜底)。
+     */
+    private float tryDrowningEscape(AltoClef mod) {
+        var p = mod.getPlayer();
+        if (p == null || !p.isTouchingWater() || p.getMaxAir() <= 0) {
+            return Float.NEGATIVE_INFINITY;
+        }
+        double airFrac = (double) p.getAir() / p.getMaxAir();
+        if (airFrac > DROWN_ESCAPE_AIR_FRACTION) {
+            _loggedNoBreathable = false;
+            return Float.NEGATIVE_INFINITY;
+        }
+        // 逃生任务正在跑: 不换目标，防逐 tick 重算/重设任务抖动。
+        if (_mainTask instanceof GetToBlockTask && isCurrentlyRunning(mod)) {
+            return DROWN_ESCAPE_PRIORITY;
+        }
+        // 任务不在跑 (刚完成/被打断/失败): 2s 冷却防 setTask 抖动。
+        if (!_drownReissueTimer.elapsed()) {
+            return Float.NEGATIVE_INFINITY;
+        }
+        BlockPos air = findNearestBreathable(mod);
+        if (air == null) {
+            if (!_loggedNoBreathable) {
+                _loggedNoBreathable = true;
+                String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                        + " 但 " + DROWN_ESCAPE_SEARCH_RADIUS + " 格内无可达呼吸方块, 退回按跳上浮兜底 pos=" + p.getBlockPos();
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+            return Float.NEGATIVE_INFINITY;
+        }
+        _loggedNoBreathable = false;
+        setTask(new GetToBlockTask(air));
+        _drownReissueTimer.reset();
+        String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                + " -> navigate to breathable " + air.toShortString()
+                + " player=" + p.getBlockPos();
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+        return DROWN_ESCAPE_PRIORITY;
+    }
+
+    /** 最近可呼吸方块: iterateOutwards 按距离递增遍历, 命中即返回 = 最近优先。 */
+    private BlockPos findNearestBreathable(AltoClef mod) {
+        BlockPos center = mod.getPlayer().getBlockPos();
+        for (BlockPos pos : BlockPos.iterateOutwards(center,
+                DROWN_ESCAPE_SEARCH_RADIUS, DROWN_ESCAPE_SEARCH_RADIUS, DROWN_ESCAPE_SEARCH_RADIUS)) {
+            if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
+            if (!WorldHelper.isAir(mod, pos)) continue;
+            boolean connected = false;
+            for (Direction d : Direction.values()) {
+                BlockPos n = pos.offset(d);
+                if (!mod.getChunkTracker().isChunkLoaded(n)) continue;
+                BlockState ns = mod.getWorld().getBlockState(n);
+                if (ns.isAir() || ns.getBlock() == Blocks.WATER) {
+                    connected = true;
+                    break;
+                }
+            }
+            if (!connected) continue;
+            return pos.toImmutable();
+        }
+        return null;
     }
 
     private void handleDrowning(AltoClef mod) {
