@@ -236,6 +236,36 @@ public class StorageHelper {
     }
 
     /**
+     * (2026-09-10 横跳修复) 计数口径:【真实背包 + 护甲 + 副手 + 光标 + 当前打开
+     * 容器的自有槽位(工作台 3x3/熔炉等)】。玩家自带界面时退化为旧口径
+     * (含 2x2 合成格)。容器界面打开时【不可】叠用 includingCraftGrid 口径:
+     * 其 PlayerSlot.CRAFT_INPUT_SLOTS=window1-4 在台子界面解析到台格前四格,
+     * 与容器遍历双计。玩家背包槽(PlayerInventory)跳过防双计。
+     *
+     * 修复场景: "钻石即做"分支每 tick 用纯背包口径数钻石 — 钻石镐合成把 3 颗钻
+     * 借进工作台 3x3 的瞬间, 背包口径骤降 → 分支切下一件防具抢切镐合成 → 格子
+     * 打断钻石弹回 → 又切回 → chestplate↔leggings 每 ~250ms 振荡 (18:28 场次
+     * [Diag-flow] 实锤), 钻石镐 50 次重选永不完成。含台格口径后阈值判定稳定。
+     */
+    public static int countItemsAccessibleIncludingOpenContainer(AltoClef mod, Item item) {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) return 0;
+        ScreenHandler handler = player.currentScreenHandler;
+        if (handler == null || handler == player.playerScreenHandler) {
+            return countItemInInventoryRealIncludingCraftGrid(mod, item);
+        }
+        int total = countItemsInInventoryReal(mod, item);
+        for (net.minecraft.screen.slot.Slot slot : handler.slots) {
+            if (slot == null || slot.inventory instanceof PlayerInventory) continue;
+            ItemStack stack = slot.getStack();
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    /**
      * (2026-09-01) 仅统计 2x2 合成格中匹配物品的数量。配合
      * {@link #countItemsInInventoryReal} 实现"背包 + 合成格"口径。
      */

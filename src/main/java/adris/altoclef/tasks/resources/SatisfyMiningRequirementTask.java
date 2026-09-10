@@ -92,8 +92,10 @@ public class SatisfyMiningRequirementTask extends Task {
      * 对齐 (StorageHelper.countItemInInventoryRealIncludingCraftGrid)。
      */
     private boolean shouldPreferIronPickaxe(AltoClef mod) {
-        int ingots = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.IRON_INGOT);
-        int rawIron = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.RAW_IRON);
+        // (2026-09-10 口径升级) 计数含打开容器自有槽位: 材料被搬进工作台 3x3 的
+        // 瞬间不再被判"缺失" → 档位选择不翻转 (横跳根因之一, 18:28 场次)。
+        int ingots = StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.IRON_INGOT);
+        int rawIron = StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.RAW_IRON);
         if (ingots < 3 && rawIron < 3) return false;
         return hasStickMaterial(mod);
     }
@@ -106,16 +108,18 @@ public class SatisfyMiningRequirementTask extends Task {
      * (防配方中间态计数翻假 → 档位选择抖动, 同 shouldPreferIronPickaxe 教训)。
      */
     private boolean shouldPreferDiamondPickaxe(AltoClef mod) {
-        int diamonds = StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.DIAMOND);
+        // (2026-09-10 口径升级) 含打开容器自有槽位: 钻石被搬进工作台 3x3 等待合成
+        // 的瞬间, 阈值判定不再骤降 → 不翻回铁镐档 (横跳根因之一)。
+        int diamonds = StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.DIAMOND);
         return diamonds >= 3 && hasStickMaterial(mod);
     }
 
     /** 棒料: 木棍 ≥2, 或 木板 ≥2, 或 任一原木 ≥1 (均可合成出 2 根棒子)。 */
     private boolean hasStickMaterial(AltoClef mod) {
-        if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, Items.STICK) >= 2) return true;
+        if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.STICK) >= 2) return true;
         if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS) >= 2) return true;
         for (Item log : ItemHelper.LOG) {
-            if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, log) >= 1) return true;
+            if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, log) >= 1) return true;
         }
         return false;
     }

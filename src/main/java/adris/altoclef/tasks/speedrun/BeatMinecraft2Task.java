@@ -1589,7 +1589,13 @@ public class BeatMinecraft2Task extends Task {
                     for (int i = 0; i < diamondOrder.length; i++) {
                         Item piece = diamondOrder[i];
                         boolean owned = mod.getItemStorage().hasItem(piece) || StorageHelper.isArmorEquipped(mod, piece);
-                        if (!owned && mod.getItemStorage().getItemCount(Items.DIAMOND) >= diamondCosts[i]) {
+                        // (2026-09-10 横跳修复) 钻石计数含打开容器自有槽位: 钻石镐合成
+                        // 把 3 颗钻借进工作台 3x3 的瞬间, 旧口径(仅背包)骤降 → 本分支
+                        // 每 tick 重扫切换到下一件 → 抢切镐合成 → 格子打断钻石弹回 →
+                        // 又切回 → chestplate↔leggings 每 ~250ms 振荡, 镐子永不完成
+                        // (18:28 场次 [Diag-flow] 实锤)。含台格口径后阈值判定稳定,
+                        // 当前件做完(或钻石真被消耗)才轮到下一件。
+                        if (!owned && StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.DIAMOND) >= diamondCosts[i]) {
                             setDebugState("Crafting diamond gear immediately: " + ItemHelper.stripItemName(piece));
                             return TaskCatalogue.getItemTask(piece, 1);
                         }
