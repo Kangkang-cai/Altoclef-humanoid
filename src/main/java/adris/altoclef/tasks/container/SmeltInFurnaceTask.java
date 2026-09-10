@@ -46,6 +46,21 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
     private final DoSmeltInFurnaceTask _doTask;
 
+    // (2026-09-10 收尾活锁看门狗) 15:13 场次实锤: 烧完铁后 Receiving Output
+    // ↔ Moving Materials(x0) ↔ Filling fuel ↔ Guarding furnace 每 6s 一轮活锁
+    // 70s+ (背包满收不走产物 / 炉子点不开等, 任何原因都没有出口)。isFinished
+    // 要求 targetsMet && isFurnaceDrained, 炉排不空就永不结束 → 无限等。
+    // 看门狗口径: 只统计熔炉界面打开的 game tick (去程取燃料/守卫驻留不计),
+    // 槽位快照 (输出/材料/燃料/背包目标数) 有任何变化即视为有进展归零;
+    // 零进展连续 1200 tick (60 游戏秒) → 放弃: 记 [SmeltGiveUp] 快照日志、
+    // 关屏、置触发层 static 冷却 30s (实例每轮会被父级重建, 实例层挡不住)。
+    private static final int SMELT_STALL_GIVEUP_TICKS = 20 * 60;
+    private static final long SMELT_GIVEUP_COOLDOWN_MS = 30_000;
+    private static long _staticGaveUpUntilMs = 0;
+    private boolean _gaveUp = false;
+    private String _stallSnap = null;
+    private int _stallOpenTicks = 0;
+
     public SmeltInFurnaceTask(SmeltTarget[] targets) {
         super(extractItemTargets(targets));
         _targets = targets;
@@ -96,7 +111,55 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // 无法在烧炼内可靠执行 → 改回"烧完排空即结束" (isFinished 依赖
         // isFurnaceDrained, 保证熔炉内不残留未烧玩/未取的东西)。回收交给
         // BeatMinecraft 的"熔炉即收"站桩分支尽力而为。
+        // (2026-09-10 看门狗) 已放弃的本实例停摆; 冷却期内新建的实例不启动
+        // 烧炼, 原地等待 30s 后再试 — 防止父级立刻重建又原样活锁。
+        if (_gaveUp) return null;
+        if (System.currentTimeMillis() < _staticGaveUpUntilMs) {
+            setDebugState("Smelt give-up cooldown");
+            return null;
+        }
+        // 看门狗主体: 只统计熔炉界面打开的 tick (去程取燃料/守卫驻留期界面
+        // 关着, 不计时, 不误伤合法的长时间取料)。
+        if (mod.getPlayer() != null
+                && mod.getPlayer().currentScreenHandler instanceof FurnaceScreenHandler) {
+            ItemStack out = StorageHelper.getItemStackInSlot(FurnaceSlot.OUTPUT_SLOT);
+            ItemStack mat = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_MATERIALS);
+            ItemStack fuel = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_FUEL);
+            int invTarget = 0;
+            for (ItemTarget t : _itemTargets) {
+                invTarget += mod.getItemStorage().getItemCountInventoryOnly(t.getMatches());
+            }
+            String snap = out.getCount() + "/" + mat.getCount() + "/" + fuel.getCount() + "/" + invTarget;
+            if (!snap.equals(_stallSnap)) {
+                _stallSnap = snap;
+                _stallOpenTicks = 0;
+            } else {
+                _stallOpenTicks++;
+            }
+            if (_stallOpenTicks >= SMELT_STALL_GIVEUP_TICKS) {
+                giveUp(mod, out, mat, fuel, invTarget);
+                return null;
+            }
+        }
         return _doTask;
+    }
+
+    /**
+     * (2026-09-10) 活锁看门狗触发: 放弃本实例 (isFinished 短路放行, 炉内遗留
+     * 现状保留不强行腾), 记快照日志定案现场, 触发层 static 冷却。
+     */
+    private void giveUp(AltoClef mod, ItemStack out, ItemStack mat, ItemStack fuel, int invTarget) {
+        _gaveUp = true;
+        _staticGaveUpUntilMs = System.currentTimeMillis() + SMELT_GIVEUP_COOLDOWN_MS;
+        String msg = "[SmeltGiveUp]\t零进展 " + (SMELT_STALL_GIVEUP_TICKS / 20)
+                + "s(界面开启口径) 放弃烧炼"
+                + " output=" + out.getCount() + " material=" + mat.getCount()
+                + " fuel=" + fuel.getCount() + " invTarget=" + invTarget
+                + " cache=" + describeFurnaceCache();
+        Debug.logMessage(msg);
+        Debug.logToFile("altoclef_diag.log", msg);
+        // 关屏 (MC 自动把光标物品弹回背包/掉落), 遗留物保持现状 — 放弃语义。
+        StorageHelper.closeScreen();
     }
 
     @Override
@@ -138,6 +201,9 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-10 活锁看门狗) 放弃语义: 看门狗触发后视为完成放行, 炉内
+        // 遗留现状 (日志 [SmeltGiveUp] 已记快照), 由上层自行改道 (挖矿/换炉)。
+        if (_gaveUp) return true;
         // 一次烧满原则：只有数量达标 且 熔炉已排空（材料烧完、产物取出）
         // 才算结束——否则塞进去的材料就浪费在炉子里了。
         // (2026-08-22 收铁卡死修复) super.isFinished (ResourceTask) 用
