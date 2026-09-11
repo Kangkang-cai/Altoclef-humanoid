@@ -370,21 +370,36 @@ public class MineAndCollectTask extends ResourceTask {
     // 尚未回册), 所以只需按破坏时刻计时; 掉落物一旦回册, hasNearbyMineableTarget
     // 的 itemDropped 条款自动接管挂住/捡取。
     private static final long GREEDY_DROP_GRACE_MS = 2500;
-    private long _greedyGraceBrokenMs = 0;
+    // (2026-09-11 背包满顺延) scoop/腾格子进行中的宽限顺延上限(总窗口 = GRACE + 此值)。
+    private static final long GREEDY_DROP_SCOOP_EXTEND_MS = 5000;
     private long _greedyGraceLogEpisodeMs = 0;
 
     private boolean holdGreedyForDrop(AltoClef mod) {
         long brokenMs = _subtask.miningTargetBrokenMs();
         if (brokenMs == 0) return false;
-        _greedyGraceBrokenMs = brokenMs;
-        boolean holding = System.currentTimeMillis() - brokenMs < GREEDY_DROP_GRACE_MS;
-        if (holding && _greedyGraceLogEpisodeMs != brokenMs) {
+        long sinceBroken = System.currentTimeMillis() - brokenMs;
+        boolean withinGrace = sinceBroken < GREEDY_DROP_GRACE_MS;
+        // (2026-09-11 背包满顺延, 09:58:56 金矿实锤) scoop 走到破坏点后捡不起来:
+        // 背包满, "Ensuring inventory is free" 腾格子耗时超过剩余宽限 → 58.27 宽限
+        // 到期整链释放, 金掉落物留在原地。修复: scoop 两段任务(转头看/走到位)仍在
+        // 进行时顺延宽限; 硬上限 GRACE+5s 防不可达目标无限挂住, 到头照常释放。
+        if (!withinGrace && sinceBroken < GREEDY_DROP_GRACE_MS + GREEDY_DROP_SCOOP_EXTEND_MS
+                && _subtask.scoopInProgress()) {
+            if (_greedyGraceLogEpisodeMs != -brokenMs) {
+                _greedyGraceLogEpisodeMs = -brokenMs; // 负值区分顺延日志, 每事件一条
+                Debug.logToFile("altoclef_diag.log",
+                        "[GreedyPickup]\textending grace — scoop/inventory-freeing still in progress");
+            }
+            return true;
+        }
+        if (!withinGrace) return false;
+        if (_greedyGraceLogEpisodeMs >= 0 && _greedyGraceLogEpisodeMs != brokenMs) {
             _greedyGraceLogEpisodeMs = brokenMs;
             Debug.logToFile("altoclef_diag.log",
                     "[GreedyPickup]\thold after ore break (grace " + GREEDY_DROP_GRACE_MS
                             + "ms) — waiting for drop landing/perception");
         }
-        return holding;
+        return true;
     }
 
     private static final double MINE_EVERYTHING_RANGE = 16;
@@ -1299,9 +1314,13 @@ public class MineAndCollectTask extends ResourceTask {
         private boolean _scoopStage2 = false;
         private Task _scoopTask = null;
 
+        /** (2026-09-11 背包满顺延) scoop 两段任务是否仍在进行(未走到/未看完)。 */
+        public boolean scoopInProgress() {
+            return _scoopTask != null && _scoopTaskPos != null && _mod != null && !_scoopTask.isFinished(_mod);
+        }
+
         /** 宽限窗口内的自挖掉落物 scoop 任务; 窗口外/无因果位置返回 null。 */
-        private Task getScoopSelfDropTask(AltoClef mod) {
-            if (_miningTargetBrokenMs == 0 || _lastSelfBrokenPos == null) return null;
+        private Task getScoopSelfDropTask(AltoClef mod) {            if (_miningTargetBrokenMs == 0 || _lastSelfBrokenPos == null) return null;
             if (System.currentTimeMillis() - _miningTargetBrokenMs >= GREEDY_DROP_GRACE_MS) return null;
             if (_scoopTaskPos == null || !_scoopTaskPos.equals(_lastSelfBrokenPos)) {
                 // 新破坏事件: 重置两段拾取, 先转头看。

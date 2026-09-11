@@ -50,6 +50,8 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _exploreStart;
     private BlockPos _currentTarget;
     private boolean _done = false;
+    // (2026-09-11 重启保状态) 已初始化过洞探索状态; 重启(打断恢复)不清进度。
+    private boolean _startedOnce = false;
     // (2026-09-02 目标深度) 钻石任务等深挖目标下, 探索导航只选目标深度附近的
     // 天然空气 (maxY = targetY + CAVE_ABOVE_TARGET_BUFFER), 防止在洞里向外推时
     // 把目标选到上方浅层、离开钻石层 (用户"下挖到合法深度却导航到上方矿洞")。
@@ -68,10 +70,21 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-10 探索断裂诊断) 实际启动打点: 对照 [CaveScan] FIRE 时刻,
         // 若 FIRE 后本行迟迟不出现, 说明探索任务被返回了但框架换入被挡
         // (ITaskRequiresGrounded 空中保护) 或被父任务换掉。
+        // (2026-09-11 重启保状态, 用户"被打打断探索超时就重置, 又开始探索同一个矿坑")
+        // 实锤: diag 两分钟内 STARTED 13 次 (10:01:37→10:03:36), 每次贪婪/战斗/
+        // 吃饭打断恢复后 onStart 无条件清 _visited/_failedTargets → 探索进度归零,
+        // 同洞反复从头探。修复: 同一实例重启(=同一洞, 每次 FIRE 都 new 实例)
+        // 保留已访问/失败集与起点, 只重置移动进度检查; _currentTarget 保留,
+        // onTick 的 baritone-idle 分支(:120)会自动重新 setGoalAndPath。
         Debug.logToFile("altoclef_diag.log",
                 "[CaveExploreDiag]\tExploreCaveTask STARTED at "
-                        + mod.getPlayer().getBlockPos().toShortString());
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + (_startedOnce ? " (resume, visited=" + _visited.size() + " kept)" : ""));
         _progressChecker.reset();
+        if (_startedOnce) {
+            return;
+        }
+        _startedOnce = true;
         _visited.clear();
         _failedTargets.clear();
         _exploreStart = mod.getPlayer().getBlockPos();

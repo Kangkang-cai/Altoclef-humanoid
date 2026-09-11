@@ -412,7 +412,10 @@ public class BeatMinecraft2Task extends Task {
     // (2026-09-07) 改为动态 interval: 普通阶段 GREEDY_ORE_CHECK_COOLDOWN_NORMAL,
     // 放弃钻石→进下界阶段由 settings.preNetherGreedyCooldownSeconds 放大 (见
     // onTick 贪婪检查块注释, 防贪婪↔燧石链乒乓)。
-    private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 8;
+    // (2026-09-11 8s→3s, 用户"看到金子总是没有第一时间触发贪婪挖矿, 总是过一会儿才
+    // 触发") 检查节拍即触发延迟上界。8s 是 2026-09-07 防频繁换任务定的; 进下界前
+    // 阶段已有 45s 保护窗(preNetherGreedyCooldownSeconds), 普通阶段 3s 乒乓风险可控。
+    private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 3;
     private final TimerGame _greedyOreCheckCooldown = new TimerGame(GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
     // (2026-09-08 烧肉 ping-pong 修复) 烧炼任务实例缓存保活。本分支原来每 tick
     // new SmeltInFurnaceTask, 且选肉按 RAW_FOODS 顺序 + getItemStorage().hasItem
