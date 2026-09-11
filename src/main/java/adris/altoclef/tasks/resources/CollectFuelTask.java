@@ -57,8 +57,16 @@ public class CollectFuelTask extends Task {
                 // 云杉/桦等其它木头也不利用，偏要去砍橡树）。通用任务木种无关：
                 // 会先把已有任意原木转木板当燃料，真不够才补砍 (用户: 明明有其他
                 // 木头却去收橡木)。
+                // (2026-09-11 冻结 39s 死锁根修) 必须传【绝对目标数】而非缺口数:
+                // CollectPlanksTask.isFinished 是"背包木板数 >= target"语义。旧版
+                // 传 ceil(deficit/1.5)=3, 而背包已有 3 木板 → 子任务秒达标 → 永远
+                // 只走清格分支不再合成; 本任务 deficit 恒 4.5>0 → 每 tick 重派同一
+                // 实例 (isEqual 挡下) → 父要木板/子不合成, 框架不查中间层
+                // isFinished 且无超时 → 冻结至手动停止 (22:17:34-22:18:13 实锤)。
+                // 改传 ceil(_targetFuel/1.5) 绝对值: 已有 3 → 子任务真去补差额。
                 setDebugState("No coal nearby, collecting wood as fuel.");
-                return TaskCatalogue.getItemTask("planks", (int) Math.ceil(deficit / PLANK_FUEL));
+                return TaskCatalogue.getItemTask("planks",
+                        (int) Math.ceil(_targetFuel / PLANK_FUEL));
             }
             case END -> {
                 setDebugState("Going to overworld, since, well, no more fuel can be found here.");
