@@ -6,6 +6,8 @@ import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.RayTraceUtils;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.RotationUtils;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.passive.MerchantEntity;
@@ -111,7 +113,7 @@ public interface LookHelper {
         Vec3d start = getCameraPos(entity);
 
         // ① 中心点判定
-        BlockHitResult centerHit = raycast(entity, start, center, maxRange, handling);
+        BlockHitResult centerHit = raycastSkippingWebs(entity, start, center, maxRange, handling);
         if (centerHit != null && centerHit.getType() == HitResult.Type.BLOCK && centerHit.getBlockPos().equals(block)) {
             return true;
         }
@@ -127,12 +129,48 @@ public interface LookHelper {
                     dir.getOffsetX() * 0.5,
                     dir.getOffsetY() * 0.5,
                     dir.getOffsetZ() * 0.5);
-            BlockHitResult faceHit = raycast(entity, start, faceCenter, maxRange, handling);
+            BlockHitResult faceHit = raycastSkippingWebs(entity, start, faceCenter, maxRange, handling);
             if (faceHit != null && faceHit.getType() == HitResult.Type.BLOCK && faceHit.getBlockPos().equals(block)) {
                 return true;
             }
         }
         return false;
+    }
+
+    // (2026-09-11 蜘蛛网透明 LOS) 蜘蛛网碰撞箱是整格 (ShapeType.COLLIDER 下
+    // 射线必命中), 但视觉上它是稀疏的网 — 人隔着蜘蛛网能看见后面的钻石。
+    // 现场 2026-09-11 11:05-11:08 实锤: [Diag-blind] cached=200 钻石矿
+    // perceivable=0, 最近 3 格仍 occluded, bot 路过多次不去挖。本射线遇到
+    // 蜘蛛网命中时从网块内继续向前 re-cast (最多穿 MAX_WEB_PASSTHROUGH 层),
+    // 只对网透明 — 网后的实心方块 (岩壁等) 仍正常遮挡, 不引入透视。
+    // 与 2026-09-09 树叶透明 LOS (isWoodVisibleThroughLeaves) 同一反透视层级:
+    // 网只存在于可见结构处, 穿网 ≠ 穿岩。
+    // interface 字段隐式 public — 不加 private 修饰符
+    static final int MAX_WEB_PASSTHROUGH = 4;
+
+    private static BlockHitResult raycastSkippingWebs(Entity entity, Vec3d start, Vec3d end, double maxRange, RaycastContext.FluidHandling fluidHandling) {
+        Vec3d cur = start;
+        BlockHitResult hit = null;
+        for (int pass = 0; pass <= MAX_WEB_PASSTHROUGH; pass++) {
+            hit = raycast(entity, cur, end, maxRange, fluidHandling);
+            if (hit == null || hit.getType() != HitResult.Type.BLOCK) {
+                return hit; // MISS 或非方块命中, 原样返回
+            }
+            if (hit.getBlockPos().equals(new BlockPos(end.x, end.y, end.z))) {
+                return hit; // 命中的就是目标方块本身 → 可见
+            }
+            BlockState hitState = entity.world.getBlockState(hit.getBlockPos());
+            if (hitState.getBlock() != Blocks.COBWEB) {
+                return hit; // 非网方块 → 正常遮挡判定, 原样返回
+            }
+            // 命中蜘蛛网 → 推进起点越过该网块中心, 继续 re-cast
+            Vec3d dir = end.subtract(cur);
+            if (dir.lengthSquared() < 1.0E-4) {
+                return hit; // 射线已走到头
+            }
+            cur = Vec3d.ofCenter(hit.getBlockPos()).add(dir.normalize().multiply(0.6));
+        }
+        return hit; // 穿透层数用尽, 按最后一次命中处理 (保守判遮挡)
     }
 
     /**

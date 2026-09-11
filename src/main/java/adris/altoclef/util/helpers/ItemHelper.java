@@ -17,6 +17,7 @@ import net.minecraft.potion.Potions;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.tag.TagKey;
 import net.minecraft.util.DyeColor;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.registry.Registry;
 import java.util.*;
 
@@ -148,6 +149,87 @@ public class ItemHelper {
         }
         return false;
     }
+
+    // =====================================================================
+    // (2026-09-11 丢弃弹回熔断器) "扔→弹回→原版自动拾取→再扔"死循环拦截。
+    // 现场 2026-09-11 11:12:53-11:13:27 实锤: 丢泥土方向"开阔"(首个实心块 4 格外),
+    // 物品撞墙反弹落点 1-2 格内, 被原版自动拾取塞回刚腾出的槽位, 2s 一轮循环
+    // 17 次直到用户干预。原版拾取代码层拦不住, 只能在丢弃层熔断:
+    //   - 每次真正扔出时 recordCursorThrown(item, dropPos)。
+    //   - 同一物品 8s 内重新出现在光标上 = 弹回被重拾实锤 →
+    //     notifyGarbageReturned: 第 1 次弹回→扔前先离开上次落点 ≥4 格;
+    //     第 2 次弹回→进入 60s 触发层冷却, 丢弃候选选择器跳过该物品
+    //     (getGarbageSlot/getBulkDisposalSlot/getRandomThrowableSlot),
+    //     打断循环; 冷却期过后自然恢复丢弃能力。
+    // 状态放 ItemHelper(util 层): StorageHelper(选择器) 查询, ThrowCursorTask
+    // (tasks 层) 写入 — 避免 util 反向依赖 tasks。
+    // =====================================================================
+    private static final long THROW_BOUNCE_WINDOW_MS = 8000;
+    private static final long THROW_COOLDOWN_MS = 60000;
+    // 弹回次数达到该值 → 触发冷却 (即第 3 次自动重扔是最后一次)
+    private static final int THROW_MAX_BOUNCES = 2;
+    // item -> long[3]: {lastThrowMs, bounceCount, cooldownUntilMs}
+    private static final Map<Item, long[]> _cursorThrowMemory = new HashMap<>();
+    // item -> 上次扔出时玩家坐标 (弹回后"先离落点"用)
+    private static final Map<Item, BlockPos> _lastThrowDropPos = new HashMap<>();
+
+    /** ThrowCursorTask 真正执行丢出时调用 (每次扔都记录)。 */
+    public static void recordCursorThrown(Item item, BlockPos dropPos) {
+        if (item == null) return;
+        long now = System.currentTimeMillis();
+        synchronized (_cursorThrowMemory) {
+            long[] mem = _cursorThrowMemory.computeIfAbsent(item, k -> new long[3]);
+            mem[0] = now;
+            _lastThrowDropPos.put(item, dropPos == null ? null : dropPos.toImmutable());
+        }
+    }
+
+    /**
+     * 光标物品在 8s 内刚被扔过 = 弹回被重拾。ThrowCursorTask.onStart 检测到时调用:
+     * 递增弹回计数 (超窗则重新计数), 达到上限时设置 60s 冷却。
+     */
+    public static void notifyGarbageReturned(Item item) {
+        if (item == null) return;
+        long now = System.currentTimeMillis();
+        synchronized (_cursorThrowMemory) {
+            long[] mem = _cursorThrowMemory.computeIfAbsent(item, k -> new long[3]);
+            mem[1] = (now - mem[0] <= THROW_BOUNCE_WINDOW_MS) ? mem[1] + 1 : 1;
+            if (mem[1] >= THROW_MAX_BOUNCES) {
+                mem[2] = now + THROW_COOLDOWN_MS;
+            }
+        }
+    }
+
+    /** 该物品是否在丢弃冷却中 (冷却期内丢弃候选选择器跳过它)。 */
+    public static boolean isThrowOnCooldown(Item item) {
+        if (item == null) return false;
+        synchronized (_cursorThrowMemory) {
+            long[] mem = _cursorThrowMemory.get(item);
+            return mem != null && System.currentTimeMillis() < mem[2];
+        }
+    }
+
+    /** 上次扔该物品时的玩家坐标 (无记录返回 null)。 */
+    public static BlockPos getLastThrowDropPos(Item item) {
+        if (item == null) return null;
+        synchronized (_cursorThrowMemory) {
+            return _lastThrowDropPos.get(item);
+        }
+    }
+
+    /** 上次扔该物品的时间戳 (无记录返回 0)。 */
+    public static long getLastCursorThrowMs(Item item) {
+        if (item == null) return 0;
+        synchronized (_cursorThrowMemory) {
+            long[] mem = _cursorThrowMemory.get(item);
+            return mem == null ? 0 : mem[0];
+        }
+    }
+
+    public static long getThrowBounceWindowMs() {
+        return THROW_BOUNCE_WINDOW_MS;
+    }
+
     public static final Item[] CARPET = new Item[]{Items.WHITE_CARPET, Items.BLACK_CARPET, Items.BLUE_CARPET, Items.BROWN_CARPET, Items.CYAN_CARPET, Items.GRAY_CARPET, Items.GREEN_CARPET, Items.LIGHT_BLUE_CARPET, Items.LIGHT_GRAY_CARPET, Items.LIME_CARPET, Items.MAGENTA_CARPET, Items.ORANGE_CARPET, Items.PINK_CARPET, Items.PURPLE_CARPET, Items.RED_CARPET, Items.YELLOW_CARPET};
 
     public static final Item[] SHULKER_BOXES = new Item[]{Items.WHITE_SHULKER_BOX, Items.BLACK_SHULKER_BOX, Items.BLUE_SHULKER_BOX, Items.BROWN_SHULKER_BOX, Items.CYAN_SHULKER_BOX, Items.GRAY_SHULKER_BOX, Items.GREEN_SHULKER_BOX, Items.LIGHT_BLUE_SHULKER_BOX, Items.LIGHT_GRAY_SHULKER_BOX, Items.LIME_SHULKER_BOX, Items.MAGENTA_SHULKER_BOX, Items.ORANGE_SHULKER_BOX, Items.PINK_SHULKER_BOX, Items.PURPLE_SHULKER_BOX, Items.RED_SHULKER_BOX, Items.YELLOW_SHULKER_BOX};

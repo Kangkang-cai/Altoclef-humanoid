@@ -1,11 +1,17 @@
 package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TurnToOpenAreaTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -19,8 +25,15 @@ import net.minecraft.util.math.BlockPos;
  * (2026-09-03 主动挖开堆头, 用户"四周封闭无开阔空间→丢出落回脚下被重拾→卡死"):
  * 转向后若 TurnToOpenAreaTask 判定四周仍封闭 (最佳方向前方紧贴实心块), 直接丢
  * 会把物品甩到贴脸处被满背包立刻捡回。此时先主动挖开该方向前方可挖的实心块,
- * 打通空间后再重新转向、丢弃。每轮最多挖 OPEN_SCORE_THRESHOLD 格 (DigSlot上限),
- * 防无限挖。
+ * 打通空间后再重新转向、丢弃。每轮最多挖 MAX_DIG 格, 防无限挖。
+ *
+ * (2026-09-11 弹回熔断器, 现场 11:12:53-11:13:27 实锤: 泥土"开阔"方向丢出撞
+ * 3-4 格外墙壁反弹落点 1-2 格内, 原版自动拾取塞回刚腾出的槽位, 2s 一轮循环
+ * 17 次直到用户干预。原版拾取拦不住, 只能丢出侧熔断):
+ *   - onStart 检测光标物品 8s 内刚被扔过 (ItemHelper 记忆) = 弹回被重拾实锤;
+ *   - 第 1 次弹回: 扔前先 RunAwayFromPositionTask 离开上次落点 ≥4 格再丢;
+ *   - 第 2 次弹回: 该物品进入 60s 丢弃冷却 (选择器跳过, 见 ItemHelper),
+ *     本轮仍照常丢出 (光标必须清空), 之后 60s 内不再主动重扔该物品。
  */
 public class ThrowCursorTask extends Task {
 
@@ -29,20 +42,52 @@ public class ThrowCursorTask extends Task {
     private TurnToOpenAreaTask _turnTask;
     // 主动挖通关卡的任务 (封闭时清理该方向前方实心块)。
     private DestroyBlockTask _digTask;
-    // (2026-09-03) 挖开处计数, 上限 = 开阔判定所需格数, 防无限挖。
+    // (2026-09-11 弹回熔断) 弹回后先离开上次落点再丢。
+    private RunAwayFromPositionTask _runAwayTask;
+    // (2026-09-11) 挖开处计数, 上限防无限挖。
     private int _dugCount = 0;
-    // 至多挖这么多格就把通路完全打通 (前后两层都数, 单层够深才算开阔)。
+    // 至多挖这么多格 (前后两层都数, 单层够深才算开阔)。
     private static final int MAX_DIG = 4;
+    // (2026-09-11) 丢出记录只做一次 (转向/挖格期间会多次走到 _throwTask 分支)。
+    private boolean _throwRecorded = false;
 
     @Override
     protected void onStart(AltoClef mod) {
         _turnTask = new TurnToOpenAreaTask();
         _digTask = null;
+        _runAwayTask = null;
         _dugCount = 0;
+        _throwRecorded = false;
+        // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
+        ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+        if (!cursor.isEmpty() && mod.getPlayer() != null) {
+            Item item = cursor.getItem();
+            long lastThrow = ItemHelper.getLastCursorThrowMs(item);
+            long now = System.currentTimeMillis();
+            if (lastThrow > 0 && now - lastThrow <= ItemHelper.getThrowBounceWindowMs()) {
+                ItemHelper.notifyGarbageReturned(item);
+                BlockPos lastDrop = ItemHelper.getLastThrowDropPos(item);
+                if (lastDrop != null
+                        && lastDrop.isWithinDistance(mod.getPlayer().getBlockPos(), 6)) {
+                    // 先离开上次落点 ≥4 格, 再走正常转向+丢弃流程。
+                    _runAwayTask = new RunAwayFromPositionTask(4, lastDrop);
+                    Debug.logMessage("(ThrowCursorTask) [ThrowBreaker] " + item
+                            + " bounced back within " + (now - lastThrow) / 1000 + "s — walking away from last drop pos before rethrow");
+                }
+            }
+        }
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // 0) (2026-09-11) 弹回后先离开上次落点, 走开后再转向丢弃。
+        if (_runAwayTask != null && !_runAwayTask.isFinished(mod)) {
+            return _runAwayTask;
+        }
+        if (_runAwayTask != null) {
+            _runAwayTask = null;
+            _turnTask = new TurnToOpenAreaTask();
+        }
         // 1) 正在挖: 挖完前一直派该挖格任务。
         if (_digTask != null && !_digTask.isFinished(mod)) {
             return _digTask;
@@ -74,9 +119,21 @@ public class ThrowCursorTask extends Task {
             }
             _digTask = null;
             // 挖无可挖/已达上限 → 直接丢 (兜底, 不再空转卡死)。
-            return _throwTask;
+            return throwNow(mod);
         }
         // 4) 转向完成且判定开阔 → 直接丢。
+        return throwNow(mod);
+    }
+
+    // (2026-09-11) 真正进入丢出前的唯一记录点: 记录物品+落点 (供弹回熔断用)。
+    private Task throwNow(AltoClef mod) {
+        if (!_throwRecorded && mod.getPlayer() != null) {
+            ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+            if (!cursor.isEmpty()) {
+                ItemHelper.recordCursorThrown(cursor.getItem(), mod.getPlayer().getBlockPos());
+            }
+            _throwRecorded = true;
+        }
         return _throwTask;
     }
 

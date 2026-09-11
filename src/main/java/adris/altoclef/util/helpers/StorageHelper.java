@@ -483,6 +483,8 @@ public class StorageHelper {
                 continue;
             ItemStack stack = getItemStackInSlot(slot);
             if (stack == null || stack.isEmpty()) continue;
+            // (2026-09-11 弹回熔断) 8s 内弹回≥2 次的物品 60s 冷却期内不参与大堆腾位。
+            if (ItemHelper.isThrowOnCooldown(stack.getItem())) continue;
             if (ItemHelper.isStackProtected(mod, stack)) continue;
             // (2026-09-09 保留闸门补洞, 用户"丢垃圾至少保留一组石头") 旧实现
             // 对 BULK 清单(圆石排第一位!)无任何保留检查: 背包满+无垃圾时, 30 个
@@ -533,6 +535,10 @@ public class StorageHelper {
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (!ItemHelper.canThrowAwayStack(mod, stack))
                 continue;
+            // (2026-09-11 弹回熔断) 冷却中的物品不作垃圾候选, 打断"扔→弹回→原版
+            // 拾取→再扔"死循环 (现场 11:12:53 实锤, 见 ItemHelper 弹回熔断器)。
+            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
+                continue;
             if (stack.getItem() instanceof BlockItem) {
                 // (2026-09-03 垃圾方块有就丢, 用户"安山岩/闪长岩/凝灰岩/树苗/泥土
                 // 不丢") 只有圆石/深板岩圆石作为建筑材料保留一组(64, 由
@@ -577,6 +583,9 @@ public class StorageHelper {
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (!ItemHelper.canThrowAwayStack(mod, stack))
                 continue;
+            // (2026-09-11 弹回熔断) 冷却中的低阶工具同样跳过。
+            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
+                continue;
             Item item = stack.getItem();
             if (item instanceof ToolItem tool) {
                 Class c = tool.getClass();
@@ -607,6 +616,9 @@ public class StorageHelper {
                 continue;
             ItemStack stack = StorageHelper.getItemStackInSlot(slot);
             if (stack.isEmpty() || !ItemHelper.canThrowAwayStack(mod, stack))
+                continue;
+            // (2026-09-11 弹回熔断) 冷却中的重复工具同样跳过。
+            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
                 continue;
             Item item = stack.getItem();
             if (item instanceof ToolItem tool) {
@@ -841,6 +853,10 @@ public class StorageHelper {
         for (Slot slot : getRealBackpackSlots()) {
             ItemStack stack = getItemStackInSlot(slot);
             if (stack.isEmpty()) continue;
+            // (2026-09-11 弹回熔断) 冷却中的物品不参与随机丢 — 否则刚熔断的物品
+            // 会被"保底随机丢"立刻捡回来再扔, 冷却形同虚设。全冷却时返回 null
+            // 由调用方等待 (宁可短暂等待, 不无限扔/捡循环)。
+            if (ItemHelper.isThrowOnCooldown(stack.getItem())) continue;
             if (ArrayUtils.contains(NEVER_DISCARD, stack.getItem())) continue;
             // (2026-08-25 镐永不丢, 用户指定) 用户实测随机丢把镐子全丢掉了。
             // 镐是挖矿刚需, 任何镐都不参与随机丢 (原 wouldLeaveNoPickaxe 只

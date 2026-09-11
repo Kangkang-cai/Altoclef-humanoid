@@ -32,7 +32,11 @@ public class TurnToOpenAreaTask extends Task {
     // 判定时两层纵深只到 1~2 格就被当开阔, 物品飞出碰到前方/头顶 2 格外的方块。
     // 丢弃需要物品真正飞离抓取范围, 前方脚层与头顶层都必须有足够纵深。提高为 3。
     // 注意与 ThrowCursorTask.MAX_DIG=4 配套: 判定为封闭时开挖能打通到 ≥3 格。
-    public static final int OPEN_SCORE_THRESHOLD = 3;
+    // (2026-09-11 再提为 4, 现场 11:12:53 实锤: 门槛 3 时首个实心块在 4 格外仍
+    // 判"开阔", 物品飞 3-4 格撞墙反弹落点 1-2 格被原版拾取吸回 → 扔/捡死循环。
+    // 4 格纵深下物品落点 ≥3 格, 超出原版拾取半径; 不足时由 ThrowCursorTask 熔断器
+    // (先离落点/60s 冷却) 兜底。)
+    public static final int OPEN_SCORE_THRESHOLD = 4;
     public boolean isEnclosed() {
         return _bestScore < OPEN_SCORE_THRESHOLD;
     }
