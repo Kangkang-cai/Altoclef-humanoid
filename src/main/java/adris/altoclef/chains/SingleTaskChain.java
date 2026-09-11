@@ -113,7 +113,16 @@ public abstract class SingleTaskChain extends TaskChain {
     }
 
     protected boolean isCurrentlyRunning(AltoClef mod) {
-        return !_interrupted && _mainTask.isActive() && !_mainTask.isFinished(mod);
+        // (2026-09-11 16:40 客户端崩溃修复) 原实现缺 _mainTask != null 判空:
+        // "_mainTask 为 null" 对绝大多数链是**常态** —— 链按需 setTask, 平时没有任务
+        // (如 WorldSurvivalChain 只在岩浆/火焰/溺水时才派任务)。而 getPriority() 是
+        // TaskRunner 每 tick 对【所有】链调用的 (不是只调 active 的链), 所以任何
+        // "在 getPriority 里裸调 isCurrentlyRunning" 的链, 只要恰好 _mainTask 为 null
+        // 且进入该分支就会 NPE 崩掉整个客户端。
+        // 实崩: WorldSurvivalChain.tryDrowningEscape:195 —— bot 挖穿掉进封闭水体后
+        // 空气 <25% 触发防溺水, _mainTask 为 null → NPE (crash 16.40.19-client.txt)。
+        // 语义上"没有任务"当然不算"正在跑任务", 加判空是纯防御, 对非 null 路径零行为变化。
+        return !_interrupted && _mainTask != null && _mainTask.isActive() && !_mainTask.isFinished(mod);
     }
 
     public Task getCurrentTask() {
