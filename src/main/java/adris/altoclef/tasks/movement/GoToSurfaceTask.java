@@ -78,8 +78,10 @@ public class GoToSurfaceTask extends Task {
     private static final int[] STEP_LADDER = {16, 8, 4, 2};
 
     // ===== 卡住检测 (2026-09-11) =====
-    /** baritone 自称有路却连续这么久没位移 → 判定卡住, 直接进挖垫模式。 */
-    private static final int STUCK_TICKS_TO_SCAFFOLD = 20 * 4;
+    /** baritone 自称有路却连续这么久没位移 → 判定卡住, 直接进挖垫模式。
+     *  (2026-09-11 用户: 4s 太长, 改 2s。baritone 自己跳几次就判失败转 wander,
+     *   等 4s 时它已经把"放弃"流程走完一轮了。) */
+    private static final int STUCK_TICKS_TO_SCAFFOLD = 20 * 2;
     /** 挖垫模式连续这么久 Y 没涨 → 放弃。 */
     private static final int SCAFFOLD_NO_PROGRESS_TICKS = 20 * 15;
     /** 挖垫模式总时长上限。 */
