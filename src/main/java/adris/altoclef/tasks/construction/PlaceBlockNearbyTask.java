@@ -48,6 +48,8 @@ public class PlaceBlockNearbyTask extends Task {
 
     // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。
     private GetToLandTask _toLand = null;
+    // (v3) 回岸模式的锁存位: 一旦进入就不再每 tick 重估 isTouchingWater (水面浮动会闪烁)。
+    private boolean _landActive = false;
 
     private final TimerGame _randomlookTimer = new TimerGame(0.25);
     private final Predicate<BlockPos> _canPlaceHere;
@@ -141,13 +143,35 @@ public class PlaceBlockNearbyTask extends Task {
         // 判据用 LandHelper.isFloatingInWater (沾水 + 脚下无实体): 站在浅水底/
         // 沙滩上有支撑, 不算踩水, 所以涉水过河、岸边浅水放置不受影响。
         // 放在"试放眼前点位"之后 —— 眼前确实能放就立刻放掉, 不白跑一趟。
-        if (LandHelper.isFloatingInWater(mod) && !GetToLandTask.isOnCooldown()) {
-            if (_toLand == null || _toLand.isFinished(mod)) {
-                _toLand = new GetToLandTask();
+        //
+        // (v3, 现场 20260911-184733 「游一会停一会」) 闸门必须**上锁**, 不能每 tick
+        // 重估 isTouchingWater: 水面上下浮动时 inWater 在 y62/y63 之间闪烁 (框架自己
+        // 记作 NOT_IN_WATER_BOB_AIRBORNE), 腾空那一 tick 闸门变 false → 掉进下面的
+        // 放置分支 → 回岸任务被抢切。实测每 2s 抢切一次, 时间戳吻合到毫秒:
+        //   42.834 SWIM-DIVE gate=NOT_IN_WATER_BOB_AIRBORNE inWater=false y=63
+        //   42.836 STOP <Getting to land> by <Place structure{crafting_table} ...>
+        // 用户明确要求: 一旦判定要上岸就一路游到岸, 中途不打断 (卡住由 GetToLandTask
+        // 自己的 4s 卡住检测重规划路线解决)。所以这里用一个 latch: 进入回岸模式后,
+        // 只要任务没报告完成就一直返回同一个实例, 不再看 isTouchingWater。
+        //
+        // 完成时用 reset() 而不是 new: GetToLandTask.isEqual 恒 true, 直接换新实例
+        // 会被框架的 isEqual 挡下 (不会 onStart), 而 reset() 让下次进入时 onStart 重跑。
+        if (!GetToLandTask.isOnCooldown()) {
+            if (_toLand != null && _toLand.isFinished(mod)) {
+                _toLand.reset();
+                _landActive = false;
             }
-            _progressChecker.reset();
-            setDebugState("Floating in water -> going to land first");
-            return _toLand;
+            if (!_landActive && LandHelper.isFloatingInWater(mod)) {
+                if (_toLand == null) {
+                    _toLand = new GetToLandTask();
+                }
+                _landActive = true;
+            }
+            if (_landActive) {
+                _progressChecker.reset();
+                setDebugState("Heading to land first (swimming, not interrupting)");
+                return _toLand;
+            }
         }
 
         // Wander while we can.
