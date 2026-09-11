@@ -25,8 +25,8 @@ import java.util.Map;
  *
  * 用户设计: 即使当前主线是"获得铁", 看到煤炭也该顺手挖一下, 看到
  * 铁矿该顺手全挖完 — 而不是只锁定目标种类。每个种类带数量上限
- * (煤 32 / 铁 32 / 金 12 / 钻石 8), 达上限就跳过该种类, 防止无限
- * 挖煤把主线饿死。
+ * (煤 32 / 铁 32 / 金 64 / 钻石 8), 达上限就跳过该种类, 防止无限
+ * 挖煤把主线饿死。金 64 (2026-09-11 用户拍板): 下界猪灵交易需大量金锭。
  *
  * 触发条件 (hasWork): 矿石【真·可见】(同洞穴: 12 格内空气 BFS 能从 bot 连通到
  * 其侧面) 且 canBreak 且不贴液体; 镐等级满足; 背包数量未达上限。只认同洞穴
@@ -52,7 +52,7 @@ public class CollectVisibleOresTask extends Task {
     private static final OrePlan[] PLANS = {
             new OrePlan(new Block[]{Blocks.COAL_ORE, Blocks.DEEPSLATE_COAL_ORE}, Items.COAL, 32, MiningRequirement.WOOD, new Item[]{Items.COAL}),
             new OrePlan(new Block[]{Blocks.IRON_ORE, Blocks.DEEPSLATE_IRON_ORE}, Items.RAW_IRON, 32, MiningRequirement.STONE, new Item[]{Items.RAW_IRON, Items.IRON_INGOT}),
-            new OrePlan(new Block[]{Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE}, Items.RAW_GOLD, 12, MiningRequirement.IRON, new Item[]{Items.RAW_GOLD, Items.GOLD_INGOT}),
+            new OrePlan(new Block[]{Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE}, Items.RAW_GOLD, 64, MiningRequirement.IRON, new Item[]{Items.RAW_GOLD, Items.GOLD_INGOT}),
             new OrePlan(new Block[]{Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE}, Items.DIAMOND, 8, MiningRequirement.IRON, new Item[]{Items.DIAMOND}),
     };
 
@@ -238,7 +238,7 @@ public class CollectVisibleOresTask extends Task {
     private static int planExecutable(AltoClef mod, OrePlan plan) {
         // (2026-08-23 金矿让位) 铁装备(铁剑+盾牌)未完成时金矿不参与贪心 —
         // 铁装备制作/穿上优先于挖金 (用户原则), 否则贪心挖金抢占 gear
-        // 任务, 铁装备迟迟不齐。铁阶段完成后金矿恢复参与 (阈值 12)。
+        // 任务, 铁装备迟迟不齐。铁阶段完成后金矿恢复参与 (阈值 64, 2026-09-11 用户改)。
         if (plan.item() == Items.RAW_GOLD && !BeatMinecraft2Task.isIronGearPhaseDone(mod)) return 0;
         if (!StorageHelper.miningRequirementMet(mod, plan.req())) return 0;
         return Math.max(0, plan.cap() - countedItems(mod, plan));
