@@ -70,10 +70,22 @@ public interface LandHelper {
      * 加 isColumnWater: 只有真正干燥 (列顶部非水) 的陆地才作为上岸目标。
      */
     static BlockPos findNearestLand(AltoClef mod) {
+        return findNearestLand(mod, 0);
+    }
+
+    /**
+     * (2026-09-11) 带方位偏移的版本: dirOffset 让扫描从第 dirOffset 个方向开始。
+     *
+     * 用途 —— 水里卡住时"重新规划路线"(现场 20260911-184733, 用户明确要求)。
+     * 原扫描固定从正东开始, 卡住重算会**反复选中同一个到不了的目标**;
+     * 每次重规划把 offset +1, 就会优先换一个方位找岸, 才叫真的换了路线。
+     */
+    static BlockPos findNearestLand(AltoClef mod, int dirOffset) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return null;
         BlockPos p = mod.getPlayer().getBlockPos();
         for (int dist = 16; dist <= 128; dist += 16) {
-            for (int d = 0; d < 8; d++) {
+            for (int i = 0; i < 8; i++) {
+                int d = (i + dirOffset) & 7;
                 double ang = Math.PI / 4.0 * d;
                 int x = p.getX() + (int) Math.round(Math.cos(ang) * dist);
                 int z = p.getZ() + (int) Math.round(Math.sin(ang) * dist);
