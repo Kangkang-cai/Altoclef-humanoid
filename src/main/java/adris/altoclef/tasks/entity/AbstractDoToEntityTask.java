@@ -131,7 +131,16 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             // "Approaching target" → GetToEntityTask 已达成 → 循环卡死 (日志:
             // Killing blaze "Shield down, preparing to attack" 反复几十秒)。
             // 绕到能看到目标的位置 (实体上方或水平邻位) 获得视线再打。
-            if (result == null || result.getType() != HitResult.Type.ENTITY) {
+            // (2026-09-11 树叶遮挡补检) 上面的 ENTITY 射线走 ProjectileUtil,
+            // 只测实体盒、不测方块 —— 目标躲在树叶/墙后时照样 "命中", 被挡分支
+            // 永不触发, bot 站在射程内反复干瞄准直到 kill timeout (2026-09-11
+            // 19:45 杀树下的猪现场)。补一次相机→实体中心的方块射线 (COLLIDER),
+            // 中途命中方块 = 视线真被挡, 走同一套绕位+遮挡钩子恢复。
+            BlockPos blockObstruction = null;
+            if (result != null && result.getType() == HitResult.Type.ENTITY) {
+                blockObstruction = findObstructingBlock(mod, entity);
+            }
+            if (result == null || result.getType() != HitResult.Type.ENTITY || blockObstruction != null) {
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
                 // (2026-09-09 遮挡消除钩子) 绕位 8s 仍被挡 → 交子类决定是否挖除。
@@ -139,7 +148,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 if (_losBlockedSinceTick == Long.MIN_VALUE) {
                     _losBlockedSinceTick = now;
                 } else if (now - _losBlockedSinceTick > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
-                    BlockPos obstruction = findObstructingBlock(mod, entity);
+                    BlockPos obstruction = blockObstruction != null ? blockObstruction : findObstructingBlock(mod, entity);
                     if (obstruction != null) {
                         if (now - _lastObstructionLogTick > 100) {
                             _lastObstructionLogTick = now;

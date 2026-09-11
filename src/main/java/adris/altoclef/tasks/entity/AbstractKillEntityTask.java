@@ -2,6 +2,7 @@ package adris.altoclef.tasks.entity;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.GetToEntityTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.CombatMemory;
@@ -21,7 +22,9 @@ import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.entity.mob.WitherSkeletonEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.tag.BlockTags;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
@@ -127,6 +130,11 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     private long _lastHitTick = Long.MIN_VALUE;
     private double _prevDistSq = Double.MAX_VALUE;
     private boolean _gaveUp = false;
+    // (2026-09-11 树叶清障) 上一次尝试清除的遮挡方块 + 尝试 tick: DestroyBlockTask
+    // 对够不着的遮挡点 2s 自弃后, 钩子下一 tick 又会拿同一个点再试 → 死循环。
+    // 单槽位冷却 100 tick (5s) 内不重试同一点。
+    private BlockPos _lastClearedObstruction = null;
+    private long _lastClearAttemptTick = Long.MIN_VALUE;
     // (2026-09-06 烈焰人波次) 最近一次"有弹射物逼近"的 tick — 判定一波连发是否结束。
     private long _lastInboundTick = Long.MIN_VALUE;
     // Last tick we actually swung back, to pace our counter-attacks.
@@ -216,6 +224,30 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         }
     }
 
+    /**
+     * (2026-09-11 树叶清障, 用户"猪躲在树叶下 bot 只会干瞄准然后放弃") 视线被挡
+     * 绕位 8s 仍无效时 (父类 AbstractDoToEntityTask 钩子), 若遮挡方块是树叶类
+     * → 直接砍掉 (拟人: 玩家遇到挡路的树叶会顺手砍掉, 而不是绕着树打转)。
+     * 走 DestroyBlockTask 标准挖方块管线, 全局 avoidBlockBreaking 谓词 (含黑曜石
+     * 门保护等禁挖层) 依然生效; 非树叶遮挡 (墙/石头) 返回 null 维持绕位, 不挖墙。
+     */
+    @Override
+    protected Task onObstructionPersistent(AltoClef mod, Entity entity, BlockPos obstruction) {
+        long now = WorldHelper.getTicks();
+        if (obstruction.equals(_lastClearedObstruction) && now - _lastClearAttemptTick < 100) {
+            return null; // 同一点刚试过失败, 冷却期内继续绕位
+        }
+        if (mod.getWorld().getBlockState(obstruction).isIn(BlockTags.LEAVES)) {
+            _lastClearedObstruction = obstruction;
+            _lastClearAttemptTick = now;
+            setDebugState("Clearing leaves blocking target at " + obstruction.toShortString());
+            Debug.logToFile("altoclef_diag.log", "[LOS-Clear]\tkill target blocked by leaves at "
+                    + obstruction.toShortString() + ", destroying");
+            return new DestroyBlockTask(obstruction);
+        }
+        return null;
+    }
+
     // (2026-08-23) 瞄准点: 末影人瞄准眼睛 (脚底 +1.5), 其余生物默认脚底。
     // (2026-08-31 用户: 瞄脚部不对) 其余生物改为瞄身体中心 (bounding box 中心),
     // 准心落在身体中段而非脚底。
@@ -236,6 +268,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         _shieldLowerUntilTick = Long.MIN_VALUE;
         _counterWindowStartTick = Long.MIN_VALUE;
         _lastInboundTick = Long.MIN_VALUE;
+        _lastClearedObstruction = null;
+        _lastClearAttemptTick = Long.MIN_VALUE;
     }
 
     @Override
