@@ -5,10 +5,12 @@ import adris.altoclef.Debug;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.BlockPlaceEvent;
+import adris.altoclef.tasks.movement.GetToLandTask;
 import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -43,6 +45,9 @@ public class PlaceBlockNearbyTask extends Task {
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final TimeoutWanderTask _wander = new TimeoutWanderTask(2);
+
+    // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。
+    private GetToLandTask _toLand = null;
 
     private final TimerGame _randomlookTimer = new TimerGame(0.25);
     private final Predicate<BlockPos> _canPlaceHere;
@@ -142,6 +147,22 @@ public class PlaceBlockNearbyTask extends Task {
         if (_tryPlace == null || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
             _tryPlace = locateClosePlacePos(mod);
         }
+
+        // (2026-09-11) 通用「放不下就先上岸」闸门。
+        // 现场 20260911-174220: bot 从封闭水体游上来后停在 (-102,61,212) 仍泡在水里,
+        // 试放工作台 15.5s 失败到会话结束。根因在配置层 —— Settings.avoidOceanBlocks
+        // (默认 true) 让 WorldHelper.canReach 在【海洋 biome + y<64 + 该列水线高于
+        // 候选点】时恒 false, 于是大洋里 locateClosePlacePos 必然返回 null, 只剩
+        // 无限 Wander。岸上不再被该规则拦, 所以先上岸是唯一出路。
+        // 只在"确实没点位可放"+"确实在踩水"时触发, 不误伤涉水过河/岸边浅水放置。
+        if (_tryPlace == null && LandHelper.isFloatingInWater(mod) && !GetToLandTask.isOnCooldown()) {
+            if (_toLand == null || _toLand.isFinished(mod)) {
+                _toLand = new GetToLandTask();
+            }
+            setDebugState("Floating in water, no placeable spot -> going to land first");
+            return _toLand;
+        }
+
         if (_tryPlace != null) {
             setDebugState("Trying to place at " + _tryPlace);
             _justPlaced = _tryPlace;
