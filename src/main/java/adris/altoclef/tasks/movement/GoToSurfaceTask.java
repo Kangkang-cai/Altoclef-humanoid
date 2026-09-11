@@ -4,10 +4,10 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.fluid.Fluids;
+import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -19,53 +19,74 @@ import net.minecraft.util.math.BlockPos;
  * 海平面下限), 而非到达某个固定 Y。峡谷/深坑判定 (getPitEscapeY) 保留。
  *
  * ============================================================================
- * (2026-09-07 v4) 回地表分流 — 四次事故迭代后的最终形态。
- * 用户定调 (2026-09-07 22:43): "之前加这个进水机制是因为头顶是一片海洋;
- * 为了不透视原则, bot 的策略是能不进水就不进水, 由 baritone 自己逐步导航
- * 上去; 但当 baritone 找不到导航路线 (上次遇到海洋就是这样) 时, 希望它缩小
- * 导航长度, 几格几格逐步导航到头, 而不是最后到海洋前十几格傻等; 实在导航
- * 找不到落脚点时才采用 dig_up, 自然就游泳上去。如果不是海洋在头顶, baritone
- * 怎么会找不到路呢?"
+ * (2026-09-11 v5) 挖一垫一 —— 取代 v4 的 DIG_UP。
  *
- * 三条设计原则:
- *  1. 【默认不进水】水面/水体本身【不再】触发凿击。只要 baritone 找得到路,
- *     无论头顶是干燥岩层还是洞穴小水池, 一律 baritone 正常导航 (拟人 + 反
- *     透视: 能不进水就不进水)。
- *  2. 【逐步缩短导航长度】检测到 baritone 找不到路线 (hasPath()==false 持续
- *     goToSurfaceNoPathSeconds) 时, 不傻等也不放弃, 而是把目标从 y=58 缩成
- *     "当前 +16 → +8 → +4 → +2" 的短段, 一段一段贴上去 (海底场景里这十几
- *     格是"找不到落脚点"的高发区, 短段导航让 bot 一格格挪到头顶顶板上)。
- *  3. 【找不到落脚点才进水凿穿】最短段 (2 格) 仍然长时间无路 → 判定"确实
- *     找不到落脚点"。此时【且仅当】头顶是可安全进入的水体 (连续水柱 ≥min
- *     深度, 且水柱上方有空气 — 封闭水洞会淹死) 才切 DIG_UP: 逐块凿穿顶板
- *     → 水落到头上 → 入水 → GetToYTask 触发 CustomBaritoneGoalTask 水中垂直
- *     上浮 ([SwimUp] 2026-09-04 实锤, 唯一被验证的"不搭高也能上升"手段)。
+ * v4 的失败教训 (会话 20260911-151743 实锤):
+ *  - DIG_UP 是唯一"凿穿后游泳上去"的入口, 触发条件是"阶梯 16→8→4→2 走完
+ *    仍无路"。但这要 20s 且期间不能被抢占 —— MLG 等反射链每次抢占都会
+ *    重跑 onStart 把 _stepIdx 归零, 13 分钟会话里只有 2 次 shrinking step
+ *    to 8, DIG_UP **一次都没进去过** (纯死代码)。
+ *  - 就算进去了, v4 假设"凿穿顶板 → 水必然流下 → 入水游泳上去"。用户实测
+ *    反例: 头顶是"大片沙砾 + 水"时凿穿了水流不下来, bot 干站在洞里,
+ *    [SwimUp] 上浮被撞头, 于是一次次超时重来。
+ *
+ * v5 用户拍板方案 (两条腿, 不依赖任何"水会自己流下来"的假设):
+ *   ① **头顶挖一格**: 头顶有可挖实心就凿掉, 给自己开上升通道。
+ *   ② **脚下垫一格**: 头顶通了就直接 pillar-jump 把自己垫高 1 格
+ *      (PillarJumpHelper, 与 TowerEscapeTask 共用实现)。
+ *   循环 ①② 净上升 1 格。只要上方有水, 垫上去**必然**接触水
+ *   ("头上挖一格脚下搭高一格, 这样子就一定会入水, 这是肯定的" —— 用户)。
+ *   入水后交 GetToYTask, 由 CustomBaritoneGoalTask 的 [SwimUp] 上浮。
+ *
+ * 触发入口 (两处, 都要求"确实卡住"而不是"看到水就凿" —— 防 09-07 22:04
+ * 洞穴小水池事故复发):
+ *   - **卡住检测** (新, 主动): baritone 自称有路径/正在寻路, 但玩家 XZ
+ *     连续 4s 位移 < 0.05 格 → 判定"有路走不动", 立即进挖垫模式。
+ *     (不再等阶梯耗尽, 从根上绕开"抢占重置 _stepIdx"的死循环。)
+ *   - **阶梯耗尽** (旧入口, 保留): 最短段(2格)仍无 baritone 路。
+ *
+ * 退出闸门 (必须有, 否则死循环):
+ *   - 无进展: 连续 15s 玩家 Y 没涨 → 放弃。
+ *   - 总超时: 90s → 放弃。
+ *   - 放弃 → **触发条件层 static 冷却 60s** (实例层冷却会被任务重建绕过,
+ *     20de6b0c 教训), 期间不再进挖垫模式, 回 baritone 普通导航。
  *
  * 事故史 (防止回归, 每次改动都要回头看):
  *  - 16:11 对 y<58 一律逐格凿 + 每 tick 重算目标 → 三方乒乓, 一块没挖穿。
  *    → 修: 目标粘性 + 只在可保证见水时凿。
  *  - 21:36 "Baritone 失速 60s → 降级 DIG_UP"兜底实锤失败 (干燥处凿了也不爬,
- *    digging up -22→-18 而 player 恒 -23)。→ 修: 删除该兜底, 干燥 stall 交
- *    baritone 自有 checker/wander。
+ *    digging up -22→-18 而 player 恒 -23)。→ 现在不成立: v5 凿完会**垫**,
+ *    干燥处也能逐格爬, 不再依赖"凿了就会爬"。
  *  - 22:04 头顶 16 格内有任意水就 DIG_UP: 洞穴小水池触发, 凿到离水差 3 格
- *    够不着 (水不会流下) → 原地卡死 + 换列重挖 + 疯狂重导航。→ v3 加严,
- *    v4 干脆改成"水不触发, 只有 baritone 找不到路才触发"。
- *  - 未验证机制 (峡谷脱困"GetToYTask 会搭方块上去") 不得作为设计前提。
+ *    够不着 (水不会流下) → 原地卡死 + 换列重挖 + 疯狂重导航。→ v5 闸门:
+ *    必须"确实卡住"+"头顶有可挖实心"才进, 且带无进展/总超时退出。
+ *  - 2026-09-11 DIG_UP 死代码 (见上)。
  */
 public class GoToSurfaceTask extends Task {
 
     private enum AscentMode {
-        /** 默认: baritone 分段导航, 不进水。 */
+        /** 默认: baritone 分段导航, 不挖不垫。 */
         BARITONE,
-        /** baritone 最短段仍找不到落脚点 + 头顶可安全进水: 凿穿游泳上去。 */
-        DIG_UP
+        /** 卡住 / 无路: 头顶挖一格 + 脚下垫一格, 逐格爬上去。 */
+        SCAFFOLD_UP
     }
 
-    /** 凿击窗口: 与 tickDigUp 的 dy 扫描上限一致。 */
-    private static final int DIG_WINDOW = 5;
+    /** 头顶向上找"可挖实心"的扫描上限 (玩家身体占 2 格, 所以从 dy=1 扫安全)。 */
+    private static final int DIG_WINDOW = 4;
 
     /** 导航分段阶梯 (格): 找不到路时逐级缩短, 让 bot 几格几格贴上去。 */
     private static final int[] STEP_LADDER = {16, 8, 4, 2};
+
+    // ===== 卡住检测 (2026-09-11) =====
+    /** baritone 自称有路却连续这么久没位移 → 判定卡住, 直接进挖垫模式。 */
+    private static final int STUCK_TICKS_TO_SCAFFOLD = 20 * 4;
+    /** 挖垫模式连续这么久 Y 没涨 → 放弃。 */
+    private static final int SCAFFOLD_NO_PROGRESS_TICKS = 20 * 15;
+    /** 挖垫模式总时长上限。 */
+    private static final int SCAFFOLD_TOTAL_TIMEOUT_TICKS = 20 * 90;
+    /** 放弃后的冷却 (触发条件层 static: 任务实例会被重建, 实例层冷却无效)。 */
+    private static final int SCAFFOLD_GIVEUP_COOLDOWN_TICKS = 20 * 60;
+    private static long _scaffoldGiveUpUntilTick = 0;
 
     private AscentMode _mode = AscentMode.BARITONE;
 
@@ -73,16 +94,19 @@ public class GoToSurfaceTask extends Task {
     private int _stepIdx = 0;                 // STEP_LADDER 指针
     private int _stepTargetY = Integer.MIN_VALUE;
     private TimerGame _noPathTimer = null;    // baritone 无路径持续时间
-
-    // 头顶水检测每 1s 重扫一次 (仅在需要判定"能否安全进水"时用)。
-    private final TimerGame _waterScanTimer = new TimerGame(1);
-    // "找不到落脚点/不可进水"的节流诊断 (防刷屏)。
+    // "找不到落脚点/不可挖垫"的节流诊断 (防刷屏)。
     private final TimerGame _blockedLogTimer = new TimerGame(5);
 
-    // 逐格凿粘性目标 (DIG_UP 模式)。
-    private BlockPos _digTarget = null;
-    // 挖掘诊断日志节流 (旧版每 tick 一行, 16:11 事故打了 930 行)。
-    private final TimerGame _digLogTimer = new TimerGame(1);
+    // ===== SCAFFOLD_UP 状态 =====
+    private long _scaffoldStartTick = -1;
+    private int _scaffoldLastY = Integer.MIN_VALUE;
+    private TimerGame _scaffoldNoProgressTimer = null;
+    private final TimerGame _scaffoldLogTimer = new TimerGame(2);
+
+    // ===== 卡住检测状态 (两种模式共用, 每 tick 采样) =====
+    private double _lastSampleX = Double.NaN;
+    private double _lastSampleZ = Double.NaN;
+    private int _stuckTicks = 0;
 
     // 峡谷脱困目标 Y (getPitEscapeY): 壁顶+1。搭到壁顶后水平走出去。
     // 每 1 秒重算一次 (getPitEscapeY 扫 960 个方块, 不能每 tick 调)。
@@ -101,49 +125,110 @@ public class GoToSurfaceTask extends Task {
         return _pitEscapeY >= 0;
     }
 
-    /**
-     * (2026-09-07 v4) 头顶列是否是【可安全进入】的水体。
-     *
-     * @return {firstWaterDy, depth, hasAirAbove}: firstWaterDy = 第一个水格相对
-     *         脚的距离 (1..range, 无水 -1); depth = 从该格起连续水格数;
-     *         hasAirAbove = 水柱上方是否出现空气 (封闭水洞会淹死, 不可进)。
-     *         只认 WATER/FLOWING_WATER (岩浆不算)。未加载区块视为边界 (按无水)。
-     */
-    private int[] scanWaterOverhead(AltoClef mod, BlockPos player) {
-        int range = mod.getModSettings().getGoToSurfaceWaterDetectRange();
-        if (range <= 0) return new int[]{-1, 0, 0};
-        int firstDy = -1;
-        int depth = 0;
-        int hasAir = 0;
-        for (int dy = 1; dy <= range; dy++) {
-            BlockPos pos = player.up(dy);
-            if (!mod.getChunkTracker().isChunkLoaded(pos)) break;
-            FluidState fluid = mod.getWorld().getBlockState(pos).getFluidState();
-            boolean water = fluid != null && !fluid.isEmpty()
-                    && (fluid.getFluid() == Fluids.WATER || fluid.getFluid() == Fluids.FLOWING_WATER);
-            if (water) {
-                if (firstDy < 0) firstDy = dy;
-                depth++;
-                continue;
-            }
-            if (firstDy > 0) {
-                // 水柱结束: 上方是空气 (有呼吸空间) 还是实心 (会淹死)?
-                hasAir = WorldHelper.isSolid(mod, pos) ? 0 : 1;
-                break;
-            }
-        }
-        return new int[]{firstDy, depth, hasAir};
-    }
-
     /** baritone 当前是否真的有路 (有正在执行的路径)。 */
     private boolean baritoneHasPath(AltoClef mod) {
-        return mod.getClientBaritone().getPathingBehavior().hasPath();
+        try {
+            return mod.getClientBaritone().getPathingBehavior().hasPath();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** baritone 是否自称正在寻路 (与 hasPath 互补: 有 state 无 path 也算"自称能动")。 */
+    private boolean pathingActive(AltoClef mod) {
+        try {
+            return mod.getClientBaritone().getPathingBehavior().isPathing();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 每 tick 采样 XZ 位移: 没动就累计, 动了就清零。 */
+    private void sampleMovement(AltoClef mod) {
+        double x = mod.getPlayer().getX();
+        double z = mod.getPlayer().getZ();
+        if (Double.isNaN(_lastSampleX)) {
+            _lastSampleX = x;
+            _lastSampleZ = z;
+            return;
+        }
+        double moved = Math.hypot(x - _lastSampleX, z - _lastSampleZ);
+        if (moved < 0.05) {
+            _stuckTicks++;
+        } else {
+            _stuckTicks = 0;
+        }
+        _lastSampleX = x;
+        _lastSampleZ = z;
+    }
+
+    /**
+     * 头顶向上找第一个"可挖的实心方块"。
+     * 第一个实心若不可挖 (基岩/放置保护) → 返回 null (上面更没戏, 不继续找)。
+     */
+    private BlockPos findOverheadDigTarget(AltoClef mod, BlockPos player) {
+        for (int dy = 1; dy <= DIG_WINDOW; dy++) {
+            BlockPos cand = player.up(dy);
+            if (!mod.getChunkTracker().isChunkLoaded(cand)) return null;
+            if (!WorldHelper.isSolid(mod, cand)) continue;
+            if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) return null;
+            float hardness = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
+            if (hardness < 0) return null; // 不可破坏
+            return cand;
+        }
+        return null;
+    }
+
+    /**
+     * 能不能切"挖一垫一"模式。
+     *
+     * 闸门 (每条都对应一次事故, 别削):
+     *  - 放弃冷却未到期 → 不进 (防"放弃→立刻重进"死循环)。
+     *  - 头顶 DIG_WINDOW 内必须存在【可挖实心】—— 有东西可凿才进。
+     *    纯水柱/纯空气不触发 (交给 baritone 或游泳), 这是 09-07 22:04
+     *    "洞穴小水池误触发原地卡死"的直接防线。
+     */
+    private boolean canScaffold(AltoClef mod, BlockPos player) {
+        if (WorldHelper.getTicks() < _scaffoldGiveUpUntilTick) return false;
+        return findOverheadDigTarget(mod, player) != null;
+    }
+
+    private void enterScaffold(AltoClef mod, BlockPos player) {
+        _mode = AscentMode.SCAFFOLD_UP;
+        _scaffoldStartTick = WorldHelper.getTicks();
+        _scaffoldLastY = player.getY();
+        if (_scaffoldNoProgressTimer == null) {
+            _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
+        }
+        _scaffoldNoProgressTimer.reset();
+        _scaffoldLogTimer.reset();
+        _stuckTicks = 0;
+    }
+
+    /** 放弃挖垫模式: 记录触发条件层 static 冷却, 回 baritone。 */
+    private Task giveUpScaffold(AltoClef mod, BlockPos player, String reason) {
+        Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD give up (" + reason + ") at " + player
+                + ", cooldown " + (SCAFFOLD_GIVEUP_COOLDOWN_TICKS / 20) + "s");
+        _scaffoldGiveUpUntilTick = WorldHelper.getTicks() + SCAFFOLD_GIVEUP_COOLDOWN_TICKS;
+        _mode = AscentMode.BARITONE;
+        _stepIdx = 0;
+        _stepTargetY = Integer.MIN_VALUE;
+        _noPathTimer = null;
+        _scaffoldStartTick = -1;
+        PillarJumpHelper.release(mod);
+        return baritoneStep(mod, player);
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+        sampleMovement(mod);
         boolean deep = WorldHelper.isDeepUnderground(mod);
         if (!deep) {
+            if (_mode == AscentMode.SCAFFOLD_UP) {
+                PillarJumpHelper.release(mod);
+                _mode = AscentMode.BARITONE;
+                _scaffoldStartTick = -1;
+            }
             // 峡谷/深坑判定 (仅地表资源前置场景使用本任务)。
             if (!inPit(mod)) {
                 return null; // 真正的地表, 等待 isFinished 结束
@@ -160,29 +245,16 @@ public class GoToSurfaceTask extends Task {
         _pitEscapeY = null;
         BlockPos player = mod.getPlayer().getBlockPos();
 
-        if (_mode == AscentMode.DIG_UP) {
-            // 水消失/条件不再满足 → 回 baritone (防一次误判锁死)。
-            if (_waterScanTimer.elapsed()) {
-                _waterScanTimer.reset();
-                if (!canEnterWater(mod, player)) {
-                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] water no longer usable at "
-                            + player + " -> back to BARITONE");
-                    _mode = AscentMode.BARITONE;
-                    _digTarget = null;
-                    return baritoneStep(mod, player);
-                }
-            }
-            return tickDigUp(mod, player);
+        if (_mode == AscentMode.SCAFFOLD_UP) {
+            return tickScaffoldUp(mod, player);
         }
-
         return baritoneStep(mod, player);
     }
 
     /**
-     * (2026-09-07 v4 核心) baritone 分段导航: 目标 y = min(58, 当前 + 段长)。
-     * 找不到路 (hasPath()==false 持续 N 秒) → 段长逐级缩短 (16→8→4→2), 让 bot
-     * 几格几格贴到头顶顶板; 最短段仍然无路 = 确实找不到落脚点 → 若头顶可安全
-     * 进水则切 DIG_UP, 否则继续等 baritone (干燥处凿了也不会爬, 旧事故教训)。
+     * baritone 分段导航: 目标 y = min(58, 当前 + 段长)。
+     * 找不到路 (hasPath()==false 持续 N 秒) → 段长逐级缩短 (16→8→4→2)。
+     * 另外新增**卡住检测**: baritone 自称有路但人不动 → 立即进挖垫模式。
      */
     private Task baritoneStep(AltoClef mod, BlockPos player) {
         int y = player.getY();
@@ -190,6 +262,19 @@ public class GoToSurfaceTask extends Task {
         // 到达本段目标 (或首次) → 下一段目标。
         if (_stepTargetY == Integer.MIN_VALUE || y >= _stepTargetY) {
             _stepTargetY = Math.min(SURFACE_TARGET_Y, y + step);
+        }
+
+        // (2026-09-11) 卡住 → 直接进"挖一垫一", 不再等阶梯耗尽。
+        // 旧入口要 20s 且不能被打断, 而每次抢占都会重跑 onStart 把 _stepIdx
+        // 归零 → 永远到不了最短段 (20260911-151743 实锤)。这里用"人不动但
+        // baritone 自称有路"直接判定, 与阶梯进度解耦。
+        if (_stuckTicks >= STUCK_TICKS_TO_SCAFFOLD
+                && (baritoneHasPath(mod) || pathingActive(mod))
+                && canScaffold(mod, player)) {
+            Debug.logToFile("altoclef_diag.log", "[GoToSurface] stuck " + (_stuckTicks / 20.0)
+                    + "s while baritone claims a path at " + player + " -> SCAFFOLD_UP");
+            enterScaffold(mod, player);
+            return tickScaffoldUp(mod, player);
         }
 
         if (_noPathTimer == null) {
@@ -206,23 +291,16 @@ public class GoToSurfaceTask extends Task {
                 _stepTargetY = Math.min(SURFACE_TARGET_Y, y + STEP_LADDER[_stepIdx]);
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone path, shrinking step to "
                         + STEP_LADDER[_stepIdx] + " at " + player);
-            } else {
-                // 最短段仍无路 = 找不到落脚点。
-                int[] w = scanWaterOverhead(mod, player);
-                boolean canEnter = canEnterWater(mod, player);
-                if (canEnter) {
-                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] no foothold (shortest step) at "
-                            + player + " and water overhead (dy=" + w[0] + " depth=" + w[1]
-                            + ") -> DIG_UP");
-                    _mode = AscentMode.DIG_UP;
-                    return tickDigUp(mod, player);
-                }
-                if (_blockedLogTimer.elapsed()) {
-                    _blockedLogTimer.reset();
-                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone foothold at " + player
-                            + " but water not usable (dy=" + w[0] + " depth=" + w[1] + " airAbove=" + w[2]
-                            + ") -> keep waiting on baritone");
-                }
+            } else if (canScaffold(mod, player)) {
+                // 最短段仍无路 → 挖一垫一。
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] no foothold (shortest step) at "
+                        + player + " -> SCAFFOLD_UP");
+                enterScaffold(mod, player);
+                return tickScaffoldUp(mod, player);
+            } else if (_blockedLogTimer.elapsed()) {
+                _blockedLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone foothold at " + player
+                        + " and nothing diggable overhead -> keep waiting on baritone");
             }
         }
         setDebugState("Going up via baritone (step " + STEP_LADDER[_stepIdx] + ", target y=" + _stepTargetY + ")");
@@ -230,56 +308,64 @@ public class GoToSurfaceTask extends Task {
     }
 
     /**
-     * 头顶是否是"凿穿后能安全进水再浮上去"的水体: 有水、水柱够深 (≥
-     * goToSurfaceMinWaterDepth, 滴水/小水洼不值得)、且水柱上方有空气
-     * (封闭水洞凿进去会淹死)。水面必须在凿击窗口 (dy≤DIG_WINDOW) 内 —
-     * "挖出必有水流下": 窗口内顶板全部凿穿后水必然落到 bot 头上。
+     * (2026-09-11 v5 核心) 头顶挖一格 + 脚下垫一格, 逐格爬上去。
+     *
+     * 顺序不能颠倒:
+     *   1. 先凿穿头顶实心 (在水里也一样 —— 用户场景就是"泡在水下但头顶被
+     *      沙砾封死", 此时 [SwimUp] 撞头, 必须先开通道)。
+     *   2. 头顶通了且已入水 → 交 GetToYTask 游泳上浮。
+     *   3. 头顶通了但还没水 → 垫塔把自己送上去 (这一步是"不靠水流下来"的关键)。
+     *   4. 没得挖也没材料垫 → 放弃。
      */
-    private boolean canEnterWater(AltoClef mod, BlockPos player) {
-        int[] w = scanWaterOverhead(mod, player);
-        int minDepth = mod.getModSettings().getGoToSurfaceMinWaterDepth();
-        return w[0] > 0 && w[0] <= DIG_WINDOW && w[1] >= minDepth && w[2] == 1;
-    }
+    private Task tickScaffoldUp(AltoClef mod, BlockPos player) {
+        if (_scaffoldStartTick < 0) _scaffoldStartTick = WorldHelper.getTicks();
+        if (WorldHelper.getTicks() - _scaffoldStartTick > SCAFFOLD_TOTAL_TIMEOUT_TICKS) {
+            return giveUpScaffold(mod, player, "total timeout " + (SCAFFOLD_TOTAL_TIMEOUT_TICKS / 20) + "s");
+        }
+        if (_scaffoldNoProgressTimer == null) {
+            _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
+        }
+        if (player.getY() > _scaffoldLastY) {
+            _scaffoldLastY = player.getY();
+            _scaffoldNoProgressTimer.reset();
+        } else if (_scaffoldNoProgressTimer.elapsed()) {
+            return giveUpScaffold(mod, player, "no Y progress for " + (SCAFFOLD_NO_PROGRESS_TICKS / 20) + "s");
+        }
 
-    /**
-     * (2026-09-07 v4) 逐格向上凿 (仅在"baritone 找不到落脚点 + 头顶可安全进水"
-     * 时进入)。入水即停凿交 GetToYTask 游泳上浮, 不凿水上方的方块。
-     * 目标粘性: 仍实心且未越过就保持, 不随 bot 微动换列重置挖掘进度。
-     */
-    private Task tickDigUp(AltoClef mod, BlockPos player) {
+        // 1) 头顶有可挖实心 → 凿穿 (给自己开上升通道)。
+        BlockPos dig = findOverheadDigTarget(mod, player);
+        if (dig != null) {
+            PillarJumpHelper.release(mod);
+            if (_scaffoldLogTimer.elapsed()) {
+                _scaffoldLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD digging up at " + dig
+                        + " player=" + player);
+            }
+            setDebugState("Scaffold: digging up at " + dig);
+            return new DestroyBlockTask(dig);
+        }
+
+        // 2) 头顶已通 + 已入水 → 交 GetToYTask (CustomBaritoneGoalTask 的 [SwimUp] 接管)。
         if (mod.getPlayer().isTouchingWater()) {
-            _digTarget = null;
-            setDebugState("In water after breach, swimming up");
+            PillarJumpHelper.release(mod);
+            setDebugState("Scaffold: breached into water, swimming up");
             return new GetToYTask(SURFACE_TARGET_Y);
         }
-        if (_digTarget != null) {
-            if (!WorldHelper.isSolid(mod, _digTarget) || player.getY() >= _digTarget.getY()) {
-                _digTarget = null; // 已挖穿 / 已爬到该高度
+
+        // 3) 头顶已通但还没水 → 垫塔送进上方空间。
+        Item[] materials = PillarJumpHelper.allMaterials();
+        if (PillarJumpHelper.hasMaterials(mod, materials)) {
+            if (_scaffoldLogTimer.elapsed()) {
+                _scaffoldLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD pillaring up at " + player);
             }
+            setDebugState("Scaffold: pillaring up");
+            PillarJumpHelper.step(mod, materials);
+            return null;
         }
-        if (_digTarget == null) {
-            for (int dy = 1; dy <= DIG_WINDOW; dy++) {
-                BlockPos cand = player.up(dy);
-                if (WorldHelper.isSolid(mod, cand)) {
-                    float h = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
-                    if (h >= 0 && !mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) {
-                        _digTarget = cand;
-                    }
-                    break; // 遇到实心 (可挖或不可挖/基岩) 就停
-                }
-            }
-        }
-        if (_digTarget != null) {
-            if (_digLogTimer.elapsed()) {
-                _digLogTimer.reset();
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] digging up at "
-                        + _digTarget + " player=" + player);
-            }
-            setDebugState("Digging upward to water");
-            return new DestroyBlockTask(_digTarget);
-        }
-        setDebugState("Ceiling breached, waiting water / going to y=" + SURFACE_TARGET_Y);
-        return new GetToYTask(SURFACE_TARGET_Y);
+
+        // 4) 没得挖也没材料垫 → 放弃 (回 baritone + 进冷却)。
+        return giveUpScaffold(mod, player, "nothing diggable overhead and no pillar materials");
     }
 
     @Override
@@ -295,13 +381,19 @@ public class GoToSurfaceTask extends Task {
         _stepIdx = 0;
         _stepTargetY = Integer.MIN_VALUE;
         _noPathTimer = null;
-        _waterScanTimer.reset();
-        _digTarget = null;
+        _scaffoldStartTick = -1;
+        _scaffoldLastY = Integer.MIN_VALUE;
+        _scaffoldNoProgressTimer = null;
+        _scaffoldLogTimer.reset();
+        _stuckTicks = 0;
+        _lastSampleX = Double.NaN;
+        _lastSampleZ = Double.NaN;
     }
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-        _digTarget = null;
+        // 垫塔期间 hold 的跳跃键必须在所有退出路径上松开 (含被反射链抢占)。
+        PillarJumpHelper.release(mod);
     }
 
     @Override

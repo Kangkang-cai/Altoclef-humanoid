@@ -6,21 +6,14 @@ import adris.altoclef.chains.MobDefenseChain;
 import adris.altoclef.tasks.entity.TowerKillEntityTask;
 import adris.altoclef.tasks.misc.EatItemTask;
 import adris.altoclef.tasksystem.Task;
-import adris.altoclef.util.helpers.LookHelper;
-import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Hand;
-import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
 
 /**
  * (2026-09-07 塔式逃生, 用户设计) 被纯近战怪围殴时 (无远程/无苦力怕) 的
@@ -208,46 +201,11 @@ public class TowerEscapeTask extends Task {
     /**
      * pillar-jump 单步: 在地面 → hold 跳; 腾空且脚下出现"空气+其下实体"
      * 的放置窗口 → 瞄准脚下块顶面 interactBlock 放置。
+     * (2026-09-11 实现抽到 PillarJumpHelper, 与 GoToSurfaceTask 挖垫模式共用,
+     *  此处只做委托, 行为逐行等价。)
      */
     private void pillarStep(AltoClef mod) {
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        BlockPos below = feet.down();
-        if (WorldHelper.isSolid(mod, below)) {
-            // 站在实体上: 起跳。
-            mod.getInputControls().hold(Input.JUMP);
-            return;
-        }
-        // 腾空放置窗口: 脚下是空气、其下是实体 (跳过 1 格后的经典窗口)。
-        if (WorldHelper.isSolid(mod, below.down())
-                && !WorldHelper.isInsidePlayer(mod, below)
-                && WorldHelper.canPlace(mod, below)) {
-            // 放置瞬间松跳, 避免连跳把放置窗口抢掉。
-            mod.getInputControls().release(Input.JUMP);
-            tryPlaceBelow(mod, below);
-        } else {
-            mod.getInputControls().hold(Input.JUMP);
-        }
-    }
-
-    /** 瞄准目标块顶面 → 准心落上后 interactBlock 放置 (与 PlaceBlockNearbyTask.place 同款路径)。 */
-    private void tryPlaceBelow(AltoClef mod, BlockPos pos) {
-        if (!StorageHelper.isEquipped(mod, TOWER_ITEMS)) {
-            if (!mod.getSlotHandler().forceEquipItem(TOWER_ITEMS)) {
-                return; // 没方块了 (链层入口已检查过库存, 这里是保险)
-            }
-        }
-        Vec3d topCenter = Vec3d.ofCenter(pos).add(0, 0.5, 0);
-        LookHelper.lookAt(mod, topCenter);
-        HitResult hit = MinecraftClient.getInstance().crosshairTarget;
-        if (hit instanceof BlockHitResult bhit
-                && bhit.getBlockPos().equals(pos)
-                && MinecraftClient.getInstance().interactionManager != null) {
-            ActionResult r = MinecraftClient.getInstance().interactionManager.interactBlock(
-                    mod.getPlayer(), mod.getWorld(), Hand.MAIN_HAND, bhit);
-            if (r == ActionResult.SUCCESS) {
-                mod.getPlayer().swingHand(Hand.MAIN_HAND);
-            }
-        }
+        PillarJumpHelper.step(mod, TOWER_ITEMS);
     }
 
     /** 20 格内有远程怪或苦力怕 (塔策略的禁入条件)。 */
