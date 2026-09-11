@@ -2,6 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
@@ -10,6 +11,7 @@ import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.Rotation;
@@ -49,6 +51,17 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private final TimerGame _drownReissueTimer = new TimerGame(1); // 溺水时限紧, 1s 重发冷却
     private final TimerGame _drownPathlessTimer = new TimerGame(1.5); // baritone 无路径观察期
     private boolean _loggedNoBreathable = false;
+
+    // ==== 盾牌看门狗 (2026-09-11, 用户复盘 21:10 死于骷髅射杀) ====
+    // 每 60s 检查一次: 副手+背包都没盾时, 材料够(1 铁锭+6 木板)就马上合成,
+    // 材料不够跳过不管(不主动去挖铁, 用户原话"没有就跳过不管了")。
+    // 背景: 死亡清空背包后旧逻辑没人补盾, 下次遇骷髅必吃箭。副手装备由
+    // MobDefenseChain/AbstractKillEntityTask 现有反应式装备负责, 这里只管"造出来"。
+    // prio 55: 抢占常规任务(50), 让位战斗(65+)/死亡恢复(70)/岩浆火溺水(90+)。
+    private static final double SHIELD_WATCHDOG_INTERVAL = 60;
+    private static final float SHIELD_WATCHDOG_PRIORITY = 55;
+    private static final int SHIELD_PLANKS_REQUIRED = 6;
+    private final TimerGame _shieldWatchdogTimer = new TimerGame(SHIELD_WATCHDOG_INTERVAL);
 
     public WorldSurvivalChain(TaskRunner runner) {
         super(runner);
@@ -148,6 +161,21 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
         if (!mod.getPlayer().isOnFire() && _wasTrackingWaterForFire) {
             stopFireWaterTracking(mod);
+        }
+
+        // 盾牌看门狗 (2026-09-11): 每 60s 检查, 没盾+材料够 → 合成 (prio 55)。
+        // 计时器无条件重置, 材料不够也只是跳过本轮, 下轮再查。
+        if (_shieldWatchdogTimer.elapsed()) {
+            _shieldWatchdogTimer.reset();
+            boolean offHandShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
+            if (!offHandShield && !mod.getItemStorage().hasItem(Items.SHIELD)
+                    && mod.getItemStorage().hasItem(Items.IRON_INGOT)
+                    && mod.getItemStorage().getItemCount(ItemHelper.PLANKS) >= SHIELD_PLANKS_REQUIRED) {
+                Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present (iron ingot + "
+                        + mod.getItemStorage().getItemCount(ItemHelper.PLANKS) + " planks), crafting one.");
+                setTask(TaskCatalogue.getItemTask(Items.SHIELD, 1));
+                return SHIELD_WATCHDOG_PRIORITY;
+            }
         }
 
         // Portal stuck
