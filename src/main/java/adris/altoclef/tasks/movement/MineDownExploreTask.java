@@ -112,11 +112,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (每行 "存档:维度 x y z"), 启动后首次访问时加载。
     // =========================================================================
     private static final String EXPLORED_CAVE_FILE = "altoclef_explored.log";
-    // 已探索洞穴区域的禁入/禁探索半径(格)——区域圆心为探索结束时玩家所在/洞区中心。
+    // 已探索洞穴区域的禁入/禁探索形状(扁圆柱): 水平半径 EXPLORED_CAVE_RADIUS +
+    // 垂直半高 EXPLORED_CAVE_Y_BAND, 区域中心为探索结束时玩家所在/洞区中心。
     // (2026-09-03 用户选定 32): 一个普通矿洞 1 次就能整体剔除; 超大洞网络靠"每个探索
     // 结束标一个中心"逐步覆盖, 即使 90s 超时也能保证同一片不再被反复进。
-    private static final int EXPLORED_CAVE_RADIUS = 32;
-    // (2026-09-03 同心丢弃) 半径内已有中心时不再重复记(防密集记录同片洞区)。
+    // (2026-09-11 用户"半径32太大"改扁圆柱 16/±8): 3D 球 y 方向 ±32, 锚点上下的
+    // 没探索过的深层/浅层全被挡(0911 09:11 场次: 昨日 y=-17 的标记把今日刚挖到的
+    // y=-24~-27 同洞系新段整体判 explored=463 → CaveScan 拒绝)。水平改 16 收窄
+    // 覆盖面, y 压 ±8 使上层洞标记不再误挡深层新洞。
+    private static final int EXPLORED_CAVE_RADIUS = 16;
+    // (2026-09-11) 扁圆柱垂直半高: |Δy| 超过此值即使水平重合也不算同片洞区。
+    private static final int EXPLORED_CAVE_Y_BAND = 8;
+    // (2026-09-03 同心丢弃) 与已有中心过近时不再重复记(防密集记录同片洞区)。
     private static final int EXPLORED_CAVE_MIN_SEP = 24;
     private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _exploredCaveByKey
             = new java.util.HashMap<>();
@@ -411,8 +418,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _inCave = false;
             _subTask = null;
             // (2026-09-03 区域记忆) 探索结束(超时/完成): 以当前玩家位置标记这个洞穴
-            // 区域为"已探索", 半径 EXPLORED_CAVE_RADIUS 内不再触发探索 → 同一大洞网络
-            // 不会被打转第二次(用户"同一个矿洞打转10分钟")。
+            // 区域为"已探索", 扁圆柱(水平16/±8, 2026-09-11 收窄)内不再触发探索 →
+            // 同一大洞网络不会被打转第二次(用户"同一个矿洞打转")。
             markExploredCaveRegion(mod, mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null);
             // (2026-09-02) 探索结束(超时/完成): 启动冷却防立刻重新探测同一洞;
             // 隧道模式下换一个水平方向继续挖, 避免原方向挖回刚探索过的洞区再次触发。
@@ -959,8 +966,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     /**
      * (2026-09-03 记录一个已探索洞穴区域) 探索结束(超时/完成)时以玩家位置为圆心,
-     * 记录 EXPLORED_CAVE_RADIUS 半径内的洞穴为"不再触发探索"。与已有中心距离不足
-     * EXPLORED_CAVE_MIN_SEP 则视为重复(同一片洞区)丢弃, 防密集堆点。
+     * 记录扁圆柱区域(水平 EXPLORED_CAVE_RADIUS / 垂直 ±EXPLORED_CAVE_Y_BAND)内的
+     * 洞穴为"不再触发探索"。与已有中心水平距离不足 EXPLORED_CAVE_MIN_SEP 且 y 带
+     * 重叠则视为重复(同一片洞区)丢弃, 防密集堆点。
+     * (2026-09-11 同心丢弃改扁形匹配: 旧 3D 距离会把"同一水平位置但 y 带不相交"
+     * 的两个独立区域误判为重复而丢弃。)
      */
     private static void markExploredCaveRegion(AltoClef mod, BlockPos center) {
         if (mod == null || mod.getWorld() == null || center == null) return;
@@ -969,7 +979,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         java.util.LinkedHashSet<BlockPos> set = _exploredCaveByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>());
         // 与已有中心过近 → 同片洞区已覆盖, 丢弃(防每 90s 超时在同一点重复追加)。
         for (BlockPos existing : set) {
-            if (center.getSquaredDistance(existing) < EXPLORED_CAVE_MIN_SEP * EXPLORED_CAVE_MIN_SEP) {
+            if (Math.abs(center.getY() - existing.getY()) > EXPLORED_CAVE_Y_BAND) continue;
+            int dx = center.getX() - existing.getX();
+            int dz = center.getZ() - existing.getZ();
+            if (dx * dx + dz * dz < EXPLORED_CAVE_MIN_SEP * EXPLORED_CAVE_MIN_SEP) {
                 return;
             }
         }
@@ -977,12 +990,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         appendExploredCaveLine(key, center);
         Debug.logToFile("altoclef_diag.log",
                 "[ExploredCave] marked region center=" + center.toShortString()
-                        + " radius=" + EXPLORED_CAVE_RADIUS + " key=" + key
+                        + " hRadius=" + EXPLORED_CAVE_RADIUS + " yBand=" + EXPLORED_CAVE_Y_BAND
+                        + " key=" + key
                         + " totalCenters=" + set.size());
     }
 
     /**
      * (2026-09-03 判定 pos 是否落在任一已探索洞穴区域内) 供探测/目标选择排除用。
+     * (2026-09-11 3D 球改扁圆柱: 水平距离 ≤ EXPLORED_CAVE_RADIUS 且 |Δy| ≤
+     * EXPLORED_CAVE_Y_BAND 才算命中, 上层洞标记不再挡深层/浅层新洞。)
      */
     private static boolean isInExploredCaveRegion(AltoClef mod, BlockPos pos) {
         if (mod == null || mod.getWorld() == null || pos == null) return false;
@@ -991,7 +1007,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (set == null || set.isEmpty()) return false;
         int rSq = EXPLORED_CAVE_RADIUS * EXPLORED_CAVE_RADIUS;
         for (BlockPos center : set) {
-            if (pos.getSquaredDistance(center) <= rSq) return true;
+            if (Math.abs(pos.getY() - center.getY()) > EXPLORED_CAVE_Y_BAND) continue;
+            int dx = pos.getX() - center.getX();
+            int dz = pos.getZ() - center.getZ();
+            if (dx * dx + dz * dz <= rSq) return true;
         }
         return false;
     }
