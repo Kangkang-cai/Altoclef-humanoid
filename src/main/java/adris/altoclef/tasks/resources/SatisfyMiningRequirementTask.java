@@ -71,6 +71,20 @@ public class SatisfyMiningRequirementTask extends Task {
                     setDebugState("Preferring DIAMOND pickaxe (diamonds+wood at hand, skip iron tier)");
                     return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
                 }
+                // (2026-09-11 无镐死锁兜底, 用户"他其实可以制作一个镐子的") 铁镐链
+                // 需要熔炉烧锭, 而 2026-08-30 的"没镐别挖石头墙"闸门
+                // (AltoClef.avoidBlockBreak → WorldHelper.shouldAvoidUnminable) 在
+                // _currentMiningReq=HAND 时禁止 baritone 挖一切石头 → 熔炉被石头挡
+                // 时: 无镐→石头禁挖→熔炉不可达→铁锭烧不了→铁镐做不出→永远无镐。
+                // 144656 场次实锤: Pickaxes 全 0 + rawIron=41 + 原木24, 冻结在
+                // 熔炉交互 path[present=false] 打转。兜底: 背包无任何镐 且 铁锭
+                // 不够直接合成(仍需熔炉) 且 有木料 → 先做一把木镐。木镐即解锁
+                // _currentMiningReq≥WOOD → baritone 可破石清障, 循环打破;
+                // 成本≈1 原木, 且"永远随身有镐"本就是拟人行为。
+                if (needsAnyPickaxeFallback(mod)) {
+                    setDebugState("No pickaxe at all — crafting WOODEN pickaxe first (unblocks stone breaking for furnace route)");
+                    return TaskCatalogue.getItemTask(Items.WOODEN_PICKAXE, 1);
+                }
                 return TaskCatalogue.getItemTask(Items.IRON_PICKAXE, 1);
             case DIAMOND:
                 return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
@@ -122,6 +136,20 @@ public class SatisfyMiningRequirementTask extends Task {
             if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, log) >= 1) return true;
         }
         return false;
+    }
+
+    /**
+     * (2026-09-11 无镐死锁兜底) 是否应先做一把木镐。条件三条:
+     * ① 背包没有任何满足 WOOD 档的镐 (全档位裸奔);
+     * ② 铁锭(可达口径) < 3 — 若锭够, 铁镐链走工作台直合, 不过熔炉, 无死锁;
+     * ③ 有棒料 (原木/木板/木棍) — 否则做不出来, 挂着也没用。
+     */
+    private boolean needsAnyPickaxeFallback(AltoClef mod) {
+        if (StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.WOOD)) return false;
+        if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.IRON_INGOT) >= 3) return false;
+        if (!hasStickMaterial(mod)) return false;
+        Debug.logMessage("(SatisfyMiningReq) 无镐死锁兜底: 先做木镐解锁石头挖掘 (熔炉路线被石头挡时铁镐链永不收敛)");
+        return true;
     }
 
     @Override
