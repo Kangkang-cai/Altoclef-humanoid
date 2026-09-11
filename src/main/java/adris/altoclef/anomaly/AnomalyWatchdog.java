@@ -8,6 +8,7 @@ import net.minecraft.util.math.Vec3d;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 异常看门狗 (2026-09-11)。
@@ -46,6 +47,9 @@ public final class AnomalyWatchdog {
 
     private static final HashMap<String, Long> _lastReportMs = new HashMap<>();
     private static final List<AnomalyDetector> _detectors = new ArrayList<>();
+
+    /** 按类型累计本次会话的告警数, 供 status() 与 session summary 使用。 */
+    private static final HashMap<String, Integer> _reportsByType = new HashMap<>();
 
     private static boolean _registered = false;
     private static int _totalReports = 0;
@@ -129,17 +133,64 @@ public final class AnomalyWatchdog {
         } catch (Throwable ignored) {
         }
         if (_totalReports <= 0) return;
-        Debug.logToFile(LOG_FILE, "==== SESSION SUMMARY: " + _totalReports + " anomaly report(s) ====");
+        StringBuilder byType = new StringBuilder();
+        for (Map.Entry<String, Integer> e : _reportsByType.entrySet()) {
+            byType.append(" ").append(e.getKey()).append("=").append(e.getValue());
+        }
+        Debug.logToFile(LOG_FILE, "==== SESSION SUMMARY: " + _totalReports
+                + " anomaly report(s) ====   by type:" + byType);
         Debug.logMessage("[Anomaly] 本次会话共检出异常 " + _totalReports + " 次 (详情见 " + LOG_FILE + ")");
         _totalReports = 0;
+        _reportsByType.clear();
         _lastDimension = null;
         resetAll();
     }
 
     /** 一行状态摘要, 供调试或后续聊天命令使用。 */
     public static String status() {
-        boolean enabled = _mod == null || _mod.getModSettings().isAnomalyWatchdogEnabled();
-        return "enabled=" + enabled + " detectors=" + _detectors.size() + " reports=" + _totalReports;
+        return "enabled=" + isEnabled() + " detectors=" + _detectors.size() + " reports=" + _totalReports;
+    }
+
+    /** 看门狗是否启用。任务启动早于首次 tick 时 _mod 尚未赋值, 按"启用"处理。 */
+    public static boolean isEnabled() {
+        return _mod == null || _mod.getModSettings().isAnomalyWatchdogEnabled();
+    }
+
+    /**
+     * 多行状态报告, 供 {@code @anomaly} 命令逐行输出到聊天。
+     * 只读: 不改变任何状态 (除必要的注册)。
+     */
+    public static List<String> statusReport() {
+        ensureRegistered();
+        List<String> lines = new ArrayList<>();
+        lines.add("[Anomaly] enabled=" + isEnabled()
+                + "  detectors=" + _detectors.size()
+                + "  session reports=" + _totalReports);
+        if (_reportsByType.isEmpty()) {
+            lines.add("[Anomaly] 本次会话尚未检出异常。");
+        } else {
+            StringBuilder byType = new StringBuilder("[Anomaly] by type:");
+            for (Map.Entry<String, Integer> e : _reportsByType.entrySet()) {
+                byType.append(" ").append(e.getKey()).append("=").append(e.getValue());
+            }
+            lines.add(byType.toString());
+        }
+        lines.add("[Anomaly] cooldown entries=" + _lastReportMs.size()
+                + "  (同一条异常在冷却期内不重复告警)");
+        List<String> top = TaskDurationTracker.topDurationLines(8);
+        if (top.isEmpty()) {
+            lines.add("[Anomaly] 任务时长: 尚无样本 (需任务自然跑完若干次)。");
+        } else {
+            lines.add("[Anomaly] 任务时长 top (按 p90 降序, 最长的排最前):");
+            lines.addAll(top);
+        }
+        lines.add("[Anomaly] 详情日志: " + Debug.SESSION_DIR + "/" + LOG_FILE);
+        return lines;
+    }
+
+    /** 清空告警冷却表, 让"下一 tick 立即重新判定"成立 (供 @anomaly reset)。 */
+    public static void resetCooldowns() {
+        _lastReportMs.clear();
     }
 
     // ------------------------------------------------------------------
@@ -154,6 +205,10 @@ public final class AnomalyWatchdog {
         // (2026-09-11 P1) 时长异常: 依赖 TaskDurationTracker 的历史样本, 样本不足时
         // 自行保持沉默 (只记录不判定)。
         _detectors.add(new DurationDetector());
+        // (2026-09-11 P2) 空转: 链持有控制权但任务栈为空。
+        _detectors.add(new NoTaskWinnerDetector());
+        // 任务环 (TaskCycleDetector) 是事件式的, 不是轮询检测器: 由
+        // TaskSwitchLogger 在每次派发时直接调用 observe(), 不注册进 _detectors。
     }
 
     private static void resetAll() {
@@ -162,6 +217,11 @@ public final class AnomalyWatchdog {
                 detector.reset();
             } catch (Throwable ignored) {
             }
+        }
+        // 事件式检测器的跨 tick 状态也要一起清 (换世界 / 换维度后转场序列不可比)。
+        try {
+            TaskCycleDetector.reset();
+        } catch (Throwable ignored) {
         }
         _lastReportMs.clear();
     }
@@ -174,11 +234,15 @@ public final class AnomalyWatchdog {
         if (last != null && now - last < cooldownFor(a.type())) return;
         _lastReportMs.put(dedupKey, now);
         _totalReports++;
+        _reportsByType.merge(a.type(), 1, Integer::sum);
         writeAnomaly(a, ctx);
     }
 
     private static long cooldownFor(String type) {
-        if ("stall".equals(type) || "duration".equals(type)) return LONG_COOLDOWN_MS;
+        // "持续存在"型: 一旦成立就会一直成立, 用长冷却避免刷屏。
+        if ("stall".equals(type) || "duration".equals(type) || "idle".equals(type)) {
+            return LONG_COOLDOWN_MS;
+        }
         return DEFAULT_COOLDOWN_MS;
     }
 

@@ -131,18 +131,56 @@ public final class TaskDurationTracker {
 
         StringBuilder sb = new StringBuilder();
         sb.append("==== TASK DURATION SUMMARY (").append(reason).append(") ====");
-        sb.append("\n    ").append(pad("task class", 38))
-                .append(pad("n", 5)).append(pad("p50", 10))
-                .append(pad("p90", 10)).append("max");
+        sb.append("\n    ").append(headerLine());
         for (Map.Entry<String, long[]> r : rows) {
             long[] v = r.getValue();
-            sb.append("\n    ").append(pad(r.getKey(), 38))
-                    .append(pad(String.valueOf(v[0]), 5))
-                    .append(pad(formatMs(v[1]), 10))
-                    .append(pad(formatMs(v[2]), 10))
-                    .append(formatMs(v[3]));
+            sb.append("\n    ").append(rowLine(r.getKey(), v));
         }
         Debug.logToFile(DURATION_LOG, sb.toString());
+    }
+
+    /**
+     * 时长分布的前 N 行 (按 p90 降序), 供 {@code @anomaly} 命令在聊天里展示。
+     * 空表返回空列表。每行是纯文本, 不含日志前缀。
+     */
+    public static List<String> topDurationLines(int topN) {
+        List<String> lines = new ArrayList<>();
+        if (_samples.isEmpty()) return lines;
+
+        List<Map.Entry<String, long[]>> rows = new ArrayList<>();
+        for (Map.Entry<String, ArrayDeque<Long>> e : _samples.entrySet()) {
+            ArrayDeque<Long> list = e.getValue();
+            if (list.isEmpty()) continue;
+            rows.add(new java.util.AbstractMap.SimpleEntry<>(e.getKey(), new long[]{
+                    list.size(),
+                    percentile(list, 0.50),
+                    percentile(list, 0.90),
+                    maxOf(list)
+            }));
+        }
+        rows.sort(Comparator.comparingLong((Map.Entry<String, long[]> r) -> r.getValue()[2]).reversed());
+
+        lines.add(headerLine());
+        int shown = 0;
+        for (Map.Entry<String, long[]> r : rows) {
+            if (shown++ >= topN) break;
+            lines.add(rowLine(r.getKey(), r.getValue()));
+        }
+        return lines;
+    }
+
+    private static String headerLine() {
+        return pad("task class", 34) + pad("n", 6) + pad("p50", 10)
+                + pad("p90", 10) + "max";
+    }
+
+    private static String rowLine(String cls, long[] v) {
+        String name = cls.length() > 32 ? cls.substring(0, 32) + ".." : cls;
+        return pad(name, 34)
+                + pad(String.valueOf(v[0]), 6)
+                + pad(formatMs(v[1]), 10)
+                + pad(formatMs(v[2]), 10)
+                + formatMs(v[3]);
     }
 
     // ------------------------------------------------------------------

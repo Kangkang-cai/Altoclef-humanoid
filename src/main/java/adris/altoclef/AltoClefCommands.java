@@ -32,7 +32,9 @@ public class AltoClefCommands {
                 new PunkCommand(),
                 new SetGammaCommand(),
                 new ListCommand(),
-                new CustomCommand()
+                new CustomCommand(),
+                // (2026-09-11 P2) 异常看门狗状态查询。
+                new AnomalyCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

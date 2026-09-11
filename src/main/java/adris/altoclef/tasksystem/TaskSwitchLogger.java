@@ -4,6 +4,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.anomaly.Anomaly;
 import adris.altoclef.anomaly.AnomalySeverity;
 import adris.altoclef.anomaly.AnomalyWatchdog;
+import adris.altoclef.anomaly.TaskCycleDetector;
 import adris.altoclef.anomaly.TaskDurationTracker;
 
 import java.util.ArrayDeque;
@@ -31,6 +32,9 @@ import java.util.HashMap;
  * 同时保留抖动检测: 相同切换 (同链/同父/同 from->to 类型) 在窗口内反复出现时,
  * 往本文件写 "!!!!" 行, 并通过 AnomalyWatchdog 上报 (统一冷却 / 分级 / 现场快照,
  * 输出到 anomaly.log + 聊天)。
+ *
+ * (2026-09-11 P2) 每次 MAIN / SUB 切换还会喂给 TaskCycleDetector, 由它检测
+ * **周期 >= 3** 的任务环 —— 抖动检测只管 A<->B 来回跳, 管不了 A->B->C->A。
  */
 public final class TaskSwitchLogger {
 
@@ -103,6 +107,9 @@ public final class TaskSwitchLogger {
     public static void mainTask(TaskChain chain, float priority, Task from, Task to) {
         write("MAIN    [" + name(chain) + " prio=" + priority + "] " + desc(from) + "  ->  " + desc(to));
         oscillationCheck("MAIN|" + name(chain), name(chain), from, to, "Chain.main");
+        // (2026-09-11 P2 任务环) 周期 >= 3 的循环检测 (周期 2 由抖动检测负责)。
+        TaskCycleDetector.observe("MAIN:" + name(chain) + ":"
+                + className(from) + "->" + className(to));
     }
 
     /**
@@ -114,6 +121,9 @@ public final class TaskSwitchLogger {
     public static void subTask(TaskChain chain, float chainPrio, Task parent, Task from, Task to) {
         write("SUB     [" + name(chain) + " prio=" + chainPrio + "] " + desc(parent) + ": " + desc(from) + "  ->  " + desc(to));
         oscillationCheck("SUB|" + name(chain) + "|" + className(parent), name(chain) + "/" + className(parent), from, to, "Task.sub");
+        // (2026-09-11 P2 任务环) 周期 >= 3 的循环检测。
+        TaskCycleDetector.observe("SUB:" + className(parent) + ":"
+                + className(from) + "->" + className(to));
     }
 
     /** A task began executing (onStart, incl. restart after resume). */
