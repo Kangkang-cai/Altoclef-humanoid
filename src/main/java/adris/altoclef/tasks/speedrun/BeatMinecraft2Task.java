@@ -394,6 +394,26 @@ public class BeatMinecraft2Task extends Task {
     // (2026-08-27 收床来源距离) 感知到的现成床在 96 格内才算"可挖去拿"——
     // 超过则走杀羊/羊毛→做床合成分支, 不为一张床长途折返。
     private static final double BED_GRAB_RANGE = 96.0;
+
+    // (2026-09-11 收床粘性延续 + latch) 事故 20260911-185745 实锤: 18:59:17.697
+    // 进入 "Picking up my placed bed (recover)" → DestroyBlockTask(-174,77,276)
+    // START, 17.898 床方块变空气后闸门 else 分支清掉记忆并掉进 "Stockpiling wood
+    // (logs): 20/25" → 收床 took=201ms, 此后 hasBed=false 持续 92s 到日志结束
+    // (床掉落物无人认领, 5 分钟后 despawn)。根因是收床闸门每 tick 重估实时世界
+    // 状态、无 latch —— "分支闸门必须 latch" 铁律的又一例。修法同
+    // _pickupCraftingTableTask: 粘性实例 + onTick 顶部延续块; 15s 仍未完成 →
+    // 放弃 + 30s 冷却 (防止"放弃→立即重建同一个→再空转"的循环)。
+    private Task _bedRecoverTask = null;
+    private long _bedRecoverStartMs = 0;
+    private long _bedRecoverGiveUpUntilMs = 0;
+    private static final long BED_RECOVER_TIMEOUT_MS = 15_000;
+    private static final long BED_RECOVER_GIVEUP_COOLDOWN_MS = 30_000;
+    // (2026-09-11 清记忆宽限) 床方块消失 ≠ 床彻底丢了: 掉落物可能还在下落, 甚至
+    // 还没同步进客户端实体表 (方块更新包与实体生成包不是同一 tick 保证送达)。
+    // 旧实现见到 still==null && !bedDropNearby 就立刻 setLastSelfPlacedBed(null)
+    // 永久清除记忆 → 掉落物再也无人认领。改为宽限 N 秒内保留记忆继续重试。
+    private long _bedMissingSinceMs = 0;
+    private static final long BED_MEMORY_GRACE_MS = 5_000;
     private final Task _getOneBedTask = TaskCatalogue.getItemTask("bed", 1);
     private final Task _sleepThroughNightTask = new SleepThroughNightTask();
     private final Task _killDragonBedStratsTask = new KillEnderDragonWithBedsTask(new WaitForDragonAndPearlTask());
@@ -724,6 +744,27 @@ public class BeatMinecraft2Task extends Task {
             }
         }
 
+        // (2026-09-11 收床粘性延续) 一旦进入收床(撸自放床 / 捡床掉落物), 就持续
+        // 返回同一实例直到完成 —— 睡眠路由(最高优先)之后、一切侧线任务之前,
+        // 绝不被屯木头/装备/下矿半路抢断。见 _bedRecoverTask 字段注释 (事故
+        // 20260911-185745: 收床 201ms 就被 "Stockpiling wood" 顶掉, 床永久丢失)。
+        // 放在这里而不是最顶部: 夜间睡/弄床仍可抢占收床 (睡眠优先级更高)。
+        if (_bedRecoverTask != null) {
+            boolean timedOut = System.currentTimeMillis() - _bedRecoverStartMs > BED_RECOVER_TIMEOUT_MS;
+            if (WorldHelper.getCurrentDimension() == Dimension.END
+                    || timedOut || _bedRecoverTask.isFinished(mod)) {
+                if (timedOut) {
+                    Debug.logMessage("[BedPickup] recover timeout ("
+                            + (BED_RECOVER_TIMEOUT_MS / 1000) + "s), giving up + "
+                            + (BED_RECOVER_GIVEUP_COOLDOWN_MS / 1000) + "s cooldown");
+                    _bedRecoverGiveUpUntilMs = System.currentTimeMillis() + BED_RECOVER_GIVEUP_COOLDOWN_MS;
+                }
+                _bedRecoverTask = null;
+            } else {
+                return _bedRecoverTask;
+            }
+        }
+
         // (2026-08-27 白天优先收床) 错过了夜(没睡成)→ 我方自放床会滞留世界没人拆,
         // 随后被"收合成台/装备/下矿"等分支抢走, 床永久留在原地 (用户实测: 放床后
         // 早晨到, canSleep=false, going to bed 被 iron gear 抢走, 睡完/错过夜床
@@ -731,19 +772,35 @@ public class BeatMinecraft2Task extends Task {
         // 都没了→清记忆。是否睡过都照收 (speedrunner 带床走)。
         {
             BlockPos strBed = mod.getLastSelfPlacedBed();
-            if (strBed != null && !_ranStrongholdLocator
-                    && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD) {
-                BlockPos still = selfBedStillThere(mod, strBed);
-                if (still != null) {
-                    if (still.isWithinDistance(mod.getPlayer().getPos(), 8)) {
-                        setDebugState("Picking up my placed bed (recover).");
-                        return new DestroyBlockTask(still);
+            if (strBed == null) {
+                _bedMissingSinceMs = 0;
+            } else if (!_ranStrongholdLocator
+                    && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                    && System.currentTimeMillis() >= _bedRecoverGiveUpUntilMs) {
+                // (2026-09-11) 区块未加载时 getBlockState 恒返回空气 → 会误判"床没了"
+                // 并把记忆清掉 (走远再回来 = 丢床)。未加载一律不判定、宽限计时归零,
+                // 且必须【放行后续所有分支】(不能 return null 把整棵树卡死)。
+                if (mod.getChunkTracker().isChunkLoaded(strBed)) {
+                    BlockPos still = selfBedStillThere(mod, strBed);
+                    if (still != null) {
+                        _bedMissingSinceMs = 0; // 床还在, 宽限计时作废
+                        if (still.isWithinDistance(mod.getPlayer().getPos(), 8)) {
+                            setDebugState("Picking up my placed bed (recover).");
+                            _bedRecoverTask = new DestroyBlockTask(still);
+                            _bedRecoverStartMs = System.currentTimeMillis();
+                            return _bedRecoverTask;
+                        }
+                    } else if (bedDropNearby(mod, strBed)) {
+                        setDebugState("Picking up my bed drop (recover).");
+                        _bedRecoverTask = new PickupDroppedItemTask(new ItemTarget[]{new ItemTarget("bed", 1)}, true);
+                        _bedRecoverStartMs = System.currentTimeMillis();
+                        return _bedRecoverTask;
+                    } else {
+                        // (2026-09-11 清记忆宽限) 不立刻清 —— 掉落物可能还在下落/未同步。
+                        scheduleForgetSelfBed(mod, strBed);
                     }
-                } else if (bedDropNearby(mod, strBed)) {
-                    setDebugState("Picking up my bed drop (recover).");
-                    return new PickupDroppedItemTask(new ItemTarget[]{new ItemTarget("bed", 1)}, true);
                 } else {
-                    mod.setLastSelfPlacedBed(null);
+                    _bedMissingSinceMs = 0;
                 }
             }
         }
@@ -1010,19 +1067,28 @@ public class BeatMinecraft2Task extends Task {
         // Destroy block 立刻撸)。强地牢阶段 (_ranStronglordLocator) 跳过收床。
         if (selfBed != null
                 && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
-                && !_ranStrongholdLocator) {
+                && !_ranStrongholdLocator
+                && System.currentTimeMillis() >= _bedRecoverGiveUpUntilMs
+                // (2026-09-11) 区块未加载 → getBlockState 恒空气, 会误判"床没了"并
+                // 在宽限后清记忆 (走远再回来 = 丢床)。未加载一律不判定。
+                && mod.getChunkTracker().isChunkLoaded(selfBed)) {
             BlockPos bedAt = selfBedStillThere(mod, selfBed);
             if (bedAt == null) {
                 // 床方块没了 (刚撸掉/被毁/放置失败)。若掉落物还躺在附近,
                 // 先捡起来再清记忆 — 否则床永远丢失, 下晚被迫重新合床。
+                // (2026-09-11 收床粘性) 与上方闸门同款: 粘性实例 + 宽限清记忆。
                 if (bedDropNearby(mod, selfBed)) {
                     setDebugState("Picking up our bed drop.");
-                    return new PickupDroppedItemTask(new ItemTarget[]{new ItemTarget("bed", 1)}, true);
+                    _bedRecoverTask = new PickupDroppedItemTask(new ItemTarget[]{new ItemTarget("bed", 1)}, true);
+                    _bedRecoverStartMs = System.currentTimeMillis();
+                    return _bedRecoverTask;
                 }
-                mod.setLastSelfPlacedBed(null);
+                scheduleForgetSelfBed(mod, selfBed);
             } else if (bedAt.isWithinDistance(mod.getPlayer().getPos(), 8)) {
                 setDebugState("Picking up our placed bed.");
-                return new DestroyBlockTask(bedAt);
+                _bedRecoverTask = new DestroyBlockTask(bedAt);
+                _bedRecoverStartMs = System.currentTimeMillis();
+                return _bedRecoverTask;
             }
         }
 
@@ -2784,16 +2850,56 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * [2026-08-22 收床防丢] 记忆床位置附近 (4 格) 是否躺着床掉落物 —
-     * 刚撸掉/被炸毁的床。有则先捡 (PickupDroppedItemTask), 没有才清记忆。
-     * 否则床永久丢失, 下晚被迫重新合床。
+     * [2026-08-22 收床防丢 / 2026-09-11 世界直扫兜底] 记忆床位置附近 (水平 6 格 ×
+     * 垂直 32 格) 是否躺着床掉落物 —— 刚撸掉/被炸毁的床。有则先捡
+     * (PickupDroppedItemTask), 没有才进清记忆宽限 (scheduleForgetSelfBed)。
+     *
+     * (2026-09-11) 旧实现查 EntityTracker.getClosestItemDrop, 而 _itemDropLocations
+     * 只收"已落地"掉落物 (EntityTracker:403: isOnGround || isTouchingWater || 下方
+     * 2–3 格实心) —— 方块被挖掉的同一 tick 才生成的掉落物必然不在缓存 → 恒返回
+     * false → 调用方清掉床记忆 (事故 20260911-185745 实锤, 参见 _bedRecoverTask
+     * 字段注释)。改为直扫世界 (含下落中/未落地), 与
+     * PickupDroppedItemTask.findClosestDropByScan (2026-08-26) 同思路。
+     * 判定盒用"水平 6 × 垂直 32"而非球半径: 床被挖后掉落物主要沿竖直方向坠落
+     * (尤其从树上/高处掉下来的场景), 水平几乎不漂移; 纵向放宽才不会漏掉落差大的。
      */
     private boolean bedDropNearby(AltoClef mod, BlockPos bedPos) {
+        if (bedPos == null) return false;
         ItemTarget bedTarget = new ItemTarget(ItemHelper.BED, 1);
-        java.util.Optional<net.minecraft.entity.ItemEntity> drop =
-                mod.getEntityTracker().getClosestItemDrop(WorldHelper.toVec3d(bedPos), bedTarget);
-        return drop.isPresent() && drop.get().isAlive()
-                && drop.get().getBlockPos().isWithinDistance(bedPos, 4);
+        for (Entity e : mod.getWorld().getEntities()) {
+            if (!(e instanceof ItemEntity ie) || !ie.isAlive()) continue;
+            if (!bedTarget.matches(ie.getStack().getItem())) continue;
+            BlockPos dp = ie.getBlockPos();
+            if (Math.abs(dp.getX() - bedPos.getX()) <= 6
+                    && Math.abs(dp.getZ() - bedPos.getZ()) <= 6
+                    && Math.abs(dp.getY() - bedPos.getY()) <= 32) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-11 清记忆宽限) 床方块已不在、且附近也扫不到床掉落物时调用 ——
+     * 不立刻 setLastSelfPlacedBed(null)。掉落物可能还在下落, 甚至还没同步进
+     * 客户端实体表 (方块更新包与实体生成包不保证同 tick 送达), 旧实现会在方块
+     * 变空气的同一 tick 永久清掉记忆 (事故 20260911-185745)。保留记忆直到宽限
+     * 窗口 BED_MEMORY_GRACE_MS 走完才判"真丢了"。
+     * 幂等: 同一 tick 内多处调用只会起一次计时, 不会提前触发清除。
+     */
+    private void scheduleForgetSelfBed(AltoClef mod, BlockPos bedPos) {
+        long now = System.currentTimeMillis();
+        if (_bedMissingSinceMs == 0) {
+            _bedMissingSinceMs = now;
+            return;
+        }
+        if (now - _bedMissingSinceMs > BED_MEMORY_GRACE_MS) {
+            Debug.logMessage("[BedPickup] bed at " + bedPos.toShortString()
+                    + " gone + no bed drop for " + (BED_MEMORY_GRACE_MS / 1000)
+                    + "s, forgetting self placed bed");
+            mod.setLastSelfPlacedBed(null);
+            _bedMissingSinceMs = 0;
+        }
     }
 
     private BlockPos doSimpleSearchForEndPortal(AltoClef mod) {

@@ -1093,15 +1093,28 @@ public class PlaceBedAndSetSpawnTask extends Task {
     }
 
     /**
-     * (2026-08-27 睡完拆床) 床位置附近 (4 格) 是否躺着床掉落物 — 刚撸掉的床。
+     * (2026-08-27 睡完拆床 / 2026-09-11 世界直扫兜底) 床位置附近 (水平 6 格 ×
+     * 垂直 32 格) 是否躺着床掉落物 —— 刚撸掉的床。
+     * (2026-09-11) 与 BeatMinecraft2Task.bedDropNearby 是同一份逻辑的两处拷贝,
+     * 同步修复: 旧实现查 EntityTracker.getClosestItemDrop 只能命中"已落地"的
+     * 掉落物 (EntityTracker:403 的 grounded 过滤), 方块刚被挖掉那一 tick 生成的
+     * 掉落物必然查不到 → 误判"没有掉落物" → 调用方清记忆丢床。改为直扫世界
+     * (含下落中), 判定盒纵向放宽覆盖"从高处坠落"。
      */
     private boolean bedDropNearby(AltoClef mod, BlockPos bedPos) {
         if (bedPos == null) return false;
         ItemTarget bedTarget = new ItemTarget(ItemHelper.BED, 1);
-        java.util.Optional<ItemEntity> drop =
-                mod.getEntityTracker().getClosestItemDrop(WorldHelper.toVec3d(bedPos), bedTarget);
-        return drop.isPresent() && drop.get().isAlive()
-                && drop.get().getBlockPos().isWithinDistance(bedPos, 4);
+        for (Entity e : mod.getWorld().getEntities()) {
+            if (!(e instanceof ItemEntity ie) || !ie.isAlive()) continue;
+            if (!bedTarget.matches(ie.getStack().getItem())) continue;
+            BlockPos dp = ie.getBlockPos();
+            if (Math.abs(dp.getX() - bedPos.getX()) <= 6
+                    && Math.abs(dp.getZ() - bedPos.getZ()) <= 6
+                    && Math.abs(dp.getY() - bedPos.getY()) <= 32) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private BlockPos locateBedRegion(AltoClef mod, BlockPos origin) {
