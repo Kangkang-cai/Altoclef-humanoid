@@ -12,6 +12,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
+import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -378,7 +379,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
         // "那边是陆地" 才游过去, 而非透视 biome 数据。
         // (2026-09-04 v3 用户"一次性导航找不到dry point卡在原地") 缓存陆地目标防
         // 每 tick 抖动 (见 _landTarget 注释), 到达后重算下一段。
-        if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && isPlayerInOcean(mod)) {
+        if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && LandHelper.isPlayerInOcean(mod)) {
             _scanLook.step(mod);
             // 已到缓存目标附近 → 清除重新找 (目标逐段向陆地推进)
             if (_landTarget != null
@@ -386,7 +387,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 _landTarget = null;
             }
             if (_landTarget == null) {
-                _landTarget = findNearestLand(mod);
+                _landTarget = LandHelper.findNearestLand(mod);
             }
             if (_landTarget != null) {
                 setDebugState("On ocean, heading to land to search " + _liquidName
@@ -435,7 +436,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
             int fx = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_WATER_PROBE);
             int fz = (int) Math.floor(pos.z + Math.sin(_exploreHeading) * EXPLORE_WATER_PROBE);
             BlockPos fp = new BlockPos(fx, pos.getY(), fz);
-            if (!isWaterAt(mod, fp)) break; // 前方干燥/未加载 → 该方向可行
+            if (!LandHelper.isColumnWater(mod, fp)) break; // 前方干燥/未加载 → 该方向可行
             _exploreHeading += Math.toRadians(EXPLORE_TURN_STEP_DEG);
         }
         int x = (int) Math.floor(pos.x + Math.cos(_exploreHeading) * EXPLORE_STEP_DIST);
@@ -445,78 +446,8 @@ public class CollectBucketLiquidTask extends ResourceTask {
         return _exploreTask;
     }
 
-    /**
-     * (2026-09-04 v3) 该 XZ 列顶部是否为水(海面/湖面)。用于前方水域探测: 避免
-     * bot 朝大片水域直冲后急停折返。列未加载视为非水(不知道, 信任当前 heading)。
-     */
-    private boolean isWaterAt(AltoClef mod, BlockPos target) {
-        if (mod.getWorld() == null) return false;
-        for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
-            BlockPos check = new BlockPos(target.getX(), y, target.getZ());
-            if (!mod.getChunkTracker().isChunkLoaded(check)) return false;
-            BlockState state = mod.getWorld().getBlockState(check);
-            if (state.isAir()) continue;
-            return state.getBlock() == Blocks.WATER;
-        }
-        return false;
-    }
-
-    /**
-     * (2026-09-04) 玩家是否"在海洋里需要回岸": 海洋 biome 且【真泡在水里】。
-     * (2026-09-04 v2 用户"遇到海洋转向不丝滑思考很久") 原只看 biome — bot 走
-     * 在海边陆地/沙滩但 biome 采样为 ocean 时误判"在海洋" → 反复 On ocean →
-     * findNearestLand(近处陆地) 与探索分支打架, heading 每段大跳 + 反复寻路停滞
-     * (日志 15:16:49-15:17:09 On ocean→land ↔ Exploring 每 1-7s 切, heading
-     * 262→299→353)。收紧为真泡水: 岸上(biome ocean 但没泡水)走正常探索, 由
-     * getSurfaceExploreTask 前方探测平滑绕海, 不再僵硬折返。
-     */
-    private boolean isPlayerInOcean(AltoClef mod) {
-        if (mod.getPlayer() == null || !WorldHelper.isOcean(mod.getWorld().getBiome(mod.getPlayer().getBlockPos()))) {
-            return false;
-        }
-        if (mod.getPlayer().isTouchingWater()) return true;
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        return mod.getChunkTracker().isChunkLoaded(feet)
-                && mod.getWorld().getBlockState(feet).isOf(Blocks.WATER);
-    }
-
-    /** (2026-09-04) 沿 8 方向扫描, 找最近的"非海洋 biome 且列顶部非水"的干燥陆地
-     * XZ; 全海/全湿返回 null。
-     * (2026-09-04 v2 用户"寻找lava老是定位到水面上") 原只查 biome 非 ocean — biome
-     * 是陆地但该 XZ 实际是海面/浅水时, bot GetToXZTask 游到水面停住不上岸 (日志
-     * 14:19:28-38 On ocean heading to land -> (216,285)/(228,279) 反复到达水面)。
-     * 加 isColumnWater: 只有真正干燥 (列顶部非水) 的陆地才作为上岸目标。 */
-    private BlockPos findNearestLand(AltoClef mod) {
-        BlockPos p = mod.getPlayer().getBlockPos();
-        for (int dist = 16; dist <= 128; dist += 16) {
-            for (int d = 0; d < 8; d++) {
-                double ang = Math.PI / 4.0 * d;
-                int x = p.getX() + (int) Math.round(Math.cos(ang) * dist);
-                int z = p.getZ() + (int) Math.round(Math.sin(ang) * dist);
-                BlockPos cand = new BlockPos(x, p.getY(), z);
-                if (mod.getChunkTracker().isChunkLoaded(cand)
-                        && !WorldHelper.isOcean(mod.getWorld().getBiome(cand))
-                        && !isColumnWater(mod, cand)) {
-                    return cand;
-                }
-            }
-        }
-        return null;
-    }
-
-    /** (2026-09-04) 该 XZ 列的顶部 (最高非空气方块) 是否为水 (海面/浅水)。
-     * 列未加载视为非水 (不知道, 先信任 biome)。 */
-    private boolean isColumnWater(AltoClef mod, BlockPos target) {
-        if (mod.getWorld() == null) return false;
-        for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
-            BlockPos check = new BlockPos(target.getX(), y, target.getZ());
-            if (!mod.getChunkTracker().isChunkLoaded(check)) return false;
-            BlockState state = mod.getWorld().getBlockState(check);
-            if (state.isAir()) continue;
-            return state.getBlock() == Blocks.WATER;
-        }
-        return false;
-    }
+    // (2026-09-11) isWaterAt / isColumnWater / isPlayerInOcean / findNearestLand
+    // 四个私有方法已抽出到 LandHelper (两者逐行等价), 供放置类任务共用。
 
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
