@@ -7,6 +7,7 @@ import adris.altoclef.tasks.AbstractDoToClosestObjectTask;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
+import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
@@ -752,6 +753,9 @@ public class MineAndCollectTask extends ResourceTask {
                     // (2026-09-10 贪婪掉落宽限) 方块刚被挖掉 → 记录时刻, 供外层
                     // isFinished 在贪婪模式下挂住等掉落物落地回册。
                     _miningTargetBrokenMs = System.currentTimeMillis();
+                    // (2026-09-11 自挖因果记忆) 记住破坏位置 — "我自己挖掉的矿,
+                    // 我知道掉落物在哪"属结构推断线索, 供宽限窗口内 scoop 拾取。
+                    _lastSelfBrokenPos = _miningPos;
                     _miningPos = null;
                 } else if (isValid(mod, _miningPos)) {
                     return Optional.of(_miningPos);
@@ -1288,11 +1292,55 @@ public class MineAndCollectTask extends ResourceTask {
             return sub;
         }
 
+        // (2026-09-11 自挖因果记忆) 最近一次自己破坏的目标方块位置 + scoop 状态。
+        // 实例缓存 keep-alive(任务重选教训): 只在破坏位置变化时重建, 防每 tick 重建。
+        private BlockPos _lastSelfBrokenPos = null;
+        private BlockPos _scoopTaskPos = null;
+        private boolean _scoopStage2 = false;
+        private Task _scoopTask = null;
+
+        /** 宽限窗口内的自挖掉落物 scoop 任务; 窗口外/无因果位置返回 null。 */
+        private Task getScoopSelfDropTask(AltoClef mod) {
+            if (_miningTargetBrokenMs == 0 || _lastSelfBrokenPos == null) return null;
+            if (System.currentTimeMillis() - _miningTargetBrokenMs >= GREEDY_DROP_GRACE_MS) return null;
+            if (_scoopTaskPos == null || !_scoopTaskPos.equals(_lastSelfBrokenPos)) {
+                // 新破坏事件: 重置两段拾取, 先转头看。
+                _scoopTaskPos = _lastSelfBrokenPos;
+                _scoopStage2 = false;
+                _scoopTask = new LookAroundTask(_scoopTaskPos, 1);
+            }
+            if (_scoopTask.isFinished(mod)) {
+                if (_scoopStage2) {
+                    // 看完也走到了仍无回册: 本次 scoop 到头, 交给宽限到期释放。
+                    return null;
+                }
+                // 第一段(转头 1s)结束仍被调到这里 = 掉落物仍未回册 → 第二段走过去。
+                _scoopStage2 = true;
+                _scoopTask = new GetToBlockTask(_scoopTaskPos);
+            }
+            return _scoopTask;
+        }
+
         @Override
         protected Task getWanderTask(AltoClef mod) {
             // (2026-08-28 贪心=纯贴身) 贪心没有紧贴矿就收手, 绝不挖隧道/探索
             // (否则会"看不到矿就挖通道", 还可能在远处发现透视的矿)。
             if (_greedy) {
+                // (2026-09-11 自挖掉落物因果记忆, 用户"他压根没去拾取") 机理: 掉落物
+                // 弹出时 bot 正脸挖下一块 → 掉落物落在视野外 → EntityTracker 人类
+                // 感知过滤(FOV+LOS)永不回册 → itemDropped 恒 false → getClosestTo
+                // 贪婪分支认为"没活"落到这里 → 原实现返回 null 原地空转, 宽限 2.5s
+                // 到期整链释放, 掉落物永远留在地上 (09:07 场次实锤: 47.3 唯一一次
+                // Pickup 派发后 49.7-52.2 全 null, 52.2 宽限到期放人, 3 个掉落物
+                // 用户人工捡)。"我自己挖掉的矿, 我知道掉落物在哪"属结构推断线索
+                // (线索优先级 视觉>听觉>结构推断), 非透视。宽限窗口内两段 scoop:
+                // ①转头看向破坏位置 → 掉落物进视锥 → 正常感知回册 → closestDrop
+                // 接管; ②看完仍无回册 → 走到破坏位置, 拾取半径自动吸入。
+                // 宽限到期仍未捡到 → 返回 null 照常释放(掉岩浆/被炸飞等)。
+                Task scoop = getScoopSelfDropTask(mod);
+                if (scoop != null) {
+                    return scoop;
+                }
                 logBlindnessDiag(mod);
                 return null;
             }
