@@ -7,6 +7,7 @@ import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.trackers.storage.ContainerType;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.Slot;
 
@@ -89,12 +90,23 @@ public class LootContainerTask extends Task {
         if (!cursor.isEmpty()) {
             // 光标已拿到物品 → 放回背包, 并清空"待确认拿起"(拿起已完成)。
             _pendingPickup = null;
-            // (2026-09-01 用户"背包满开箱卡住, 一直和一个物品交换") 旧逻辑
-            // `.or(getGarbageSlot)` 在背包无空位时回退到【点垃圾槽】— 点击只做
-            // 交换(光标物品↔垃圾槽物品), 垃圾槽被腾空后光标变成垃圾, 下一 tick
-            // 又找不到可放处 → 再点同一垃圾槽换回 → 无限交换, 从不真正扔掉
-            // (日志 TaskPingPong 实锤)。删掉该回退: 无空位一律走
-            // EnsureFreeInventorySlotTask, 它会把垃圾/大堆建材真正扔出腾位。
+            // (2026-09-11 存箱抢断修复, 现场 10:35:14-17: 深板岩圆石拿起/放回 5 次
+            // 后整堆扔地) 旧链路: StoreGarbageInContainerTask 阶段1 把垃圾拿上光标后,
+            // 本任务下一 tick 重跑至此, 光标非空 → 走"放回背包" — 而全背包唯一空位
+            // 恰是刚腾出的那个垃圾槽, 等于原样放回 → 阶段2(存入箱子)一个 tick 都没
+            // 轮到 → 拿起/放回循环, 最终走 ThrowCursor 扔地。
+            // 闸门: 开着储物箱且光标是垃圾/大堆建材(与存箱流程同口径)且容器装得下
+            // → 直接存入容器。拾取目标(床/食物/矿石)都是 protected 物品, 永不命中
+            // 此闸, 正常捡箱不受影响; 容器满的边界由 Store 阶段1 的存前预检兜住。
+            if (StoreGarbageInContainerTask.isStorageContainerOpen()
+                    && (StorageHelper.isBulkDisposalItem(cursor.getItem())
+                        || ItemHelper.canThrowAwayStack(mod, cursor))) {
+                List<Slot> fits = mod.getItemStorage().getSlotsThatCanFitInOpenContainer(cursor, true);
+                if (!fits.isEmpty()) {
+                    setDebugState("Storing cursor junk into container");
+                    return new ClickSlotTask(fits.get(0));
+                }
+            }
             Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
             if (toFit.isPresent()) {
                 setDebugState("Putting cursor in inventory");
