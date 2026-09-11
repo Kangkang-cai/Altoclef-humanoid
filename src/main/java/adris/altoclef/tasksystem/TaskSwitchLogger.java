@@ -4,6 +4,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.anomaly.Anomaly;
 import adris.altoclef.anomaly.AnomalySeverity;
 import adris.altoclef.anomaly.AnomalyWatchdog;
+import adris.altoclef.anomaly.TaskDurationTracker;
 
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -118,11 +119,21 @@ public final class TaskSwitchLogger {
     /** A task began executing (onStart, incl. restart after resume). */
     public static void taskStarted(Task task, TaskChain chain) {
         write("START   [" + name(chain) + "] " + desc(task));
+        // (2026-09-11 P1 时长记录) 每次 START 重置计时起点: 被抢占后恢复即重新计时,
+        // 只统计"连续"运行时长 (理由见 TaskDurationTracker 类注释)。
+        TaskDurationTracker.onTaskStarted(task);
     }
 
-    /** A task stopped. {@code interruptor} == null means a clean stop. */
+    /**
+     * A task stopped. {@code interruptor} == null means a clean stop.
+     * (2026-09-11 P1) 行尾附带该实例本次连续运行的时长, 让 tasks.log 直接可读,
+     * 不必再靠前后时间戳人工做减法。
+     */
     public static void taskStopped(Task task, Task interruptor) {
-        write("STOP    " + desc(task) + (interruptor == null ? "  (clean)" : "  by " + desc(interruptor)));
+        long tookMs = TaskDurationTracker.elapsedMs(task);
+        write("STOP    " + desc(task) + (interruptor == null ? "  (clean)" : "  by " + desc(interruptor))
+                + (tookMs >= 0 ? "  took=" + TaskDurationTracker.formatMs(tookMs) : ""));
+        TaskDurationTracker.onTaskStopped(task);
     }
 
     /** A chain's main task ended this tick (finished naturally or stopped). */

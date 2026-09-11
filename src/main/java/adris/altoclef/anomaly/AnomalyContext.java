@@ -115,6 +115,14 @@ public final class AnomalyContext {
                 health, food, chainName, stack, pathing, pathPresent, baritoneOk);
     }
 
+    /**
+     * 任务栈 (从根到叶)。只读约定: 检测器可以遍历, 但**不得跨 tick 持有引用** ——
+     * 底层列表每个 tick 由 TaskChain.tick 清空重建。
+     */
+    public List<Task> taskStack() {
+        return _taskStack;
+    }
+
     /** 任务栈上是否存在指定类型 (含子类) 的任务。 */
     public boolean stackHasTask(Class<?> type) {
         for (Task t : _taskStack) {

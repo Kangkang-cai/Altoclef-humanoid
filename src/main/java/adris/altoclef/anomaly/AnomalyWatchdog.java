@@ -41,7 +41,8 @@ public final class AnomalyWatchdog {
 
     /** 同一条异常的重复告警冷却 (触发条件层静态表)。 */
     private static final long DEFAULT_COOLDOWN_MS = 30_000;
-    private static final long STALL_COOLDOWN_MS = 60_000;
+    /** "持续存在"型异常 (停滞 / 超时) 用更长的冷却: 它们一旦成立就会一直成立。 */
+    private static final long LONG_COOLDOWN_MS = 60_000;
 
     private static final HashMap<String, Long> _lastReportMs = new HashMap<>();
     private static final List<AnomalyDetector> _detectors = new ArrayList<>();
@@ -121,6 +122,12 @@ public final class AnomalyWatchdog {
 
     /** 会话结束时调用: 输出汇总并清空状态。 */
     public static void onSessionEnd() {
+        // (2026-09-11 P1) 无论本次是否报过异常, 都输出一份任务时长分布摘要 ——
+        // 这是"跑一晚上、第二天只读一份报告"的主要兑现方式。
+        try {
+            TaskDurationTracker.dumpSummary("session end");
+        } catch (Throwable ignored) {
+        }
         if (_totalReports <= 0) return;
         Debug.logToFile(LOG_FILE, "==== SESSION SUMMARY: " + _totalReports + " anomaly report(s) ====");
         Debug.logMessage("[Anomaly] 本次会话共检出异常 " + _totalReports + " 次 (详情见 " + LOG_FILE + ")");
@@ -144,6 +151,9 @@ public final class AnomalyWatchdog {
         _registered = true;
         _detectors.add(new StallDetector());
         _detectors.add(new UnreachableDetector());
+        // (2026-09-11 P1) 时长异常: 依赖 TaskDurationTracker 的历史样本, 样本不足时
+        // 自行保持沉默 (只记录不判定)。
+        _detectors.add(new DurationDetector());
     }
 
     private static void resetAll() {
@@ -168,7 +178,7 @@ public final class AnomalyWatchdog {
     }
 
     private static long cooldownFor(String type) {
-        if ("stall".equals(type)) return STALL_COOLDOWN_MS;
+        if ("stall".equals(type) || "duration".equals(type)) return LONG_COOLDOWN_MS;
         return DEFAULT_COOLDOWN_MS;
     }
 
