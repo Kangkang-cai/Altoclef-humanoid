@@ -29,9 +29,19 @@ import java.util.HashMap;
  * 控制权, 看 SUB/STOP 判断任务树内部的切换原因, 看 START 间隔判断
  * 任务是否反复重启 (抖动)。
  *
- * 同时保留抖动检测: 相同切换 (同链/同父/同 from->to 类型) 在窗口内反复出现时,
+ * 同时保留抖动检测: 相同切换 (同链/同父/同 from->to 目的) 在窗口内反复出现时,
  * 往本文件写 "!!!!" 行, 并通过 AnomalyWatchdog 上报 (统一冷却 / 分级 / 现场快照,
  * 输出到 anomaly.log + 聊天)。
+ *
+ * (2026-09-11 口径修正) 抖动检测原先的两个缺陷让它把"正常推进"报成"thrashing":
+ *   ① 去重键只有 where|chain|parentClass, 没有 from/to —— 等于在数"这个父任务
+ *      5 秒内换了几次子任务", 却拿最后一次的 from->to 当标题。于是单向序列
+ *      A->B->C->D->E->F 会被报成 "A <-> F 6x in 5s. Bot is thrashing!"。
+ *   ② from/to 有一侧为 null 也照计。null 是"父级在等外部条件"(槽位点击节流
+ *      200ms / 等材料), 不是"换了个目的"; 且每个点击都会产生 (子->null) 与
+ *      (null->新子) 两条事件, 阈值 6/5s 等价于"5 秒内点 3 次就告警"。
+ *      20260911-151743 场次实测: 307 条派发里 168 条含 null (55%)。
+ * 修正后同一场次回放: 10 条告警 -> 0 条 (见 analysis/oscillation_replay.py)。
  *
  * (2026-09-11 P2) 每次 MAIN / SUB 切换还会喂给 TaskCycleDetector, 由它检测
  * **周期 >= 3** 的任务环 —— 抖动检测只管 A<->B 来回跳, 管不了 A->B->C->A。
@@ -61,7 +71,7 @@ public final class TaskSwitchLogger {
     // Warn at most this often per switch key.
     private static final long WARN_THROTTLE_MS = 10000;
 
-    // key = where|chain|parentClass|oldClass->newClass ; values = recent switch timestamps.
+    // key = where|chain|parent|from目的<->to目的 (无序); values = recent switch timestamps.
     private static final HashMap<String, ArrayDeque<Long>> _recentSwitches = new HashMap<>();
     private static final HashMap<String, Long> _lastWarnMs = new HashMap<>();
 
@@ -176,7 +186,27 @@ public final class TaskSwitchLogger {
         Debug.logToFile(LOG_FILE, "[t=" + _tick + "] " + message);
     }
 
-    private static void oscillationCheck(String key, String parentDesc, Object from, Object to, String where) {
+    /**
+     * @param scope 去重域 (where|chain|parentClass), 由调用方构造 —— 抖动只在
+     *              同一父任务内部才算, 跨父任务的同名切换不是一回事。
+     */
+    private static void oscillationCheck(String scope, String parentDesc, Task from, Task to, String where) {
+        // (2026-09-11 口径修正①) null 不是"另一个任务", 是"父级本 tick 没有子任务可派"
+        // —— 典型场景是等槽位点击节流 (containerItemMoveDelay=200ms) 或等材料。
+        // 这类往返既不代表目的改变, 数量上又恰好是"每次点击两条事件", 计入会让
+        // 任何多件搬运必然越线 (阈值 6/5s ≈ 5 秒点 3 次)。不计入。
+        if (from == null || to == null) return;
+
+        // (2026-09-11 口径修正②) 去重键必须含 from/to 的"目的身份", 否则统计的是
+        // "该父任务换了几次子任务", 却用最后一次的 from->to 当标题 —— 单向推进
+        // A->B->C->D->E->F 会被报成 "A <-> F 6x, Bot is thrashing!"。
+        // 身份用 toDebugString (含目标槽/物品/数量) 而非类名: 类名太粗, 同类不同
+        // 参数会被聚成一个桶 (回放实测: 类名口径剩 1 条误报, 参数化口径 0 条)。
+        // 无序比较: A<->B 来回跳必须落进同一个桶才数得出来。
+        String a = identity(from);
+        String b = identity(to);
+        String key = scope + "|" + (a.compareTo(b) <= 0 ? a + " <-> " + b : b + " <-> " + a);
+
         long now = System.currentTimeMillis();
         ArrayDeque<Long> times = _recentSwitches.computeIfAbsent(key, k -> new ArrayDeque<>());
         times.addLast(now);
@@ -215,6 +245,18 @@ public final class TaskSwitchLogger {
         // (2026-09-10 用户"看不懂") 110 -> 80: toString 常有超长参数列表,
         // 截断点收紧让每行任务描述在终端里一屏可读。
         if (s.length() > 80) s = s.substring(0, 80) + "...";
+        return s;
+    }
+
+    /**
+     * from/to 的"目的身份", 用于抖动去重键。取 toDebugString (只含任务参数, 如
+     * 目标槽/物品/数量), 不带每 tick 变化的 debugState —— 后者会让同一目的在
+     * 不同 tick 产生不同 key, 把真正的横跳拆散。
+     */
+    private static String identity(Task task) {
+        if (task == null) return "null";
+        String s = task.toDebugString();
+        if (s.length() > 60) s = s.substring(0, 60);
         return s;
     }
 
