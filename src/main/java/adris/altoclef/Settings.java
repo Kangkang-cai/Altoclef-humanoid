@@ -634,6 +634,19 @@ public class Settings implements IFailableConfigFile {
      */
     private List<BlockRange> areasToProtect = Collections.emptyList();
 
+    /**
+     * (2026-09-11 异常看门狗) 是否启用异常自动检测。
+     *
+     * 启用后每 tick 只读扫描 bot 状态, 检出以下异常并主动告警, 免去人工盯屏:
+     *  - 反复横跳: 同一处任务在 5s 窗口内来回切换 >= 6 次
+     *  - 原地停滞: 有任务在跑但位置长期不动 (45s WARN / 120s CRITICAL)
+     *  - 不可达  : 期望寻路但 baritone 持续算不出路径
+     *
+     * 检测层严格只读, 绝不修改任务状态 —— 关掉它只是停止告警, 不影响 bot 行为。
+     * 告警落盘于 logs/altoclef/&lt;会话&gt;/anomaly.log。
+     */
+    private boolean anomalyWatchdogEnabled = true;
+
 
     //////////////////////////////////////////////////////////////////////////////////////////
     ////////** END SETTINGS w/ COMMENTS **////////////////////////////////////////////////////
@@ -655,6 +668,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean shouldHideAllWarningLogs() {
         return hideAllWarningLogs;
+    }
+
+    public boolean isAnomalyWatchdogEnabled() {
+        return anomalyWatchdogEnabled;
     }
 
     public String getCommandPrefix() {

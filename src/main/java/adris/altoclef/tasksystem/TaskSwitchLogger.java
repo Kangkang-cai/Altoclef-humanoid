@@ -1,6 +1,9 @@
 package adris.altoclef.tasksystem;
 
 import adris.altoclef.Debug;
+import adris.altoclef.anomaly.Anomaly;
+import adris.altoclef.anomaly.AnomalySeverity;
+import adris.altoclef.anomaly.AnomalyWatchdog;
 
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -24,8 +27,9 @@ import java.util.HashMap;
  * 控制权, 看 SUB/STOP 判断任务树内部的切换原因, 看 START 间隔判断
  * 任务是否反复重启 (抖动)。
  *
- * 同时保留抖动检测: 相同切换 (同链/同父/同 from->to 类型) 在窗口内
- * 反复出现时在聊天里告警 "[TaskPingPong]"。
+ * 同时保留抖动检测: 相同切换 (同链/同父/同 from->to 类型) 在窗口内反复出现时,
+ * 往本文件写 "!!!!" 行, 并通过 AnomalyWatchdog 上报 (统一冷却 / 分级 / 现场快照,
+ * 输出到 anomaly.log + 聊天)。
  */
 public final class TaskSwitchLogger {
 
@@ -170,8 +174,12 @@ public final class TaskSwitchLogger {
                 String msg = "[TaskPingPong] '" + parentDesc + "' switched '"
                         + desc(from) + "' <-> '" + desc(to) + "' " + times.size()
                         + "x in " + OSCILLATION_WINDOW_MS / 1000 + "s (@" + where + "). Bot is thrashing!";
-                Debug.logWarning(msg);
                 write("!!!! " + msg);
+                // (2026-09-11) 抖动归入统一异常看门狗: 由它负责冷却、分级、输出到
+                // anomaly.log + 聊天, 并附带现场快照 (任务栈 / 坐标 / baritone 状态)。
+                // 这里只上报, 不再自己 logWarning —— 避免同一件事在两条通道各喊一遍。
+                AnomalyWatchdog.report(new Anomaly(
+                        "oscillation", key, AnomalySeverity.WARN, msg, null));
             }
         }
     }

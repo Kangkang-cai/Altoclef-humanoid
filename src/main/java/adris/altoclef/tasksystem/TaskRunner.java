@@ -2,6 +2,7 @@ package adris.altoclef.tasksystem;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.anomaly.AnomalyWatchdog;
 
 import java.util.ArrayList;
 
@@ -115,6 +116,14 @@ public class TaskRunner {
         } else {
             _lastEmptyWinnerLogMs = 0;
         }
+
+        // (2026-09-11 异常看门狗) 只读扫描, 检出抖动 / 原地停滞 / 目标不可达并
+        // 主动告警。放在链执行之后: 快照里的任务栈才是本次 tick 的最终状态。
+        // 看门狗不参与调度、不做任何行为干预; 它自身抛异常也不能影响任务调度。
+        try {
+            AnomalyWatchdog.tick(_mod, maxChain, _tickCounter);
+        } catch (Throwable ignored) {
+        }
     }
 
     public void addTaskChain(TaskChain chain) {
@@ -138,6 +147,13 @@ public class TaskRunner {
             chain.stop(_mod);
         }
         _active = false;
+
+        // (2026-09-11 异常看门狗) 会话收尾: 输出本次会话的异常汇总, 让"跑一晚上
+        // 第二天只看一份报告"成为可能。
+        try {
+            AnomalyWatchdog.onSessionEnd();
+        } catch (Throwable ignored) {
+        }
 
         Debug.logMessage("Stopped");
     }
