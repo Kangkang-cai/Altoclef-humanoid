@@ -356,7 +356,20 @@ public class PlaceBedAndSetSpawnTask extends Task {
         }
 
         boolean anyBed = mod.getBlockTracker().anyFound(BEDS);
-        if (!anyBed) {
+        // (2026-09-11 门控放宽) 旧版只在"世界上任何地方都没床"时才扫自己刚放的
+        // 床并注册。但别处 (如 120m 外村庄) 有床 → anyBed=true → 直接跳过 →
+        // 脚边刚放的那张永远进不了方块缓存 → nearbyBed 判假 → "Getting a bed
+        // first" 死循环 (用户 20260911-192550 复现 3 次: knownBeds=20 全是远处,
+        // 脚边那张始终不在 tracker)。追加条件: 自放床已记录但不在缓存里 → 同样
+        // 扫一次并注册。容差 3 格: 床占两格, 记忆点与缓存点可能差 1。
+        boolean selfBedNotInCache = false;
+        BlockPos selfBedRecord = mod.getLastSelfPlacedBed();
+        if (selfBedRecord != null) {
+            selfBedNotInCache = mod.getBlockTracker()
+                    .getKnownLocations(ItemHelper.itemsToBlocks(ItemHelper.BED)).stream()
+                    .noneMatch(p -> p.isWithinDistance(selfBedRecord, 3));
+        }
+        if (!anyBed || selfBedNotInCache) {
             // ==== [Diag-bed] FIX for "placed bed, then went off to craft
             // another one": after placing, the bed is in the WORLD but not
             // yet in the BlockTracker cache (chunk scans are throttled and
@@ -400,6 +413,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 // 被 gear/挖矿抢走, 床就滞留 (用户实测: 放床→想去睡→被 iron gear
                 // 抢走→床没拆)。
                 mod.setLastSelfPlacedBed(placed);
+                // (2026-09-11 同步注册, 同 840 行) 只记 "自己放的床" 不够 ——
+                // 358 行算出的 anyBed 以及下面 407 行的 getNearestTracking 都读
+                // 方块缓存, 刚放的床不在缓存里 → anyBed=false/查不到, 直接落到
+                // "Getting a bed first" 去合第二张床。这里顺手注册并纠正 anyBed,
+                // 让本轮判定立刻看到它。
+                mod.getBlockTracker().addBlock(mod.getWorld().getBlockState(placed).getBlock(), placed);
+                anyBed = true;
                 Debug.logMessage("[Diag-bed] sleep target set to just-placed bed at " + placed.toShortString());
                 Debug.logToFile("altoclef_diag.log", "[Diag-bed] sleep target set to just-placed bed at " + placed.toShortString());
             }
@@ -838,6 +858,16 @@ public class PlaceBedAndSetSpawnTask extends Task {
             if (actual != null) bedBlock = actual;
             mod.setLastSelfPlacedBed(bedBlock);
             _justPlacedBed = bedBlock;
+            // (2026-09-11 放床后立刻注册进 BlockTracker) 扫描器有节流, 从"床放进
+            // 世界"到"进方块缓存"之间有窗口; 该窗口内 anyBed / nearbyBed /
+            // findInteractableBedNear 全部判假 → 判定"没床" → "Getting a bed first"
+            // → 合床 → 放下 → 再判没床, 整晚死循环 (用户 20260911-192550 复现 3 次:
+            // "Getting a bed first" ↔ "Placing bed... progressing" 一晚 292 次,
+            // 0 次 Sleeping/Respawn point set)。床刚在此刻确认放进世界, 顺手直接
+            // 注册, 不等扫描周期。注意 addBlock 内部走 blockIsValid (世界方块必须
+            // 真是床) 与 unreachable 检查 —— 刚放的床在注册前不在缓存, 故不会被
+            // markProtectedBedsUnreachable 误标, 必定通过。
+            mod.getBlockTracker().addBlock(mod.getWorld().getBlockState(bedBlock).getBlock(), bedBlock);
             setDebugState("Waiting to rescan + find bed that we just placed. Should be almost instant.");
             _progressChecker.reset();
             return null;
