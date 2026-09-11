@@ -89,6 +89,10 @@ public class GoToSurfaceTask extends Task {
     /** 放弃后的冷却 (触发条件层 static: 任务实例会被重建, 实例层冷却无效)。 */
     private static final int SCAFFOLD_GIVEUP_COOLDOWN_TICKS = 20 * 60;
     private static long _scaffoldGiveUpUntilTick = 0;
+    /** 挖穿进入水体后连续这么久仍未脱离 → 判定"封闭水体"(向上挖只会灌更多水), 放弃。
+     *  5s 的取值: 现场空气从 1.00 掉到 0.30 只用 14s, 必须远早于溺水;
+     *  而"挖穿海底/湖底 → 上浮出水"的正常场景几秒内就会脱离水体, 不会误伤。 */
+    private static final int SEALED_WATER_TICKS = 20 * 5;
 
     private AscentMode _mode = AscentMode.BARITONE;
 
@@ -103,6 +107,8 @@ public class GoToSurfaceTask extends Task {
     private long _scaffoldStartTick = -1;
     private int _scaffoldLastY = Integer.MIN_VALUE;
     private TimerGame _scaffoldNoProgressTimer = null;
+    /** 挖穿进水后的"封闭水体"计时 (见 SEALED_WATER_TICKS)。null = 未进过水。 */
+    private TimerGame _waterStuckTimer = null;
     private final TimerGame _scaffoldLogTimer = new TimerGame(2);
 
     // ===== 卡住检测状态 (两种模式共用, 每 tick 采样) =====
@@ -203,6 +209,7 @@ public class GoToSurfaceTask extends Task {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
         }
         _scaffoldNoProgressTimer.reset();
+        _waterStuckTimer = null; // 每次进挖垫都重新判定水体
         _scaffoldLogTimer.reset();
         _stuckTicks = 0;
     }
@@ -324,6 +331,29 @@ public class GoToSurfaceTask extends Task {
         if (WorldHelper.getTicks() - _scaffoldStartTick > SCAFFOLD_TOTAL_TIMEOUT_TICKS) {
             return giveUpScaffold(mod, player, "total timeout " + (SCAFFOLD_TOTAL_TIMEOUT_TICKS / 20) + "s");
         }
+
+        // (2026-09-11 16:40 崩溃现场) 封闭水体判定 —— 必须在"挖头顶"之前拦住。
+        // 现场: 挖穿含水层 y=40 后水灌进来, 头顶 1~3 格变水(挖穿的口子), 第 4 格
+        // 仍是石头 → findOverheadDigTarget 接着挖 y=45 → 水又灌一格 → 玩家被顶上去
+        // (39→41→43)。空气 14 秒耗尽(1.00→0.30)淹死, 而"无进展"闸门因为 Y 一直在涨
+        // 永不触发, 90s 总超时远来不及。
+        // 核心事实: **封闭含水层里向上挖是无效的** —— 挖一格水灌一格, Y 涨但永远
+        // 见不到空气。所以判据只能是"泡在水里够久还没出去" → 立即停止一切挖掘
+        // (停止后水稳定, 玩家自然下沉回自己挖上来的通道), 放弃并进冷却。
+        // 之后的逃生交给 WorldSurvivalChain 的防溺水 (priority 95): 它会找 16 格内
+        // 最近可呼吸方块 —— 在封闭水体里那就是自己刚挖上来的那条通道。
+        if (mod.getPlayer().isTouchingWater()) {
+            if (_waterStuckTimer == null) {
+                _waterStuckTimer = new TimerGame(SEALED_WATER_TICKS / 20.0);
+            }
+            if (_waterStuckTimer.elapsed()) {
+                return giveUpScaffold(mod, player, "sealed water: " + (SEALED_WATER_TICKS / 20)
+                        + "s in water without surfacing (digging up only floods more)");
+            }
+        } else if (_waterStuckTimer != null) {
+            _waterStuckTimer.reset(); // 出水 → 重新计时
+        }
+
         if (_scaffoldNoProgressTimer == null) {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
         }
@@ -386,6 +416,7 @@ public class GoToSurfaceTask extends Task {
         _scaffoldStartTick = -1;
         _scaffoldLastY = Integer.MIN_VALUE;
         _scaffoldNoProgressTimer = null;
+        _waterStuckTimer = null;
         _scaffoldLogTimer.reset();
         _stuckTicks = 0;
         _lastSampleX = Double.NaN;
