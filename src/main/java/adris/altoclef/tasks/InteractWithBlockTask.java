@@ -61,6 +61,16 @@ public class InteractWithBlockTask extends Task {
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
     private final int reachDistance = 0;
 
+    // (2026-09-11 熔炉误判事故) 失败时是否允许"拉黑目标 + wander 挪位"。
+    // 容器交互(开炉/开台)场景必须传 false: bot 因 NAV-STUCK 冻结时 moveChecker
+    // 立刻判负, 旧逻辑会把 1 格外的熔炉 requestBlockUnreachable 拉黑 → 而
+    // WorldHelper.canReach 实际是"黑名单取反"(非几何距离) → 父任务三路容器
+    // 查找全被过滤 → 误判"无可用容器"→ 重做熔炉 (22:51 日志实锤, 炉内 6 生羊
+    // 肉成为孤儿)。false 时: 站住原地持续重试点击, 15s 仍无进展才走原放弃路径。
+    private final boolean _wanderOnFailure;
+    // 上述 false 模式下的总兜底: 自上次真实进展起 15s 仍失败, 回落原路径。
+    private final TimerGame _giveUpTimer = new TimerGame(15);
+
     private ClickResponse _cachedClickStatus = ClickResponse.CANT_REACH;
 
     // (2026-09-10 清上方方块止损+持久化) 15:13 场次实锤: 清上方方块的
@@ -81,6 +91,10 @@ public class InteractWithBlockTask extends Task {
     private long _clearAboveSinceMs = 0;
 
     public InteractWithBlockTask(ItemTarget toUse, Direction direction, BlockPos target, Input interactInput, boolean walkInto, Vec3i interactOffset, boolean shiftClick) {
+        this(toUse, direction, target, interactInput, walkInto, interactOffset, shiftClick, true);
+    }
+
+    public InteractWithBlockTask(ItemTarget toUse, Direction direction, BlockPos target, Input interactInput, boolean walkInto, Vec3i interactOffset, boolean shiftClick, boolean wanderOnFailure) {
         _toUse = toUse;
         _direction = direction;
         _target = target;
@@ -88,6 +102,7 @@ public class InteractWithBlockTask extends Task {
         _walkInto = walkInto;
         _interactOffset = interactOffset;
         _shiftClick = shiftClick;
+        _wanderOnFailure = wanderOnFailure;
     }
 
     public InteractWithBlockTask(ItemTarget toUse, Direction direction, BlockPos target, Input interactInput, boolean walkInto, boolean shiftClick) {
@@ -133,6 +148,11 @@ public class InteractWithBlockTask extends Task {
 
     public InteractWithBlockTask(BlockPos target) {
         this(ItemTarget.EMPTY, null, target, Input.CLICK_RIGHT, false, false);
+    }
+
+    /** 容器交互专用: 失败不拉黑不游荡, 15s 兜底 (2026-09-11 熔炉误判事故)。 */
+    public InteractWithBlockTask(BlockPos target, boolean wanderOnFailure) {
+        this(ItemTarget.EMPTY, null, target, Input.CLICK_RIGHT, false, Vec3i.ZERO, false, wanderOnFailure);
     }
 
     private static Goal createGoalForInteract(BlockPos target, int reachDistance, Direction interactSide, Vec3i interactOffset, boolean walkInto) {
@@ -185,6 +205,8 @@ public class InteractWithBlockTask extends Task {
         // 差 1-3 格 (舀岩浆点在自己搭的路/旁边地形上)。onStart 重置后, "1.5s 兜底"
         // 才是真正"等了 1.5s 仍瞄不准"才触发。
         _forceClickTimer.reset();
+        // (2026-09-11) 无游荡模式的 15s 总兜底计时。
+        _giveUpTimer.reset();
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -225,12 +247,20 @@ public class InteractWithBlockTask extends Task {
         }
 
         // Wander and check
-        if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
+        // (2026-09-11) 无游荡模式绝不续跑 wander 子任务 —— 实例被 isEqual 复用时
+        // onStart 不重跑, 上一次交互失败留下的 active wander 会让任务恢复后第一
+        // tick 就接着游荡 (22:51:46 事故: guard 6.1s 后回到交互, 立刻 Wander 5.0)。
+        if (_wanderOnFailure && _wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
             _moveChecker.reset();
             _clickTimer.reset();
             return _wanderTask;
         }
-        if (!_moveChecker.check(mod)) {
+        // (2026-09-11) moveChecker 判负不再无条件"拉黑目标+wander": 容器交互
+        // (_wanderOnFailure=false) 时 bot 冻结/站桩会让本检查器瞬间判负, 把眼前
+        // 熔炉拉黑 → canReach(=黑名单取反)全链失效 → 父任务误判"无容器"重做熔炉。
+        boolean moveOk = _moveChecker.check(mod);
+        if (!moveOk) {
+            // 失败=无真实进展, 无游荡模式下兜底计时持续走表。
             // (2026-09-02 Q2: 目标正上方被实心方块堵住 → 到不了 → 先清掉暴露目标再试)
             // 用户实测: 开熔炉时 bot 误把圆石放到炉顶(69,-21,394), 之后目标炉(69,-22,394)
             // 一直 CANT_REACH (不是 WAIT_FOR_CLICK)。旧的"清上方"逻辑只挂在
@@ -240,13 +270,17 @@ public class InteractWithBlockTask extends Task {
             // DestroyBlockTask 清掉它"暴露"容器, 回来再开炉取物 —— 人类也会清碍事方块
             // 而不是扭头游走。判定口径与下方 WAIT_FOR_CLICK 分支的 isSolid+canBreak 一致,
             // 只碰 _target.up()(绝不清目标本体), 且只有真走不到(卡住)才触发, 不误伤。
-            if (_interactInput == Input.CLICK_RIGHT) {
-                Task clear = clearAboveOrGiveUp(mod, "CANT_REACH stuck, clearing solid above");
-                if (clear != null) return clear;
+            if (_wanderOnFailure || _giveUpTimer.elapsed()) {
+                if (_interactInput == Input.CLICK_RIGHT) {
+                    Task clear = clearAboveOrGiveUp(mod, "CANT_REACH stuck, clearing solid above");
+                    if (clear != null) return clear;
+                }
+                Debug.logMessage("Failed, blacklisting and wandering.");
+                mod.getBlockTracker().requestBlockUnreachable(_target);
+                return _wanderTask;
             }
-            Debug.logMessage("Failed, blacklisting and wandering.");
-            mod.getBlockTracker().requestBlockUnreachable(_target);
-            return _wanderTask;
+            // 无游荡模式未到 15s 兜底: 重置检查器, 继续走下方点击/寻路流程。
+            _moveChecker.reset();
         }
 
         Goal moveGoal = createGoalForInteract(_target, reachDistance, _direction, _interactOffset, _walkInto);
@@ -262,6 +296,11 @@ public class InteractWithBlockTask extends Task {
                 }
                 _clickTimer.reset();
                 _clickStuckTiming = false;
+                // (2026-09-11) 有真实移动进展才重置无游荡兜底; 冻结站桩时走表,
+                // 15s 后由上方 moveChecker 分支/下方卡死分支回落放弃路径。
+                if (moveOk) {
+                    _giveUpTimer.reset();
+                }
             }
             case WAIT_FOR_CLICK -> {
                 setDebugState("Waiting for click");
@@ -304,6 +343,10 @@ public class InteractWithBlockTask extends Task {
                         }
                     }
                     // 上方没东西可撸：按原有超时逻辑放弃并 wander。
+                    // (2026-09-11) 无游荡模式: 15s 兜底未到前不拉黑不游荡, 原地继续点。
+                    if (!_wanderOnFailure && !_giveUpTimer.elapsed()) {
+                        break;
+                    }
                     mod.getBlockTracker().requestBlockUnreachable(_target);
                     return _wanderTask;
                 }
@@ -317,6 +360,10 @@ public class InteractWithBlockTask extends Task {
                     // We tried clicking but failed.
                     _clickTimer.reset();
                     _clickStuckTiming = false;
+                    // (2026-09-11) 无游荡模式: 15s 兜底未到前不拉黑不游荡。
+                    if (!_wanderOnFailure && !_giveUpTimer.elapsed()) {
+                        break;
+                    }
                     mod.getBlockTracker().requestBlockUnreachable(_target);
                     return _wanderTask;
                 }

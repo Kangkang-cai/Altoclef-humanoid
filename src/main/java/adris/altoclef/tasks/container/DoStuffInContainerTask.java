@@ -65,7 +65,10 @@ public abstract class DoStuffInContainerTask extends Task {
             // 父层每 tick 先于子任务重算并刷新该字段, 取到时必非 null 且新鲜。
             _openTableTask = new DoToClosestBlockTask(
                     (java.util.function.Supplier<Vec3d>) null,
-                    InteractWithBlockTask::new,
+                    // (2026-09-11 熔炉误判事故) 容器交互关闭"失败拉黑+wander": 站在
+                    // 炉前重试点击即可, 拉黑会让父任务三路查找误判"无可用容器"而
+                    // 重做熔炉 (炉内物料成孤儿)。
+                    pos -> new InteractWithBlockTask(pos, false),
                     pos -> Optional.ofNullable(_cachedContainerPosition),
                     null,
                     _containerBlocks);
@@ -215,7 +218,8 @@ public abstract class DoStuffInContainerTask extends Task {
                 _justPlacedTimer.reset();
                 // (2026-09-11) 直接交互刚验证过的 stillThere, 不走 tracker "最近"
                 // (同 _openTableTask 错位修复: 最近位可能是已挖掉/被埋的旧容器位)。
-                return new InteractWithBlockTask(stillThere);
+                // (2026-09-11) 同 _openTableTask: 无游荡模式, 失败不拉黑容器。
+                return new InteractWithBlockTask(stillThere, false);
             }
             // (2026-09-08 空放置修复, 用户"手上没有熔炉谁触发的放置?") 手头无
             // 容器物品时, "重新放置"是纯游荡: PlaceBlockNearbyTask 无物可放,
@@ -232,7 +236,8 @@ public abstract class DoStuffInContainerTask extends Task {
                 _cachedContainerPosition = trackedExisting.get();
                 _placeForceTimer.reset();
                 _justPlacedTimer.reset();
-                return new InteractWithBlockTask(trackedExisting.get());
+                // (2026-09-11) 同 _openTableTask: 无游荡模式, 失败不拉黑容器。
+                return new InteractWithBlockTask(trackedExisting.get(), false);
             }
             // tracker 完全没货 (理论上到不了: isItemOwned(USE)=true 需要世界里有):
             // 兜底回"获取容器物品"重造, 别空手放置。
@@ -312,6 +317,12 @@ public abstract class DoStuffInContainerTask extends Task {
      * (2026-08-30 分而治之: 眼前真实容器优先于缓存) 当 tracker 无目标容器记忆
      * (如上一个中断任务留下的熔炉), 主动扫 bot 附近真实方块, 返回第一个可到达的
      * 目标容器。仅当遍历式查找失败时调用(触发频率极低), 故直接用世界扫描可接受。
+     *
+     * (2026-09-11 熔炉误判事故) 去掉 WorldHelper.canReach 过滤: 该函数实际是
+     * "BlockTracker 黑名单取反"(非几何距离)。交互任务在 bot 冻结时会把眼前熔炉
+     * requestBlockUnreachable → 此处带过滤就扫不出 1 格外的炉 → 父任务误判
+     * "无可用容器"→ 重做熔炉 (22:51 日志实锤, 炉内 6 生羊肉成孤儿)。4 格内的
+     * 同类容器几乎不可能"真不可达", 黑名单多为瞬时误标, 直接采信真实方块。
      */
     private Optional<BlockPos> findNearbyContainerBlock(AltoClef mod, Vec3d center) {
         MinecraftClient client = MinecraftClient.getInstance();
@@ -326,7 +337,7 @@ public abstract class DoStuffInContainerTask extends Task {
                     BlockPos pos = new BlockPos(cx + dx, cy + dy, cz + dz);
                     Block block = client.world.getBlockState(pos).getBlock();
                     for (Block containerBlock : _containerBlocks) {
-                        if (block == containerBlock && WorldHelper.canReach(mod, pos)) {
+                        if (block == containerBlock) {
                             return Optional.of(pos);
                         }
                     }
