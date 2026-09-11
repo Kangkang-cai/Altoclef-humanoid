@@ -94,6 +94,14 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private boolean _directSwimUpMode = false;
     private int _directSwimLastY = Integer.MIN_VALUE;
     private static final int DIRECT_SWIM_UP_MIN_Y_GAIN = 1;
+    // (2026-09-11) 垂直上浮的水平距离闸门: 上浮只该发生在"目标正上方/附近"。
+    // 死亡恢复实锤 (20260911-205655 场次 21:10-21:14): GetToBlockTask 目标在
+    // 167 格外, 玩家在岸边浅水 bobbing, goalY()=69 > 玩家 y=62 → 上浮误触发
+    // → 浅水无 Y 增益 5s 失速交还 baritone → checker 失败 wander → 再触发,
+    // 反复横跳 4 分钟零进展 (tasks.log Wander 每 3-8s 一轮)。GoalYLevel 无 XZ
+    // (goalXZ()=null) 保持原行为不动; 带水平目标 (GoalBlock/TwoBlocks) 仅在
+    // 水平距离 <= 8 格时允许上浮 (贴近目标柱再够 y)。
+    private static final double DIRECT_SWIM_UP_MAX_XZ_DIST = 8;
 
     // ===== 直游换气 (2026-09-09, 用户实锤"只游不按空格上浮, 快淹死了") =====
     // GoalXZ 的 target.getY()=0 → 平游分支无条件 release(JUMP) → 埋头游不换气。
@@ -229,15 +237,23 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                 if (inWater && !_directSwimControl) {
                     int ty = goalY();
                     if (ty > 0 && ty > mod.getPlayer().getBlockPos().getY()) {
-                        Debug.logToFile("altoclef_diag.log", "[SwimUp] trigger player="
-                                + mod.getPlayer().getBlockPos() + " goalY=" + ty
-                                + " baritoneActive=" + mod.getClientBaritone().getCustomGoalProcess().isActive());
-                        _directSwimUpMode = true;
-                        _directSwimLastY = mod.getPlayer().getBlockPos().getY();
-                        _directSwimStallTimer.reset();
-                        holdDirectSwimUp(mod);
-                        setDebugState("Swimming straight up to y=" + ty);
-                        return null;
+                        // (2026-09-11) 水平闸门: GoalYLevel 无 XZ 保持原行为;
+                        // 带水平目标时只有贴近目标柱 (<=8 格) 才允许垂直上浮,
+                        // 远距离一律交 baritone / 水平平游, 详见常量注释。
+                        BlockPos upXZ = goalXZ();
+                        boolean swimUpAllowed = upXZ == null
+                                || horizontalDist(mod, upXZ) <= DIRECT_SWIM_UP_MAX_XZ_DIST;
+                        if (swimUpAllowed) {
+                            Debug.logToFile("altoclef_diag.log", "[SwimUp] trigger player="
+                                    + mod.getPlayer().getBlockPos() + " goalY=" + ty
+                                    + " baritoneActive=" + mod.getClientBaritone().getCustomGoalProcess().isActive());
+                            _directSwimUpMode = true;
+                            _directSwimLastY = mod.getPlayer().getBlockPos().getY();
+                            _directSwimStallTimer.reset();
+                            holdDirectSwimUp(mod);
+                            setDebugState("Swimming straight up to y=" + ty);
+                            return null;
+                        }
                     }
                 }
                 if (!_checker.check(mod)) {
