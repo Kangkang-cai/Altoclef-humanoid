@@ -78,7 +78,16 @@ public class GetToLandTask extends Task {
         }
 
         if (_startTick >= 0 && WorldHelper.getTicks() - _startTick > TOTAL_TIMEOUT_TICKS) {
-            _gaveUp = true;
+            if (!_gaveUp) {
+                _gaveUp = true;
+                // (2026-09-11 v2) 冷却必须在此刻立刻写入, 不能只放 onStop ——
+                // Task.tickInternal 从不检查子任务 isFinished, 父任务只要还返回本
+                // 任务, _sub 就一直是同一实例; 而 GetToLandTask.isEqual 恒 true,
+                // 父任务"重建实例"的写法也会被 isEqual 挡下, 于是 onStart 不会重跑、
+                // onStop 永不触发 → 冷却永远写不进去 → 实例带着 _gaveUp 被无限 tick。
+                // 写在这里, 父任务的 `!isOnCooldown()` 闸门下一 tick 立刻放行别的分支。
+                _giveUpUntilTick = WorldHelper.getTicks() + GIVEUP_COOLDOWN_TICKS;
+            }
             setDebugState("Give up: no land reached in " + (TOTAL_TIMEOUT_TICKS / 20) + "s");
             return null;
         }
