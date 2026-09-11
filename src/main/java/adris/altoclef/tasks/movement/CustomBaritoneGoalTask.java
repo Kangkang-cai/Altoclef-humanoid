@@ -17,7 +17,9 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.registry.Registry;
 
 /**
  * Turns a baritone goal into a task.
@@ -55,6 +57,11 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     // (2026-08-26 用户多次反馈: 游泳时按住疾跑, 一直没修好) 游泳时是否要强制
     // 关 baritone 疾跑 (allowSprint)。上/下水状态变化时切换一次。
     private boolean _wasInWater = false;
+
+    // ===== (2026-09-11) 跳跃卡死诊断 (纯只读, 零行为改动) =====
+    private static final int JUMP_STUCK_TICKS = 20;   // 满足 1s 才落盘
+    private int _jumpStuckTicks = 0;
+    private final TimerGame _jumpStuckLogTimer = new TimerGame(2);
 
     // ===== 水下垂直上浮 (2026-09-04) =====
     // 用户"上方全是海洋, baritone 找不到落脚点但可游泳上去"。GetToYTask 的
@@ -119,6 +126,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
 
     @Override
     protected Task onTick(AltoClef mod) {
+        diagnoseJumpStuck(mod);
 
         // (2026-08-26 用户多次反馈: 游泳时按住疾跑, 一直没修好) baritone 在
         // allowSprint=true 下, 水中寻路会 sprint-swim (之前只在 direct-swim /
@@ -355,6 +363,83 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getInputControls().hold(Input.SPRINT);
         mod.getInputControls().release(Input.SNEAK);
         _directSwimControl = true;
+    }
+
+    /**
+     * (2026-09-11) 跳跃卡死诊断 —— 纯只读, 零行为改动。
+     *
+     * 用户报"baritone 爬台阶时一个简单的旋转跳怎么都跳不上去, 跳几次就超时变
+     * wander, 下次导航又选同一条路"。会话 20260911-151743 已抓到 9 条硬样本:
+     * baritone 真的强制按下了前进+跳跃 (bIn[fwd=true jump=true]), 但玩家
+     * hSpeed≈0.000, 同一格内 y 只上下震荡 0.33 格 (正常跳跃应上升约 1.25 格),
+     * 持续 2~6s 后被超时。
+     *
+     * 现有日志不足以区分三种成因, 所以先补现场快照再定方案:
+     *   ① 跳起撞头 (头顶紧邻有实心) — 处置: 挖掉;
+     *   ② baritone 规划了不存在的落点 / 前方是 1 格坎+头顶封顶 — 处置: 挖/抬;
+     *   ③ 玩家其实卡在半空 (非跳跃动作) — 处置: 换路。
+     *
+     * 落盘: logs/altoclef/<会话>/altoclef_diag.log 的 [JumpStuck] 行。
+     */
+    private void diagnoseJumpStuck(AltoClef mod) {
+        boolean jumpForced;
+        try {
+            jumpForced = mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.JUMP);
+        } catch (Throwable t) {
+            return;
+        }
+        if (!jumpForced) {
+            _jumpStuckTicks = 0;
+            return;
+        }
+        Vec3d v = mod.getPlayer().getVelocity();
+        if (Math.hypot(v.x, v.z) >= 0.05) {
+            _jumpStuckTicks = 0;
+            return;
+        }
+        _jumpStuckTicks++;
+        if (_jumpStuckTicks < JUMP_STUCK_TICKS) return;
+        if (!_jumpStuckLogTimer.elapsed()) return;
+        _jumpStuckLogTimer.reset();
+        BlockPos p = mod.getPlayer().getBlockPos();
+        Direction facing = mod.getPlayer().getHorizontalFacing();
+        BlockPos ahead = p.offset(facing);
+        String goal;
+        try {
+            Goal g = mod.getClientBaritone().getPathingBehavior().getGoal();
+            goal = g == null ? "null" : g.toString();
+        } catch (Throwable t) {
+            goal = "?";
+        }
+        Debug.logToFile("altoclef_diag.log",
+                "[JumpStuck] " + String.format("%.1f", _jumpStuckTicks / 20.0) + "s"
+                        + " pos=" + p
+                        + " xyz=(" + String.format("%.2f", mod.getPlayer().getX())
+                        + "," + String.format("%.2f", mod.getPlayer().getY())
+                        + "," + String.format("%.2f", mod.getPlayer().getZ()) + ")"
+                        + " vel=(" + String.format("%.2f", v.x) + "," + String.format("%.2f", v.y)
+                        + "," + String.format("%.2f", v.z) + ")"
+                        + " onGround=" + mod.getPlayer().isOnGround()
+                        + " inWater=" + mod.getPlayer().isTouchingWater()
+                        + " facing=" + facing
+                        + " blocks[below=" + bk(mod, p.down())
+                        + " feet=" + bk(mod, p)
+                        + " up1=" + bk(mod, p.up(1))
+                        + " up2=" + bk(mod, p.up(2))
+                        + " up3=" + bk(mod, p.up(3))
+                        + " ahead=" + bk(mod, ahead)
+                        + " aheadUp1=" + bk(mod, ahead.up(1))
+                        + " aheadUp2=" + bk(mod, ahead.up(2)) + "]"
+                        + " goal=" + goal);
+    }
+
+    /** 方块名 (诊断用, 失败不抛)。 */
+    private static String bk(AltoClef mod, BlockPos pos) {
+        try {
+            return Registry.BLOCK.getId(mod.getWorld().getBlockState(pos).getBlock()).getPath();
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     /** 从 baritone goal 提取目标 XZ, 不支持的类型返回 null (不启用直游)。 */
