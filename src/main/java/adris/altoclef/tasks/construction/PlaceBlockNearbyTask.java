@@ -123,6 +123,33 @@ public class PlaceBlockNearbyTask extends Task {
             }
         }
 
+        // (2026-09-11 v2) 通用「踩水就先上岸」闸门 —— **无条件生效**, 不再要求
+        // "选不到点位"。v1 的条件 `_tryPlace == null` 形同虚设:
+        //
+        // 现场 20260911-182618: bot 停在 (-101.50,61.50,214.57) 泡在深水里
+        // (inWater=true onGround=false hSpeed=0.000), 12.2 秒零输入
+        // (bIn[fwd/jump/sprint 全 false], baritone[pathing=false builder=true]),
+        // 会话结束前一直在 "Place structure{crafting_table} at -102,62,214"。
+        // 而 (-102,62,214) **就是 bot 自己的头部格** —— 方块放不进自己身体里,
+        // baritone builder 只能死等。
+        //
+        // 为什么 v1 闸门没拦到: avoidOceanBlocks 让 canReach 在大洋里只剩
+        // "水面高度那一层"(y=62, 判据 `pos.y < 64 && 水线62 > pos.y` 恰好为假)
+        // 能通过, 于是 locateClosePlacePos **总会返回一个假点位**(就是头顶那格),
+        // `_tryPlace == null` 永远不成立 → 闸门一行都没执行。
+        //
+        // 判据用 LandHelper.isFloatingInWater (沾水 + 脚下无实体): 站在浅水底/
+        // 沙滩上有支撑, 不算踩水, 所以涉水过河、岸边浅水放置不受影响。
+        // 放在"试放眼前点位"之后 —— 眼前确实能放就立刻放掉, 不白跑一趟。
+        if (LandHelper.isFloatingInWater(mod) && !GetToLandTask.isOnCooldown()) {
+            if (_toLand == null || _toLand.isFinished(mod)) {
+                _toLand = new GetToLandTask();
+            }
+            _progressChecker.reset();
+            setDebugState("Floating in water -> going to land first");
+            return _toLand;
+        }
+
         // Wander while we can.
         if (_wander.isActive() && !_wander.isFinished(mod)) {
             setDebugState("Wandering, will try to place again later.");
@@ -146,21 +173,6 @@ public class PlaceBlockNearbyTask extends Task {
         // 过期点位反复重建被 [PortalGuard] 拒绝的 PlaceBlockTask 死循环。
         if (_tryPlace == null || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
             _tryPlace = locateClosePlacePos(mod);
-        }
-
-        // (2026-09-11) 通用「放不下就先上岸」闸门。
-        // 现场 20260911-174220: bot 从封闭水体游上来后停在 (-102,61,212) 仍泡在水里,
-        // 试放工作台 15.5s 失败到会话结束。根因在配置层 —— Settings.avoidOceanBlocks
-        // (默认 true) 让 WorldHelper.canReach 在【海洋 biome + y<64 + 该列水线高于
-        // 候选点】时恒 false, 于是大洋里 locateClosePlacePos 必然返回 null, 只剩
-        // 无限 Wander。岸上不再被该规则拦, 所以先上岸是唯一出路。
-        // 只在"确实没点位可放"+"确实在踩水"时触发, 不误伤涉水过河/岸边浅水放置。
-        if (_tryPlace == null && LandHelper.isFloatingInWater(mod) && !GetToLandTask.isOnCooldown()) {
-            if (_toLand == null || _toLand.isFinished(mod)) {
-                _toLand = new GetToLandTask();
-            }
-            setDebugState("Floating in water, no placeable spot -> going to land first");
-            return _toLand;
         }
 
         if (_tryPlace != null) {
@@ -303,7 +315,14 @@ public class PlaceBlockNearbyTask extends Task {
 
         for (BlockPos blockPos : WorldHelper.scanRegion(mod, start, end)) {
             boolean solid = WorldHelper.isSolid(mod, blockPos);
-            boolean inside = WorldHelper.isInsidePlayer(mod, blockPos);
+            // (2026-09-11 v2) 方块放不进自己身体里 —— 原实现把 isInsidePlayer 只当
+            // 评分项 (+3 分) 而不排除, 于是 bot 泡在大洋里时 (合法点位全被
+            // avoidOceanBlocks 的 canReach 规则滤掉) 唯一"幸存"的候选恰好是它自己
+            // 的头部格 (-102,62,214), 被选中 → baritone builder 死等 12.2s。
+            // 现场 20260911-182618。直接排除。
+            if (WorldHelper.isInsidePlayer(mod, blockPos)) {
+                continue;
+            }
             // We can't break this block.
             if (solid && !WorldHelper.canBreak(mod, blockPos)) {
                 continue;
@@ -319,7 +338,7 @@ public class PlaceBlockNearbyTask extends Task {
             boolean hasBelow = WorldHelper.isSolid(mod, blockPos.down());
             double distSq = blockPos.getSquaredDistance(mod.getPlayer().getPos());
 
-            double score = distSq + (solid ? 4 : 0) + (hasBelow ? 0 : 10) + (inside ? 3 : 0);
+            double score = distSq + (solid ? 4 : 0) + (hasBelow ? 0 : 10);
 
             if (score < smallestScore) {
                 best = blockPos;
