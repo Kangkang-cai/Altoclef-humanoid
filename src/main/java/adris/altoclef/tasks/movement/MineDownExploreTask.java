@@ -1217,8 +1217,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
         // (2026-09-06 闸门级诊断) 取代原 200 tick 概率采样行: 每次评估都有确定结论,
         // 触发(FIRE)必打, 拒绝(邻居不足)走 2 秒节流。
+        // (2026-09-11 FIRE 行补计数, 用户"自己挖的通道却触发了探索") REJECT 行有
+        // aboveMaxY/selfDug/explored 三计数而 FIRE 行没有 → 误触发时无法看出 488
+        // 个"natural"里自挖/高度/区域记忆各吃掉多少, 定位分类漏洞缺证据。补齐。
         logCaveScanDiag(mod, center, (best != null ? "FIRE best=" + best.toShortString() : "REJECT no-neighbor x" + noNeighbor)
-                + " natural=" + naturalAir.size() + " reachable=" + reachableAir.size());
+                + " natural=" + naturalAir.size() + " reachable=" + reachableAir.size() + (reachableAir.size() >= 512 ? "(CAP HIT)" : "")
+                + " aboveMaxY=" + aboveMaxY + " selfDug=" + selfDugCount + " explored=" + exploredCount
+                + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY + " c=" + center.toShortString());
         return Optional.ofNullable(best);
     }
 
