@@ -56,7 +56,19 @@ public abstract class DoStuffInContainerTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         if (_openTableTask == null) {
-            _openTableTask = new DoToClosestBlockTask(InteractWithBlockTask::new, _containerBlocks);
+            // (2026-09-11 开容器目标错位修复) 交互目标优先用父层本 tick 选出的
+            // _cachedContainerPosition (canReach 过滤+实时有效), 而不是 tracker 的
+            // "最近同类方块"——后者无 canReach 校验, 缓存里有已挖掉/被埋不可交互的
+            // 旧容器位时, 交互任务会朝它导航到天荒地老。132539 场次实锤: walk 目标
+            // = -134,14,214(刚放的真炉, canReach), 交互目标= -134,15,214(tracker 最近,
+            // 旧炉残位) → NAV-STUCK active-stale 冻结, wander 兜底 9s 一轮不收敛。
+            // 父层每 tick 先于子任务重算并刷新该字段, 取到时必非 null 且新鲜。
+            _openTableTask = new DoToClosestBlockTask(
+                    (java.util.function.Supplier<Vec3d>) null,
+                    InteractWithBlockTask::new,
+                    pos -> Optional.ofNullable(_cachedContainerPosition),
+                    null,
+                    _containerBlocks);
         }
 
         mod.getBlockTracker().trackBlock(_containerBlocks);
@@ -201,7 +213,9 @@ public abstract class DoStuffInContainerTask extends Task {
                 _cachedContainerPosition = stillThere;
                 _placeForceTimer.reset();
                 _justPlacedTimer.reset();
-                return new DoToClosestBlockTask(InteractWithBlockTask::new, _containerBlocks);
+                // (2026-09-11) 直接交互刚验证过的 stillThere, 不走 tracker "最近"
+                // (同 _openTableTask 错位修复: 最近位可能是已挖掉/被埋的旧容器位)。
+                return new InteractWithBlockTask(stillThere);
             }
             // (2026-09-08 空放置修复, 用户"手上没有熔炉谁触发的放置?") 手头无
             // 容器物品时, "重新放置"是纯游荡: PlaceBlockNearbyTask 无物可放,
