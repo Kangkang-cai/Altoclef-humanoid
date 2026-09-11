@@ -21,6 +21,7 @@ import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
+import adris.altoclef.util.helpers.TaskStackSnapshot;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
 import baritone.altoclef.AltoClefSettings;
@@ -292,6 +293,11 @@ public class AltoClef implements ModInitializer {
         // altoclef_diag.log。零行为改动。
         if (inGame()) {
             NavStuckWatchdog.tick(this);
+            // [SNAPSHOT] 任务栈全栈快照 (2026-09-11, 只读诊断): 常态 5s 一条,
+            // NAV-STUCK 冻结期间 1s 一条。补事件驱动日志的盲区 — "父任务每 tick
+            // 重派同一子任务 / 子任务每 tick 空转返回 null" 这类无切换死锁在
+            // START/STOP 日志里完全不可见 (22:17 冻结 39s 实锤)。内部自节流。
+            TaskStackSnapshot.periodicTick(this);
         }
         _blockTracker.postTickTask();
 

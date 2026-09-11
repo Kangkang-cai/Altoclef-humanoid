@@ -36,6 +36,11 @@ public final class NavStuckWatchdog {
 
     private NavStuckWatchdog() {}
 
+    /** 当前是否处于"判卡"状态 (供 TaskStackSnapshot 提频用)。 */
+    public static boolean isStuck() {
+        return _stuckSinceMs != 0;
+    }
+
     private static final long SAMPLE_INTERVAL_MS = 250;
     private static final long WINDOW_MS = 4000;
     private static final long EVAL_INTERVAL_MS = 1000;
