@@ -750,7 +750,12 @@ public class MobDefenseChain extends SingleTaskChain {
                     }
                     double ourStrength = ThreatEvaluator.estimatePlayerStrength(mod);
 
-                    if (ThreatEvaluator.canWin(totalThreat, ourStrength)) {
+                    // (2026-09-11 用户: 空手一律逃不例外) 没剑时连"威胁公式判赢"
+                    // 也不进 FIGHT — 空手 ourStrength 低但仍可能赢过单只近战怪,
+                    // 照样追着打 (实锤 20260911-205655 场次 21:10:07 无装备追骷髅
+                    // 2m48s)。空手 → 直接走下方逃跑。自信战斗/近战直打/must-kill
+                    // 入口已有剑门槛, 此处补齐最后一个 FIGHT 入口。
+                    if (hasWeaponToFight(mod) && ThreatEvaluator.canWin(totalThreat, ourStrength)) {
                         // We can take them: commit to a FIGHT and stay in it until
                         // the whole batch is dead (集中击杀, 2026-08-21) — the old
                         // code re-evaluated every tick from EVALUATE, so the moment
@@ -886,6 +891,19 @@ public class MobDefenseChain extends SingleTaskChain {
         // (2026-08-30 已开火骷髅不撤退, 用户) mustKill 加急战斗中被攻击时,
         // 血量低也【不撤退】—— 逃跑正对骷髅背身, 边跑边被射只会更早死,
         // "特别是血量低的时候, 需要击杀"。只由超时(第 4 步)/目标逃离收场。
+        // (2026-09-11 空手一律逃不例外, 用户) 战斗批次实例能跨死亡/复活存活 —
+        // 实锤 20260911-205655 场次: 21:10:07 开打 → 21:10:13 死亡复活空手
+        // → 同一 KillEntitiesTask 继续追骷髅。每 tick 复查武器, 丢剑(死亡
+        // 复活是主要来源)立即转逃; must-kill 也不例外 (入口闸门保证空手进
+        // 不了 must-kill, 这里兜底复活后清空背包的场景)。
+        if (!hasWeaponToFight(mod)) {
+            Debug.logMessage("Combat decision: RUN (no weapon mid-fight, enemies=%d)", _fightTargets.size());
+            exitFightState();
+            _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
+            setTask(_runAwayTask);
+            _defenseState = DefenseState.RETREAT;
+            return 80;
+        }
         if (!_mustKillAttacker) {
             if (_confidentFight) {
                 // (2026-08-23) 自信战斗中途不走威胁公式/护甲脆弱判定 (无甲时
