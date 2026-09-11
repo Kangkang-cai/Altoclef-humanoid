@@ -11,6 +11,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.container.DoStuffInContainerTask;
 import adris.altoclef.tasks.container.EmptyFurnaceTask;
+import adris.altoclef.tasks.container.FurnaceSmeltGuardTask;
 import adris.altoclef.tasks.container.LootContainerTask;
 import adris.altoclef.tasks.container.PickupFromContainerTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
@@ -2146,9 +2147,15 @@ public class BeatMinecraft2Task extends Task {
      */
     private BlockPos scanNearestNonEmptyFurnace(AltoClef mod) {
         BlockPos player = mod.getPlayer().getBlockPos();
+        // (2026-09-11 互抢豁免) 守卫在值的工作炉 = 冶炼链自家正在用的炉,
+        // 跳过不排 —— 否则闸门拆炉→链重建再放再投→闸门再拆, 2.1s 周期
+        // 互抢死循环 (125529 场次 12 分钟零进度)。守卫 onStop 后静态清除,
+        // 炉若仍非空, 下一轮扫描照常排掉 — 闸门职责不受损。
+        BlockPos guarded = FurnaceSmeltGuardTask.getActiveGuardedFurnacePos();
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.FURNACE)) {
+            if (guarded != null && pos.equals(guarded)) continue;
             if (pos.isWithinDistance(player, FURNACE_GRAB_RANGE)
                     && mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
                     && WorldHelper.isFurnaceNonEmpty(mod, pos)) {

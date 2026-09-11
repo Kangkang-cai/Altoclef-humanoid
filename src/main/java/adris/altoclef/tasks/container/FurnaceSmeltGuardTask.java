@@ -49,6 +49,18 @@ public class FurnaceSmeltGuardTask extends Task {
     private static final long COMMIT_LOST_TICKS = 60;
 
     private final BlockPos _furnacePos;
+
+    // (2026-09-11) 当前正在守卫的工作炉位置 — 静态跨层信号 (同 MineDownExploreTask
+    // getLastFireAnchor 先例)。用途: BeatMinecraft2Task 进下界排空闸门豁免冶炼链
+    // 自家的炉。125529 场次实锤: nether 链为做岩浆桶放炉投料 → 排空闸门看到非空炉
+    // 抢占拆炉 → 链重建再放再投 → 2.1s 周期互抢 12 分钟零进度。守卫存活期间闸门
+    // 跳过该炉, 烧完收集后守卫停止 → 静态清除 → 闸门恢复正常职责。
+    private static BlockPos _activeGuardedPos = null;
+
+    /** 当前有守卫在值的工作炉位置; 无守卫返回 null。 */
+    public static BlockPos getActiveGuardedFurnacePos() {
+        return _activeGuardedPos;
+    }
     private final TimerGame _dwellTimer = new TimerGame(DWELL_SECONDS);
     private final TimerGame _scanTimer = new TimerGame(SCAN_INTERVAL_SECONDS);
     private boolean _screenClosed = false;
@@ -67,6 +79,7 @@ public class FurnaceSmeltGuardTask extends Task {
         _scanTimer.reset();
         _committedKill = null;
         _committedLastSeenTick = Long.MIN_VALUE;
+        _activeGuardedPos = _furnacePos;
     }
 
     @Override
@@ -143,6 +156,9 @@ public class FurnaceSmeltGuardTask extends Task {
     protected void onStop(AltoClef mod, Task interruptTask) {
         // 界面已在本任务里被关掉; 若被外部打断, 不强行重开 —— 父任务
         // (DoStuffInContainerTask) 的 walk&open 分支会自然重开。
+        if (_activeGuardedPos != null && _activeGuardedPos.equals(_furnacePos)) {
+            _activeGuardedPos = null;
+        }
     }
 
     /**
