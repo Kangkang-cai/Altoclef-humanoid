@@ -7,12 +7,14 @@ import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TurnToOpenAreaTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 /**
  * 丢弃光标上的物品。
@@ -24,8 +26,13 @@ import net.minecraft.util.math.BlockPos;
  *
  * (2026-09-03 主动挖开堆头, 用户"四周封闭无开阔空间→丢出落回脚下被重拾→卡死"):
  * 转向后若 TurnToOpenAreaTask 判定四周仍封闭 (最佳方向前方紧贴实心块), 直接丢
- * 会把物品甩到贴脸处被满背包立刻捡回。此时先主动挖开该方向前方可挖的实心块,
- * 打通空间后再重新转向、丢弃。每轮最多挖 MAX_DIG 格, 防无限挖。
+ * 会把物品甩到贴脸处被满背包立刻捡回。
+ *
+ * (2026-09-12 用户钦定隧道丢弃流程, 取代旧"挖一格碰运气"):
+ *   封闭时挖掉【和自己头一样高的、面前两个方块】(d=1 与 d=2 的头高层),
+ *   然后【对准这个洞的中心】(远格中心), 准星命中后丢出 —
+ *   物品沿视线飞进隧道落在 ≥2 格外, 满背包拾取半径够不着, 不再反复吸回。
+ *   近→远顺序挖 (同实例续租), 25s 总超时/2s 瞄准超时兜底照丢。
  *
  * (2026-09-11 弹回熔断器, 现场 11:12:53-11:13:27 实锤: 泥土"开阔"方向丢出撞
  * 3-4 格外墙壁反弹落点 1-2 格内, 原版自动拾取塞回刚腾出的槽位, 2s 一轮循环
@@ -44,13 +51,16 @@ public class ThrowCursorTask extends Task {
     private DestroyBlockTask _digTask;
     // (2026-09-11 弹回熔断) 弹回后先离开上次落点再丢。
     private RunAwayFromPositionTask _runAwayTask;
-    // (2026-09-11) 挖开处计数, 上限防无限挖。
-    private int _dugCount = 0;
-    // 至多挖这么多格 (前后两层都数, 单层够深才算开阔)。
-    // (2026-09-12 v10 封闭空间压缩: 4→1) 20260912-173227 实锤: 封闭口袋合成木镐
-    // 需要腾 1 格, 空手 10s/格 × 4 轮 = 40s+ 才到兜底, 期间还被其他任务抢断。
-    // 挖 1 格后仍封闭就直接丢 (掉落物落原地, 弹回熔断兜底) —— 早丢早解脱。
-    private static final int MAX_DIG = 1;
+    // (2026-09-11) 挖开处计数, 上限防无限挖。 → (2026-09-12 废弃: 改用户钦定隧道流程)
+    // (2026-09-12 用户钦定隧道流程) 隧道目标: 近格(d=1 头高)/远格(d=2 头高)。
+    private BlockPos _tunnelNear;
+    private BlockPos _aimFar;
+    private int _tunnelStartTick = -1;
+    private int _aimStartTick = -1;
+    // 空手 ~7.5s/格 × 2 格 + 富余; 超时照丢 (光标必须清空)。
+    private static final int TUNNEL_TIMEOUT_TICKS = 20 * 25;
+    // 瞄准就位等待上限 (lookAt 是平滑转头)。
+    private static final int AIM_TIMEOUT_TICKS = 20 * 2;
     // (2026-09-12 v10) 弹回熔断"走开"步骤超时: 封闭空间 baritone 无路,
     // RunAwayFromPositionTask 永不 finished → ThrowCursor 卡死在走开这步。
     // 走不动就放弃走开, 照常丢 (死点兜底)。
@@ -64,9 +74,12 @@ public class ThrowCursorTask extends Task {
         _turnTask = new TurnToOpenAreaTask();
         _digTask = null;
         _runAwayTask = null;
-        _dugCount = 0;
         _throwRecorded = false;
         _runAwayStartTick = -1;
+        _tunnelNear = null;
+        _aimFar = null;
+        _tunnelStartTick = -1;
+        _aimStartTick = -1;
         // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         if (!cursor.isEmpty() && mod.getPlayer() != null) {
@@ -101,41 +114,84 @@ public class ThrowCursorTask extends Task {
             _runAwayTask = null;
             _turnTask = new TurnToOpenAreaTask();
         }
-        // 1) 正在挖: 挖完前一直派该挖格任务。
-        if (_digTask != null && !_digTask.isFinished(mod)) {
-            return _digTask;
-        }
-        if (_digTask != null) {
-            // 挖格与挖掘标记重置 — 挖完一处就重新转向评估。
-            _digTask = null;
-            _dugCount++;
-            _turnTask = new TurnToOpenAreaTask();
-            return _turnTask;
+        // 1) (2026-09-12 用户钦定流程) 隧道丢弃: 挖面前两个头高方块 (d=1,d=2)
+        //    → 对准洞中心 (远格中心) → 丢。顺序: 近格→远格→瞄准→丢。
+        //    洞打穿后物品沿视线飞进隧道落在 ≥2 格外, 满背包拾取半径够不着,
+        //    不再"丢在脚边→立刻吸回"。
+        if (_aimFar != null) {
+            // 总超时兜底: 空手 7.5s/格 × 2 + 瞄准富余。超时就照丢 (光标必须清空)。
+            if (WorldHelper.getTicks() - _tunnelStartTick > TUNNEL_TIMEOUT_TICKS) {
+                Debug.logMessage("(ThrowCursorTask) [ThrowTunnel] timeout, throwing anyway");
+                resetTunnel();
+                return throwNow(mod);
+            }
+            // 近格还实心 → 挖近格。
+            if (WorldHelper.isSolid(mod, _tunnelNear)) {
+                if (!WorldHelper.canBreak(mod, _tunnelNear)) {
+                    // 不可挖 (基岩/保护方块) → 隧道放弃, 直接丢兜底。
+                    resetTunnel();
+                    return throwNow(mod);
+                }
+                _digTask = new DestroyBlockTask(_tunnelNear);
+                setDebugState("Throw: digging tunnel near " + _tunnelNear);
+                return _digTask;
+            }
+            // 远格还实心 → 挖远格。
+            if (WorldHelper.isSolid(mod, _aimFar)) {
+                if (!WorldHelper.canBreak(mod, _aimFar)) {
+                    resetTunnel();
+                    return throwNow(mod);
+                }
+                _digTask = new DestroyBlockTask(_aimFar);
+                setDebugState("Throw: digging tunnel far " + _aimFar);
+                return _digTask;
+            }
+            // 洞已打穿 (两格都空) → 每 tick 对准远格中心, 准星命中即丢。
+            if (_aimStartTick < 0) _aimStartTick = WorldHelper.getTicks();
+            LookHelper.lookAt(mod, new Vec3d(_aimFar.getX() + 0.5, _aimFar.getY() + 0.5,
+                    _aimFar.getZ() + 0.5));
+            if (LookHelper.isLookingAt(mod, _aimFar)
+                    || WorldHelper.getTicks() - _aimStartTick > AIM_TIMEOUT_TICKS) {
+                resetTunnel();
+                return throwNow(mod);
+            }
+            setDebugState("Throw: aiming at tunnel center");
+            return null;
         }
         // 2) 转向中: 完成前持续转向。
         if (_turnTask != null && !_turnTask.isFinished(mod)) {
             return _turnTask;
         }
-        // 3) 转向完成。判定是否封闭 → 是则主动挖开堆头。
+        // 3) 转向完成。判定封闭 → 建立隧道目标 (近/远两格头高), 交给上面流程。
         if (_turnTask != null) {
             boolean enclosed = _turnTask.isEnclosed();
             float bestYaw = _turnTask.getBestYaw();
             _turnTask = null;
-            if (enclosed && _dugCount < MAX_DIG) {
-                // 挖开最佳方向前方第一块实心 (最贴脸处)。
-                BlockPos dig = findFirstWallInBestDir(mod, bestYaw);
-                // 挖不到或不该挖(如基岩/液体/关键方块)时不能无限重试 → 回退直接丢。
-                if (dig != null) {
-                    _digTask = new DestroyBlockTask(dig);
-                    return _digTask;
-                }
+            if (enclosed && mod.getPlayer() != null) {
+                double rad = Math.toRadians(bestYaw);
+                int dx = (int) Math.round(-Math.sin(rad));
+                int dz = (int) Math.round(Math.cos(rad));
+                BlockPos p = mod.getPlayer().getBlockPos();
+                // 头高层 = 脚下 +1: 丢弃物品沿胸前 (y=+1) 飞行, 挡路的正是这层。
+                _tunnelNear = p.add(dx, 1, dz);
+                _aimFar = p.add(dx * 2, 1, dz * 2);
+                _tunnelStartTick = WorldHelper.getTicks();
+                _aimStartTick = -1;
+                return null; // 下一 tick 进入隧道流程 (挖近格)。
             }
-            _digTask = null;
-            // 挖无可挖/已达上限 → 直接丢 (兜底, 不再空转卡死)。
+            // 开阔 → 直接丢。
             return throwNow(mod);
         }
-        // 4) 转向完成且判定开阔 → 直接丢。
+        // 4) 兜底: 无转向任务 → 直接丢。
         return throwNow(mod);
+    }
+
+    /** 清掉隧道状态 (超时/不可挖/已丢弃), 回到普通直接丢路径。 */
+    private void resetTunnel() {
+        _tunnelNear = null;
+        _aimFar = null;
+        _digTask = null;
+        _aimStartTick = -1;
     }
 
     // (2026-09-11) 真正进入丢出前的唯一记录点: 记录物品+落点 (供弹回熔断用)。
@@ -150,38 +206,8 @@ public class ThrowCursorTask extends Task {
         return _throwTask;
     }
 
-    // 沿最佳方向前方 (1..MAX_DIG) 找"脚下层(dy=0)或头顶层(dy=1)"第一格实心且可挖的
-    // 块, 返回其坐标; 无则 null。
-    // (2026-09-03 用户"丢出撞到上面/面前: 不是挖头顶, 是挖面前两块"):
-    // 丢弃物品是沿玩家丢出高度(y=+1, 身体/胸前层)飞出的 — 挡路的正是这层前方
-    // d=1..2 的方块, 而不是更高处的"头顶"。旧实现先挖脚下层(dy=0), 物品飞行高度
-    // (dy=1) 的前方方块没被挖, 挖一次重转仍封闭 → 达上限被迫直接丢 → 撞到面前上层
-    // 方块。故: 沿面前距离 d=1..2, 【优先挖丢出高度层 dy=1】(这才是挡飞行的), 同
-    // 距离脚下层 dy=0 也挖 — 即面前两格都挖两层。
-    private BlockPos findFirstWallInBestDir(AltoClef mod, float yaw) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
-        double rad = Math.toRadians(yaw);
-        int dx = (int) Math.round(-Math.sin(rad));
-        int dz = (int) Math.round(Math.cos(rad));
-        BlockPos p = mod.getPlayer().getBlockPos();
-        for (int d = 1; d <= MAX_DIG; d++) {
-            BlockPos cFoot = p.add(dx * d, 0, dz * d);
-            BlockPos cHead = p.add(dx * d, 1, dz * d);
-            // 优先挖丢出高度层(dy=1)= 物品实际飞行层; 该层可挖就挖它。
-            if (WorldHelper.isSolid(mod, cHead) && WorldHelper.canBreak(mod, cHead)) {
-                return cHead;
-            }
-            // 同距离脚下层(dy=0)也要挖 — 面前两格都挖两层。
-            if (WorldHelper.isSolid(mod, cFoot) && WorldHelper.canBreak(mod, cFoot)) {
-                return cFoot;
-            }
-            // 该距离两层都不可挖的实心 → 这个方向挖不开, 放弃换方向重转为丢。
-            if (WorldHelper.isSolid(mod, cFoot) || WorldHelper.isSolid(mod, cHead)) {
-                return null;
-            }
-        }
-        return null; // 前方已是通路, 无需挖 (理论封闭判定不该到这)。
-    }
+    // (2026-09-12 挖墙选点逻辑废弃: findFirstWallInBestDir 删除, 改为用户钦定的
+    //  "挖面前两个头高方块 → 对准洞中心 → 丢" 隧道流程, 见 onTick 分支 1/3。)
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
