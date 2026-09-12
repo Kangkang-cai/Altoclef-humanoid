@@ -5,6 +5,8 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.util.helpers.PillarJumpHelper;
+import adris.altoclef.util.helpers.WaterStandHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
 import net.minecraft.client.MinecraftClient;
@@ -31,9 +33,18 @@ import net.minecraft.util.math.Vec3d;
  *      (3) 处于导航/挖掘类主任务（复用 movement 包名判定），非战斗。
  *      (4) 屏幕关闭 (非容器/合成/聊天/死亡)。
  *      (5) 3 秒（SWIM_STUCK_WINDOW_TICKS）内玩家水平位移 < 1 格 → 判卡住。
- *  - 触发动作 = 下潜向前游 DIVE_HOLD_TICKS 格：面向当前前进方向 + 按住
- *    FORWARD + SNEAK (下沉) + SPRINT (加速)，持续后释放；自带冷却，避免
- *    每 tick 狂潜。释放后给 bot 一段时间恢复 (RE_DIVE_COOLDOWN_TICKS)。
+ *  - 触发动作 = 兜底阶梯 (2026-09-12 升级):
+ *      ① 脚下垫方块止浮 (WaterStandHelper, 优先): 现场 20260912-085838 实锤
+ *         bot 在水面 y7↔9 每 0.5s 上下振荡 (bobbing), dive+sprint 10+ 次零
+ *         进展, 目标方块距离随 y 振荡在可达边缘闪进闪出, 挖掘无法进行。
+ *         往脚下水格垫一块建材, bot 落上站定后瞄准/可达/挖掘速度同时恢复
+ *         (水中悬空挖掘有 5x 水 × 5x 悬空 = 25x 惩罚, 浮着挖不现实)。
+ *         站稳后给 6s 宽限期不注入任何输入, 让导航自己走起来。
+ *      ② 下潜向前游 (原有路径): 无建材 / 没得垫 (深水无底、水草挡路、
+ *         放置禁区) / 垫方块窗口超时 / 站稳但非本反应所垫 (浅水底,
+ *         垫档让位防死结) → 面向当前前进方向 + 按住 FORWARD +
+ *         SNEAK (下沉) + SPRINT (加速), 短暂下潜重新咬合水面。
+ *    两档都自带冷却, 避免每 tick 狂触发。
  *  - 只加行为+日志，不改任何既有任务/优先级数值/状态机跳转。
  *  - 绝不调用 getPriority()（避开 setTask→getPriority→setTask 递归铁律）。
  */
@@ -45,6 +56,14 @@ public class SwimDiveChain extends TaskChain {
     private static final int DIVE_HOLD_TICKS = 60;
     // 下潜后冷却（tick）。触发一次后即使仍卡，过一段时间才允许再次下潜。
     private static final long RE_DIVE_COOLDOWN_TICKS = 100; // 5s
+    // 垫方块尝试窗口（tick, 60 ≈3s）：覆盖 1-2 个 bob 周期, 内含平滑转向落地。
+    private static final long PLACE_WINDOW_TICKS = 60;
+    // 垫方块成功站稳后的宽限期（tick, 120 ≈6s）：让导航自己走起来,
+    // 期间不再触发垫/潜, 避免把站着的 bot 又按回水里。
+    private static final long STAND_GRACE_TICKS = 120;
+    // 站稳状态记忆（tick, 300 ≈15s）：刚垫完的"站稳"才值得宽限；
+    // 超过这个时间的 SUPPORTED 说明 bot 本来就站在浅水底, 垫方块帮不上。
+    private static final long PLACE_STAND_MEM_TICKS = 300;
     // 卡住判定：窗口内玩家水平位移 < 1 格即视为原地。
     private static final double STUCK_MIN_MOVE_SQR = 1.0 * 1.0;
     // 空气充足阈值（剩余空气百分比），低于则不触发下潜以免溺水。
@@ -59,6 +78,18 @@ public class SwimDiveChain extends TaskChain {
     private boolean _diving = false;
     private int _diveTicksLeft = 0;
     private long _lastDiveTick = Long.MIN_VALUE;
+
+    // 垫方块状态 (2026-09-12)：进行中标志 + 本轮窗口起点。
+    // 注意 _standGraceUntilTick 故意【不】随 resetState 清零 —— 站稳宽限要
+    // 跨过"离水→重置窗口"的常规重置路径存续 6s, 到期自然失效。
+    private boolean _placing = false;
+    private long _placeStartTick = Long.MIN_VALUE;
+    private long _standGraceUntilTick = Long.MIN_VALUE;
+    // 最近一次垫方块成功的 tick（站稳归属判定）+ 垫档让位截止 tick
+    // （SUPPORTED 但非本反应垫的 → 垫档帮不上, 冷却期内直接走下潜档,
+    //   防止"垫档空转、下潜档永远轮不到"的阶梯死结）。均不随 resetState 清零。
+    private long _lastPlacedTick = Long.MIN_VALUE;
+    private long _skipPlaceUntilTick = Long.MIN_VALUE;
 
     // ==== [SWIM-DIVE-DIAG] 2026-09-10 零行为改动诊断 ====
     // 现场：水中卡住全靠 NAV-STUCK/超时兜底，整场日志 0 条 [SWIM-DIVE]。
@@ -92,8 +123,7 @@ public class SwimDiveChain extends TaskChain {
                 mod.getInputControls().release(Input.SPRINT);
             } catch (Exception ignored) { }
             releaseDive(mod);
-            _windowStartTick = -1;
-            _windowStartPos = null;
+            resetState();
         }
         // 恒定负无穷：永不抢占任何任务链。
         return Float.NEGATIVE_INFINITY;
@@ -109,6 +139,12 @@ public class SwimDiveChain extends TaskChain {
         if (MinecraftClient.getInstance().currentScreen != null) {
             releaseDive(mod);
             resetState();
+            return;
+        }
+
+        // 正在垫方块：每 tick 瞄准+尝试放置（不走下潜检测）。
+        if (_placing) {
+            tickPlace(mod);
             return;
         }
 
@@ -208,11 +244,21 @@ public class SwimDiveChain extends TaskChain {
                 writeDiag(mod, "ACCUMULATING streak=" + stuckForTicks
                         + "/" + SWIM_STUCK_WINDOW_TICKS);
             }
+        } else if (nowTick < _standGraceUntilTick) {
+            // (2026-09-12) 刚垫方块站稳：给导航 6s 自己走起来, 期间不注入。
+            diagGate(mod, "STAND_GRACE");
         } else if (_lastDiveTick != Long.MIN_VALUE
                 && (nowTick - _lastDiveTick) < RE_DIVE_COOLDOWN_TICKS) {
             diagGate(mod, "COOLDOWN_BLOCKING");
-        } else {
+        } else if (!PillarJumpHelper.hasMaterials(mod, PillarJumpHelper.allMaterials())) {
+            // 无建材 → 旧路径：直接下潜。
             triggerDive(mod, stuckForTicks);
+        } else if (nowTick < _skipPlaceUntilTick) {
+            // 垫档刚让位（站在浅水底垫不上）→ 冷却期内走下潜。
+            triggerDive(mod, stuckForTicks);
+        } else {
+            // 有建材 → 优先垫方块止浮；窗口内失败则回退下潜（下一窗口）。
+            startPlaceUnderfoot(mod, stuckForTicks);
         }
     }
 
@@ -240,6 +286,78 @@ public class SwimDiveChain extends TaskChain {
         } catch (Throwable ignored) {
             // 诊断绝不影响主逻辑
         }
+    }
+
+    /**
+     * (2026-09-12) 开始垫方块止浮：进入 place 状态, 后续由 tickPlace 每 tick
+     * 推进（探测→瞄准→interactBlock）。写 [SWIM-DIVE] 日志, 格式与下潜一致。
+     */
+    private void startPlaceUnderfoot(AltoClef mod, long stuckForTicks) {
+        _placing = true;
+        _placeStartTick = WorldHelper.getTicks();
+        Vec3d pos = mod.getPlayer().getPos();
+        Task main = mod.getUserTaskChain().getCurrentTask();
+        String m = "[SWIM-DIVE] stuck in water -> place block underfoot (stop bobbing). player=" + pos
+                + " task=" + (main == null ? "null" : main.toString())
+                + " stuckFor=" + stuckForTicks + " window=" + PLACE_WINDOW_TICKS;
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * 垫方块单 tick 推进。退出路径（站稳/没得垫/超时）统一 endPlace + 重开
+     * 卡住窗口 —— 失败时下潜兜底在下一个窗口自然接管, 无需在此直接触发。
+     */
+    private void tickPlace(AltoClef mod) {
+        long nowTick = WorldHelper.getTicks();
+        if (mod.getPlayer() == null) {
+            resetState();
+            return;
+        }
+        WaterStandHelper.Spot spot = WaterStandHelper.probe(mod, mod.getPlayer());
+        if (spot.status == WaterStandHelper.Status.SUPPORTED) {
+            if (nowTick - _lastPlacedTick <= PLACE_STAND_MEM_TICKS) {
+                // 站在本反应刚垫的方块上：宽限 6s 让导航走起来
+                _standGraceUntilTick = nowTick + STAND_GRACE_TICKS;
+                writeDiag(mod, "PLACE_ALREADY_SUPPORTED");
+            } else {
+                // 没垫过东西也"站稳" = 本来就站在浅水底, 垫方块帮不上
+                // → 垫档让位, 冷却期内走下潜档（防阶梯死结）
+                _skipPlaceUntilTick = nowTick + RE_DIVE_COOLDOWN_TICKS;
+                writeDiag(mod, "PLACE_SUPPORTED_NO_PLACEMENT");
+            }
+            endPlace(mod);
+            return;
+        }
+        if (spot.status == WaterStandHelper.Status.NONE) {
+            // 深水够不着 / 水草挡路 / 放置禁区 → 本轮放弃, 回退下潜兜底
+            writeDiag(mod, "PLACE_NO_SPOT");
+            endPlace(mod);
+            return;
+        }
+        if (nowTick - _placeStartTick >= PLACE_WINDOW_TICKS) {
+            writeDiag(mod, "PLACE_TIMEOUT");
+            endPlace(mod);
+            return;
+        }
+        if (spot.status == WaterStandHelper.Status.WAIT) {
+            // bob 下浮半程占住目标格, 等上浮再放（窗口内重试, 节流记录）
+            diagGate(mod, "PLACE_WAIT_PLAYER_BOX");
+            return;
+        }
+        // FOUND: 瞄准承托面 → 准星落上 → interactBlock 放置
+        if (WaterStandHelper.placeTick(mod, spot.floor)) {
+            _lastPlacedTick = nowTick;
+            _standGraceUntilTick = nowTick + STAND_GRACE_TICKS;
+            writeDiag(mod, "PLACE_PLACED");
+            endPlace(mod);
+        }
+    }
+
+    private void endPlace(AltoClef mod) {
+        _placing = false;
+        _placeStartTick = Long.MIN_VALUE;
+        resetWindow();
     }
 
     /**
@@ -295,6 +413,8 @@ public class SwimDiveChain extends TaskChain {
         resetWindow();
         _diving = false;
         _diveTicksLeft = 0;
+        _placing = false;
+        _placeStartTick = Long.MIN_VALUE;
     }
 
     @Override
