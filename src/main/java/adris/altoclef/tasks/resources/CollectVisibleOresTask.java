@@ -98,6 +98,8 @@ public class CollectVisibleOresTask extends Task {
     // 2026-08-28 由 3s 缩短, 与感知延迟一致)。
     private long _lastRefreshMs = 0;
     private static final long REFRESH_INTERVAL_MS = 1000;
+    // (2026-09-12 批次原子性) "本批已锁死"诊断日志每批只打一条, 避免 1s 节流下刷屏。
+    private boolean _engagedLockLogged = false;
 
     @Override
     protected Task onTick(AltoClef mod) {
@@ -108,6 +110,7 @@ public class CollectVisibleOresTask extends Task {
             if (countedItems(mod, _activePlan) >= _activePlan.cap() || _active.isFinished(mod)) {
                 _active = null;
                 _activePlan = null;
+                _engagedLockLogged = false;
             } else {
                 // (2026-08-22 动态刷新) 导航/挖矿途中每 3 秒重新扫描一次:
                 // 若视野内出现"明显更丰富"的其他矿种, 立即切换目标 —
@@ -117,6 +120,24 @@ public class CollectVisibleOresTask extends Task {
                 long nowMs = System.currentTimeMillis();
                 if (nowMs - _lastRefreshMs >= REFRESH_INTERVAL_MS) {
                     _lastRefreshMs = nowMs;
+                    // (2026-09-12 批次原子性, 用户"挖完一处的矿然后全部拾取完才换到下一处")
+                    // 本批次一旦已经"接触"矿石 (破坏过目标方块, 或感知范围内已有目标掉落物
+                    // 待拾取), 就锁死到本批结束 — 动态刷新退化为"仅纯导航阶段允许转向更富
+                    // 矿脉", 保留 2026-08-22 "被导航导向某矿途中发现可贪心矿应立马转向" 的
+                    // 设计意图, 同时杜绝挖到一半/正在拾取时被切走。
+                    // 实锤 (21:51:05 会话 20260912-212737): 铁矿批次挖空 163/-183 后正走去
+                    // 捡掉落物 (掉落物 (175,20,-172) 距 bot 仅 3.68 格), 刷新见隔壁 1 块金矿
+                    // (vis 1 vs 0) 判"更丰富"整批切走 → 铁掉落物留原地、金矿 1.9s 后放弃
+                    // 探索, 净损 ~4s 两处皆空。切换判据里的 curV=0 本就是"刚被自己挖空"的
+                    // 表现, 不等于"这处矿不值得挖"。
+                    if (_active.hasEngagedOre(mod)) {
+                        if (!_engagedLockLogged) {
+                            _engagedLockLogged = true;
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[GreedyOre] batch engaged — switching locked until this batch finishes");
+                        }
+                        return _active;
+                    }
                     Map<OrePlan, OreStat> counts = countAllVisible(mod);
                     OrePlan best = null;
                     int bestCount = 0;
@@ -167,6 +188,7 @@ public class CollectVisibleOresTask extends Task {
         // 的"16 格内扫尾挖完"把眼前这处矿清光即停, 不再追着凑 32 硬挖到底。
         _active = new MineAndCollectTask(new ItemTarget(best.item(), 1), best.blocks(), best.req(), true);
         _activePlan = best;
+        _engagedLockLogged = false; // 新批次开始, 锁死日志重新计数
         setDebugState("Greedy mining " + best.item().toString());
         return _active;
     }

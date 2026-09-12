@@ -402,6 +402,24 @@ public class MineAndCollectTask extends ResourceTask {
         return true;
     }
 
+    /**
+     * (2026-09-12 批次原子性, 用户"挖完一处的矿然后全部拾取完才换到下一处") 本批次是否
+     * 已经"接触"过矿石 —— 破坏过目标方块, 或感知范围内已有目标掉落物待拾取。
+     *
+     * 供 CollectVisibleOresTask 判断能否中途换矿种: 已接触 → 锁死到本任务 isFinished
+     * (该处挖空 + 掉落物拾完); 未接触 (纯导航阶段) → 仍允许转向更富矿脉, 保留
+     * 2026-08-22 "被导航导向某矿的途中, 发现可贪心矿应立马转向" 的设计意图。
+     *
+     * 实锤 (2026-09-12 21:51:05 会话 20260912-212737): 贪心批次把 163/-183 那片铁矿
+     * 挖空后正走去捡掉落物 (掉落物 (175,20,-172) 距 bot 仅 3.68 格), 动态刷新见隔壁
+     * 1 块金矿 (vis 1 vs 0) 判"更丰富"整批切走 → 铁掉落物留原地、金矿 1.9s 后放弃
+     * 探索, 净损 ~4s 两处皆空。
+     */
+    public boolean hasEngagedOre(AltoClef mod) {
+        return _subtask.miningTargetBrokenMs() != 0
+                || mod.getEntityTracker().itemDropped(_itemTargets);
+    }
+
     private static final double MINE_EVERYTHING_RANGE = 16;
 
     private boolean hasNearbyMineableTarget(AltoClef mod) {
