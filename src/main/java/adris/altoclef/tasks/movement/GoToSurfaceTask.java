@@ -257,7 +257,7 @@ public class GoToSurfaceTask extends Task {
      *  (本可以放心挖上去) 误判成封闭含水层。 */
     private boolean eyesUnderwater(AltoClef mod) {
         Vec3d eye = mod.getPlayer().getEyePos();
-        BlockPos eyeBlock = new BlockPos(eye);
+        BlockPos eyeBlock = new BlockPos((int) eye.x, (int) eye.y, (int) eye.z);
         return mod.getWorld().getBlockState(eyeBlock).getFluidState().isNotEmpty();
     }
 
