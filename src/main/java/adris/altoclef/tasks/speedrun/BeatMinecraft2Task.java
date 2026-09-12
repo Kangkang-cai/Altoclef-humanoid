@@ -1927,7 +1927,14 @@ public class BeatMinecraft2Task extends Task {
                 // 仍因 !ironArmorMet 强推铁件 → 铁件覆盖钻石件 → 下 tick Path A 见
                 // 钻石没了又装回 → 反复横跳 (日志 TaskPingPong 实锤)。已有钻石装具
                 // 时跳过铁套阶段 — 钻石>铁, 走钻石路径后不再强推铁套。
-                if (!ironArmorMet(mod) && !eyeGearSatisfied && !hasDiamondArmorEquipped(mod)) {
+                // (2026-09-12 金靴↔铁靴抢脚槽, 用户"任务打架") Path A 的
+                // COLLECT_EYE_ARMOR 含金靴, Path B 的铁套含铁靴, 两者都打
+                // 脚部槽位: Path A 穿金靴 → Path B 见铁靴未穿换上铁靴(金靴掉回
+                // 背包) → Path A 又见金靴未穿 → 每 2s 振荡 (tasks.log 10:49
+                // 实锤)。09-01 的钻石守卫盖不住金靴。定案(用户): 金靴优先,
+                // 脚上已有金靴则铁套让位 — 进下界猪灵中立价值高于铁靴 1 点护甲。
+                if (!ironArmorMet(mod) && !eyeGearSatisfied && !hasDiamondArmorEquipped(mod)
+                        && !StorageHelper.isArmorEquipped(mod, Items.GOLDEN_BOOTS)) {
                     diagIronPhase(mod, "make iron armor set",
                             "ironArmorMet=" + ironArmorMet(mod)
                                     + " eyeGearSatisfied=" + eyeGearSatisfied);
