@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.util.helpers.JumpObstructionHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
@@ -131,6 +132,19 @@ public final class JumpStuckResolver {
         //    立刻把它换掉 (实锤: 每次只活 1 tick)。期间不重估、不 forceCancel,
         //    撤销路径会把正在进行的挖掘/探索打断。
         if (_activeOrder != null) {
+            // (2026-09-12 14:00:53 假死现场, 这条必须保住) 防"处置任务成为自己的后代"。
+            // 处置任务内部可能再跑出一个 CustomBaritoneGoalTask 子类: DestroyBlockTask
+            // 发现"要挖的方块就在自己脚下且它下面危险"时返回 RunAwayFromPositionTask
+            // —— 而 RunAwayFromPositionTask 正是 CustomBaritoneGoalTask, onTick 第一件
+            // 事就是回来调本函数。若无条件续租, 同一个 DestroyBlockTask 会被发回给它
+            // 自己的后代 → 单 tick 内 128 层嵌套 (每层一次 baritone setGoalAndPath),
+            // 日志只留一条 TASK CHAIN RECURSION OVERFLOW 然后渲染线程再无输出, 世界
+            // 保存线程却照常工作 = 假死 (用户"崩溃了")。
+            // 判据: 本 tick 的链里已经出现这个处置任务实例 = 它就在当前递归栈上。
+            // TaskChain._cachedTaskChain 每 tick 开头 clear, 每个被 tick 的任务都会
+            // addTaskToChain, 所以这一条对"深层嵌套"是精确的。用 == 而非 equals:
+            // Task.equals 走 isEqual (同类同参数即相等), 同坐标的另一个任务会误判。
+            if (isOrderOnStack(mod)) return null;
             int leaseNow = WorldHelper.getTicks();
             boolean leaseOver = leaseNow - _orderStartTick >= ORDER_LEASE_TICKS;
             boolean done;
@@ -246,6 +260,23 @@ public final class JumpStuckResolver {
                 + _sameSpotCount + ")");
         mod.getClientBaritone().getPathingBehavior().forceCancel();
         return null;
+    }
+
+    /**
+     * (2026-09-12) 当前 tick 的任务链里是否已经出现 {@link #_activeOrder}。
+     * true = 处置任务已经在当前递归栈上 (它自己或它的后代又调回了本函数) →
+     * 绝不能再把它发一遍, 否则同一实例成为自己的子任务 = 无限嵌套。
+     */
+    private static boolean isOrderOnStack(AltoClef mod) {
+        try {
+            TaskChain chain = mod.getTaskRunner().getCurrentTaskChain();
+            if (chain == null) return false;
+            for (Task t : chain.getTasks()) {
+                if (t == _activeOrder) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     /**

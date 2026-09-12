@@ -46,6 +46,9 @@ import java.util.List;
  *   - shouldAvoidBreaking (行为栈谓词, 如 PortalGuard "永不拆门") → 跳过。
  *   - 带 BlockEntity 的方块 (箱子/熔炉/漏斗/告示牌) → 挖了内容物撒一地 → 跳过。
  *   - 距玩家 > {@link #MAX_REACH_MANHATTAN} 格 → 不挖 (够不着, 只会引入新的卡死)。
+ *   - 比玩家脚底更低的位置 → 不挖 (2026-09-12): 本模块语义是"跳不上去/顶不过去",
+ *     向下挖解决不了问题, 且会触发 DestroyBlockTask 的"站在危险方块上方"分支 →
+ *     任务环 (见 {@link #isDiggableObstruction} 注释)。
  *
  * 找不到任何可挖障碍时返回 null, 调用方应改为"撤销当前路径逼 baritone 换路"
  * (baritone 没有路径级禁行注入, IPathingBehavior 只暴露 forceCancel/cancelEverything,
@@ -139,6 +142,14 @@ public final class JumpObstructionHelper {
     /** 够近 + 可挖 + 挖了有意义 (见类注释的闸门清单)。 */
     private static boolean isDiggableObstruction(AltoClef mod, BlockPos feet, BlockPos pos) {
         if (pos.equals(feet)) return false;
+        // (2026-09-12 14:00:53 假死现场) 不挖比自己脚底更低的位置。
+        // 本模块的语义是"跳不上去 / 顶不过去", 向下挖既解决不了, 还会踩中
+        // DestroyBlockTask 的"站在危险方块上方"分支 —— 它返回 RunAwayFromPositionTask
+        // (一个 CustomBaritoneGoalTask), 那个任务回头又调 JumpStuckResolver, 若
+        // resolver 正在租用这个 DestroyBlockTask 就构成任务环 (单 tick 无限嵌套 →
+        // 假死)。现场: bot 在浅水给自己垫了一块方块站上去, baritone 路径的 next
+        // 节点落到脚下那块垫块 (140,62,44) → 被判"障碍" → 要挖自己脚下的方块。
+        if (pos.getY() < feet.getY()) return false;
         if (manhattan(pos, feet) > MAX_REACH_MANHATTAN) return false;
         try {
             if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
