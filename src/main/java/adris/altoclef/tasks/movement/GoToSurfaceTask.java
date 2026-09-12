@@ -103,7 +103,7 @@ public class GoToSurfaceTask extends Task {
         NONE,
         /** 挖脚下 1 格 (豁免"没镐避让"), 腾出放台空间。 */
         DIG_FOOT,
-        /** 交给通用合成链: 原木→板→台→放台→棍→木镐。 */
+        /** 交给通用合成链: 台→放台→(棍)→石镐/木镐 (按现场材料选)。 */
         CRAFT_PICK,
         /** 已完成或失败不再重试 (本实例生命周期)。 */
         DONE
@@ -119,6 +119,8 @@ public class GoToSurfaceTask extends Task {
 
     private PickEscapePhase _pickPhase = PickEscapePhase.NONE;
     private Task _pickSubTask = null;
+    /** CRAFT_PICK 阶段选定的合成目标 ("stone_pickaxe"/"wooden_pickaxe")。 */
+    private String _pickTargetName = "wooden_pickaxe";
     private int _pickEscapeStartTick = -1;
     /** DIG_FOOT 阶段锁定的脚下目标格: 派发后一直等它变非实心才推进 (防每 tick
      *  重选目标把"还没挖完"误判成"挖完了")。 */
@@ -498,13 +500,17 @@ public class GoToSurfaceTask extends Task {
         if (_pickPhase == PickEscapePhase.DONE) return null;
         if (_pickPhase == PickEscapePhase.NONE) {
             if (!shouldTryPickEscape(mod)) {
-                // (2026-09-12 v13) 不触发必须留痕: 20260912-183017 零日志黑盒,
-                // 不知道是没镐误判还是木头计数口径问题。
+                // (2026-09-12 v13/v14) 不触发必须留痕: 20260912-183017 零日志黑盒。
+                int _lg = mod.getItemStorage().getItemCount(ItemHelper.LOG);
+                int _pl = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
+                int _st = mod.getItemStorage().getItemCount(Items.STICK);
+                int _cb = mod.getItemStorage().getItemCount(Items.COBBLESTONE);
                 Debug.logToFile("altoclef_diag.log",
                         "[GoToSurface] pick-escape skip: pickaxe=" + hasAnyPickaxe(mod)
-                                + " logs*4+planks=" + (mod.getItemStorage().getItemCount(ItemHelper.LOG) * 4
-                                + mod.getItemStorage().getItemCount(ItemHelper.PLANKS))
-                                + " (need >=9) at " + player);
+                                + " logs=" + _lg + " planks=" + _pl + " sticks=" + _st
+                                + " cobble=" + _cb
+                                + " (stone need cobble>=3,sticks>=2; wood need planks+logs*4>=3+2+4 - 已有) at "
+                                + player);
                 _pickPhase = PickEscapePhase.DONE;
                 return null;
             }
@@ -552,11 +558,17 @@ public class GoToSurfaceTask extends Task {
                     finishPickEscape(mod);
                     return null;
                 }
-                // 通用链 (原木→木板→台→放台→木棍→木镐), 不自造合成逻辑。
+                // 通用链, 不自造合成逻辑。目标按现场材料选 (2026-09-12 v14,
+                // 用户钦定石镐优先): 圆石≥3+棍≥2 → stone_pickaxe, 否则 wooden_pickaxe。
                 if (_pickSubTask == null || _pickSubTask.isFinished(mod)) {
-                    _pickSubTask = TaskCatalogue.getItemTask("wooden_pickaxe", 1);
+                    boolean stone = mod.getItemStorage().getItemCount(Items.COBBLESTONE) >= 3
+                            && mod.getItemStorage().getItemCount(Items.STICK) >= 2;
+                    _pickTargetName = stone ? "stone_pickaxe" : "wooden_pickaxe";
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] pick-escape crafting " + _pickTargetName);
+                    _pickSubTask = TaskCatalogue.getItemTask(_pickTargetName, 1);
                 }
-                setDebugState("Escape: crafting wooden pickaxe (generic chain)");
+                setDebugState("Escape: crafting " + _pickTargetName + " (generic chain)");
                 return _pickSubTask;
             }
             default:
@@ -566,10 +578,21 @@ public class GoToSurfaceTask extends Task {
 
     private boolean shouldTryPickEscape(AltoClef mod) {
         if (hasAnyPickaxe(mod)) return false;
-        // 木头等价板数 ≥ 9 (台 4 + 棍 2 + 镐 3)。
+        // (2026-09-12 v14) 口径修正: 用户现场"有足量木板和木棍, 还有一堆石头" —
+        // 旧口径只算 logs*4+planks, ① 现成的木棍不计入 (棍 2 板等价被白扣),
+        // ② 圆石不算 → 石镐永远不触发。
         int logs = mod.getItemStorage().getItemCount(ItemHelper.LOG);
         int planks = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
-        return logs * 4 + planks >= 9;
+        int sticks = mod.getItemStorage().getItemCount(Items.STICK);
+        int cobble = mod.getItemStorage().getItemCount(Items.COBBLESTONE);
+        boolean hasTable = mod.getItemStorage().getItemCount(Items.CRAFTING_TABLE) >= 1;
+        boolean tableMakeable = hasTable || planks >= 4 || logs >= 1;
+        // 石镐优先 (用户钦定): 圆石≥3 + 棍≥2 + 台可得。
+        if (cobble >= 3 && sticks >= 2 && tableMakeable) return true;
+        // 木镐兜底: 板等价 = planks + logs*4,
+        // 消耗 = 镐 3 + 棍 (已有 2 支免, 否则 +2) + 台 (已有免, 否则 +4)。
+        int need = 3 + (sticks >= 2 ? 0 : 2) + (hasTable ? 0 : 4);
+        return logs * 4 + planks >= need;
     }
 
     private void finishPickEscape(AltoClef mod) {
