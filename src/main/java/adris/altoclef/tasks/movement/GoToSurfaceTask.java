@@ -2,12 +2,17 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -91,6 +96,38 @@ public class GoToSurfaceTask extends Task {
     /** 头顶向上找"可挖实心"的扫描上限 (玩家身体占 2 格, 所以从 dy=1 扫安全)。 */
     private static final int DIG_WINDOW = 4;
 
+    // ===== (2026-09-12 v8) 封闭空间做镐侧线 =====
+    // 用户困境: 全封闭两格空间放不了工作台 → 没法做镐 → "没镐避让"谓词把
+    // baritone 寻路和挖垫判定同时锁死 (avoidBreaking at y68 实锤)。用户拍板
+    // 序列: 挖 1 格脚下腾位置 → 放工作台 → 合成石镐 → 换镐再挖穿。
+    private enum PickEscapePhase {
+        /** 未触发 / 不适用。 */
+        NONE,
+        /** 挖脚下 1 格 (豁免"没镐避让"), 掉落后腾出放台空间。 */
+        DIG_FOOT,
+        /** 在身旁放工作台。 */
+        PLACE_TABLE,
+        /** 合成石镐 (交给 TaskCatalogue 合成链)。 */
+        CRAFT_PICK,
+        /** 已完成或失败不再重试 (本实例生命周期)。 */
+        DONE
+    }
+
+    private static final Item[] PICKAXE_ITEMS = new Item[]{
+            Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.IRON_PICKAXE,
+            Items.GOLDEN_PICKAXE, Items.DIAMOND_PICKAXE, Items.NETHERITE_PICKAXE
+    };
+
+    /** 做镐侧线整体超时 (空手挖石 7.5s/格 + 放置 + 合成, 120s 足够, 卡死兜底)。 */
+    private static final int PICK_ESCAPE_TIMEOUT_TICKS = 20 * 120;
+
+    private PickEscapePhase _pickPhase = PickEscapePhase.NONE;
+    private Task _pickSubTask = null;
+    private int _pickEscapeStartTick = -1;
+    /** DIG_FOOT 阶段锁定的脚下目标格: 派发后一直等它变非实心才推进 (防每 tick
+     *  重选目标把"还没挖完"误判成"挖完了")。 */
+    private BlockPos _footDigTarget = null;
+
     /** 导航分段阶梯 (格): 找不到路时逐级缩短, 让 bot 几格几格贴上去。 */
     private static final int[] STEP_LADDER = {16, 8, 4, 2};
 
@@ -100,7 +137,9 @@ public class GoToSurfaceTask extends Task {
      *   等 4s 时它已经把"放弃"流程走完一轮了。) */
     private static final int STUCK_TICKS_TO_SCAFFOLD = 20 * 2;
     /** 挖垫模式连续这么久 Y 没涨 → 放弃。 */
-    private static final int SCAFFOLD_NO_PROGRESS_TICKS = 20 * 15;
+    /** 挖垫无进展放弃阈值。(2026-09-12 v8) 15s→30s: 空手挖石 7.5s/格 (逃生
+     *  豁免后没镐也挖), 挖穿一格+垫上经常 >15s, 15s 会把正常空手挖掘判成卡死。 */
+    private static final int SCAFFOLD_NO_PROGRESS_TICKS = 20 * 30;
     /** 挖垫模式总时长上限。 */
     private static final int SCAFFOLD_TOTAL_TIMEOUT_TICKS = 20 * 90;
     /** (2026-09-12 重见天日) y>=58 封闭顶板下挖垫的总时长上限: 可能要空手
@@ -309,6 +348,19 @@ public class GoToSurfaceTask extends Task {
         _pitEscapeY = null;
         BlockPos player = mod.getPlayer().getBlockPos();
 
+        // (2026-09-12 v8) 逃生挖掘豁免: 本任务在深地下执行期间, 放行 avoidBlockBreak
+        // 谓词里的"没镐避让"(shouldAvoidUnminable) 那一条。必须在进 canScaffold 判定
+        // 【之前】开 —— baritoneStep 的挖垫入口闸门也查 shouldAvoidBreaking, 若判定
+        // 时刻豁免未开, 没镐时永远进不了挖垫 (193,68,-484 avoidBreaking 实锤)。
+        // 单一出口每 tick 重算, onStop 兜底复位 —— 防止豁免残留导致平时乱挖。
+        // 深地下之外 (峡谷塔逃等) 不豁免; 硬保护 (传送门/显式保护) 永远生效。
+        mod.setEscapeDigOverride(deep);
+
+        // (2026-09-12 v8 封闭空间做镐侧线): 挖 1 格脚下 → 放台 → 做石镐。
+        // 完成后镐子在手, "没镐避让"自然解除, baritone 恢复寻路 + 快速挖掘。
+        Task pickEscape = maybePickEscape(mod, player);
+        if (pickEscape != null) return pickEscape;
+
         if (_mode == AscentMode.SCAFFOLD_UP) {
             return tickScaffoldUp(mod, player);
         }
@@ -397,6 +449,125 @@ public class GoToSurfaceTask extends Task {
      *   3. 头顶通了但还没水 → 垫塔把自己送上去 (这一步是"不靠水流下来"的关键)。
      *   4. 没得挖也没材料垫 → 放弃。
      */
+    /** bot 是否持有任意镐 (含物品栏+副手+光标口径)。 */
+    private boolean hasAnyPickaxe(AltoClef mod) {
+        for (Item pick : PICKAXE_ITEMS) {
+            if (mod.getItemStorage().getItemCount(pick) > 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-12 v8) 封闭空间做镐侧线。触发条件 (全部满足才进, 只试一次):
+     *  - 没有任何镐;
+     *  - 圆石 >= 3 且木棍 >= 2 (石镐配方);
+     *  - 包里有工作台成品 (没台不试 —— 台收不回来是合成链 A 修复管的事,
+     *    现场实锤台已做好在输出槽, A 修复后能收进包)。
+     * 阶段推进 DIG_FOOT → PLACE_TABLE → CRAFT_PICK → DONE。
+     * 返回 null = 本 tick 不占用控制权, 走正常导航/挖垫。
+     */
+    private Task maybePickEscape(AltoClef mod, BlockPos player) {
+        if (_pickPhase == PickEscapePhase.DONE) return null;
+        if (_pickPhase == PickEscapePhase.NONE) {
+            if (!shouldTryPickEscape(mod)) {
+                _pickPhase = PickEscapePhase.DONE;
+                return null;
+            }
+            _pickPhase = PickEscapePhase.DIG_FOOT;
+            _pickEscapeStartTick = WorldHelper.getTicks();
+            _footDigTarget = null;
+            _pickSubTask = null;
+            Debug.logToFile("altoclef_diag.log",
+                    "[GoToSurface] pick-escape START at " + player + " (no pickaxe, materials ready)");
+        }
+        if (WorldHelper.getTicks() - _pickEscapeStartTick > PICK_ESCAPE_TIMEOUT_TICKS) {
+            Debug.logToFile("altoclef_diag.log",
+                    "[GoToSurface] pick-escape TIMEOUT at " + player + ", phase=" + _pickPhase);
+            finishPickEscape(mod);
+            return null;
+        }
+        switch (_pickPhase) {
+            case DIG_FOOT: {
+                // 只挖 1 格 (用户: "不能让他挖几十个石头, 一两个就够了")。
+                // 目标格锁定: 挖穿 (变非实心, 玩家掉入) 才推进, 不每 tick 重选。
+                if (_footDigTarget != null && !WorldHelper.isSolid(mod, _footDigTarget)) {
+                    _footDigTarget = null;
+                    _pickPhase = PickEscapePhase.PLACE_TABLE;
+                    _pickSubTask = null;
+                    return null;
+                }
+                if (_footDigTarget == null) {
+                    _footDigTarget = findFootDigTarget(mod, player);
+                    if (_footDigTarget == null) {
+                        // 脚下没实心可挖 (悬空/基岩) → 直接试放台。
+                        _pickPhase = PickEscapePhase.PLACE_TABLE;
+                        _pickSubTask = null;
+                        return null;
+                    }
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] pick-escape digging foot at " + _footDigTarget);
+                }
+                setDebugState("Escape: digging foot space for crafting table");
+                return new DestroyBlockTask(_footDigTarget);
+            }
+            case PLACE_TABLE: {
+                if (mod.getBlockTracker().anyFound(Blocks.CRAFTING_TABLE)) {
+                    _pickPhase = PickEscapePhase.CRAFT_PICK;
+                    _pickSubTask = null;
+                    return null;
+                }
+                // 实例缓存续租 (框架铁律: 每 tick 原样返回同一实例直到完成)。
+                if (_pickSubTask == null || _pickSubTask.isFinished(mod)) {
+                    _pickSubTask = new PlaceBlockNearbyTask(Blocks.CRAFTING_TABLE);
+                }
+                setDebugState("Escape: placing crafting table");
+                return _pickSubTask;
+            }
+            case CRAFT_PICK: {
+                if (hasAnyPickaxe(mod)) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] pick-escape SUCCESS at " + player + " (pickaxe in hand)");
+                    finishPickEscape(mod);
+                    return null;
+                }
+                if (_pickSubTask == null || _pickSubTask.isFinished(mod)) {
+                    _pickSubTask = TaskCatalogue.getItemTask("stone_pickaxe", 1);
+                }
+                setDebugState("Escape: crafting stone pickaxe");
+                return _pickSubTask;
+            }
+            default:
+                return null;
+        }
+    }
+
+    private boolean shouldTryPickEscape(AltoClef mod) {
+        if (hasAnyPickaxe(mod)) return false;
+        if (mod.getItemStorage().getItemCount(Items.COBBLESTONE) < 3) return false;
+        if (mod.getItemStorage().getItemCount(Items.STICK) < 2) return false;
+        // 只在"台已在包里"时试 (现场实锤台在输出槽, A 修复后可收)。
+        return mod.getItemStorage().getItemCount(Items.CRAFTING_TABLE) >= 1;
+    }
+
+    private void finishPickEscape(AltoClef mod) {
+        _pickPhase = PickEscapePhase.DONE;
+        _pickSubTask = null;
+    }
+
+    /**
+     * 脚下可挖目标 (挖 1 格腾放置空间)。只挑"挖掉后掉落安全"的:
+     * 下下方必须也是实心 (不掉进更深空洞), hardness>=0 (基岩除外)。
+     * "没镐避让"谓词在逃生豁免下已放行, 这里不再查 shouldAvoidBreaking。
+     */
+    private BlockPos findFootDigTarget(AltoClef mod, BlockPos player) {
+        BlockPos below = player.down();
+        if (!WorldHelper.isSolid(mod, below)) return null;
+        if (!WorldHelper.isSolid(mod, below.down())) return null;
+        float hardness = mod.getWorld().getBlockState(below).getHardness(mod.getWorld(), below);
+        if (hardness < 0) return null;
+        return below;
+    }
+
     private Task tickScaffoldUp(AltoClef mod, BlockPos player) {
         if (_scaffoldStartTick < 0) _scaffoldStartTick = WorldHelper.getTicks();
         int totalTicks = player.getY() >= SURFACE_TARGET_Y
@@ -502,6 +673,12 @@ public class GoToSurfaceTask extends Task {
         _scaffoldNoProgressTimer = null;
         _waterStuckTimer = null;
         _scaffoldLogTimer.reset();
+        // (2026-09-12 v8) 做镐侧线状态归零: 新场景重新评估 ( isEqual 恒 true,
+        // 框架不会因每 tick new 实例重跑这里, 字段跨抢占保留 —— 框架铁律)。
+        _pickPhase = PickEscapePhase.NONE;
+        _pickSubTask = null;
+        _footDigTarget = null;
+        _pickEscapeStartTick = -1;
         _stuckTicks = 0;
         _lastSampleX = Double.NaN;
         _lastSampleZ = Double.NaN;
@@ -511,6 +688,9 @@ public class GoToSurfaceTask extends Task {
     protected void onStop(AltoClef mod, Task interruptTask) {
         // 垫塔期间 hold 的跳跃键必须在所有退出路径上松开 (含被反射链抢占)。
         PillarJumpHelper.release(mod);
+        // (2026-09-12 v8) 逃生挖掘豁免兜底复位: 本任务是唯一持有者, 所有退出
+        // 路径 (完工/被抢占/链停止) 都必须关掉, 否则平时会乱挖"没镐避让"方块。
+        mod.setEscapeDigOverride(false);
     }
 
     @Override

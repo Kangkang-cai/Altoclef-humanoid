@@ -70,6 +70,12 @@ public class AltoClef implements ModInitializer {
     // 只在客户线程 (onClientTick) 更新, volatile 保证可见。避免谓词里再走
     // plausibleToBreak (会回调本谓词 → 栈溢出崩溃, 上次实测)。
     private volatile adris.altoclef.util.MiningRequirement _currentMiningReq = adris.altoclef.util.MiningRequirement.HAND;
+    // (2026-09-12 v8 封闭空间逃生豁免, 用户拍板"挖一格放工作台做镐子") true 时
+    // avoidBlockBreak 谓词放行"没镐避让"(shouldAvoidUnminable) 那一条 —— 空手
+    // 挖石头 7.5s/格 慢但能挖, 逃生是最后手段不该被这条规则锁死。硬保护
+    // (isPositionExplicitelyProtected: 传送门/黑曜石守卫等) 仍然生效。
+    // 只由 GoToSurfaceTask 逃生序列开关, onStop 必须复位。
+    private volatile boolean _escapeDigOverride = false;
     // Trackers
     private ItemStorageTracker _storageTracker;
     private ContainerSubTracker _containerSubTracker;
@@ -172,7 +178,7 @@ public class AltoClef implements ModInitializer {
             // 绝不用 plausibleToBreak (它会回调本谓词 → 栈溢出崩溃, 上次实测)。
             getExtraBaritoneSettings().avoidBlockBreak(blockPos ->
                     _settings.isPositionExplicitelyProtected(blockPos)
-                            || WorldHelper.shouldAvoidUnminable(this, _currentMiningReq, blockPos));
+                            || (!_escapeDigOverride && WorldHelper.shouldAvoidUnminable(this, _currentMiningReq, blockPos)));
             getExtraBaritoneSettings().avoidBlockPlace(blockPos -> _settings.isPositionExplicitelyProtected(blockPos));
         });
 
@@ -508,6 +514,15 @@ public class AltoClef implements ModInitializer {
      */
     public Settings getClientBaritoneSettings() {
         return Baritone.settings();
+    }
+
+    // (2026-09-12 v8) 逃生挖掘豁免开关: 见 _escapeDigOverride 注释。
+    public void setEscapeDigOverride(boolean value) {
+        _escapeDigOverride = value;
+    }
+
+    public boolean isEscapeDigOverride() {
+        return _escapeDigOverride;
     }
 
     /**
