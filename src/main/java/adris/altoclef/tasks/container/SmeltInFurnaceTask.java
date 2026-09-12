@@ -342,6 +342,18 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // 是否已实际观察到炉内数据 (打开过熔炉且坐标未切换)。
         private boolean _cacheKnown = false;
 
+        // (2026-09-12 界面闪烁修复) 开屏 latch —— 界面刚打开后的最短显示时长。
+        // 现场 20260912-085838 (用户"熔炉界面一闪一闪地开合"): bot 走到炉前
+        // ~1.8s + 点开界面 ~0.2s, 界面刚开 containerSubTask 就判"无事可做"
+        // (产物没烧好+料够) → 立刻派守卫, 守卫首 tick closeScreen() → 界面总
+        // 显示 <0.3s 就被关, 下轮再开, 反复 11 轮 (tasks.log 里
+        // "STOP <Doing something to closest block...> by <Guarding furnace> took=2.0s")。
+        // latch 让界面至少显示 MIN_OPEN_SECONDS 再交给守卫关屏; 期间若烧出
+        // 产物/缺料, 前方 Receiving Output / Filling fuel 分支照常先命中, 不误事。
+        private static final double MIN_OPEN_SECONDS = 3.0;
+        private final TimerGame _openHoldTimer = new TimerGame(MIN_OPEN_SECONDS);
+        private boolean _wasContainerOpen = false;
+
         /**
          * (2026-09-08 诊断) 缓存快照: 材料槽/输出槽/燃料槽/烧制进度。
          */
@@ -376,6 +388,12 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         @Override
         protected Task onTick(AltoClef mod) {
+            // (2026-09-12 界面闪烁修复) 界面一旦关闭就复位开屏 latch 标记, 下一次
+            // 打开重新计时。放在守卫闸门之前 —— 守卫关屏后本方法提前 return,
+            // 不经过这里就会漏掉复位。
+            if (!isContainerOpen(mod)) {
+                _wasContainerOpen = false;
+            }
             // (2026-09-08 记得管理) 掉落捡回保活: 记忆中的炉子被毁时, 材料以掉落物
             // 形式散在原地 (5 分钟 despawn), 先捡回再继续。缓存实例保活 (勿一次性
             // new 后靠标志防重入)。
@@ -491,6 +509,14 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         @Override
         protected Task containerSubTask(AltoClef mod) {
+            // (2026-09-12 界面闪烁修复) 开屏 latch 起点: 本方法只在界面打开时被
+            // 调用, 首次进来即"界面刚打开" → 重置最短显示计时 (之后每 tick 进来
+            // 不再重置, 计时连续累积, 直到 onTick 看到界面关闭才复位标记)。
+            if (!_wasContainerOpen) {
+                _wasContainerOpen = true;
+                _openHoldTimer.reset();
+            }
+
             // We have appropriate materials/fuel.
             /*
              * - If output slot has something, receive it.
@@ -637,6 +663,17 @@ public class SmeltInFurnaceTask extends ResourceTask {
                         return new MoveItemToSlotFromInventoryTask(new ItemTarget(bestStack.getItem(), countToMove), FurnaceSlot.INPUT_SLOT_FUEL);
                     }
                 }
+            }
+
+            // (2026-09-12 界面闪烁修复) 开屏 latch 闸门: 界面显示时长不足
+            // MIN_OPEN_SECONDS 时先不交给守卫 —— 守卫首 tick 就 closeScreen(),
+            // 界面开了 <0.3s 即被关掉是本轮"一闪一闪"的直接成因。这里 return
+            // null 保持界面开着, 不派子任务; 计时到点才落到下方守卫分支关屏。
+            // 前方 Receiving Output / Filling fuel 分支已先执行, 故 latch 期间
+            // 真有产物或缺料时不受影响。
+            if (!_openHoldTimer.elapsed()) {
+                setDebugState("Holding furnace UI open (anti-flicker latch)");
+                return null;
             }
 
             // (2026-09-07 熔炉守卫, 用户"烧东西时不能一直在烧制界面") 等待期
