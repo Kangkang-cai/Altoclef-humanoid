@@ -44,6 +44,10 @@ import net.minecraft.util.math.Vec3d;
  *         腾出下一格继续垫, 自底向上填满水柱; 站上柱顶后 pillar-jump 一路
  *         垫出水面。放置用 force-click (构造 hit+UP 直接交互, 不等准星
  *         收敛 —— 首版等收敛被 baritone 抢旋转, 6 轮全 TIMEOUT 零放置)。
+ *         【压住跳跃】(09-12 100413 会话, 用户点破): baritone 水里持续 hold
+ *         JUMP = 向上游 = bobbing 的根源。垫方块/下潜全程每 tick release
+ *         JUMP 让 bot 沉降稳住; 出水判定必须 onGround, bob 顶点假出水
+ *         (PLACE_OUT_OF_WATER placed=0 骗退) 不算数。
  *      ② 下潜向前游 (原有路径): 无建材 / 没得垫 (深水无底、水草挡路、
  *         放置禁区) / 垫方块窗口超时 / 站稳但非本反应所垫 (浅水底,
  *         垫档让位防死结) → 面向当前前进方向 + 按住 FORWARD +
@@ -160,6 +164,10 @@ public class SwimDiveChain extends TaskChain {
 
         // 正在下潜：保持按住，数到下潜时长结束松开并重置窗口。
         if (_diving) {
+            // (2026-09-12 用户点破) 下潜期间必须每 tick 压住跳跃: baritone 会
+            // 重新 hold JUMP, 水里跳优先于潜 → "下潜"变成向上游 = 又一个 bob。
+            // 这正是此前 dive+sprint 10+ 次零进展的根因之一。
+            WaterStandHelper.releaseJump(mod);
             if (--_diveTicksLeft <= 0) {
                 releaseDive(mod);
                 resetWindow();
@@ -328,10 +336,22 @@ public class SwimDiveChain extends TaskChain {
             return;
         }
         // 出水即收工 (柱子垫满后 bot 已站到水面之上)。
+        // (2026-09-12 现场 100413) 必须要求 onGround —— bob 顶点那一瞬
+        // inWater 也会闪 false, 旧判据 PLACE_OUT_OF_WATER placed=0 假出水
+        // 骗退 (0.15s 内结束, 一块没放), 下一 tick 又落回水里。腾空时恰好
+        // 是放置窗口 (目标格刚被腾出), 继续往下走 probe。
         if (!mod.getPlayer().isTouchingWater()) {
-            endWithGrace(mod, "PLACE_OUT_OF_WATER");
-            return;
+            if (mod.getPlayer().isOnGround()) {
+                endWithGrace(mod, "PLACE_OUT_OF_WATER");
+                return;
+            }
+            diagGate(mod, "PLACE_APEX_HOLD");
         }
+        // (2026-09-12 用户点破) 每 tick 压住跳跃: baritone 导航在水里持续
+        // hold JUMP = 向上游 = 水面 bobbing 的根源。不松开, 目标格永远被
+        // 身体闪占闪空 (PLACE_WAIT_PLAYER_BOX), bob 永不停止。SUPPORTED 档
+        // 例外 —— 下方 riseTick 需要跳跃 pillar-jump。
+        WaterStandHelper.releaseJump(mod);
         // 超时: 带上已垫块数与最近交互结果, 方便定位"垫不出"的原因。
         if (nowTick - _placeStartTick >= PLACE_WINDOW_TICKS) {
             writeDiag(mod, "PLACE_TIMEOUT placed=" + _placedCount + " last=" + _lastPlaceResult);
@@ -408,6 +428,9 @@ public class SwimDiveChain extends TaskChain {
         mod.getInputControls().hold(Input.MOVE_FORWARD);
         mod.getInputControls().hold(Input.SNEAK);
         mod.getInputControls().hold(Input.SPRINT);
+        // (2026-09-12 用户点破) 起潜第一 tick 就压住跳跃: 水里跳>SNEAK 下沉,
+        // 不压住跳跃"下潜"根本沉不下去 (dive 曾 10+ 次零进展的根因之一)。
+        WaterStandHelper.releaseJump(mod);
         _diving = true;
         _diveTicksLeft = DIVE_HOLD_TICKS;
         _lastDiveTick = WorldHelper.getTicks();
