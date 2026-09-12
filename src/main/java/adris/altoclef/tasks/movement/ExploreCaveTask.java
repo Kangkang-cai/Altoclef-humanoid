@@ -44,6 +44,14 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     // 已到达/已探索的天然空气, 绝不回头。
     private final Set<BlockPos> _visited = new HashSet<>();
+    // (2026-09-12 实际探索点回传) 到达过的【目标点】本身(不是 343 倍膨胀的 _visited),
+    // 结束/被打断时交给 MineDownExploreTask 登记为已探索区域中心。
+    // 起因: 旧实现只在 FIRE 时刻记一个半径 16 的圆柱, 洞体跨度超过 16 格时远端永远
+    // 在标记外 → 冷却过后同一个洞被二次 FIRE(09-12 实锤: 锚点 129,41,-231 只覆盖到
+    // z=-247, 洞延伸到 z=-255, 22 秒后 139,41,-255 再次触发)。
+    private final java.util.List<BlockPos> _reachedTargets = new java.util.ArrayList<>();
+    // 已交回过的前缀长度: 支持 resume(被打断后恢复再结束)只增量导出新增点。
+    private int _exportedCount = 0;
     // 导航失败(不可达/无进展)的目标, 不再重复选取。
     private final Set<BlockPos> _failedTargets = new HashSet<>();
     // 探索起点: 距离参考点, 所有目标都朝"离它更远"的方向选。
@@ -104,6 +112,7 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
 
         // 到达当前目标: 标记已探索, 选下一个更靠外的目标。
         if (_currentTarget != null && arrived(mod)) {
+            _reachedTargets.add(_currentTarget.toImmutable());
             markVisited(_currentTarget);
             _currentTarget = null;
         }
@@ -117,6 +126,7 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
                         "[CaveExplore] no unvisited natural cave air, cave exploration done. player="
                                 + center.toShortString() + " visited=" + _visited.size());
                 _done = true;
+                exportReachedTargets(mod, "done");
                 return null;
             }
             _progressChecker.reset();
@@ -170,7 +180,36 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-12 实际探索点回传) 超时/被抢占打断时也要把已走过的洞体登记掉,
+        // 否则这一段探索白走 —— 冷却过后同一个洞会被再 FIRE 一次(用户"已经探索
+        // 过了又重复去探索")。这里同时覆盖 done 分支(explicit)与框架强停。
+        exportReachedTargets(mod, interruptTask == null ? "stop" : "interrupted");
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+    }
+
+    /**
+     * (2026-09-12 实际探索点回传) 把本次【增量】实际到达的目标点 + 当前所在位置
+     * 交给 MineDownExploreTask 登记为已探索洞穴区域。去重(间距 8)与覆盖半径(16)
+     * 由下游负责, 本方法只负责"把走过的位置交出去"。
+     *
+     * 增量而非全量: 被战斗/吃饭打断后本实例会被恢复(onStart 走 resume 分支),
+     * 恢复期间可能又走到新目标点, 因此用 _exportedCount 记录已交回的前缀长度,
+     * 每次只交新增部分 —— 全量交回会因为下游集合已含旧点而被去重, 结果一样,
+     * 但增量避免重复构造列表。字段本身在 resume 时【不清空】(见 onStart 的
+     * _startedOnce 分支提前 return)。
+     */
+    private void exportReachedTargets(AltoClef mod, String why) {
+        java.util.List<BlockPos> fresh = new java.util.ArrayList<>();
+        if (_reachedTargets.size() > _exportedCount) {
+            fresh.addAll(_reachedTargets.subList(_exportedCount, _reachedTargets.size()));
+            _exportedCount = _reachedTargets.size();
+        }
+        // 结束位置本身也要覆盖: 最后一次到达点到结束点之间往往还有一段洞体。
+        if (mod != null && mod.getPlayer() != null) {
+            fresh.add(mod.getPlayer().getBlockPos());
+        }
+        if (fresh.isEmpty()) return;
+        MineDownExploreTask.markExploredCavePoints(mod, fresh, why);
     }
 
     @Override

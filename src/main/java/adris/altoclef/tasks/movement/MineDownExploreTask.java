@@ -125,6 +125,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int EXPLORED_CAVE_Y_BAND = 8;
     // (2026-09-03 同心丢弃) 与已有中心过近时不再重复记(防密集记录同片洞区)。
     private static final int EXPLORED_CAVE_MIN_SEP = 24;
+    // (2026-09-12 点集回传) ExploreCaveTask 结束/被打断时把【实际到达过的目标点】
+    // 批量交回本类登记, 用 8 作去重间距而非 24: 到达点在洞内是一串连续轨迹, 彼此
+    // 常近于 24, 用 24 会把整条轨迹削掉只剩几个点、洞两端仍可能落在半径外。8 仍能
+    // 滤掉同一目标的重记, 又保留轨迹形状 —— 相邻登记中心距 ≥8 < 2×半径16, 圆柱
+    // 必然互相重叠 → 覆盖连续无缝隙。
+    // 起因(09-12 实锤): 09-11 把半径 32 收窄到 16 后, 洞体跨度 24 格的场景漏了远端 ——
+    // 锚点 129,41,-231 + 半径16 只覆盖到 z=-247, 洞实际延伸到 z=-255, 22 秒后
+    // 139,41,-255 再次 FIRE, 同一洞二次进洞。
+    private static final int EXPLORED_CAVE_POINT_MIN_SEP = 8;
     private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _exploredCaveByKey
             = new java.util.HashMap<>();
     private static boolean _exploredCaveLoaded = false;
@@ -379,9 +388,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + mod.getPlayer().getBlockPos().toShortString() + " to target y=" + _targetY + ".");
         }
 
-        if (_caveExploreCooldownSteps > 0) {
-            _caveExploreCooldownSteps--;
-        }
+        // (2026-09-12 冷却语义修正, 用户"同一段矿洞放弃后又重复去探索") 原实现在此
+        // 每 tick 递减 —— _caveExploreCooldownSteps 名为 STEPS 却按 tick 消耗,
+        // 12 tick ≈ 0.6 秒, 注释声称的"冷却内不探测(防同一洞反复)"从未生效。
+        // 09-12 日志实锤: 探索结束 22:51:52.4 之后第一个扫描点 22:51:54.1(step=3)
+        // 就已经在冷却外。递减移到【真实挖掉方块】处 (见 _realDigs++ 分支), 恢复
+        // "再挖 12 格通道才允许重新探洞"的原意。
 
         // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
         // 放在洞穴探索之前——水是当前挖掘路径的直接危险源, 优先于洞穴分心。
@@ -567,6 +579,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (_miningTarget != null) {
             if (WorldHelper.isAir(mod, _miningTarget)) {
                 _realDigs++;
+                // (2026-09-12 冷却语义修正) 洞穴探索冷却按【真实挖掉的方块数】消耗,
+                // 不再是每 tick 递减(见 onTick 顶部的说明)。
+                if (_caveExploreCooldownSteps > 0) {
+                    _caveExploreCooldownSteps--;
+                }
             }
             _miningTarget = null;
         }
@@ -978,14 +995,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         String key = exploredCaveKey(mod);
         java.util.LinkedHashSet<BlockPos> set = _exploredCaveByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>());
         // 与已有中心过近 → 同片洞区已覆盖, 丢弃(防每 90s 超时在同一点重复追加)。
-        for (BlockPos existing : set) {
-            if (Math.abs(center.getY() - existing.getY()) > EXPLORED_CAVE_Y_BAND) continue;
-            int dx = center.getX() - existing.getX();
-            int dz = center.getZ() - existing.getZ();
-            if (dx * dx + dz * dz < EXPLORED_CAVE_MIN_SEP * EXPLORED_CAVE_MIN_SEP) {
-                return;
-            }
-        }
+        if (hasNearbyCenter(set, center, EXPLORED_CAVE_MIN_SEP)) return;
         set.add(center.toImmutable());
         appendExploredCaveLine(key, center);
         Debug.logToFile("altoclef_diag.log",
@@ -993,6 +1003,64 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                         + " hRadius=" + EXPLORED_CAVE_RADIUS + " yBand=" + EXPLORED_CAVE_Y_BAND
                         + " key=" + key
                         + " totalCenters=" + set.size());
+    }
+
+    /**
+     * (2026-09-12 实际探索点回传, 用户"同一段矿洞放弃后又重复去探索") ExploreCaveTask
+     * 把本次【实际到达过的目标点】批量交回, 逐点写入已探索洞穴区域记忆。
+     *
+     * 起因: 旧实现只在 (a) FIRE 时刻 anchor、(b) 探索结束玩家位置 各记【一个】中心,
+     * 覆盖 = 半径 16 的扁圆柱。洞体跨度 24 格的场景 (09-12 场次) 下:
+     *   - FIRE 锚点 129,41,-231 → 覆盖 z∈[-247,-215];
+     *   - 洞实际延伸到 z=-255 (22:52:14 FIRE 目标 139,41,-255) → 远端 8 格永在标记外;
+     *   - (b) 那次还被 MIN_SEP=24 去重吞掉 (结束位置 132,42,-232 距锚点仅 3 格) →
+     *     等于只有 1 个中心。
+     * 结果: 冷却过后, 玩家挖隧道走到 z=-247 (标记圆柱边界外) 重扫, 缺口里的洞空气
+     * 重新满足 naturalAir≥24 → 同一洞二次 FIRE (日志两次 FIRE 相隔 77 秒)。
+     *
+     * 点集 + 既有扁圆柱判定天然贴合连通洞穴的形状: ExploreCaveTask 的到达点是沿洞
+     * 单调向外的轨迹, 逐点登记后整条洞都被覆盖, 不再依赖"洞是否恰好落在某个圆柱里"。
+     *
+     * @param why 诊断标签(完成/打断), 只进日志不改行为。
+     */
+    static void markExploredCavePoints(AltoClef mod, java.util.List<BlockPos> points, String why) {
+        if (mod == null || mod.getWorld() == null || points == null || points.isEmpty()) return;
+        ensureExploredCaveLoaded();
+        String key = exploredCaveKey(mod);
+        java.util.LinkedHashSet<BlockPos> set = _exploredCaveByKey
+                .computeIfAbsent(key, k -> new java.util.LinkedHashSet<>());
+        int added = 0;
+        for (BlockPos center : points) {
+            if (center == null) continue;
+            if (hasNearbyCenter(set, center, EXPLORED_CAVE_POINT_MIN_SEP)) continue;
+            BlockPos immutable = center.toImmutable();
+            set.add(immutable);
+            appendExploredCaveLine(key, immutable);
+            added++;
+        }
+        if (added > 0) {
+            Debug.logToFile("altoclef_diag.log",
+                    "[ExploredCave] point-set marked (" + why + "): +" + added
+                            + " centers, totalCenters=" + set.size()
+                            + " hRadius=" + EXPLORED_CAVE_RADIUS + " yBand=" + EXPLORED_CAVE_Y_BAND
+                            + " key=" + key);
+        }
+    }
+
+    /**
+     * (2026-09-12 抽取自 markExploredCaveRegion) 扁形同片判定: |Δy| ≤ Y_BAND 且水平
+     * 距离 < minSep 视为同一片洞区。minSep 按调用场景区分 —— 单点标记用 24(一次探索
+     * 一个中心), 点集回传用 8(保留轨迹形状)。
+     */
+    private static boolean hasNearbyCenter(java.util.Set<BlockPos> set, BlockPos center, int minSep) {
+        if (set == null || set.isEmpty()) return false;
+        for (BlockPos existing : set) {
+            if (Math.abs(center.getY() - existing.getY()) > EXPLORED_CAVE_Y_BAND) continue;
+            int dx = center.getX() - existing.getX();
+            int dz = center.getZ() - existing.getZ();
+            if (dx * dx + dz * dz < minSep * minSep) return true;
+        }
+        return false;
     }
 
     /**
