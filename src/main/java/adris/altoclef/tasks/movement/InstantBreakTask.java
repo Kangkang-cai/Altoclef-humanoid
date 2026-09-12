@@ -1,11 +1,13 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.LookHelper;
 import baritone.api.utils.input.Input;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.registry.Registry;
 
 /**
  * (2026-09-12) 非实心障碍 (azalea/草等植物) 的直挖任务。
@@ -21,11 +23,20 @@ import net.minecraft.util.math.Vec3d;
  */
 public class InstantBreakTask extends Task {
 
-    /** 1.5s 上限 (用户: 超时时长不要超过 1.5s, 影响观感)。 */
+    /**
+     * 1.5s 上限 (用户: 超时时长不要超过 1.5s, 影响观感)。
+     *
+     * 【脑残硬编码 ③】这个上限此前**一次都没生效过** —— 本任务被父任务派出去后
+     * 只活 1 tick (50ms) 就被框架 stop 掉 (实锤: tasks.log `took=49ms`), 根本
+     * 走不到 30 tick。真正的"挖不掉"不是这个 1.5s 太短, 是它压根没跑到。
+     * 现在由 JumpStuckResolver 的独占租约保证本任务能连续活满 30 tick。
+     */
     private static final int TIMEOUT_TICKS = 30;
 
     private final BlockPos _pos;
     private int _ticks = 0;
+    /** 准星真正压在目标上的 tick 数 = 实际按出左键的时长 (诊断用: 0 = 一次都没瞄上)。 */
+    private int _aimTicks = 0;
 
     public InstantBreakTask(BlockPos pos) {
         _pos = pos;
@@ -34,6 +45,7 @@ public class InstantBreakTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _ticks = 0;
+        _aimTicks = 0;
     }
 
     @Override
@@ -41,11 +53,16 @@ public class InstantBreakTask extends Task {
         if (mod.getChunkTracker().isChunkLoaded(_pos) && mod.getWorld().getBlockState(_pos).isAir()) {
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
             setDebugState("Instant break done");
+            Debug.logToFile("altoclef_diag.log", "[InstantBreak] done in " + _ticks + "t (aim "
+                    + _aimTicks + "t) at " + _pos);
             return null;
         }
         if (_ticks >= TIMEOUT_TICKS) {
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
             setDebugState("Instant break timeout");
+            Debug.logToFile("altoclef_diag.log", "[InstantBreak] TIMEOUT " + _ticks + "t (aim "
+                    + _aimTicks + "t) at " + _pos + " block=" + blockName(mod)
+                    + " -> 1.5s 没挖掉: aim=0 即转头没跟上, aim 很大则方块太硬");
             return null;
         }
         _ticks++;
@@ -56,6 +73,7 @@ public class InstantBreakTask extends Task {
         // 打穿花丛命中背后的方块 (用户目击"瞄准花草左键, 打到花后面的东西")。
         // 未瞄准时必须显式松开, 防上一 tick 的强制状态误击别的目标。
         if (LookHelper.isLookingAt(mod, _pos)) {
+            _aimTicks++;
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
         } else {
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
@@ -83,5 +101,14 @@ public class InstantBreakTask extends Task {
     @Override
     protected String toDebugString() {
         return "Instant break at " + _pos.toShortString();
+    }
+
+    /** 方块名 (诊断用, 失败不抛)。 */
+    private String blockName(AltoClef mod) {
+        try {
+            return Registry.BLOCK.getId(mod.getWorld().getBlockState(_pos).getBlock()).getPath();
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 }

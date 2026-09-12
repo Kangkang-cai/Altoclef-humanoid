@@ -69,9 +69,34 @@ public final class JumpStuckResolver {
     /** 现场快照日志节流 (2s 一条)。 */
     private static final TimerGame _logTimer = new TimerGame(2);
 
+    // ===== 处置任务独占 (2026-09-12 会话 20260912-134716 实锤) =====
+    /**
+     * 【脑残硬编码 ①：处置任务只活 1 tick 的元凶】
+     *
+     * 本文件 tick() 每 tick 被父任务调用一次, 返回的处置任务会成为父任务的子任务。
+     * 但任务框架 (TaskSystem.Task.tickInternal L79-123) 的规则是: **父任务下一 tick
+     * 若返回别的任务或 null, 刚派出的子任务立刻被 stop**。而旧版这里在返回处置任务
+     * 之前就把 _cooldownUntil 设成 now+20 → 下一 tick 本函数直接 return null →
+     * 父任务 (CustomBaritoneGoalTask) 继续往下走, 落到 [SwimUp] 分支 return null →
+     * 框架把 InstantBreakTask / 挖障任务 / wander 全部 stop 掉。
+     *
+     * 实锤 (tasks.log): `<Instant break at 140,64,44>` START→STOP 全是 took=49~51ms
+     * = **1 tick**。也就是说:
+     *   - 挖树叶需要的连续左键窗口 = 1 tick (50ms), 方块永远差几 tick;
+     *   - InstantBreakTask 自己 1.5s 的超时 (TIMEOUT_TICKS=30) 从来没走到过;
+     *   - TimeoutWanderTask(5) 需要在 5 格内持续探索, 也只拿到 1 tick;
+     *   - 每秒换一次挖障目标 ((140,64,43) ↔ (140,64,44)), 破坏进度反复清零。
+     */
+    private static Task _activeOrder = null;
+    private static int _orderStartTick = 0;
+    /** 独占硬顶 (处置任务自己的 isFinished 不可靠/永不成立时兜底收权)。 */
+    private static final int ORDER_LEASE_TICKS = 200;
+
     // ===== 处置冷却 (static: 实例频繁重建会绕过实例层冷却) =====
-    /** 挖障与换路共用一个冷却。(2026-09-12 用户"超时时长不要超过 1.5s, 影响
-     *  观感": 检测 1s + 冷却 1s, 卡住后每个节奏点都 ≤1.5s。) */
+    /** 【脑残硬编码 ②】挖障与换路共用一个冷却。(2026-09-12 用户"超时时长不要超过
+     *  1.5s, 影响观感": 检测 1s + 冷却 1s, 卡住后每个节奏点都 ≤1.5s。)
+     *  注意: 冷却现在只在【处置任务结束后】起算 (见 tick() 第 0 步), 不再在派发
+     *  那一刻就起算 —— 否则就是上面说的"派出即被判 null 打断"。 */
     private static final int COOLDOWN_TICKS = 20;
     private static int _cooldownUntil = 0;
     /** 同一格反复处置: 达上限不再原地纠缠, 强制 wander 脱离 (2026-09-12 用户
@@ -79,8 +104,11 @@ public final class JumpStuckResolver {
     private static final int JUMP_SAME_SPOT_LIMIT = 4;
     private static BlockPos _lastStuckPos = null;
     private static int _sameSpotCount = 0;
-    /** 同一格重复挖障计数: 挖了 2 次还在原地 (baritone builder 拒挖/挖不掉)
-     *  → 立即强制 wander, 不再第三次挖。 */
+    /** 【脑残硬编码 ④】同一格重复挖障计数: 挖了 2 次还在原地 (baritone builder
+     *  拒挖/挖不掉) → 立即强制 wander, 不再第三次挖。
+     *  旧口径的错: 它数的是【派发次数】而不是【失败的挖掘】—— 在"每次只活 1 tick"
+     *  的年代, 2 次 = 2 tick 的点击, 树叶连破坏进度都没攒起来就被判"挖不掉"。
+     *  现在 1 次 = 一个完整租约 (最长 1.5s, InstantBreakTask 自己结束), 口径才成立。 */
     private static final int SAME_POS_DIG_LIMIT = 2;
     private static BlockPos _lastDigPos = null;
     private static int _digCount = 0;
@@ -90,10 +118,37 @@ public final class JumpStuckResolver {
     /**
      * 每 tick 调用 (放在任务 onTick 最前面)。
      *
-     * @return 处置任务 (挖障时为 DestroyBlockTask, 调用方应直接 return 它);
-     *         null = 无事发生 / 只做了 forceCancel 换路 / 冷却中。
+     * 第 0 步是「处置任务独占续租」: 只要上一次派发的处置任务还没结束 (或未超
+     * ORDER_LEASE_TICKS), 就原样把它返回给父任务, 保证它能连续拿到 tick。调用方
+     * (CustomBaritoneGoalTask / ExploreCaveTask) 只需把返回值直接 return 出去。
+     *
+     * @return 处置任务 (挖障时为 InstantBreakTask / DestroyBlockTask, 脱离时为
+     *         TimeoutWanderTask); null = 无事发生 / 只做了 forceCancel 换路 / 冷却中。
      */
     public static Task tick(AltoClef mod) {
+        // 0) (2026-09-12) 进行中的处置任务优先续租。处置任务必须"独占"到它自己
+        //    报告结束为止 —— 否则父任务下一 tick 的 SwimUp/本体 return null 会
+        //    立刻把它换掉 (实锤: 每次只活 1 tick)。期间不重估、不 forceCancel,
+        //    撤销路径会把正在进行的挖掘/探索打断。
+        if (_activeOrder != null) {
+            int leaseNow = WorldHelper.getTicks();
+            boolean leaseOver = leaseNow - _orderStartTick >= ORDER_LEASE_TICKS;
+            boolean done;
+            try {
+                done = _activeOrder.isFinished(mod);
+            } catch (Throwable t) {
+                // TimeoutWanderTask 在 onStart 之前被问 isFinished 会 NPE
+                // (_origin 为 null)。视为"未完成", 下一 tick 它 tick 到 onStart
+                // 后即可正常判定。
+                done = false;
+            }
+            if (!done && !leaseOver) return _activeOrder;
+            _activeOrder = null;
+            _cooldownUntil = leaseNow + COOLDOWN_TICKS;
+            Debug.logToFile("altoclef_diag.log", "[JumpStuck] order released (done=" + done
+                    + " leaseOver=" + leaseOver + ") at " + mod.getPlayer().getBlockPos());
+        }
+
         Vec3d v = mod.getPlayer().getVelocity();
         boolean hSlow = Math.hypot(v.x, v.z) < HSPEED_STUCK;
         if (!hSlow) {
@@ -149,8 +204,8 @@ public final class JumpStuckResolver {
                 _lastDigPos = obstacle;
                 _digCount = 1;
             }
-            _cooldownUntil = now + COOLDOWN_TICKS;
-            resetStreak();
+            // 冷却 / streak 由 issue() 在真正派发处置那一刻设置 (见 _activeOrder 注释:
+            // 提前设冷却 = 派出的任务下一 tick 就被判 null 打断)。
             if (_digCount >= SAME_POS_DIG_LIMIT) {
                 _digCount = 0;
                 _lastDigPos = null;
@@ -158,7 +213,7 @@ public final class JumpStuckResolver {
                         + " no escape at " + obstacle + " -> forcing wander");
                 mod.getClientBaritone().getPathingBehavior().forceCancel();
                 _wanderTask.resetWander();
-                return _wanderTask;
+                return issue(mod, _wanderTask);
             }
             // (2026-09-12) 分流判据: baritone builder 只对自己视为实心的方块执行
             // 破坏, "可穿过"的 (树叶/azalea/草) 一律拒挖 (111853 实锤连挖 8 次
@@ -170,9 +225,9 @@ public final class JumpStuckResolver {
                     + " -> " + (passable ? "InstantBreakTask" : "DestroyBlockTask"));
             mod.getClientBaritone().getPathingBehavior().forceCancel();
             if (passable) {
-                return new InstantBreakTask(obstacle);
+                return issue(mod, new InstantBreakTask(obstacle));
             }
-            return new DestroyBlockTask(obstacle);
+            return issue(mod, new DestroyBlockTask(obstacle));
         }
 
         // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
@@ -184,13 +239,31 @@ public final class JumpStuckResolver {
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] same spot re-route x"
                     + JUMP_SAME_SPOT_LIMIT + " -> forcing wander");
             _wanderTask.resetWander();
-            return _wanderTask;
+            return issue(mod, _wanderTask);
         }
         Debug.logToFile("altoclef_diag.log", "[JumpStuck] no obstruction at "
                 + mod.getPlayer().getBlockPos() + " -> forceCancel to re-route (sameSpot="
                 + _sameSpotCount + ")");
         mod.getClientBaritone().getPathingBehavior().forceCancel();
         return null;
+    }
+
+    /**
+     * (2026-09-12) 派发一个处置任务并登记"独占租约"。
+     *
+     * 派发即登记: 之后每 tick 由 tick() 第 0 步把它原样返回给父任务, 直到
+     * {@code isFinished} 或 ORDER_LEASE_TICKS 到期。**冷却从任务结束后才起算**,
+     * 不再从派发那一刻起算 (那是"派出即打断"的根因)。
+     */
+    private static Task issue(AltoClef mod, Task task) {
+        _activeOrder = task;
+        _orderStartTick = WorldHelper.getTicks();
+        _cooldownUntil = _orderStartTick + COOLDOWN_TICKS;
+        resetStreak();
+        Debug.logToFile("altoclef_diag.log", "[JumpStuck] ORDER " + task
+                + " at " + mod.getPlayer().getBlockPos()
+                + " (lease " + ORDER_LEASE_TICKS + "t)");
+        return task;
     }
 
     private static boolean isInputForced(AltoClef mod, Input input) {
