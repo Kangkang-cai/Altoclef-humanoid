@@ -70,15 +70,23 @@ public final class JumpStuckResolver {
     private static final TimerGame _logTimer = new TimerGame(2);
 
     // ===== 处置冷却 (static: 实例频繁重建会绕过实例层冷却) =====
-    /** 挖障 / 换路后的冷却。 */
-    private static final int JUMP_FIX_COOLDOWN_TICKS = 20 * 3;
-    private static final int JUMP_REPATH_COOLDOWN_TICKS = 20 * 5;
+    /** 挖障 / 换路后的冷却。(2026-09-12 用户"超时时长不要超过 1.5s, 影响观感":
+     *  检测 1s + 冷却 1s, 卡住后每个节奏点都 ≤1.5s。) */
+    private static final int JUMP_FIX_COOLDOWN_TICKS = 20;
+    private static final int JUMP_REPATH_COOLDOWN_TICKS = 20;
     private static int _cooldownUntil = 0;
-    /** 同一格反复卡 (挖不出障碍 → 换路 → baritone 又选回来): 达上限拉长冷却防抖动。 */
+    /** 同一格反复处置: 达上限不再原地纠缠, 强制 wander 脱离 (2026-09-12 用户
+     *  "兜底机制没有强行 w 吗" — 旧 30s 被动冷却期内谁也不动, 观感极差)。 */
     private static final int JUMP_SAME_SPOT_LIMIT = 4;
-    private static final int JUMP_SAME_SPOT_COOLDOWN_TICKS = 20 * 30;
     private static BlockPos _lastStuckPos = null;
     private static int _sameSpotCount = 0;
+    /** 同一格重复挖障计数: 挖了 2 次还在原地 (baritone builder 拒挖/挖不掉)
+     *  → 立即强制 wander, 不再第三次挖。 */
+    private static final int SAME_POS_DIG_LIMIT = 2;
+    private static BlockPos _lastDigPos = null;
+    private static int _digCount = 0;
+    /** 共享 wander 任务 (强制脱离用)。 */
+    private static final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
 
     /**
      * 每 tick 调用 (放在任务 onTick 最前面)。
@@ -122,19 +130,49 @@ public final class JumpStuckResolver {
         if (obstacle != null) {
             // 有明确挡路的方块 → 挖掉它。挖完路径自然重算 (改世界是最根本的杠杆,
             // 也最拟人 — 等价于用户手动左键)。
+            // 同格挖了 2 次还在原地 (baritone builder 拒挖非实心植物等) → 强制 wander。
+            if (obstacle.equals(_lastDigPos)) {
+                _digCount++;
+            } else {
+                _lastDigPos = obstacle;
+                _digCount = 1;
+            }
             _cooldownUntil = now + JUMP_FIX_COOLDOWN_TICKS;
             resetStreak();
+            if (_digCount >= SAME_POS_DIG_LIMIT) {
+                _digCount = 0;
+                _lastDigPos = null;
+                Debug.logToFile("altoclef_diag.log", "[JumpStuck] dig x" + SAME_POS_DIG_LIMIT
+                        + " no escape at " + obstacle + " -> forcing wander");
+                mod.getClientBaritone().getPathingBehavior().forceCancel();
+                _wanderTask.resetWander();
+                return _wanderTask;
+            }
+            // (2026-09-12) 非实心植物 (azalea/草等) 不走 DestroyBlockTask:
+            // baritone builder 把它们当"本来就可通过", 拒绝执行破坏 (111853 场
+            // 次连挖 8 次方块纹丝不动)。硬度 0 直接视角+左键秒挖。
+            boolean solid = WorldHelper.isSolid(mod, obstacle);
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] clearing obstruction " + obstacle
-                    + " player=" + mod.getPlayer().getBlockPos() + " -> DestroyBlockTask");
+                    + " solid=" + solid + " player=" + mod.getPlayer().getBlockPos()
+                    + " -> " + (solid ? "DestroyBlockTask" : "InstantBreakTask"));
             mod.getClientBaritone().getPathingBehavior().forceCancel();
-            return new DestroyBlockTask(obstacle);
+            if (solid) {
+                return new DestroyBlockTask(obstacle);
+            }
+            return new InstantBreakTask(obstacle);
         }
 
         // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
-        // 人在半空)。只能撤销路径逼它重算另一条路。
+        // 人在半空)。只能撤销路径逼它重算另一条路; 同格反复换路也没用 → 强制 wander
+        // (旧的 30s 被动冷却期内谁也不动, 已废除)。
         _cooldownUntil = now + JUMP_REPATH_COOLDOWN_TICKS;
         resetStreak();
-        registerSameSpotStuck(mod);
+        if (registerSameSpotStuck(mod)) {
+            Debug.logToFile("altoclef_diag.log", "[JumpStuck] same spot re-route x"
+                    + JUMP_SAME_SPOT_LIMIT + " -> forcing wander");
+            _wanderTask.resetWander();
+            return _wanderTask;
+        }
         Debug.logToFile("altoclef_diag.log", "[JumpStuck] no obstruction at "
                 + mod.getPlayer().getBlockPos() + " -> forceCancel to re-route (sameSpot="
                 + _sameSpotCount + ")");
@@ -158,8 +196,12 @@ public final class JumpStuckResolver {
         _bonkSeen = false;
     }
 
-    /** 同一格反复卡 → 计数, 达上限进长冷却 (防"挖不出 → 换路 → 又选回来"抖动)。 */
-    private static void registerSameSpotStuck(AltoClef mod) {
+    /**
+     * 同一格反复卡 → 计数。
+     *
+     * @return true = 达上限 (调用方应强制 wander 脱离, 不再原地纠缠)。
+     */
+    private static boolean registerSameSpotStuck(AltoClef mod) {
         BlockPos p = mod.getPlayer().getBlockPos();
         if (_lastStuckPos != null
                 && Math.abs(p.getX() - _lastStuckPos.getX()) <= 1
@@ -170,12 +212,11 @@ public final class JumpStuckResolver {
             _sameSpotCount = 1;
         }
         if (_sameSpotCount >= JUMP_SAME_SPOT_LIMIT) {
-            _cooldownUntil = WorldHelper.getTicks() + JUMP_SAME_SPOT_COOLDOWN_TICKS;
             _sameSpotCount = 0;
-            Debug.logToFile("altoclef_diag.log", "[JumpStuck] same spot " + p + " stuck "
-                    + JUMP_SAME_SPOT_LIMIT + "x -> backing off "
-                    + (JUMP_SAME_SPOT_COOLDOWN_TICKS / 20) + "s");
+            _lastStuckPos = null;
+            return true;
         }
+        return false;
     }
 
     private static void logSnapshot(AltoClef mod) {
