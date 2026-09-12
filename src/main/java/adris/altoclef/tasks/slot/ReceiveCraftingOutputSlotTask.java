@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -79,14 +80,32 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
             // [2026-08-22] 背包放不下输出时不能落到 PICKUP (拿起后没有后续
             // 放置步骤, 见上)。
             if (!mod.getItemStorage().getSlotThatCanFitInPlayerInventory(inOutput, true).isPresent()) {
-                // (2026-09-03 回退) 曾用"交换进合成格"腾位(借垃圾槽→QUICK_MOVE产物
-                // →垃圾暂存合成格)。实测 3x3 工作台合成钻石头盔时该状态机制造
-                // 借位↔放回死循环(12s 内 borrow/move/park 各 ~70 次 ping-pong,
-                // 且被 Throwing Cursor 打断真丢物品)。根因: 交换借出的位马上又被
-                // 产物占据, 净空格没增加, getSlotThatCanFit 恒 false → 反复重启交换。
-                // 回退为直接走 EnsureFreeInventorySlotTask 腾位。
-                setDebugState("Making room for output");
-                return new EnsureFreeInventorySlotTask();
+            // (2026-09-03 回退) 曾用"交换进合成格"腾位(借垃圾槽→QUICK_MOVE产物
+            // →垃圾暂存合成格)。实测 3x3 工作台合成钻石头盔时该状态机制造
+            // 借位↔放回死循环(12s 内 borrow/move/park 各 ~70 次 ping-pong,
+            // 且被 Throwing Cursor 打断真丢物品)。根因: 交换借出的位马上又被
+            // 产物占据, 净空格没增加, getSlotThatCanFit 恒 false → 反复重启交换。
+            // 回退为直接走 EnsureFreeInventorySlotTask 腾位。
+            // (2026-09-12 收产物互锁实修) fit 判定与 MC 权威背包不一致时以现实为准:
+            // craftgrid_diag 16:11:49 实锤 — 2x2 界面下产物 crafting_table x1 已在
+            // 输出槽、合成格 4 木板就位, MC 权威背包尚有 hotbar 空位(window 36),
+            // 但 getSlotThatCanFit 恒 false → "Making room for output"→EnsureFree
+            // no-op 分支互锁, 30s+ 空转直到被上层抢占(16:09:49/16:10:19 两次)。
+            // 光标为空且背包真有空位时, 直接 QUICK_MOVE shift 进空位, 一步到位。
+            boolean realEmptyMain = mod.getPlayer() != null
+                    && mod.getPlayer().getInventory() != null
+                    && mod.getPlayer().getInventory().getEmptySlot() >= 0;
+            if (realEmptyMain && cursorSlotFree) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[CraftFitMismatch] fit=false but realEmptyMain=true -> QUICK_MOVE output anyway"
+                                + " | output=" + inOutput.getItem().getTranslationKey() + "x" + inOutput.getCount()
+                                + " handler=" + (mod.getPlayer().currentScreenHandler != null
+                                        ? mod.getPlayer().currentScreenHandler.getClass().getSimpleName() : "null"));
+                setDebugState("Quick moving output (fit mismatch fallback)");
+                return new ClickSlotTask(_slot, SlotActionType.QUICK_MOVE);
+            }
+            setDebugState("Making room for output");
+            return new EnsureFreeInventorySlotTask();
             }
             if (now - _lastOutputClickMs < OUTPUT_CLICK_GRACE_MS
                     && inOutput.getCount() == _lastClickedOutputCount) {

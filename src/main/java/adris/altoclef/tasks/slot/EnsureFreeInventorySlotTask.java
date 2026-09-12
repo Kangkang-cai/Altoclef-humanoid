@@ -186,6 +186,19 @@ public class EnsureFreeInventorySlotTask extends Task {
 
     }
 
+    // (2026-09-12 语义修复) onTick 的 no-op 分支（有真实空位+光标空 → 直接返回）
+    // 之前没同步到 isFinished, 基类默认恒 false → 任何以 isFinished 判断本任务的
+    // 调用方都会把"无事可做"误读成"未完成"并永久等待（16:10 收产物互锁的
+    // 次生风险）。与 no-op 分支保持同一判定口径。
+    @Override
+    public boolean isFinished(AltoClef mod) {
+        if (mod.getPlayer() != null && mod.getPlayer().getInventory() != null) {
+            return mod.getPlayer().getInventory().getEmptySlot() >= 0
+                    && StorageHelper.getItemStackInCursorSlot().isEmpty();
+        }
+        return false;
+    }
+
     @Override
     protected boolean isEqual(Task obj) {
         return obj instanceof EnsureFreeInventorySlotTask;
