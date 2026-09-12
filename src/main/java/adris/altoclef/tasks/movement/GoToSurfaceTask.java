@@ -118,6 +118,8 @@ public class GoToSurfaceTask extends Task {
     private static final int PICK_ESCAPE_TIMEOUT_TICKS = 20 * 120;
 
     private PickEscapePhase _pickPhase = PickEscapePhase.NONE;
+    /** skip 原因日志节流 (v15: skip 不再一次性 DONE, 需节流防刷屏)。 */
+    private TimerGame _pickSkipLogTimer = null;
     private Task _pickSubTask = null;
     /** CRAFT_PICK 阶段选定的合成目标 ("stone_pickaxe"/"wooden_pickaxe")。 */
     private String _pickTargetName = "wooden_pickaxe";
@@ -125,6 +127,9 @@ public class GoToSurfaceTask extends Task {
     /** DIG_FOOT 阶段锁定的脚下目标格: 派发后一直等它变非实心才推进 (防每 tick
      *  重选目标把"还没挖完"误判成"挖完了")。 */
     private BlockPos _footDigTarget = null;
+    /** (2026-09-12 v15) 挖垫模式 latched 的头顶挖掘目标格: feet blockPos 跳动
+     *  时扫描结果会翻转 (dig↔pillar), 不锁会把挖掘进度反复清零 (184659 实锤)。 */
+    private BlockPos _scaffoldDigTarget = null;
 
     /** 导航分段阶梯 (格): 找不到路时逐级缩短, 让 bot 几格几格贴上去。 */
     private static final int[] STEP_LADDER = {16, 8, 4, 2};
@@ -213,10 +218,15 @@ public class GoToSurfaceTask extends Task {
         if (mod.getPlayer() == null || mod.getWorld() == null) return false;
         BlockPos p = mod.getPlayer().getBlockPos();
         BlockPos head = p.up();
-        for (BlockPos around : new BlockPos[]{p.north(), p.south(), p.east(), p.west(),
-                head.north(), head.south(), head.east(), head.west()}) {
-            if (!WorldHelper.isSolid(mod, around)) {
-                return false; // 有任一水平出口 → 不算井
+        // (2026-09-12 v15 口径修正, 20260912-184659 实锤: 井里 18:47:37 clean
+        // 完工退场, bot 还没见天) 旧口径 8 格任一非实心 = 有出口 → 一条 1 格高
+        // 的横向缝 (feet 层空气、head 层实心, 人爬不过去) 就误判"不是井"。
+        // 改: 四个水平方向逐个判, 只有 feet+head 两层【都】非实心 (= 2 格高
+        // 通道, 人能走出去) 才算真出口; 其余 (全实心 / 1 格高缝) 都算井。
+        for (BlockPos f : new BlockPos[]{p.north(), p.south(), p.east(), p.west()}) {
+            BlockPos h = f.up();
+            if (!WorldHelper.isSolid(mod, f) && !WorldHelper.isSolid(mod, h)) {
+                return false; // 真 2 格高出口
             }
         }
         return true;
@@ -305,6 +315,7 @@ public class GoToSurfaceTask extends Task {
         _mode = AscentMode.SCAFFOLD_UP;
         _scaffoldStartTick = WorldHelper.getTicks();
         _scaffoldLastY = player.getY();
+        _scaffoldDigTarget = null;
         if (_scaffoldNoProgressTimer == null) {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
         }
@@ -500,18 +511,28 @@ public class GoToSurfaceTask extends Task {
         if (_pickPhase == PickEscapePhase.DONE) return null;
         if (_pickPhase == PickEscapePhase.NONE) {
             if (!shouldTryPickEscape(mod)) {
-                // (2026-09-12 v13/v14) 不触发必须留痕: 20260912-183017 零日志黑盒。
-                int _lg = mod.getItemStorage().getItemCount(ItemHelper.LOG);
-                int _pl = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
-                int _st = mod.getItemStorage().getItemCount(Items.STICK);
-                int _cb = mod.getItemStorage().getItemCount(Items.COBBLESTONE);
-                Debug.logToFile("altoclef_diag.log",
-                        "[GoToSurface] pick-escape skip: pickaxe=" + hasAnyPickaxe(mod)
-                                + " logs=" + _lg + " planks=" + _pl + " sticks=" + _st
-                                + " cobble=" + _cb
-                                + " (stone need cobble>=3,sticks>=2; wood need planks+logs*4>=3+2+4 - 已有) at "
-                                + player);
-                _pickPhase = PickEscapePhase.DONE;
+                // (2026-09-12 v15) 不再一次性 DONE: 184659 实锤 —— 会话 t=1 时
+                // 背包 tracker 尚未同步 (logs/planks/sticks/cobble 全 0), skip
+                // 即置 DONE → 之后材料在手也永不触发 ("做镐链路没有一开始就
+                // 触发")。保持 NONE 每 tick 重评 (几次计数, 代价可忽略)。
+                // 日志 5s 节流, 防刷屏。
+                if (_pickSkipLogTimer == null) {
+                    _pickSkipLogTimer = new TimerGame(5);
+                    _pickSkipLogTimer.reset();
+                }
+                if (_pickSkipLogTimer.elapsed()) {
+                    _pickSkipLogTimer.reset();
+                    int _lg = mod.getItemStorage().getItemCount(ItemHelper.LOG);
+                    int _pl = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
+                    int _st = mod.getItemStorage().getItemCount(Items.STICK);
+                    int _cb = mod.getItemStorage().getItemCount(Items.COBBLESTONE);
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] pick-escape skip: pickaxe=" + hasAnyPickaxe(mod)
+                                    + " logs=" + _lg + " planks=" + _pl + " sticks=" + _st
+                                    + " cobble=" + _cb
+                                    + " (stone need cobble>=3,sticks>=2; wood need planks+logs*4>=3+2+4 - 已有) at "
+                                    + player);
+                }
                 return null;
             }
             _pickPhase = PickEscapePhase.DIG_FOOT;
@@ -671,10 +692,30 @@ public class GoToSurfaceTask extends Task {
         //    永远是空气 → 永远不挖; 天花板其实在 up(2), 垫跳时头撞天花板弹回。
         //    现扫 dy=1..2: dy=1 (头格, 挤压场景) 与 dy=2 (头顶正上方)。
         //    跳跃头顶高度 ≈ feet+2.25, 挖通 up(2) 即可垫升 1 格, 不会连凿烟囱。
+        // 1) 头顶上方实心 → 凿穿 (最低的先挖)。
+        //    (2026-09-12 v15 latch 修复, 20260912-184659 实锤: y67 连续 20 次
+        //    START/STOP took=399ms 永挖不穿) 站在垫块上跳跃/落地时 feet 的
+        //    blockPos 在 64↔65 闪烁 → dy=1..2 扫描结果随之翻转 → dig↔pillar
+        //    每 400ms 互换 → DestroyBlockTask 反复被换, 挖掘进度反复清零
+        //    (空手 0.75s/块 > 400ms)。修: 挖掘目标 latch —— 锁定后每 tick
+        //    只查"仍实心", 是就继续挖 (isEqual 同 pos 保留运行实例, 进度不丢),
+        //    挖穿/不可挖才解锁重扫。这正是"分支闸门不能每 tick 重估瞬时物理
+        //    状态"的框架铁律在挖掘分支上的翻版。
+        if (_scaffoldDigTarget != null) {
+            BlockPos t = _scaffoldDigTarget;
+            if (WorldHelper.isSolid(mod, t)
+                    && mod.getWorld().getBlockState(t).getHardness(mod.getWorld(), t) >= 0) {
+                PillarJumpHelper.release(mod);
+                setDebugState("Scaffold: digging up (latched) at " + t);
+                return new DestroyBlockTask(t);
+            }
+            _scaffoldDigTarget = null; // 挖穿 (或变不可挖) → 解锁, 走垫跳
+        }
         for (int dy = 1; dy <= 2; dy++) {
             BlockPos above = player.up(dy);
             if (WorldHelper.isSolid(mod, above)
                     && mod.getWorld().getBlockState(above).getHardness(mod.getWorld(), above) >= 0) {
+                _scaffoldDigTarget = above;
                 PillarJumpHelper.release(mod);
                 if (_scaffoldLogTimer.elapsed()) {
                     _scaffoldLogTimer.reset();
@@ -747,6 +788,7 @@ public class GoToSurfaceTask extends Task {
         _mode = AscentMode.BARITONE;
         _stepIdx = 0;
         _stepTargetY = Integer.MIN_VALUE;
+        _scaffoldDigTarget = null;
         _noPathTimer = null;
         _scaffoldStartTick = -1;
         _scaffoldLastY = Integer.MIN_VALUE;
