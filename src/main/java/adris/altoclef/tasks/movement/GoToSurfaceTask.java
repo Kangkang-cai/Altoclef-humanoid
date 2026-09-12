@@ -498,6 +498,13 @@ public class GoToSurfaceTask extends Task {
         if (_pickPhase == PickEscapePhase.DONE) return null;
         if (_pickPhase == PickEscapePhase.NONE) {
             if (!shouldTryPickEscape(mod)) {
+                // (2026-09-12 v13) 不触发必须留痕: 20260912-183017 零日志黑盒,
+                // 不知道是没镐误判还是木头计数口径问题。
+                Debug.logToFile("altoclef_diag.log",
+                        "[GoToSurface] pick-escape skip: pickaxe=" + hasAnyPickaxe(mod)
+                                + " logs*4+planks=" + (mod.getItemStorage().getItemCount(ItemHelper.LOG) * 4
+                                + mod.getItemStorage().getItemCount(ItemHelper.PLANKS))
+                                + " (need >=9) at " + player);
                 _pickPhase = PickEscapePhase.DONE;
                 return null;
             }
@@ -635,18 +642,25 @@ public class GoToSurfaceTask extends Task {
         // 玩家还站 y66: 旧顺序"先扫头顶 4 格内可挖就一直挖", 垫塔分支要等
         // DIG_WINDOW 全挖空才轮到 —— 空手 10s/格 = 先凿 4 格高烟囱才想到爬。
         // 改为人类直觉: 【挖 1 格立即垫 1 格】, 净升 1 格循环。
-        // 1) 紧贴头顶 (dy=1) 可挖实心 → 凿穿。
-        BlockPos head = player.up();
-        if (WorldHelper.isSolid(mod, head)
-                && mod.getWorld().getBlockState(head).getHardness(mod.getWorld(), head) >= 0) {
-            PillarJumpHelper.release(mod);
-            if (_scaffoldLogTimer.elapsed()) {
-                _scaffoldLogTimer.reset();
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD digging up at " + head
-                        + " player=" + player);
+        // 1) 头顶上方实心 → 凿穿 (最低的先挖)。
+        //    (2026-09-12 v13 撞头修复, 20260912-183017 实锤: pillaring 15s 零位移
+        //    jump=true onGround=true) 旧代码查 player.up() = 自己的头格, 站立时
+        //    永远是空气 → 永远不挖; 天花板其实在 up(2), 垫跳时头撞天花板弹回。
+        //    现扫 dy=1..2: dy=1 (头格, 挤压场景) 与 dy=2 (头顶正上方)。
+        //    跳跃头顶高度 ≈ feet+2.25, 挖通 up(2) 即可垫升 1 格, 不会连凿烟囱。
+        for (int dy = 1; dy <= 2; dy++) {
+            BlockPos above = player.up(dy);
+            if (WorldHelper.isSolid(mod, above)
+                    && mod.getWorld().getBlockState(above).getHardness(mod.getWorld(), above) >= 0) {
+                PillarJumpHelper.release(mod);
+                if (_scaffoldLogTimer.elapsed()) {
+                    _scaffoldLogTimer.reset();
+                    Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD digging up at " + above
+                            + " player=" + player);
+                }
+                setDebugState("Scaffold: digging up at " + above);
+                return new DestroyBlockTask(above);
             }
-            setDebugState("Scaffold: digging up at " + head);
-            return new DestroyBlockTask(head);
         }
 
         // 2) 头顶已通 + 已入水 → 交 GetToYTask (CustomBaritoneGoalTask 的 [SwimUp] 接管)。
