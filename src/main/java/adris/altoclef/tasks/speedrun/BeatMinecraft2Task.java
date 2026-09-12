@@ -864,6 +864,12 @@ public class BeatMinecraft2Task extends Task {
                 // (铁装合成/下矿/食物/熔炼) 忙时一律让位, 绝不打断 (isMainLineBusy
                 // 顺着 _sub 子链深查, 覆盖铁装 squash 任务内部展开的挖矿/熔炼树枝)。
                 && !isMainLineBusy(mod)
+                // (2026-09-12 v16 逃生优先, 20260912-190543 实锤) GoToSurfaceTask
+                // 在链上时收台必须让位: 封闭空间做镐侧线刚把台放到地上, "包里
+                // 没台 + 台在近旁"瞬间成立, 本分支每 2s 抢占挖垫爬升 (Mine And
+                // Collect ↔ Returning to surface 乒乓, 10.7s 才爬 2 格)。台又
+                // 跑不掉 (方块/掉落物就在井里), 爬出见天后本分支自然恢复。
+                && !thisOrChildSatisfies(t -> t instanceof GoToSurfaceTask)
                 // (2026-08-27 睡/床优先) 主世界夜间可睡时推迟收合成台 — 否则
                 // 收合成台分支优先于睡眠分支, 反复把睡/弄床流程打断 (用户实测:
                 // 摘床动作被 "Pick up crafting table" 打断没做完)。夜里先睡/弄床。
