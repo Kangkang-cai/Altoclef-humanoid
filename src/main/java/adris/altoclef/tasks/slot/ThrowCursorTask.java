@@ -47,7 +47,15 @@ public class ThrowCursorTask extends Task {
     // (2026-09-11) 挖开处计数, 上限防无限挖。
     private int _dugCount = 0;
     // 至多挖这么多格 (前后两层都数, 单层够深才算开阔)。
-    private static final int MAX_DIG = 4;
+    // (2026-09-12 v10 封闭空间压缩: 4→1) 20260912-173227 实锤: 封闭口袋合成木镐
+    // 需要腾 1 格, 空手 10s/格 × 4 轮 = 40s+ 才到兜底, 期间还被其他任务抢断。
+    // 挖 1 格后仍封闭就直接丢 (掉落物落原地, 弹回熔断兜底) —— 早丢早解脱。
+    private static final int MAX_DIG = 1;
+    // (2026-09-12 v10) 弹回熔断"走开"步骤超时: 封闭空间 baritone 无路,
+    // RunAwayFromPositionTask 永不 finished → ThrowCursor 卡死在走开这步。
+    // 走不动就放弃走开, 照常丢 (死点兜底)。
+    private static final int RUNAWAY_TIMEOUT_TICKS = 20 * 5;
+    private int _runAwayStartTick = -1;
     // (2026-09-11) 丢出记录只做一次 (转向/挖格期间会多次走到 _throwTask 分支)。
     private boolean _throwRecorded = false;
 
@@ -58,6 +66,7 @@ public class ThrowCursorTask extends Task {
         _runAwayTask = null;
         _dugCount = 0;
         _throwRecorded = false;
+        _runAwayStartTick = -1;
         // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         if (!cursor.isEmpty() && mod.getPlayer() != null) {
@@ -81,10 +90,14 @@ public class ThrowCursorTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
         // 0) (2026-09-11) 弹回后先离开上次落点, 走开后再转向丢弃。
-        if (_runAwayTask != null && !_runAwayTask.isFinished(mod)) {
-            return _runAwayTask;
-        }
+        //    (2026-09-12 v10) 封闭空间兜底: baritone 无路时 RunAway 永不完成 →
+        //    卡死死点。5s 走不动就放弃, 直接进入转向+丢弃流程。
         if (_runAwayTask != null) {
+            if (_runAwayStartTick < 0) _runAwayStartTick = WorldHelper.getTicks();
+            if (!_runAwayTask.isFinished(mod)
+                    && WorldHelper.getTicks() - _runAwayStartTick < RUNAWAY_TIMEOUT_TICKS) {
+                return _runAwayTask;
+            }
             _runAwayTask = null;
             _turnTask = new TurnToOpenAreaTask();
         }
