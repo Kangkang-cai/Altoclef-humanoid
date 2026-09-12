@@ -258,7 +258,7 @@ public class GoToSurfaceTask extends Task {
     private boolean eyesUnderwater(AltoClef mod) {
         Vec3d eye = mod.getPlayer().getEyePos();
         BlockPos eyeBlock = new BlockPos((int) eye.x, (int) eye.y, (int) eye.z);
-        return mod.getWorld().getBlockState(eyeBlock).getFluidState().isNotEmpty();
+        return !mod.getWorld().getBlockState(eyeBlock).getFluidState().isEmpty();
     }
 
     /** 放弃挖垫模式: 记录触发条件层 static 冷却, 回 baritone。 */
