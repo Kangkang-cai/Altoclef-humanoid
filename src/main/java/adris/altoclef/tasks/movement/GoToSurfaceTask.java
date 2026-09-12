@@ -199,6 +199,27 @@ public class GoToSurfaceTask extends Task {
         }
     }
 
+    /**
+     * (2026-09-12 v12 井底误判修复) 站在自挖竖井/烟囱底部: 头顶通天但
+     * 脚+头两层水平四面全实心, 无法水平移动。
+     * isSkyVisible 在井底也是 true → isDeepUnderground 判"见天" →
+     * isFinished 误完工退场 (18:00:52 clean STOP 实锤, 三次测试"刚看到
+     * 天就开始睡觉/放床/收台"的总根源)。见天 ≠ 脱困, 四面实心继续爬。
+     * 脚+头两层都查: 1 格深的坑能直接跳出去, 不算井。
+     */
+    private boolean inShaft(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
+        BlockPos p = mod.getPlayer().getBlockPos();
+        BlockPos head = p.up();
+        for (BlockPos around : new BlockPos[]{p.north(), p.south(), p.east(), p.west(),
+                head.north(), head.south(), head.east(), head.west()}) {
+            if (!WorldHelper.isSolid(mod, around)) {
+                return false; // 有任一水平出口 → 不算井
+            }
+        }
+        return true;
+    }
+
     /** baritone 是否自称正在寻路 (与 hasPath 互补: 有 state 无 path 也算"自称能动")。 */
     private boolean pathingActive(AltoClef mod) {
         try {
@@ -321,7 +342,8 @@ public class GoToSurfaceTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
         sampleMovement(mod);
-        boolean deep = WorldHelper.isDeepUnderground(mod);
+        // (2026-09-12 v12) 竖井底也算"仍被困" → 走挖垫爬升, 不提前完工。
+        boolean deep = WorldHelper.isDeepUnderground(mod) || inShaft(mod);
         if (!deep) {
             if (_mode == AscentMode.SCAFFOLD_UP) {
                 PillarJumpHelper.release(mod);
@@ -375,9 +397,13 @@ public class GoToSurfaceTask extends Task {
         // 旧版阶梯目标 min(58, y+step) 在口袋里等于"往下走" (y66 口袋被派
         // GetToYTask(58)), 是 20260912-144157 冻结现场的一半根因。
         boolean skyward = y >= SURFACE_TARGET_Y;
-        if (skyward && canScaffold(mod, player)) {
+        // (2026-09-12 v12) 竖井底: 头顶已通无格可挖, canScaffold=false, 但四面
+        // 实心仍需垫塔爬出 → inShaft 直接放行 (继续沿井垫跳到井口)。
+        boolean shaft = inShaft(mod);
+        if (skyward && (canScaffold(mod, player) || shaft)) {
             Debug.logToFile("altoclef_diag.log", "[GoToSurface] y=" + y
-                    + " sealed under cover at " + player + " -> SCAFFOLD_UP (sky criterion)");
+                    + (shaft ? " in shaft bottom at " : " sealed under cover at ") + player
+                    + " -> SCAFFOLD_UP (sky criterion)");
             enterScaffold(mod, player);
             return tickScaffoldUp(mod, player);
         }
@@ -415,12 +441,18 @@ public class GoToSurfaceTask extends Task {
             _noPathTimer.reset();
             if (_stepIdx < STEP_LADDER.length - 1) {
                 // 缩小导航长度重试 (海底前十几格别傻等, 一段段贴上去)。
+                // (2026-09-12 v12 乒乓修复) skyward 段必须同样只上探: 旧版这里
+                // 硬钳 min(58, ...) → y64 的 bot 被派 GetToYTask(58) 向下目标
+                // (挖脚下方块), 下一 tick 又重算回 skyward 67 → 58/67 每 2s
+                // 乒乓 (20260912-175546 18:00:37-50 实锤)。
                 _stepIdx++;
-                _stepTargetY = Math.min(SURFACE_TARGET_Y, y + STEP_LADDER[_stepIdx]);
+                _stepTargetY = skyward
+                        ? Math.min(y + Math.min(STEP_LADDER[_stepIdx], 4), 250)
+                        : Math.min(SURFACE_TARGET_Y, y + STEP_LADDER[_stepIdx]);
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone path, shrinking step to "
                         + STEP_LADDER[_stepIdx] + " at " + player);
-            } else if (canScaffold(mod, player)) {
-                // 最短段仍无路 → 挖一垫一。
+            } else if (canScaffold(mod, player) || (skyward && inShaft(mod))) {
+                // 最短段仍无路 → 挖一垫一 (竖井底也走这: 垫塔爬出)。
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no foothold (shortest step) at "
                         + player + " -> SCAFFOLD_UP");
                 enterScaffold(mod, player);
@@ -667,7 +699,8 @@ public class GoToSurfaceTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        if (WorldHelper.isDeepUnderground(mod)) return false;
+        // (2026-09-12 v12) 见天但四面实心 = 竖井底, 不算完工。
+        if (WorldHelper.isDeepUnderground(mod) || inShaft(mod)) return false;
         return !inPit(mod);
     }
 
