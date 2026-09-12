@@ -135,7 +135,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
 
     @Override
     protected Task onTick(AltoClef mod) {
-        Task jumpFix = tickJumpStuck(mod);
+        Task jumpFix = JumpStuckResolver.tick(mod);
         if (jumpFix != null) return jumpFix;
 
         // (2026-08-26 用户多次反馈: 游泳时按住疾跑, 一直没修好) baritone 在

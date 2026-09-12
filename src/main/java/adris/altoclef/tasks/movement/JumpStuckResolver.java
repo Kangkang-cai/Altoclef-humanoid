@@ -70,10 +70,9 @@ public final class JumpStuckResolver {
     private static final TimerGame _logTimer = new TimerGame(2);
 
     // ===== 处置冷却 (static: 实例频繁重建会绕过实例层冷却) =====
-    /** 挖障 / 换路后的冷却。(2026-09-12 用户"超时时长不要超过 1.5s, 影响观感":
-     *  检测 1s + 冷却 1s, 卡住后每个节奏点都 ≤1.5s。) */
-    private static final int JUMP_FIX_COOLDOWN_TICKS = 20;
-    private static final int JUMP_REPATH_COOLDOWN_TICKS = 20;
+    /** 挖障与换路共用一个冷却。(2026-09-12 用户"超时时长不要超过 1.5s, 影响
+     *  观感": 检测 1s + 冷却 1s, 卡住后每个节奏点都 ≤1.5s。) */
+    private static final int COOLDOWN_TICKS = 20;
     private static int _cooldownUntil = 0;
     /** 同一格反复处置: 达上限不再原地纠缠, 强制 wander 脱离 (2026-09-12 用户
      *  "兜底机制没有强行 w 吗" — 旧 30s 被动冷却期内谁也不动, 观感极差)。 */
@@ -137,7 +136,7 @@ public final class JumpStuckResolver {
                 _lastDigPos = obstacle;
                 _digCount = 1;
             }
-            _cooldownUntil = now + JUMP_FIX_COOLDOWN_TICKS;
+            _cooldownUntil = now + COOLDOWN_TICKS;
             resetStreak();
             if (_digCount >= SAME_POS_DIG_LIMIT) {
                 _digCount = 0;
@@ -165,7 +164,7 @@ public final class JumpStuckResolver {
         // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
         // 人在半空)。只能撤销路径逼它重算另一条路; 同格反复换路也没用 → 强制 wander
         // (旧的 30s 被动冷却期内谁也不动, 已废除)。
-        _cooldownUntil = now + JUMP_REPATH_COOLDOWN_TICKS;
+        _cooldownUntil = now + COOLDOWN_TICKS;
         resetStreak();
         if (registerSameSpotStuck(mod)) {
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] same spot re-route x"

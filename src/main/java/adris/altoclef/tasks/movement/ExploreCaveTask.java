@@ -94,12 +94,8 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected Task onTick(AltoClef mod) {
-        // (2026-09-12) 跳跃卡死挖障处置: 会话 20260912-101305 10:19 实锤 bot 在
-        // (117,-13,102) 原地弹跳 19s (撞头弹回, hSpeed=0), 本任务自己的兜底只是
-        // 每 6s 换一个同样不可达的洞内空气目标, 对物理卡点无效; 用户左键挖掉
-        // 挡路方块才脱困。挂上共享 JumpStuckResolver: 检测到"水平零速 + 强制跳/
-        // 撞头弹回证据"连续 1s → 找到挡路方块就派 DestroyBlockTask 挖掉 (等价于
-        // 用户手动左键), 找不到才 forceCancel 换路。
+        // 跳跃卡死/顶墙的挖障处置 (共享件, 本类不走 CustomBaritoneGoalTask):
+        // 检测口径与处置策略见 JumpStuckResolver 类注释。
         Task jumpFix = JumpStuckResolver.tick(mod);
         if (jumpFix != null) return jumpFix;
 
