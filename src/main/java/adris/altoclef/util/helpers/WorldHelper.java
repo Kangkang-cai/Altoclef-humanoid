@@ -597,8 +597,21 @@ public interface WorldHelper {
         );
     }
 
+    /**
+     * pos 这一格是否与玩家碰撞箱相交 (即"方块放不进自己身体里"的那几格)。
+     *
+     * (2026-09-12 收窄) 旧实现 `pos.isWithinDistance(player.getPos(), 2)` 把
+     * "离玩家 2 格以内"整片区域都判成"在自己身上", 两个后果:
+     *   ① 放置选点 (PlaceBlockNearbyTask.locateClosePlacePos /
+     *      getCurrentlyLookingBlockPlace) 被迫外移到 2 格外 —— bot 走到目标
+     *      旁边时画面上像"往自己脚边放/放不下" (现场 20260912-084704 目标
+     *      20,57,152 vs bot 站格 21,57,152);
+     *   ② PillarJumpHelper 的腾空放置窗口目标恒为 feet.down() (距离必然 <2),
+     *      被恒真排除 → 垫塔永远放不出方块。
+     * 改为"方块格 box 与玩家碰撞箱是否相交", 只排除脚/头实际占住的格。
+     */
     static boolean isInsidePlayer(AltoClef mod, BlockPos pos) {
-        return pos.isWithinDistance(mod.getPlayer().getPos(), 2);
+        return mod.getPlayer().getBoundingBox().intersects(new Box(pos));
     }
 
     static Iterable<BlockPos> getBlocksTouchingPlayer(AltoClef mod) {

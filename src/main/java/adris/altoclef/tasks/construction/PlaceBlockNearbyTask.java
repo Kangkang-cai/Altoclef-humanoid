@@ -43,7 +43,11 @@ public class PlaceBlockNearbyTask extends Task {
 
     private final Block[] _toPlace;
 
-    private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
+    // (2026-09-12 观感) 站住不动容忍 6s→2s。现场 20260912-084704: 这条才是日志里
+    // 实际触发换位的 checker (快照 L3 "Wandering, will try to place again later."
+    // + L4 Wander for 2.0 blocks, 08:48:20.6), 与 PlaceBlockTask 的 checker 同源
+    // 6s 叠加 → 放置失败要等 6s 才动。移动中 distance 有进展不触发。
+    private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2, 0.1, 0.5, 0.001, 1);
     private final TimeoutWanderTask _wander = new TimeoutWanderTask(2);
 
     // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。

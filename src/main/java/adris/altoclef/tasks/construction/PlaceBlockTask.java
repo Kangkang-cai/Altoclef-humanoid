@@ -37,7 +37,11 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     private final Block[] _toPlace;
     private final boolean _useThrowaways;
     private final boolean _autoCollectStructureBlocks;
-    private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
+    // (2026-09-12 观感) 「站住不动」容忍从默认 6s 收紧到 2s。现场
+    // 20260912-084704: Place structure{furnace} at 20,57,152 站桩 6s 才放弃换位
+    // (08:48:13→20.6), 单次放置总耗时 13.1s, 用户反馈观感差。移动中 distance
+    // 有进展不会触发, 故 2s 只压缩"真卡住"的等待。其余参数保持默认。
+    private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2, 0.1, 0.5, 0.001, 1);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(3, true); // This can get stuck forever, so we increase the range.
     private Task _materialTask;
     private int _failCount = 0;
