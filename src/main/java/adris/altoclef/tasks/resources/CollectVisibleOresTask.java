@@ -200,7 +200,11 @@ public class CollectVisibleOresTask extends Task {
         // 几乎一直存在 → 贪心任务永不释放 → 反复打断主线铁套任务 → 铁套↔贪心每
         // ~2s 互抢 (日志 09:21 实锤)。改为【当前批次挖完即释放】(有界贪心):
         // _active(本批 MineAndCollectTask)挖完 → 完成交还主线; 由 BeatMinecraft2Task
-        // 的冷却(已加大到 8s)控制下次再触发, 主线获得长窗口推进。
+        // 的检查节拍(普通阶段 3s = GREEDY_ORE_CHECK_COOLDOWN_NORMAL / 进下界前阶段
+        // preNetherGreedyCooldownSeconds)控制下次再触发, 主线获得长窗口推进。
+        // (2026-09-12 更正) 此处原文写"冷却已加大到 8s"是 09-01 的旧值, 09-11 已按
+        // 用户"看到金子总是没有第一时间触发"改回 3s, 且检查失败的分支也会 reset —
+        // 节拍的实际语义是"两次检查间隔 >= 3s", 与冷却起点无关。
         if (_active == null) {
             // 还没选目标(或当前无可见矿): 有可见活就继续等 onTick 建目标, 否则完成。
             return !hasAnyVisibleOreWork(mod);
