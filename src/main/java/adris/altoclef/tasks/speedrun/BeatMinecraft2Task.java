@@ -2230,11 +2230,18 @@ public class BeatMinecraft2Task extends Task {
         // 跳过不排 —— 否则闸门拆炉→链重建再放再投→闸门再拆, 2.1s 周期
         // 互抢死循环 (125529 场次 12 分钟零进度)。守卫 onStop 后静态清除,
         // 炉若仍非空, 下一轮扫描照常排掉 — 闸门职责不受损。
+        // (2026-09-12 v20 填料期豁免) 守卫静态口只盖交接后; 20260912-195954
+        // 20:07:08-21 实锤填料阶段 (Moving Materials, 尚未 Handing over) 被闸门
+        // 1s 扫描撞上 → 拆炉 → 链捡回重放再填 → 再拆, 2-4s 周期三轮零进度。
+        // 补 SmeltInFurnaceTask.getActiveSmeltingFurnacePos (链锁定炉位即登记,
+        // onStop 注销) 覆盖全程。
         BlockPos guarded = FurnaceSmeltGuardTask.getActiveGuardedFurnacePos();
+        BlockPos smelting = SmeltInFurnaceTask.getActiveSmeltingFurnacePos();
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.FURNACE)) {
             if (guarded != null && pos.equals(guarded)) continue;
+            if (smelting != null && pos.equals(smelting)) continue;
             if (pos.isWithinDistance(player, FURNACE_GRAB_RANGE)
                     && mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
                     && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
@@ -2251,6 +2258,10 @@ public class BeatMinecraft2Task extends Task {
             for (int dy = -r; dy <= r; dy++) {
                 for (int dz = -r; dz <= r; dz++) {
                     BlockPos pos = player.add(dx, dy, dz);
+                    // (2026-09-12 v20) 兜底循环同样豁免守卫/冶炼链在用炉
+                    // (09-11 的守卫豁免只盖了上面 tracker 循环, 这里一直漏)。
+                    if (guarded != null && pos.equals(guarded)) continue;
+                    if (smelting != null && pos.equals(smelting)) continue;
                     if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.FURNACE
                             && WorldHelper.isFurnaceNonEmpty(mod, pos)) {
                         double sq = pos.getSquaredDistance(player);

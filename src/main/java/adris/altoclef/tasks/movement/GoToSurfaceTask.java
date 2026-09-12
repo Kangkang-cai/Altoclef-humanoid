@@ -79,10 +79,25 @@ import net.minecraft.util.math.Vec3d;
  *  - 2026-09-12 v7 重见天日 (会话 20260912-144157, 用户拍板 "没挖到天或
  *    连着天的海洋不算完"): isDeepUnderground 旧判据 y<58 让 y66 封闭湖底
  *    口袋里的本任务直接完工退场, 之后所有任务只寻路不挖掘 → 冻结 18+ 分钟。
- *    修: WorldHelper.isDeepUnderground 改为"头顶无天空视线" (水面也算盖);
+ *    修: "头顶无天空视线" 判据收归本任务私有 isDeepForEscape (原 v7 曾直接改
+ *    WorldHelper.isDeepUnderground 全局语义, 2026-09-12 实测树冠/门框下 deep
+ *    闪烁 → 睡觉↔囤木头分支横跳, 已回滚全局口径; 本任务保留 v7 完工语义)。
  *    y>=58 顶板下头顶可挖时直接进挖一垫一, 阶梯目标不再向下 (58)。
  */
 public class GoToSurfaceTask extends Task {
+
+    /**
+     * (2026-09-12 v20) 本任务专属"深处"判据 = v7 语义: y<58 硬阈值, 或
+     * 头顶无天空视线 (isSkyVisible 走 MOTION_BLOCKING 高度图, 水面也算盖 →
+     * 海里必须游到水面才算见天, 即"连着天的海洋")。只服务逃生完工判定,
+     * 不与全局共享口径混用 —— 全局 isDeepUnderground 已回滚 y<58。
+     */
+    private static boolean isDeepForEscape(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
+        BlockPos pos = mod.getPlayer().getBlockPos();
+        if (pos.getY() < 58) return true;
+        return !mod.getWorld().isSkyVisible(pos.up());
+    }
 
     private enum AscentMode {
         /** 默认: baritone 分段导航, 不挖不垫。 */
@@ -356,7 +371,7 @@ public class GoToSurfaceTask extends Task {
     protected Task onTick(AltoClef mod) {
         sampleMovement(mod);
         // (2026-09-12 v12) 竖井底也算"仍被困" → 走挖垫爬升, 不提前完工。
-        boolean deep = WorldHelper.isDeepUnderground(mod) || inShaft(mod);
+        boolean deep = isDeepForEscape(mod) || inShaft(mod);
         if (!deep) {
             if (_mode == AscentMode.SCAFFOLD_UP) {
                 PillarJumpHelper.release(mod);
@@ -807,7 +822,7 @@ public class GoToSurfaceTask extends Task {
     @Override
     public boolean isFinished(AltoClef mod) {
         // (2026-09-12 v12) 见天但四面实心 = 竖井底, 不算完工。
-        if (WorldHelper.isDeepUnderground(mod) || inShaft(mod)) return false;
+        if (isDeepForEscape(mod) || inShaft(mod)) return false;
         return !inPit(mod);
     }
 

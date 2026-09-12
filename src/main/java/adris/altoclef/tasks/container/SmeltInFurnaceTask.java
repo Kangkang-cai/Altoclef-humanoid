@@ -61,6 +61,20 @@ public class SmeltInFurnaceTask extends ResourceTask {
     private String _stallSnap = null;
     private int _stallOpenTicks = 0;
 
+    // (2026-09-12 v20 填料期豁免) 冶炼链当前锁定的炉位 — 静态跨层信号, 与
+    // FurnaceSmeltGuardTask.getActiveGuardedFurnacePos 同先例。区别: 守卫静态口
+    // 只在守卫交接后生效, 而排空闸门 (BeatMinecraft2Task 进下界前) 的 1s 扫描
+    // 会撞上【填料阶段】(Moving Materials, 尚未交接) 的非空炉 → 拆炉 → 链捡回
+    // 掉落重放炉再填 → 再拆, 2-4s 周期互抢 (20260912-195954 20:07:08-21 实锤
+    // 三轮, raw_iron x4/x6 反复落地)。本静态口从链锁定炉位起生效 (onTick 顶部
+    // 缓存读, 零扫描成本), onStop 清除 → 填料/收货/守卫全程闸门让位。
+    private static BlockPos _activeSmeltPos = null;
+
+    /** 冶炼链正在使用的炉位 (含填料期); 链未运行或未锁定时返回 null。 */
+    public static BlockPos getActiveSmeltingFurnacePos() {
+        return _activeSmeltPos;
+    }
+
     public SmeltInFurnaceTask(SmeltTarget[] targets) {
         super(extractItemTargets(targets));
         _targets = targets;
@@ -195,6 +209,9 @@ public class SmeltInFurnaceTask extends ResourceTask {
         } catch (Exception e) {
             Debug.logWarning("Furnace stop-loss failed (ignored): " + e);
         }
+        // (2026-09-12 v20) 外层兜底注销: 内层 onStop 理论上先于本方法触发,
+        // 这里防内层路径遗漏导致静态豁免悬挂。
+        _activeSmeltPos = null;
         // Close furnace screen
         StorageHelper.closeScreen();
     }
@@ -384,10 +401,21 @@ public class SmeltInFurnaceTask extends ResourceTask {
             // 任务重跑从头走 walk&open, 防止旧守卫实例把重启后的任务又拉回守卫分支。
             _guardActive = false;
             _guard = null;
+            // (2026-09-12 v20) 链停即注销炉位豁免; 炉若仍非空, 排空闸门恢复职责。
+            _activeSmeltPos = null;
         }
 
         @Override
         protected Task onTick(AltoClef mod) {
+            // (2026-09-12 v20 填料期豁免) 链锁定炉位即登记 (getTargetContainerPosition
+            // 是缓存字段读, 零扫描成本) → 排空闸门从放炉/走向炉起就让位, 不再只保
+            // 守卫交接后。未锁定时不覆盖旧值 (onStop 统一清除)。
+            {
+                BlockPos active = getTargetContainerPosition();
+                if (active != null) {
+                    _activeSmeltPos = active;
+                }
+            }
             // (2026-09-12 界面闪烁修复) 界面一旦关闭就复位开屏 latch 标记, 下一次
             // 打开重新计时。放在守卫闸门之前 —— 守卫关屏后本方法提前 return,
             // 不经过这里就会漏掉复位。

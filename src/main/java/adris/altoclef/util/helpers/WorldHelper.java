@@ -238,16 +238,15 @@ public interface WorldHelper {
         if (mod.getPlayer() == null || mod.getWorld() == null) return false;
         BlockPos pos = mod.getPlayer().getBlockPos();
         // 5+ blocks below sea level: genuinely deep cave/mine.
-        if (pos.getY() < 58) return true;
-        // (2026-09-12 重见天日判据, 用户拍板: "没挖到天或连着天的海洋不算完")
-        // 旧版 y>=58 一律算地表 → bot 在 y66 封闭湖底口袋里 GoToSurfaceTask
-        // 完工退场, 之后所有导航任务只寻路不挖掘, 无人再手撸方块 (会话
-        // 20260912-144157 冻结 18+ 分钟的根因)。改为: 头顶没有天空视线仍算
-        // 深处。isSkyVisible 走 MOTION_BLOCKING 高度图, 水面也算盖 → 海里必须
-        // 游到水面才算见天, 即"连着天的海洋"。树冠/屋檐下也会短暂判深, 但
-        // GoToSurfaceTask 首选 baritone 导航 (有路就走出去), 只有真无路才进
-        // 挖一垫一, 误判代价 = 顶多凿掉头顶几片树叶。
-        return !mod.getWorld().isSkyVisible(pos.up());
+        // (2026-09-12 回滚 v7 23ece415 的全局语义扩张, 用户"睡觉烧东西都被异常打断")
+        // v7 曾把"头顶无天空视线"并入本判据 —— 但本方法有 5+ 个共享调用点
+        // (睡觉优先 isNightSleepPriority / 囤木头 / 找羊 / 扔眼), 树冠/门框/
+        // 屋檐下每走一步 deep 翻转 → 睡觉↔囤木分支每 550ms 抖 (20260912-195954
+        // diag 实锤: deep=true/false 三次翻转, branch 同步抖三次)。
+        // "重见天日"判据是 GoToSurfaceTask 的完工语义, 收归其私有
+        // isDeepForEscape(同 v7 语义), 共享口径恢复 y<58 硬阈值 (2026-08-27
+        // 用户拍板: y≥58 即视为地表, 24 格长扫描撤销的结论不变)。
+        return pos.getY() < 58;
     }
 
     /**
