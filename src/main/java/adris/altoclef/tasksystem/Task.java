@@ -204,6 +204,18 @@ public abstract class Task {
 
     protected abstract String toDebugString();
 
+    /**
+     * (2026-09-12 诊断) 本任务当前操作的"目标方块"坐标, 供 TaskStackSnapshot
+     * 打印目标位及邻块现场 (放置不下/交互失败时唯一缺失的证据: 目标格是什么
+     * 方块、有没有可放置面、是否已被 BlockTracker 拉黑)。
+     *
+     * 默认 null = 该任务无单一目标位。纯只读, 不参与任何决策, 不改变行为;
+     * 只在需要现场证据的任务里覆写 (放置/交互)。
+     */
+    public net.minecraft.util.math.BlockPos getDiagTargetBlock() {
+        return null;
+    }
+
     @Override
     public String toString() {
         return "<" + toDebugString() + "> " + _debugState;

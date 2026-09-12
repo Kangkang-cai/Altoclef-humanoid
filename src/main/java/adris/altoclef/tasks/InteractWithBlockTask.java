@@ -404,6 +404,12 @@ public class InteractWithBlockTask extends Task {
         return "Interact using " + _toUse + " at " + _target + " dir " + _direction;
     }
 
+    /** (2026-09-12 诊断) 交互目标位, 供 snapshot 打印目标格方块/邻块现场。 */
+    @Override
+    public BlockPos getDiagTargetBlock() {
+        return _target;
+    }
+
     public ClickResponse getClickStatus() {
         return _cachedClickStatus;
     }

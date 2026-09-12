@@ -5,8 +5,11 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.util.slots.PlayerSlot;
+import net.minecraft.block.BlockState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 
 import java.util.List;
 
@@ -90,7 +93,18 @@ public final class TaskStackSnapshot {
             sb.append("\n  RES planks=").append(planks)
                     .append(" logs=").append(logs)
                     .append(" coal=").append(coal)
-                    .append(" fuelUnits=").append(String.format("%.1f", fuelUnits));
+                    .append(" fuelUnits=").append(String.format("%.1f", fuelUnits))
+                    // (2026-09-12) 容器类现场: 手头到底有没有炉/台 (放置不下时最
+                    // 先要排除的假设 —— "没物品的放置是纯游荡")。
+                    .append(" furnace=").append(mod.getItemStorage().getItemCount(Items.FURNACE))
+                    .append(" table=").append(mod.getItemStorage().getItemCount(Items.CRAFTING_TABLE));
+
+            // (2026-09-12 目标位现场) 最深一个有目标位的任务: 打印目标格方块、
+            // 可放置面、下方支撑、3x3x3 邻块 (仅非空气)。20260912-084704 场次
+            // 实锤缺口: `Place structure{furnace} at 20,57,152> Letting baritone
+            // place a block.` 空转 9.1s, 但日志里 20,57,152 到底是什么方块、
+            // 有没有可放置面, 一个字都没有 → 事后无法判断"放不下"的原因。
+            appendTargetBlockContext(sb, mod, tasks);
 
             // 2x2 合成格 + 输出格 + 光标
             sb.append("\n  GRID");
@@ -110,5 +124,94 @@ public final class TaskStackSnapshot {
     private static String fmtStack(ItemStack stack) {
         return stack == null || stack.isEmpty() ? "EMPTY"
                 : stack.getItem().toString() + "x" + stack.getCount();
+    }
+
+    /**
+     * (2026-09-12) 目标位方块现场: 目标格状态 + 六向可放置面 + 下方支撑 +
+     * 3x3x3 非空气邻块 + 与 bot 距离 + 是否被 BlockTracker 拉黑。
+     *
+     * 取【最深一个】有目标位的任务 (叶子层最贴近现场)。纯只读, 全包 try/catch。
+     */
+    private static void appendTargetBlockContext(StringBuilder sb, AltoClef mod, List<Task> tasks) {
+        try {
+            if (mod.getWorld() == null) return;
+            Task owner = null;
+            BlockPos target = null;
+            for (int i = tasks.size() - 1; i >= 0; i--) {
+                BlockPos p = null;
+                try {
+                    p = tasks.get(i).getDiagTargetBlock();
+                } catch (Throwable ignored) {
+                }
+                if (p != null) {
+                    owner = tasks.get(i);
+                    target = p;
+                    break;
+                }
+            }
+            if (target == null) return;
+
+            BlockState st = mod.getWorld().getBlockState(target);
+            sb.append("\n  BLOCK from=").append(shortName(owner))
+                    .append(" target=").append(target.toShortString())
+                    .append(" block=").append(st.getBlock())
+                    .append(" air=").append(st.isAir())
+                    .append(" solid=").append(WorldHelper.isSolid(mod, target))
+                    .append(" fluid=").append(!st.getFluidState().isEmpty())
+                    .append(" blacklisted=").append(mod.getBlockTracker().unreachable(target));
+
+            if (mod.getPlayer() != null) {
+                double d = Math.sqrt(mod.getPlayer().squaredDistanceTo(WorldHelper.toVec3d(target)));
+                sb.append(" dist=").append(String.format("%.2f", d));
+            }
+
+            // 六个相邻面: 哪些方向有实心面可点击放置 (无面 = 天然放不下)。
+            StringBuilder faces = new StringBuilder();
+            int faceCount = 0;
+            for (Direction dir : Direction.values()) {
+                BlockPos nb = target.offset(dir);
+                if (WorldHelper.isSolid(mod, nb)) {
+                    if (faceCount > 0) faces.append(',');
+                    faces.append(dir.getName());
+                    faceCount++;
+                }
+            }
+            sb.append(" placeFaces=").append(faceCount == 0 ? "NONE" : faces.toString());
+
+            BlockPos below = target.down();
+            sb.append("\n  BLOCK below=").append(below.toShortString())
+                    .append(" block=").append(mod.getWorld().getBlockState(below).getBlock())
+                    .append(" solid=").append(WorldHelper.isSolid(mod, below));
+
+            // 3x3x3 邻块, 只列非空气 (空气在放置场景无信息量, 会淹没日志)。
+            StringBuilder nbs = new StringBuilder();
+            int shown = 0;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        BlockPos np = target.add(dx, dy, dz);
+                        BlockState ns = mod.getWorld().getBlockState(np);
+                        if (ns.isAir()) continue;
+                        if (shown > 0) nbs.append(' ');
+                        nbs.append(dx).append('/').append(dy).append('/').append(dz)
+                                .append('=').append(ns.getBlock());
+                        shown++;
+                    }
+                }
+            }
+            sb.append("\n  BLOCK neighbors(非空气, 偏移/方块) ").append(shown == 0 ? "none" : nbs.toString());
+        } catch (Throwable ignored) {
+            // 诊断日志绝不影响主逻辑
+        }
+    }
+
+    private static String shortName(Task t) {
+        try {
+            String s = t.toString();
+            return s.length() > 40 ? s.substring(0, 40) + "…" : s;
+        } catch (Throwable e) {
+            return "?";
+        }
     }
 }

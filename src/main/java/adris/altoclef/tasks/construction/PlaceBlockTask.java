@@ -214,6 +214,12 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         return "Place structure" + ArrayUtils.toString(_toPlace) + " at " + _target.toShortString();
     }
 
+    /** (2026-09-12 诊断) 放置目标位, 供 snapshot 打印目标格方块/可放置面现场。 */
+    @Override
+    public net.minecraft.util.math.BlockPos getDiagTargetBlock() {
+        return _target;
+    }
+
     private boolean tryingAlternativeWay() {
         return _failCount % 4 == 3;
     }
