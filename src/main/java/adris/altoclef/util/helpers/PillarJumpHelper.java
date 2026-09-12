@@ -95,6 +95,53 @@ public final class PillarJumpHelper {
     /** 松开垫塔期间 hold 的跳跃键 (退出路径必调)。 */
     public static void release(AltoClef mod) {
         mod.getInputControls().release(Input.JUMP);
+        // (2026-09-12 v21) 居中转向可能残留移动输入, 退出时一并松开。
+        mod.getInputControls().release(Input.MOVE_FORWARD);
+        mod.getInputControls().release(Input.MOVE_BACK);
+        mod.getInputControls().release(Input.MOVE_LEFT);
+        mod.getInputControls().release(Input.MOVE_RIGHT);
+    }
+
+    // (2026-09-12 v21 居中再跳) 1x1 竖井垫跳: 头顶开口只有 1 格宽, 玩家碰撞箱
+    // 0.6 —— 站偏超过 (1.0-0.6)/2 = 0.2 格, 起跳瞬间头顶就蹭到开口边沿 → 垂直
+    // 速度被顶掉, 跳不起来 (20260912-203009 20:43:55-20:44:12 y=-16 同格 17s+
+    // 实锤, 用户: "站的偏了一点, 老是撞到旁边的方块导致跳不起来")。人类做法 =
+    // 先把脚挪到方块正中再跳。跳跃放行阈值 0.2 (几何硬上限, 不留余量就蹭),
+    // 转向松键阈值 0.25 (松键后动量滑行 ~0.1, 自然落进 0.2 内, 防冲过头滑出
+    // 支撑块)。
+    private static final double CENTER_JUMP_MAX = 0.2;
+    private static final double CENTER_STEER_THRESHOLD = 0.25;
+
+    private static double offAxisSq(AltoClef mod, BlockPos support) {
+        Vec3d c = Vec3d.ofCenter(support);
+        double dx = c.x - mod.getPlayer().getX();
+        double dz = c.z - mod.getPlayer().getZ();
+        return Math.max(Math.abs(dx), Math.abs(dz));
+    }
+
+    /**
+     * 把前后左右输入换算成"走向支撑块中心"的移动力。视线此时钉在脚下
+     * (pitch≈90°), 不影响水平移动输入 —— 输入按当前 yaw 分解, 而 lookAt
+     * (支撑块顶面中心) 的 yaw 本来就指向中心偏移方向, 二者自洽。
+     */
+    private static void steerToCenter(AltoClef mod, BlockPos support) {
+        Vec3d c = Vec3d.ofCenter(support);
+        double dx = c.x - mod.getPlayer().getX();
+        double dz = c.z - mod.getPlayer().getZ();
+        double yaw = Math.toRadians(mod.getPlayer().getYaw());
+        double fwdX = -Math.sin(yaw), fwdZ = Math.cos(yaw);
+        double rightX = -fwdZ, rightZ = fwdX;
+        double fwd = dx * fwdX + dz * fwdZ;
+        double right = dx * rightX + dz * rightZ;
+        adris.altoclef.control.InputControls in = mod.getInputControls();
+        if (fwd > CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_FORWARD);
+        else in.release(Input.MOVE_FORWARD);
+        if (fwd < -CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_BACK);
+        else in.release(Input.MOVE_BACK);
+        if (right > CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_RIGHT);
+        else in.release(Input.MOVE_RIGHT);
+        if (right < -CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_LEFT);
+        else in.release(Input.MOVE_LEFT);
     }
 
     /**
@@ -114,6 +161,12 @@ public final class PillarJumpHelper {
         if (WorldHelper.isSolid(mod, below)) {
             // 站在实体上: 起跳 (视线已对准脚下块顶面, 跳起即入放置窗口)。
             LookHelper.lookAt(mod, supportTop);
+            // (2026-09-12 v21) 居中再跳: 站偏时先走向方块中心, 不起跳 ——
+            // 站偏起跳头蹭开口边沿, 垂直速度被顶掉 = 永远跳不起来。
+            if (offAxisSq(mod, below) > CENTER_JUMP_MAX) {
+                steerToCenter(mod, below);
+                return true;
+            }
             mod.getInputControls().hold(Input.JUMP);
             return true;
         }
@@ -133,7 +186,12 @@ public final class PillarJumpHelper {
             return place(mod, below, materials);
         }
         // 腾空但窗口还没到 (上升途中): 继续按住跳, 视线保持钉在支撑面。
+        // (2026-09-12 v21) 上升途中同步向中心收 (空中控制微弱但聊胜于无),
+        // 防止起跳后漂移在开口边沿蹭头。
         LookHelper.lookAt(mod, supportTop);
+        if (offAxisSq(mod, below) > CENTER_JUMP_MAX) {
+            steerToCenter(mod, below);
+        }
         mod.getInputControls().hold(Input.JUMP);
         return true;
     }
