@@ -153,6 +153,12 @@ public class BeatMinecraft2Task extends Task {
         return StorageHelper.itemTargetsMet(mod, toItemTargets(Items.IRON_SWORD)) && shieldMet(mod);
     }
 
+    // (2026-09-12 跨批次对撞闸门) 判据在 MineAndCollectTask.mainlineMiningEngagedOn —
+    // 由【主线挖矿批次主动登记心跳】(矿种 + 时间戳, TTL 1.5s), 本任务只读。
+    // 不能在这里遍历 mod.getUserTaskChain().getTasks() 找子任务: Task.tickInternal
+    // 是自上而下"先 addTaskToChain 再 onTick"(Task.java L56/L67), 本任务 onTick 跑的
+    // 时候链上只有它自己和祖先, 看不到 gear 链里的 MineAndCollectTask。
+
     /**
      * (2026-09-09 进下界前必须持盾, 用户"bot 进下界前没有先做一个盾牌, 这不对")
      * 漏洞: OVERWORLD case 里铁装门槛是 `!gearMinMet && !eyeGearSatisfied` —
@@ -466,6 +472,9 @@ public class BeatMinecraft2Task extends Task {
     // 2 秒一条)。核心目标: 实锤"已有≥6铁锭却仍去拿工作台/收熔炉/囤木而不推进
     // 铁装备"这类症状 —— 每个分支打一份当前阶段+关键材料量+为何选此分支的键值。
     private final TimerGame _ironDiagTimer = new TimerGame(2);
+    // (2026-09-12 跨批次对撞) "贪心让位给主线"诊断日志节流 (5s 一条) — 长时间挖矿时
+    // 贪心检查每 3s 一次, 不节流会持续刷屏。
+    private final TimerGame _greedyYieldLogTimer = new TimerGame(5);
     // (2026-08-22) getPitEscapeY 每 tick 扫 960 个方块 (4 方向×4 距离×
     // 60 高度), 不能每 tick 重算。1 秒缓存 + food/wood 分支共用。
     private final TimerGame _pitEscapeCacheTimer = new TimerGame(1);
@@ -1745,15 +1754,27 @@ public class BeatMinecraft2Task extends Task {
                         // 纯函数静态版 hasAnyVisibleOreWork (不实例化探针,
                         // 避免 onStart trackBlock 引用计数泄漏)。
                         if (CollectVisibleOresTask.hasAnyVisibleOreWork(mod)) {
-                            _greedyOreTask = new CollectVisibleOresTask();
-                            setDebugState("Greedy mining visible ores");
-                            _greedyOreCheckCooldown.reset();
-                            if (preNetherPhase) {
-                                Debug.logToFile("altoclef_diag.log",
-                                        "[PreNetherGreedy]\tgreedy fires during pre-nether phase (protection window="
-                                                + mod.getModSettings().getPreNetherGreedyCooldownSeconds() + "s)");
+                            // (2026-09-12 跨批次对撞闸门) 主线链里已有"已接触矿石 +
+                            // 同矿种"的挖矿在推进 → 贪心让位, 不拆主线已选定的矿点。
+                            // 见 mainlineMiningEngagedOn 注释 (21:51:29 实锤)。
+                            if (MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.bestVisibleOreBlocks(mod))) {
+                                if (_greedyYieldLogTimer.elapsed()) {
+                                    _greedyYieldLogTimer.reset();
+                                    Debug.logToFile("altoclef_diag.log",
+                                            "[GreedyOre] yield — mainline mining already engaged on the same ore");
+                                }
+                                _greedyOreCheckCooldown.reset();
+                            } else {
+                                _greedyOreTask = new CollectVisibleOresTask();
+                                setDebugState("Greedy mining visible ores");
+                                _greedyOreCheckCooldown.reset();
+                                if (preNetherPhase) {
+                                    Debug.logToFile("altoclef_diag.log",
+                                            "[PreNetherGreedy]\tgreedy fires during pre-nether phase (protection window="
+                                                    + mod.getModSettings().getPreNetherGreedyCooldownSeconds() + "s)");
+                                }
+                                return _greedyOreTask;
                             }
-                            return _greedyOreTask;
                         } else {
                             _greedyOreTask = null;
                             _greedyOreCheckCooldown.reset();

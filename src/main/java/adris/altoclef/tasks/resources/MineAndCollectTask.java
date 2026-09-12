@@ -198,6 +198,10 @@ public class MineAndCollectTask extends ResourceTask {
             return getToCorrectDimensionTask(mod);
         }
 
+        // (2026-09-12 跨批次对撞闸门) 心跳登记"主线挖矿已接触矿石 + 当前矿种",
+        // 供 BeatMinecraft2Task 的贪心检查让位 (祖先查不到后代, 只能后代主动登记)。
+        heartbeatMainlineEngaged(mod);
+
         return _subtask;
     }
 
@@ -418,6 +422,50 @@ public class MineAndCollectTask extends ResourceTask {
     public boolean hasEngagedOre(AltoClef mod) {
         return _subtask.miningTargetBrokenMs() != 0
                 || mod.getEntityTracker().itemDropped(_itemTargets);
+    }
+
+    // (2026-09-12 跨批次对撞闸门) 非贪婪(主线)挖矿批次"已接触矿石"时的心跳登记:
+    // 当前矿种方块 + 时间戳。供 BeatMinecraft2Task 的贪心检查让位 —— 祖先任务在
+    // 自己的 onTick 里【查不到后代任务】(Task.tickInternal 是自上而下"先
+    // addTaskToChain 再 onTick", 见 Task.java L56/L67: BeatMinecraft2Task.onTick
+    // 跑的时候链上只有它自己和祖先), 所以只能由后代主动登记 (与
+    // SmeltInFurnaceTask.getActiveSmeltingFurnacePos 同模式)。
+    private static final Set<Block> _MAINLINE_ENGAGED_BLOCKS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private static long _mainlineEngagedMs = 0;
+    // 心跳 TTL: 主线批次每 tick 刷新, 1500ms 覆盖"挖完一块到下一块"的间隔; 超时
+    // 即视为"主线没在推进挖矿"(切去合成/走路/被抢占), 贪心恢复正常触发。
+    private static final long MAINLINE_ENGAGED_TTL_MS = 1500;
+
+    /**
+     * (2026-09-12 跨批次对撞闸门) 供 BeatMinecraft2Task 调用: 主线挖矿是否正在推进
+     * 【给定矿种之一】。成立时贪心让位 —— 主线已锁定这处矿并在挖/拾, 贪心插进来只会
+     * 把主线的矿物目标选择拆掉重新找矿, 两边交替重建 = 用户看到的"被多个地点的矿
+     * 反复抢来抢去"。
+     *
+     * 只拦【同矿种】: 主线挖铁时贪心照样能顺手挖煤/金 (保留 08-22 "进 gear 分支后
+     * 碰到煤也顺手挖"的设计)。
+     *
+     * 实锤 (会话 20260912-212737): 21:51:28.194 gear 链 `Mine And Collect raw_iron x24`
+     * 派 `Destroy block at 163,1,-183` 正在挖, 21:51:29.544 被贪心整链抢走 → 贪心自己
+     * 派批却选中同一块 (已被 gear 挖成空气) → "Target already air" → 空转 2.6s 后释放,
+     * 期间 gear 的掉落物 (163,2,-182) 躺在地上没人捡。
+     * 反例 (不拦, 那次抢是合理的): 21:50:38 gear 链在 `Digging a tunnel to find ores`
+     * 探矿、尚未锁定矿点 → hasEngagedOre=false → 让贪心去挖眼前的可见铁矿。
+     */
+    public static boolean mainlineMiningEngagedOn(Block[] blocks) {
+        if (System.currentTimeMillis() - _mainlineEngagedMs > MAINLINE_ENGAGED_TTL_MS) return false;
+        for (Block b : blocks) {
+            if (_MAINLINE_ENGAGED_BLOCKS.contains(b)) return true;
+        }
+        return false;
+    }
+
+    private void heartbeatMainlineEngaged(AltoClef mod) {
+        if (_greedy || !hasEngagedOre(mod)) return;
+        _mainlineEngagedMs = System.currentTimeMillis();
+        _MAINLINE_ENGAGED_BLOCKS.clear();
+        for (Block b : _blocksToMine) _MAINLINE_ENGAGED_BLOCKS.add(b);
     }
 
     private static final double MINE_EVERYTHING_RANGE = 16;

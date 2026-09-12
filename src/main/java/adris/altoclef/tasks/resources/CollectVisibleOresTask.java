@@ -244,6 +244,30 @@ public class CollectVisibleOresTask extends Task {
     }
 
     /**
+     * (2026-09-12 跨批次对撞闸门) 当前【贪心会选的矿种】的方块集 — 可见块数最多且
+     * 可执行 (镐够 / 未达上限)。无可见活时返回空数组。
+     *
+     * 供 BeatMinecraft2Task 与"主线正在推进的挖矿"做同矿种对撞判定: 撞上则贪心让位 —
+     * 主线已锁定这处矿并在挖/拾, 贪心插进来只会把主线的目标选择拆掉重新找矿。
+     * 复用 countAllVisible 的 1s 缓存, 不额外扫世界; 与 onTick 里选 best 的口径一致。
+     */
+    public static Block[] bestVisibleOreBlocks(AltoClef mod) {
+        Map<OrePlan, OreStat> counts = countAllVisible(mod);
+        OrePlan best = null;
+        int bestCount = 0;
+        for (OrePlan plan : PLANS) {
+            if (planExecutable(mod, plan) <= 0) continue;
+            OreStat st = counts.get(plan);
+            int v = st == null ? 0 : st.count;
+            if (v > bestCount) {
+                bestCount = v;
+                best = plan;
+            }
+        }
+        return best == null ? new Block[0] : best.blocks();
+    }
+
+    /**
      * 已计入上限的数量: 生矿 + 已烧制的锭 (用户 2026-08-23: 烧制产物也
      * 算进 32, 达标不再触发)。getItemCountInventoryOnly 含光标 (捡掉落
      * 物时光标拿着矿不会误判未达标)。
