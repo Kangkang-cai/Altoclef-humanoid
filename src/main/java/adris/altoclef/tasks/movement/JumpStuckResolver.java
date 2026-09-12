@@ -27,10 +27,12 @@ import net.minecraft.util.registry.Registry;
  *      的 streak 永远凑不满, 检测死代码化。
  *
  * 新检测口径: 水平速度 ≈ 0 的【连续】streak 内, 出现过以下任一证据即视为
- * "跳跃卡死"而非"站立等待":
- *   - baritone 强制过跳跃键 (isInputForcedDown(JUMP), 间歇也算);
- *   - 垂直速度先上冲 (>+BONK_VY) 后急坠 (<-BONK_VY) — 撞头弹回的弹跳特征。
- * 纯站立等待 (算路中 vel.y≈-0.078, 无上冲无强制跳) 不满足证据, 不处置。
+ * "卡死"而非"站立等待":
+ *   - baritone 强制过跳跃键 (原地弹跳);
+ *   - 垂直速度先上冲 (>+BONK_VY) 后急坠 (<-BONK_VY) — 撞头弹回的弹跳特征;
+ *   - baritone 强制按着前进 (贴地顶墙: 会话 20260912-111130 实锤 bIn[fwd=true]
+ *     而 hSpeed 0.019~0.064 抖动 22s+, 全程不跳不撞)。
+ * 纯站立等待 (算路中 vel.y≈-0.078, bIn 全 false) 不满足证据, 不处置。
  *
  * 处置 = 「挖障碍」: 改世界 → baritone 重算时路径自然变 (最根本的杠杆, 也最
  * 拟人 — 等价于用户手动左键)。baritone 没有路径级禁行注入 (IPathingBehavior
@@ -50,15 +52,17 @@ public final class JumpStuckResolver {
     private JumpStuckResolver() {}
 
     // ===== 检测 =====
-    /** 连续 1s (20 tick) 水平零速 + 卡死证据才判定。 */
+    /** 连续 1s (20 tick) 水平近零速 + 卡死证据才判定。 */
     private static final int STUCK_TICKS = 20;
-    /** 水平速度低于此值视为原地 (玩家 walk 速度约 0.2/tick)。 */
-    private static final double HSPEED_STUCK = 0.05;
+    /** 水平速度低于此值视为原地 (walk 约 0.2/tick; 0.1 容纳顶墙抖动 0.019~0.064,
+     *  会话 20260912-111130 实锤)。 */
+    private static final double HSPEED_STUCK = 0.1;
     /** 弹跳证据阈值: 上冲/急坠的垂直速度分界 (跳跃起跳约 +0.42, 撞头反弹 -0.3~)。 */
     private static final double BONK_VY = 0.15;
 
     private static int _streakTicks = 0;
     private static boolean _sawJumpForced = false;
+    private static boolean _sawFwdForced = false;
     private static boolean _risingSeen = false;
     private static boolean _bonkSeen = false;
 
@@ -90,14 +94,18 @@ public final class JumpStuckResolver {
             return null;
         }
         _streakTicks++;
-        if (isJumpForced(mod)) _sawJumpForced = true;
+        if (isInputForced(mod, Input.JUMP)) _sawJumpForced = true;
+        if (isInputForced(mod, Input.MOVE_FORWARD)) _sawFwdForced = true;
         if (v.y > BONK_VY) {
             _risingSeen = true;
         } else if (_risingSeen && v.y < -BONK_VY) {
             _bonkSeen = true;
         }
         if (_streakTicks < STUCK_TICKS) return null;
-        if (!(_sawJumpForced || _bonkSeen)) return null;   // 纯站立等待, 不处置
+        // 证据三选一: 强制跳跃 (原地弹跳) / 撞头弹回 / 强制前进 (贴地顶墙,
+        // 20260912-111130 实锤: bIn[fwd=true] 而 hSpeed 0.019~0.064 抖动 22s+)。
+        // 三者皆无 = 纯站立等待 (算路等), 不处置。
+        if (!(_sawJumpForced || _bonkSeen || _sawFwdForced)) return null;
 
         if (_logTimer.elapsed()) {
             _logTimer.reset();
@@ -134,9 +142,9 @@ public final class JumpStuckResolver {
         return null;
     }
 
-    private static boolean isJumpForced(AltoClef mod) {
+    private static boolean isInputForced(AltoClef mod, Input input) {
         try {
-            return mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.JUMP);
+            return mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(input);
         } catch (Throwable t) {
             return false;
         }
@@ -145,6 +153,7 @@ public final class JumpStuckResolver {
     private static void resetStreak() {
         _streakTicks = 0;
         _sawJumpForced = false;
+        _sawFwdForced = false;
         _risingSeen = false;
         _bonkSeen = false;
     }
