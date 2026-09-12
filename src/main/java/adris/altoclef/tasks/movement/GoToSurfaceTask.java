@@ -4,13 +4,11 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
-import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
-import net.minecraft.block.Block;
-import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
@@ -103,11 +101,9 @@ public class GoToSurfaceTask extends Task {
     private enum PickEscapePhase {
         /** 未触发 / 不适用。 */
         NONE,
-        /** 挖脚下 1 格 (豁免"没镐避让"), 掉落后腾出放台空间。 */
+        /** 挖脚下 1 格 (豁免"没镐避让"), 腾出放台空间。 */
         DIG_FOOT,
-        /** 在身旁放工作台。 */
-        PLACE_TABLE,
-        /** 合成石镐 (交给 TaskCatalogue 合成链)。 */
+        /** 交给通用合成链: 原木→板→台→放台→棍→木镐。 */
         CRAFT_PICK,
         /** 已完成或失败不再重试 (本实例生命周期)。 */
         DONE
@@ -458,12 +454,12 @@ public class GoToSurfaceTask extends Task {
     }
 
     /**
-     * (2026-09-12 v8) 封闭空间做镐侧线。触发条件 (全部满足才进, 只试一次):
+     * (2026-09-12 v8/v9) 封闭空间做镐侧线。触发条件 (全部满足才进, 只试一次):
      *  - 没有任何镐;
-     *  - 圆石 >= 3 且木棍 >= 2 (石镐配方);
-     *  - 包里有工作台成品 (没台不试 —— 台收不回来是合成链 A 修复管的事,
-     *    现场实锤台已做好在输出槽, A 修复后能收进包)。
-     * 阶段推进 DIG_FOOT → PLACE_TABLE → CRAFT_PICK → DONE。
+     *  - 木头够: 原木×4 + 木板 ≥ 9 板等价 (木镐链总耗: 台 4 板 + 木棍 2 板 + 镐 3 板,
+     *    20260912 现场"没台没木棍只有足量木头" —— 台/棍由通用合成链自己造)。
+     * 阶段推进 DIG_FOOT (挖 1 格脚下腾放台空间) → CRAFT_PICK (直接交通用
+     * {@link TaskCatalogue} 木镐链: 板→台→放台→棍→镐 全自动) → DONE。
      * 返回 null = 本 tick 不占用控制权, 走正常导航/挖垫。
      */
     private Task maybePickEscape(AltoClef mod, BlockPos player) {
@@ -478,7 +474,7 @@ public class GoToSurfaceTask extends Task {
             _footDigTarget = null;
             _pickSubTask = null;
             Debug.logToFile("altoclef_diag.log",
-                    "[GoToSurface] pick-escape START at " + player + " (no pickaxe, materials ready)");
+                    "[GoToSurface] pick-escape START at " + player + " (no pickaxe, wood available)");
         }
         if (WorldHelper.getTicks() - _pickEscapeStartTick > PICK_ESCAPE_TIMEOUT_TICKS) {
             Debug.logToFile("altoclef_diag.log",
@@ -492,15 +488,15 @@ public class GoToSurfaceTask extends Task {
                 // 目标格锁定: 挖穿 (变非实心, 玩家掉入) 才推进, 不每 tick 重选。
                 if (_footDigTarget != null && !WorldHelper.isSolid(mod, _footDigTarget)) {
                     _footDigTarget = null;
-                    _pickPhase = PickEscapePhase.PLACE_TABLE;
+                    _pickPhase = PickEscapePhase.CRAFT_PICK;
                     _pickSubTask = null;
                     return null;
                 }
                 if (_footDigTarget == null) {
                     _footDigTarget = findFootDigTarget(mod, player);
                     if (_footDigTarget == null) {
-                        // 脚下没实心可挖 (悬空/基岩) → 直接试放台。
-                        _pickPhase = PickEscapePhase.PLACE_TABLE;
+                        // 脚下没实心可挖 (悬空/基岩) → 直接交合成链 (空间可能已够)。
+                        _pickPhase = PickEscapePhase.CRAFT_PICK;
                         _pickSubTask = null;
                         return null;
                     }
@@ -510,19 +506,6 @@ public class GoToSurfaceTask extends Task {
                 setDebugState("Escape: digging foot space for crafting table");
                 return new DestroyBlockTask(_footDigTarget);
             }
-            case PLACE_TABLE: {
-                if (mod.getBlockTracker().anyFound(Blocks.CRAFTING_TABLE)) {
-                    _pickPhase = PickEscapePhase.CRAFT_PICK;
-                    _pickSubTask = null;
-                    return null;
-                }
-                // 实例缓存续租 (框架铁律: 每 tick 原样返回同一实例直到完成)。
-                if (_pickSubTask == null || _pickSubTask.isFinished(mod)) {
-                    _pickSubTask = new PlaceBlockNearbyTask(Blocks.CRAFTING_TABLE);
-                }
-                setDebugState("Escape: placing crafting table");
-                return _pickSubTask;
-            }
             case CRAFT_PICK: {
                 if (hasAnyPickaxe(mod)) {
                     Debug.logToFile("altoclef_diag.log",
@@ -530,10 +513,11 @@ public class GoToSurfaceTask extends Task {
                     finishPickEscape(mod);
                     return null;
                 }
+                // 通用链 (原木→木板→台→放台→木棍→木镐), 不自造合成逻辑。
                 if (_pickSubTask == null || _pickSubTask.isFinished(mod)) {
-                    _pickSubTask = TaskCatalogue.getItemTask("stone_pickaxe", 1);
+                    _pickSubTask = TaskCatalogue.getItemTask("wooden_pickaxe", 1);
                 }
-                setDebugState("Escape: crafting stone pickaxe");
+                setDebugState("Escape: crafting wooden pickaxe (generic chain)");
                 return _pickSubTask;
             }
             default:
@@ -543,10 +527,10 @@ public class GoToSurfaceTask extends Task {
 
     private boolean shouldTryPickEscape(AltoClef mod) {
         if (hasAnyPickaxe(mod)) return false;
-        if (mod.getItemStorage().getItemCount(Items.COBBLESTONE) < 3) return false;
-        if (mod.getItemStorage().getItemCount(Items.STICK) < 2) return false;
-        // 只在"台已在包里"时试 (现场实锤台在输出槽, A 修复后可收)。
-        return mod.getItemStorage().getItemCount(Items.CRAFTING_TABLE) >= 1;
+        // 木头等价板数 ≥ 9 (台 4 + 棍 2 + 镐 3)。
+        int logs = mod.getItemStorage().getItemCount(ItemHelper.LOG);
+        int planks = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
+        return logs * 4 + planks >= 9;
     }
 
     private void finishPickEscape(AltoClef mod) {
@@ -615,17 +599,22 @@ public class GoToSurfaceTask extends Task {
             return giveUpScaffold(mod, player, "no Y progress for " + (SCAFFOLD_NO_PROGRESS_TICKS / 20) + "s");
         }
 
-        // 1) 头顶有可挖实心 → 凿穿 (给自己开上升通道)。
-        BlockPos dig = findOverheadDigTarget(mod, player);
-        if (dig != null) {
+        // (2026-09-12 v9 连挖不垫修复, 20260912-171248 实锤) y68→69→70 连挖 3 格
+        // 玩家还站 y66: 旧顺序"先扫头顶 4 格内可挖就一直挖", 垫塔分支要等
+        // DIG_WINDOW 全挖空才轮到 —— 空手 10s/格 = 先凿 4 格高烟囱才想到爬。
+        // 改为人类直觉: 【挖 1 格立即垫 1 格】, 净升 1 格循环。
+        // 1) 紧贴头顶 (dy=1) 可挖实心 → 凿穿。
+        BlockPos head = player.up();
+        if (WorldHelper.isSolid(mod, head)
+                && mod.getWorld().getBlockState(head).getHardness(mod.getWorld(), head) >= 0) {
             PillarJumpHelper.release(mod);
             if (_scaffoldLogTimer.elapsed()) {
                 _scaffoldLogTimer.reset();
-                Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD digging up at " + dig
+                Debug.logToFile("altoclef_diag.log", "[GoToSurface] SCAFFOLD digging up at " + head
                         + " player=" + player);
             }
-            setDebugState("Scaffold: digging up at " + dig);
-            return new DestroyBlockTask(dig);
+            setDebugState("Scaffold: digging up at " + head);
+            return new DestroyBlockTask(head);
         }
 
         // 2) 头顶已通 + 已入水 → 交 GetToYTask (CustomBaritoneGoalTask 的 [SwimUp] 接管)。
@@ -639,8 +628,11 @@ public class GoToSurfaceTask extends Task {
             return new GetToYTask(swimTarget);
         }
 
-        // 3) 头顶已通但还没水 → 垫塔送进上方空间。
-        Item[] materials = PillarJumpHelper.allMaterials();
+        // 3) 头顶已空 (dy=1 空气/可穿过) → 立即垫跳升 1 格, 不再等烟囱挖高。
+        //    (2026-09-12 v9) 材料=常规垫块+木板+原木: 20260912-171248 现场"足量
+        //    木头"却零垫材料 (SAFE_MATERIALS 无木类) → giveUp 循环。木板/原木
+        //    垂直垫塔不会掉, 可燃风险仅在下界岩浆旁, 本任务只服务"回地表"。
+        Item[] materials = scaffoldMaterials();
         if (PillarJumpHelper.hasMaterials(mod, materials)) {
             if (_scaffoldLogTimer.elapsed()) {
                 _scaffoldLogTimer.reset();
@@ -653,6 +645,24 @@ public class GoToSurfaceTask extends Task {
 
         // 4) 没得挖也没材料垫 → 放弃 (回 baritone + 进冷却)。
         return giveUpScaffold(mod, player, "nothing diggable overhead and no pillar materials");
+    }
+
+    /** (2026-09-12 v9) 本任务垫塔材料: 常规垫块 + 重力块 + 木板/原木 (垂直垫不掉)。 */
+    private static Item[] _scaffoldMaterialsCache = null;
+
+    private static Item[] scaffoldMaterials() {
+        if (_scaffoldMaterialsCache == null) {
+            Item[] base = PillarJumpHelper.allMaterials();
+            Item[] wood = new Item[]{Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
+                    Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS,
+                    Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG, Items.JUNGLE_LOG,
+                    Items.ACACIA_LOG, Items.DARK_OAK_LOG};
+            Item[] all = new Item[base.length + wood.length];
+            System.arraycopy(base, 0, all, 0, base.length);
+            System.arraycopy(wood, 0, all, base.length, wood.length);
+            _scaffoldMaterialsCache = all;
+        }
+        return _scaffoldMaterialsCache;
     }
 
     @Override
