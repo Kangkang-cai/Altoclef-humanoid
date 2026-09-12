@@ -112,9 +112,16 @@ public final class PillarJumpHelper {
             return true;
         }
         // 腾空放置窗口: 脚下是空气、其下是实体 (跳过 1 格后的经典窗口)。
+        // (2026-09-12 v18) 放置合法性检查不再走 WorldHelper.canPlace —— 它是
+        // "寻路可达性"语义 (unreachable 黑名单 + avoidOcean biome 检查), 而垫塔
+        // 窗口 feet.down() 贴脸物理可达, 不该过这道闸。20260912-192542 实锤:
+        // pick-escape DIG_FOOT 挖穿脚下后 DestroyBlockTask 早退分支
+        // requestBlockUnreachable 拉黑该格 → 垫塔 below 恰为该格 → canPlace 恒
+        // false → 永远不进放置分支 → 只 hold JUMP = 原地狂跳 (y62↔63 交替 12+
+        // 次零放置, 24s+)。硬保护谓词 (传送门/黑曜石) 保留。
         if (WorldHelper.isSolid(mod, below.down())
                 && !WorldHelper.isInsidePlayer(mod, below)
-                && WorldHelper.canPlace(mod, below)) {
+                && !mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(below)) {
             // 放置瞬间松跳, 避免连跳把放置窗口抢掉。
             mod.getInputControls().release(Input.JUMP);
             return place(mod, below, materials);

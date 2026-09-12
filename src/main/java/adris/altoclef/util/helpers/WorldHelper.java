@@ -526,7 +526,9 @@ public interface WorldHelper {
         return true;
     }
 
-    static boolean canPlace(AltoClef mod, BlockPos pos) {
+    // (2026-09-12 v18) 包私有 → public: GoToSurfaceTask pick-escape 需要扫描
+    // 身旁可放置空格 (跳过无谓的挖脚下)。判定语义不变。
+    public static boolean canPlace(AltoClef mod, BlockPos pos) {
         return !mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(pos)
                 && canReach(mod, pos);
     }

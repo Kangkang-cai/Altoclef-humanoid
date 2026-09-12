@@ -550,6 +550,17 @@ public class GoToSurfaceTask extends Task {
         }
         switch (_pickPhase) {
             case DIG_FOOT: {
+                // (2026-09-12 v18) 身旁已有可放置空格 → 跳过挖脚下, 直接交通用链
+                // (通用链内部自己放台, 空格够就直接放)。用户 20260912-192542 现场:
+                // "旁边空格有三四个, 他却还是选择挖脚下" —— 挖脚下只为"完全没
+                // 空位"场景兜底, 有空位还挖是白费时间。
+                if (findAdjacentPlaceSpot(mod, player) != null) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] pick-escape skip dig: adjacent open spot available at " + player);
+                    _pickPhase = PickEscapePhase.CRAFT_PICK;
+                    _pickSubTask = null;
+                    return null;
+                }
                 // 只挖 1 格 (用户: "不能让他挖几十个石头, 一两个就够了")。
                 // 目标格锁定: 挖穿 (变非实心, 玩家掉入) 才推进, 不每 tick 重选。
                 if (_footDigTarget != null && !WorldHelper.isSolid(mod, _footDigTarget)) {
@@ -626,6 +637,24 @@ public class GoToSurfaceTask extends Task {
      * 下下方必须也是实心 (不掉进更深空洞), hardness>=0 (基岩除外)。
      * "没镐避让"谓词在逃生豁免下已放行, 这里不再查 shouldAvoidBreaking。
      */
+    /**
+     * (2026-09-12 v18) 扫身旁 (水平 4 邻 × feet/head 两层 = 8 格) 有无可放
+     * 工作台的空气格。有 → pick-escape 跳过挖脚下直接交通用链。
+     */
+    private BlockPos findAdjacentPlaceSpot(AltoClef mod, BlockPos player) {
+        BlockPos head = player.up();
+        BlockPos[] around = new BlockPos[]{
+                player.north(), player.south(), player.east(), player.west(),
+                head.north(), head.south(), head.east(), head.west()
+        };
+        for (BlockPos pos : around) {
+            if (WorldHelper.isAir(mod, pos) && WorldHelper.canPlace(mod, pos)) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
     private BlockPos findFootDigTarget(AltoClef mod, BlockPos player) {
         BlockPos below = player.down();
         if (!WorldHelper.isSolid(mod, below)) return null;
