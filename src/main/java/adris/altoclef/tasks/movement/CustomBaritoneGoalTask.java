@@ -6,6 +6,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.GoalChunk;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
@@ -73,6 +74,15 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private boolean _directSwimUpMode = false;
     private int _directSwimLastY = Integer.MIN_VALUE;
     private static final int DIRECT_SWIM_UP_MIN_Y_GAIN = 1;
+    // (2026-09-12 会话 20260912-132300) 上浮失速后的重试退避。
+    // 旧版失速释放后, 下一 tick 触发条件 (inWater + goalY>y + XZ<=8) 依旧成立
+    // → 立刻重新进入上浮 → 2s 一轮 "触发→失速→释放" 死循环。上浮分支在
+    // _checker.check() 之前 return, 于是进度检查器、baritone 重寻路、wander
+    // 三个兜底全部拿不到控制权 (实锤: 岸边浅水被树叶顶住 40s 零位移, 日志里
+    // 每 2s 一对 "[SwimUp] trigger" / "Swimming straight up")。
+    // 释放后强制静默这么久, 让通用兜底有机会运行。static: 导航任务实例频繁重建。
+    private static int _swimUpBlockedUntilTick = 0;
+    private static final int SWIM_UP_RETRY_BACKOFF_TICKS = 20 * 3;
     // (2026-09-11) 垂直上浮的水平距离闸门: 上浮只该发生在"目标正上方/附近"。
     // 死亡恢复实锤 (20260911-205655 场次 21:10-21:14): GetToBlockTask 目标在
     // 167 格外, 玩家在岸边浅水 bobbing, goalY()=69 > 玩家 y=62 → 上浮误触发
@@ -183,6 +193,9 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         }
                         if (_directSwimStallTimer.elapsed()) {
                             Debug.logMessage("Direct swim-up stalled (no Y gain), handing back to baritone.");
+                            // (2026-09-12) 强制退避, 否则下一 tick 原地重新上浮 (死循环,
+                            // 见 _swimUpBlockedUntilTick 注释)。
+                            _swimUpBlockedUntilTick = WorldHelper.getTicks() + SWIM_UP_RETRY_BACKOFF_TICKS;
                             releaseDirectSwim(mod);
                         } else {
                             holdDirectSwimUp(mod);
@@ -222,7 +235,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         BlockPos upXZ = goalXZ();
                         boolean swimUpAllowed = upXZ == null
                                 || horizontalDist(mod, upXZ) <= DIRECT_SWIM_UP_MAX_XZ_DIST;
-                        if (swimUpAllowed) {
+                        // (2026-09-12) 失速退避期内不再抢控制权, 让 _checker/baritone 兜底跑。
+                        if (swimUpAllowed && WorldHelper.getTicks() >= _swimUpBlockedUntilTick) {
                             Debug.logToFile("altoclef_diag.log", "[SwimUp] trigger player="
                                     + mod.getPlayer().getBlockPos() + " goalY=" + ty
                                     + " baritoneActive=" + mod.getClientBaritone().getCustomGoalProcess().isActive());

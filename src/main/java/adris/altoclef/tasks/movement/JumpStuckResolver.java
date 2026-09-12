@@ -121,11 +121,24 @@ public final class JumpStuckResolver {
 
         int now = WorldHelper.getTicks();
         if (now < _cooldownUntil) return null;
-        // 水里强制按 JUMP 是游泳上浮 (baritone 的正常行为), 不是"跳不上去"。
-        // 水面场景交给 [SwimUp] / GoToSurfaceTask, 这里不挖。
-        if (mod.getPlayer().isTouchingWater()) return null;
 
+        // (2026-09-12 会话 20260912-132300) 水里强制按 JUMP 通常是游泳上浮
+        // (baritone 的正常行为), 旧版这里一律 return null —— 但"岸边浅水"是
+        // 所有兜底一起失效的死角: 实锤现场为岸边 1 格水, 头顶 up2=spruce_leaves
+        // 顶住上浮、上岸方向还有树叶挡前进, hSpeed 与 Δy 恒 0 持续 40s;
+        // [SwimUp] 每 2s "触发→失速释放→立刻重触发" 把 baritone 与进度检查器
+        // 全挡在门外, 而这一行水中豁免又把唯一的挖障兜底短路 → 三个兜底同时失效。
+        // 例外两条 (其余开阔水面照旧不挖, 交 [SwimUp] / GoToSurfaceTask):
+        //   ① 上浮通道被封: 头顶正上方 (up2) 有碰撞方块;
+        //   ② 挡路物是"baritone 认为可穿过"的植物类 (树叶/azalea/草):
+        //      builder 拒挖、物理上却挡人, 只能直挖。
         BlockPos obstacle = JumpObstructionHelper.findObstruction(mod);
+        if (mod.getPlayer().isTouchingWater()
+                && !ascentCapped(mod)
+                && !(obstacle != null && isBaritonePassable(mod, obstacle))) {
+            return null;
+        }
+
         if (obstacle != null) {
             // 有明确挡路的方块 → 挖掉它。挖完路径自然重算 (改世界是最根本的杠杆,
             // 也最拟人 — 等价于用户手动左键)。
@@ -147,18 +160,19 @@ public final class JumpStuckResolver {
                 _wanderTask.resetWander();
                 return _wanderTask;
             }
-            // (2026-09-12) 非实心植物 (azalea/草等) 不走 DestroyBlockTask:
-            // baritone builder 把它们当"本来就可通过", 拒绝执行破坏 (111853 场
-            // 次连挖 8 次方块纹丝不动)。硬度 0 直接视角+左键秒挖。
-            boolean solid = WorldHelper.isSolid(mod, obstacle);
+            // (2026-09-12) 分流判据: baritone builder 只对自己视为实心的方块执行
+            // 破坏, "可穿过"的 (树叶/azalea/草) 一律拒挖 (111853 实锤连挖 8 次
+            // 方块纹丝不动) → 这些走 InstantBreakTask 直挖。
+            boolean passable = isBaritonePassable(mod, obstacle);
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] clearing obstruction " + obstacle
-                    + " solid=" + solid + " player=" + mod.getPlayer().getBlockPos()
-                    + " -> " + (solid ? "DestroyBlockTask" : "InstantBreakTask"));
+                    + " passable=" + passable + " solid=" + WorldHelper.isSolid(mod, obstacle)
+                    + " player=" + mod.getPlayer().getBlockPos()
+                    + " -> " + (passable ? "InstantBreakTask" : "DestroyBlockTask"));
             mod.getClientBaritone().getPathingBehavior().forceCancel();
-            if (solid) {
-                return new DestroyBlockTask(obstacle);
+            if (passable) {
+                return new InstantBreakTask(obstacle);
             }
-            return new InstantBreakTask(obstacle);
+            return new DestroyBlockTask(obstacle);
         }
 
         // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
@@ -182,6 +196,34 @@ public final class JumpStuckResolver {
     private static boolean isInputForced(AltoClef mod, Input input) {
         try {
             return mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(input);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * (2026-09-12) 头顶正上方 (up2 = 头部上一格) 是否被有碰撞的方块封住。
+     * 玩家高 1.8: 脚在 p, 头占 p.up(1), 上浮需要 p.up(2) 有空间。树叶/石头
+     * 都有碰撞形状; 水/空气/草 (无碰撞) 不算封住。
+     */
+    private static boolean ascentCapped(AltoClef mod) {
+        try {
+            BlockPos above = mod.getPlayer().getBlockPos().up(2);
+            return !mod.getWorld().getBlockState(above)
+                    .getCollisionShape(mod.getWorld(), above).isEmpty();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * (2026-09-12) 该方块是否属于"baritone 认为可穿过"的一类 (非不透明满方块:
+     * 树叶/azalea/草/藤等)。baritone builder 对这类方块拒绝执行破坏
+     * (111853 实锤: 连挖 8 次方块纹丝不动), 必须用 InstantBreakTask 直挖。
+     */
+    private static boolean isBaritonePassable(AltoClef mod, BlockPos pos) {
+        try {
+            return !mod.getWorld().getBlockState(pos).isOpaqueFullCube(mod.getWorld(), pos);
         } catch (Throwable t) {
             return false;
         }
