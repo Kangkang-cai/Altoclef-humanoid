@@ -275,7 +275,12 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     @Override
     protected Task onEntityInteract(AltoClef mod, Entity entity) {
         // Face the enemy even when attacking without a shield. 末影人瞄准眼睛。
-        LookHelper.lookAt(mod, aimPoint(entity));
+        // (2026-09-12 瞄头) 父类多点视线判定出的可见点优先 —— 目标只露头时
+        // (贴方块沿/蹲掩体) 准心直接落在头部, crosshairTarget=目标实体 →
+        // isCrosshairOn 通过, 能真实出刀; 旧逻辑死瞄包围盒中心, 中心被挡
+        // 准心落在方块上 → 永不出手。没有可见点才退回中心/眼睛兜底。
+        Vec3d aim = getVisibleAimPoint() != null ? getVisibleAimPoint() : aimPoint(entity);
+        LookHelper.lookAt(mod, aim);
 
         // (2026-08-28 战斗中即刻装盾) 盾通常只在背包、未必已换到副手。
         // 开战瞬间若副手没盾, 旧代码 isOffHand 判定 false → 整段走"直接
@@ -364,7 +369,9 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     int n = Math.max(1, countNearbyRangedThreats(mod)); // 感知到几只远程威胁 (至少算1)
 
     // 打小白时盾要正对小白方向; 不再用多威胁加权平均 (会偏开射来的箭)。
-    LookHelper.lookAt(mod, entity.getPos());
+    // (2026-09-12 瞄头) 同近战分支: 可见点 (头) 优先, 旧 entity.getPos() 是脚底,
+    // 小白只露头时盾/准心对着方块沿, 既格挡不了也打不出。
+    LookHelper.lookAt(mod, getVisibleAimPoint() != null ? getVisibleAimPoint() : aimPoint(entity));
 
     // 箭轨迹追踪: 有箭飞来 → _arrowInbound=true; 放过 → 记一次"已格挡"。
     updateArrowStreak(mod);

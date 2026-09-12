@@ -134,11 +134,22 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             // (2026-09-11 树叶遮挡补检) 上面的 ENTITY 射线走 ProjectileUtil,
             // 只测实体盒、不测方块 —— 目标躲在树叶/墙后时照样 "命中", 被挡分支
             // 永不触发, bot 站在射程内反复干瞄准直到 kill timeout (2026-09-11
-            // 19:45 杀树下的猪现场)。补一次相机→实体中心的方块射线 (COLLIDER),
-            // 中途命中方块 = 视线真被挡, 走同一套绕位+遮挡钩子恢复。
+            // 19:45 杀树下的猪现场)。补方块遮挡射线 (COLLIDER), 命中 = 被挡,
+            // 走同一套绕位+遮挡钩子恢复。
+            // (2026-09-12 多点视线/瞄头, 用户"小白的头明明露出来了却打不到")
+            // 旧补检射线终点只取包围盒【中心】(小白≈腰高) —— 小白贴在方块后
+            // 只露头时, 中心被挡 → 判"被挡" → 绕位 ping-pong, 一次刀都不出
+            // (2026-09-12 11:40 现场绕位 10+ 次后 58s 被射死)。改为自上而下
+            // 探测候选瞄准点 (头 0.85 身高 → 中心), 第一个视线通畅的点即为
+            // "可见" —— 本 tick 判定不被挡, 且把该点缓存给子类瞄准 (看到头
+            // 就瞄头, 与人类一致)。全部被挡才算真被挡。
+            _visibleAimPoint = null;
             BlockPos blockObstruction = null;
             if (result != null && result.getType() == HitResult.Type.ENTITY) {
-                blockObstruction = findObstructingBlock(mod, entity);
+                _visibleAimPoint = computeVisibleAimPoint(mod, entity);
+                if (_visibleAimPoint == null) {
+                    blockObstruction = findObstructingBlock(mod, entity);
+                }
             }
             if (result == null || result.getType() != HitResult.Type.ENTITY || blockObstruction != null) {
                 setDebugState("Target blocked, repositioning for line of sight");
@@ -208,6 +219,38 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(from, to,
                 RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
         if (hit.getType() == HitResult.Type.BLOCK) return hit.getBlockPos();
+        return null;
+    }
+
+    // (2026-09-12 多点视线) 本 tick 判定出的可见瞄准点 (自上而下第一个视线
+    // 通畅的候选); 目标射线命中实体但全点被挡时为 null。仅在交战判定 tick
+    // 内有效, 交战分支的子类 (瞄准) 与盾战分支 (朝向) 直接取用。
+    protected Vec3d _visibleAimPoint = null;
+
+    /** (2026-09-12) 取本 tick 的可见瞄准点; 不可用 (被挡/未判定) 返回 null。 */
+    protected Vec3d getVisibleAimPoint() {
+        return _visibleAimPoint;
+    }
+
+    /**
+     * (2026-09-12 多点视线/瞄头) 自上而下探测目标身上的候选瞄准点: 头部
+     * (0.85 身高, 小白/僵尸探头过方块沿时最先露出的就是这一段) → 包围盒
+     * 中心。返回第一个从玩家相机无方块遮挡的点; 全被挡返回 null。
+     * 这是"用自己的眼睛看" (相机射线), 不违反反透视。
+     */
+    private Vec3d computeVisibleAimPoint(AltoClef mod, Entity entity) {
+        Vec3d from = mod.getPlayer().getCameraPosVec(1.0F);
+        net.minecraft.util.math.Box box = entity.getBoundingBox();
+        double cx = (box.minX + box.maxX) / 2.0;
+        double cz = (box.minZ + box.maxZ) / 2.0;
+        double height = box.maxY - box.minY;
+        double[] fractions = {0.85, 0.5};
+        for (double frac : fractions) {
+            Vec3d p = new Vec3d(cx, box.minY + height * frac, cz);
+            BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(from, p,
+                    RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+            if (hit.getType() != HitResult.Type.BLOCK) return p;
+        }
         return null;
     }
 
@@ -287,6 +330,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         mod.getMobDefenseChain().resetForceField();
         _repositionTarget = null; // (2026-08-31) 长任务停止时清掉绕位记忆, 避免遗留下次误用
         _losBlockedSinceTick = Long.MIN_VALUE; // (2026-09-09) 遮挡计时一并清掉
+        _visibleAimPoint = null; // (2026-09-12) 可见瞄准点一并清掉
     }
 
     protected abstract Optional<Entity> getEntityTarget(AltoClef mod);
