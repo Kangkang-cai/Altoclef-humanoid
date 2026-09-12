@@ -21,6 +21,7 @@ import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
+import adris.altoclef.util.helpers.OffhandHygiene;
 import adris.altoclef.util.helpers.TaskStackSnapshot;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
@@ -298,6 +299,11 @@ public class AltoClef implements ModInitializer {
             // 重派同一子任务 / 子任务每 tick 空转返回 null" 这类无切换死锁在
             // START/STOP 日志里完全不可见 (22:17 冻结 39s 实锤)。内部自节流。
             TaskStackSnapshot.periodicTick(this);
+            // [OFFHAND-HYGIENE] 副手卫生检测 (2026-09-12, 低频自愈): 副手被意外
+            // 塞进非功能物品 (现场: spruce_planks 挂副手 33s, 材料够但合成链死等
+            // — 配方填充从背包取料看不见副手)。白名单外 (盾/食物/药水/图腾) 且
+            // 背包放得下 → 搬回背包。5s 冷却, 内部自节流。
+            OffhandHygiene.tick(this);
         }
         _blockTracker.postTickTask();
 
