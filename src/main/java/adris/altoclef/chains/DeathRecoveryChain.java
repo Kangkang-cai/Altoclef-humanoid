@@ -181,8 +181,22 @@ public class DeathRecoveryChain extends SingleTaskChain {
         // Log only once per 5 seconds to keep the log file sane.
         // (2026-08-31 用户确认合理并应保留: 无镐去捡无法自保/采集, DEFER 等镐是正确行为。)
         // ------------------------------------------------------------
-        if (s.shouldDeathRecoveryRequireStonePickaxe()
-                && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)) {
+        // (2026-09-12 动态镐门槛, 用户定案"需要镐子的死亡恢复才搞镐") 全局开关
+        // deathRecoveryRequireStonePickaxe 保留为总闸; 总闸开时按墓地深度动态
+        // 判断: 墓地埋在地下 (heightmap 差 >8 格) 才要求石镐, 地表/浅层死亡
+        // 直接导航不折腾。实锤 20260912-114028: 总闸被配置关成 false → 空手
+        // 复活后 baritone 对"地表挖 89 格下墓"成本爆炸 path[present=false] →
+        // wander 3 分钟零进展。另: DeathRecoveryTask 内部镐子升级进行中时本闸
+        // 让路, 避免链层把正在升级的恢复任务整个替换成搞镐任务。
+        boolean deathRecoveryTaskUpgradingPickaxe = false;
+        if (getCurrentTask() instanceof DeathRecoveryTask) {
+            deathRecoveryTaskUpgradingPickaxe = ((DeathRecoveryTask) getCurrentTask()).isPickaxeUpgradeActive();
+        }
+        boolean pickaxeGateActive = s.shouldDeathRecoveryRequireStonePickaxe()
+                && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)
+                && !deathRecoveryTaskUpgradingPickaxe
+                && DeathRecoveryTask.isGraveBuried(mod, grave.position);
+        if (pickaxeGateActive) {
             if (ageTicks % 100L == 0L) {
                 Debug.logToFile("death_recovery.log", String.format(
                         "[DEFER NO_PICKAXE] grave=%s dim=%s dist=%.1f age=%ds; actively crafting stone pickaxe",
@@ -212,9 +226,10 @@ public class DeathRecoveryChain extends SingleTaskChain {
                     grave.position.getX(), grave.position.getY(), grave.position.getZ(),
                     distXZ, ageSeconds, timeoutSeconds));
             Debug.logToFile("death_recovery.log", String.format(
-                    "[ACTIVATE] grave=%s dim=%s dist=%.1f age=%ds timeout=%ds pickaxeReq=%s",
+                    "[ACTIVATE] grave=%s dim=%s dist=%.1f age=%ds timeout=%ds pickaxeReq=%s gate=%s",
                     grave.position, currentDim, distXZ, ageSeconds, timeoutSeconds,
-                    s.shouldDeathRecoveryRequireStonePickaxe() ? "Y" : "N"));
+                    s.shouldDeathRecoveryRequireStonePickaxe() ? "Y" : "N",
+                    pickaxeGateActive ? "GATED" : "pass"));
             setTask(new DeathRecoveryTask(grave.position, currentDim, timeoutSeconds));
         }
 

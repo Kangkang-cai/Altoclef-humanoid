@@ -2,9 +2,12 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.MiningRequirement;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.client.MinecraftClient;
@@ -12,7 +15,10 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
+import net.minecraft.world.chunk.EmptyChunk;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -75,6 +81,21 @@ public class DeathRecoveryTask extends Task {
     // Track whether the first onTick has logged the header.
     private boolean _started = false;
 
+    // (2026-09-12 GOTO 中途升级镐子) 空手导航到深埋墓地时 baritone 成本模型
+    // 爆炸算不出路径 (20260912-114028 实锤: 空手复活地表 y=63 → 墓 y=-26,
+    // path[present=false] → wander 循环 3 分钟零进展)。激活时链层闸门已按
+    // 墓地深度动态要求石镐, 这里是兜底: 区块未加载导致 heightmap 误判/开关
+    // 关闭等漏网场景下, GOTO 失速 (每 5s 采样, 20s 窗口净位移 <3 格) 且
+    // 墓地确实埋在地下且无石镐档 → 挂起导航先搞镐, 到手后重新导航。
+    private static final int STALL_SAMPLE_SECONDS = 5;
+    private static final int STALL_WINDOW_SAMPLES = 4;
+    private static final double STALL_NET_MOVEMENT = 3.0;
+    private static final int BURIED_DEPTH_THRESHOLD = 8;
+    private final TimerGame _stallSampleTimer = new TimerGame(STALL_SAMPLE_SECONDS);
+    private final ArrayDeque<BlockPos> _stallSamples = new ArrayDeque<>();
+    private boolean _pickaxeUpgradeActive = false;
+    private Task _pickaxeSub = null;
+
     public DeathRecoveryTask(BlockPos gravePos, Dimension graveDim, int timeoutSeconds) {
         _gravePos = gravePos;
         _graveDim = graveDim;
@@ -88,6 +109,22 @@ public class DeathRecoveryTask extends Task {
     public Dimension getGraveDimension() { return _graveDim; }
     public int getTimeoutSeconds() { return _timeoutSeconds; }
 
+    /** GOTO 中途镐子升级是否进行中 (链层闸门据此让路, 避免重复派搞镐任务)。 */
+    public boolean isPickaxeUpgradeActive() { return _pickaxeUpgradeActive; }
+
+    /**
+     * (2026-09-12 动态镐门槛) 墓地是否深埋在地下: heightmap 地表 y 与墓 y
+     * 之差超过 {@link #BURIED_DEPTH_THRESHOLD}。区块未加载时 heightmap 不可信,
+     * 返回 false — 链层跳过镐门槛直接导航, 由 GOTO 中途失速升级兜底。
+     */
+    public static boolean isGraveBuried(AltoClef mod, BlockPos grave) {
+        if (mod.getWorld().getChunk(grave.getX() >> 4, grave.getZ() >> 4) instanceof EmptyChunk) {
+            return false;
+        }
+        int surfaceY = mod.getWorld().getTopPosition(Heightmap.Type.MOTION_BLOCKING, grave).getY();
+        return surfaceY - grave.getY() > BURIED_DEPTH_THRESHOLD;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _phase = Phase.GOTO_GRAVE;
@@ -97,6 +134,10 @@ public class DeathRecoveryTask extends Task {
         _everSawDropNearGrave = false;
         _degradeScanActive = false;
         _degradeScanTimer.reset();
+        _pickaxeUpgradeActive = false;
+        _pickaxeSub = null;
+        _stallSamples.clear();
+        _stallSampleTimer.reset();
     }
 
     @Override
@@ -152,6 +193,8 @@ public class DeathRecoveryTask extends Task {
             _degradeScanTimer.reset();
             _degradeScanActive = false;
             _currentPickupTarget = null;
+            _stallSamples.clear();
+            _stallSampleTimer.reset();
         }
 
         // Overall timeout safety net.
@@ -188,6 +231,59 @@ public class DeathRecoveryTask extends Task {
             _noDropsTimer.reset();
             return null;
         }
+
+        // (2026-09-12 GOTO 中途升级镐子) 升级激活期间: 镐到位 → 重新导航;
+        // 未到位 → 继续搞镐 (实例缓存, isEqual 挡下重复重建)。
+        if (_pickaxeUpgradeActive) {
+            if (StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)) {
+                Debug.logToFile("death_recovery.log", String.format(
+                        "[PICKAXE UPGRADE DONE] stone-tier tool acquired; re-navigating to grave=%s",
+                        _gravePos));
+                _pickaxeUpgradeActive = false;
+                _pickaxeSub = null;
+                _stallSamples.clear();
+                _stallSampleTimer.reset();
+                _currentSub = new GetToBlockTask(_gravePos, _graveDim);
+                return _currentSub;
+            }
+            if (_pickaxeSub == null) {
+                _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE);
+            }
+            setDebugState("Buried grave & stalled: getting a pickaxe first");
+            return _pickaxeSub;
+        }
+
+        // 失速采样: 每 5s 记录一次位置, 窗口 20s; 净位移 <3 格视为原地打转。
+        // (实例跨 GetToBlockTask 重建存活 — wander 循环里 GetToBlockTask 反复
+        // 重建, 锚点必须留在本层才能看到"4 分钟零进展"。)
+        if (_stallSampleTimer.elapsed()) {
+            _stallSampleTimer.reset();
+            _stallSamples.addLast(mod.getPlayer().getBlockPos());
+            while (_stallSamples.size() > STALL_WINDOW_SAMPLES) {
+                _stallSamples.removeFirst();
+            }
+            if (_stallSamples.size() == STALL_WINDOW_SAMPLES
+                    && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)
+                    && isGraveBuried(mod, _gravePos)) {
+                BlockPos oldest = _stallSamples.peekFirst();
+                BlockPos now = mod.getPlayer().getBlockPos();
+                double net = Math.hypot(now.getX() - oldest.getX(), now.getZ() - oldest.getZ());
+                if (net < STALL_NET_MOVEMENT) {
+                    _pickaxeUpgradeActive = true;
+                    _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE);
+                    _stallSamples.clear();
+                    Debug.logWarning(String.format(
+                            "Death recovery GOTO stalled (%.1f blocks net in %ds) with no pickaxe and buried grave — acquiring stone pickaxe first.",
+                            net, STALL_SAMPLE_SECONDS * STALL_WINDOW_SAMPLES));
+                    Debug.logToFile("death_recovery.log", String.format(
+                            "[PICKAXE UPGRADE START] stalled net=%.1f over %ds grave=%s; running SatisfyMiningRequirementTask(STONE)",
+                            net, STALL_SAMPLE_SECONDS * STALL_WINDOW_SAMPLES, _gravePos));
+                    setDebugState("Buried grave & stalled: getting a pickaxe first");
+                    return _pickaxeSub;
+                }
+            }
+        }
+
         if (_currentSub == null || _currentSub.isFinished(mod) || !(_currentSub instanceof GetToBlockTask)) {
             _currentSub = new GetToBlockTask(_gravePos, _graveDim);
             Debug.logToFile("death_recovery.log", String.format(
