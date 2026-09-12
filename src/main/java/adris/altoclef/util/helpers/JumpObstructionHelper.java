@@ -5,6 +5,7 @@ import baritone.api.pathing.calc.IPath;
 import baritone.api.pathing.path.IPathExecutor;
 import baritone.api.utils.BetterBlockPos;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.util.math.BlockPos;
 
@@ -32,8 +33,13 @@ import java.util.List;
  * 拿不到路径时退化到"朝向的前方一格"(仍然只考察同样 4 格口径)。
  *
  * 闸门 (每条都对应一类误挖风险):
- *   - 非实心 (空气/水/藤蔓/梯子/火把) → 不是障碍, {@link WorldHelper#isSolid} 天然
- *     放行 → 水里卡住不会误触发挖障 (交给 [SwimUp] / GoToSurfaceTask)。
+ *   - 空气/液体 (水/岩浆) → 不是障碍 → 水里卡住不会误触发挖障 (交给 [SwimUp] /
+ *     GoToSurfaceTask)。
+ *   - (2026-09-12 放宽) 非实心植物类 (azalea/草/苔藓毯等) 【可以挖】: 实锤
+ *     会话 20260912-110137 — baritone 把 azalea 当可穿过方块规划路径, 但物理上
+ *     它有碰撞判定, bot 顶着它 hSpeed=0 弹跳 90s; 旧 isSolid 闸门把它排除 →
+ *     永远 "no obstruction" → forceCancel 重算又选回同一条路。反正候选格都在
+ *     baritone 自己规划的路线上, 卡死实证在先, 挖掉即改世界。
  *   - 重力方块 (沙/沙砾/混凝土粉末) → 挖了会塌回原处, 白挖还改地形 → 跳过。
  *   - 硬度 < 0 (基岩/屏障/传送门框架) → 挖不动 → 跳过。
  *   - shouldAvoidBreaking (行为栈谓词, 如 PortalGuard "永不拆门") → 跳过。
@@ -66,17 +72,25 @@ public final class JumpObstructionHelper {
     }
 
     /**
-     * 候选格 (按优先级): 起跳空间 → 落点空间。
+     * 候选格 (按优先级): 起跳空间 → 落点空间 → 朝向前方 (2026-09-12 增补)。
      * 起跳空间优先 —— 它被封时无论落点多宽敞都跳不上去。
+     * 朝向前方两格兜底: 会话 20260912-110137 实锤 baritone 规划的 next 节点可能
+     * 落在障碍之后 (真正顶住玩家的是朝向前方那格 azalea), 不看朝向就漏挖。
      */
     private static List<BlockPos> candidates(AltoClef mod, BlockPos feet) {
-        List<BlockPos> list = new ArrayList<>(4);
+        List<BlockPos> list = new ArrayList<>(6);
         addUnique(list, feet.up(1));
         addUnique(list, feet.up(2));
         BlockPos next = nextPathNode(mod, feet);
         if (next != null) {
             addUnique(list, next);
             addUnique(list, next.up(1));
+        }
+        try {
+            BlockPos ahead = feet.offset(mod.getPlayer().getHorizontalFacing());
+            addUnique(list, ahead);
+            addUnique(list, ahead.up(1));
+        } catch (Throwable ignored) {
         }
         return list;
     }
@@ -121,17 +135,21 @@ public final class JumpObstructionHelper {
         if (!list.contains(pos)) list.add(pos);
     }
 
-    /** 实心 + 够近 + 可挖 + 挖了有意义 (见类注释的闸门清单)。 */
+    /** 够近 + 可挖 + 挖了有意义 (见类注释的闸门清单)。 */
     private static boolean isDiggableObstruction(AltoClef mod, BlockPos feet, BlockPos pos) {
         if (pos.equals(feet)) return false;
         if (manhattan(pos, feet) > MAX_REACH_MANHATTAN) return false;
         try {
             if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
-            if (!WorldHelper.isSolid(mod, pos)) return false;           // 空气/水/藤蔓/梯子
-            Block block = mod.getWorld().getBlockState(pos).getBlock();
+            // (2026-09-12 放宽) 空气/液体不是障碍; 其余非实心 (azalea/草/毯等
+            // 植物类) 也算 —— baritone 会把它们当可穿过方块规划路径, 物理上却
+            // 可能挡人 (azalea 实锤), 卡死实证在先, 挖掉即改世界。
+            BlockState state = mod.getWorld().getBlockState(pos);
+            if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+            Block block = state.getBlock();
             if (block instanceof FallingBlock) return false;            // 沙/沙砾: 挖了塌回来
             if (mod.getWorld().getBlockEntity(pos) != null) return false; // 箱子/熔炉等: 内容物会撒
-            if (mod.getWorld().getBlockState(pos).getHardness(mod.getWorld(), pos) < 0) return false;
+            if (state.getHardness(mod.getWorld(), pos) < 0) return false;
             if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(pos)) return false;
             return true;
         } catch (Throwable t) {
