@@ -33,6 +33,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     private final TimerGame _tryToMineTimer = new TimerGame(5);
 
+    // (2026-09-12 v17) 挖掘总时长兜底: reach 持续在但 45s 没挖穿 = 挖掘无效
+    // (力点击被吃掉/方块不可破坏判定错误), 放弃防死挖。空手最慢石头 ~7.5s。
+    private final TimerGame _miningTotalTimer = new TimerGame(45);
+
     // (2026-09-03 够不着直接放弃, 用户"没用的随机探索, 再够不到直接放弃") 对悬浮/太高
     // 的目标(reach 持续缺失), 旧逻辑 _tryToMineTimer 超时 → "Getting to block…"设
     // baritone 目标 → 够不着 → wander → 重试同目标 → 无限空转(09:10 撸树顶 y=68 原木
@@ -104,7 +108,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             _moveChecker.reset();
             return _wanderTask;
         }
-        if (!_moveChecker.check(mod)) {
+        // (2026-09-12 v17) 正在有效挖掘时【跳过移动检查】—— 挖掘期间原地不动是合法的。
+        // 20260912-191401 实锤: pick-escape DIG_FOOT 挖脚下石头, 空手 7.5s/块 >
+        // moveChecker 6s 窗口 → 每次挖到 6s 被 moveChecker 误判"卡住" →
+        // requestBlockUnreachable 拉黑 + 强制 Wander → 回来重挖 → 循环永不穿。
+        // (上次成功是脚下泥土 0.75s < 6s, 掩盖了该 bug。)
+        // 只在"最近 5s reach 都缺失"(真走不到) 时 moveChecker 失败才拉黑。
+        if (!_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
             _moveChecker.reset();
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             _wanderTask.resetWander();
@@ -122,10 +132,21 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // We're trying to mine
         Optional<Rotation> reach = LookHelper.getReach(_pos);
         if (reach.isPresent()) {
+            // (2026-09-12 v17) 转换沿: tryToMine 刚从"缺 reach 超时"回到可达 = 开始
+            // 一轮新挖掘, 重置总挖掘计时 (TimerGame 新建即到期, 不能 onStart reset)。
+            if (_tryToMineTimer.elapsed()) {
+                _miningTotalTimer.reset();
+            }
             _tryToMineTimer.reset();
             _gettingToBlockTick = 0;
         }
         if (!_tryToMineTimer.elapsed()) {
+            if (_miningTotalTimer.elapsed()) {
+                // 持续可达 45s 仍没挖穿 (空手最慢石头 ~7.5s×富余) → 挖掘无效, 放弃。
+                setDebugState("Mining stalled, giving up");
+                mod.getBlockTracker().requestBlockUnreachable(_pos);
+                return null;
+            }
             if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround())) {
                 setDebugState("Block in range, mining...");
                 // Break the block, force it.
