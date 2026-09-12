@@ -2,13 +2,10 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
-import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.GoalChunk;
-import adris.altoclef.util.helpers.JumpObstructionHelper;
 import adris.altoclef.util.helpers.LookHelper;
-import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
@@ -20,9 +17,7 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
-import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.registry.Registry;
 
 /**
  * Turns a baritone goal into a task.
@@ -62,28 +57,12 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private boolean _wasInWater = false;
 
     // ===== (2026-09-11) 跳跃卡死: 检测 + 挖障处置 =====
-    // 检测口径 (用户报"简单旋转跳怎么都跳不上去"): baritone 强制按住跳跃键 +
-    // 水平速度 ≈ 0 连续 1s。会话 20260911-151743 抓到 9 条硬样本 (bIn[fwd=true
-    // jump=true] 而 hSpeed≈0.000, 同格内 y 只震荡 0.33 格)。
-    // 处置 = 「挖障碍」: 改世界 → baritone 重算时路径自然变。
-    // (baritone 没有路径级禁行注入, IPathingBehavior 只暴露 hasPath/isPathing/
-    //  getPath/getGoal/forceCancel/cancelEverything; Settings.blacklistClosestOnFailure
-    //  与 #blacklist 都挂在 GetToBlockProcess/MineProcess 上, 而 altoclef 走的是
-    //  CustomGoalProcess.setGoalAndPath, 拿不到那份黑名单。所以"不重复选失败路线"
-    //  只有两个杠杆: ① 挖掉障碍物改世界 ② forceCancel 撤销路径逼它重算。)
-    private static final int JUMP_STUCK_TICKS = 20;   // 连续 1s 才判定
-    private int _jumpStuckTicks = 0;
-    private final TimerGame _jumpStuckLogTimer = new TimerGame(2);
-    /** 挖障 / 换路后的冷却。必须是"触发条件层 static" —— 导航任务实例会被频繁
-     *  重建, 实例层冷却会被新实例绕过 (20de6b0c 教训)。 */
-    private static final int JUMP_FIX_COOLDOWN_TICKS = 20 * 3;
-    private static final int JUMP_REPATH_COOLDOWN_TICKS = 20 * 5;
-    private static long _jumpFixCooldownUntil = 0;
-    /** 同一格反复卡 (挖不出障碍 → 换路 → baritone 又选回来): 达上限拉长冷却防抖动。 */
-    private static final int JUMP_SAME_SPOT_LIMIT = 4;
-    private static final int JUMP_SAME_SPOT_COOLDOWN_TICKS = 20 * 30;
-    private static BlockPos _jumpLastStuckPos = null;
-    private static int _jumpSameSpotCount = 0;
+    // (2026-09-12) 检测与处置整体迁至 JumpStuckResolver (共享件): ExploreCaveTask
+    // 直接继承 Task 不走本类, 会话 20260912-101305 10:19 实锤它在洞内原地弹跳
+    // 19s 只有"换目标"兜底、没有挖障处置。本类只保留委托调用。
+    // 旧检测要求 baritone 连续 20 tick 强制按住跳跃键 — 实锤 bIn[jump] 只在起跳
+    // 瞬间为 true、空中即释放, streak 永远凑不满 (检测死代码化)。新口径见
+    // JumpStuckResolver 类注释 (水平零速 streak + 强制跳/撞头弹回任一证据)。
 
     // ===== 水下垂直上浮 (2026-09-04) =====
     // 用户"上方全是海洋, baritone 找不到落脚点但可游泳上去"。GetToYTask 的
@@ -420,123 +399,13 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
      *
      * 落盘: logs/altoclef/<会话>/altoclef_diag.log 的 [JumpStuck] 行。
      */
+    /**
+     * (2026-09-12) 跳跃卡死检测 + 挖障处置已迁至 {@link JumpStuckResolver},
+     * 此处仅委托。旧私有实现 (tickJumpStuck/isJumpStuck/logJumpStuck/
+     * registerSameSpotStuck) 删除, 逻辑原样保留在共享件中。
+     */
     private Task tickJumpStuck(AltoClef mod) {
-        if (!isJumpStuck(mod)) {
-            _jumpStuckTicks = 0;
-            return null;
-        }
-        _jumpStuckTicks++;
-        if (_jumpStuckTicks < JUMP_STUCK_TICKS) return null;
-
-        if (_jumpStuckLogTimer.elapsed()) {
-            _jumpStuckLogTimer.reset();
-            logJumpStuck(mod);   // 只读现场快照, 供复盘
-        }
-
-        long now = WorldHelper.getTicks();
-        if (now < _jumpFixCooldownUntil) return null;
-        // 水里强制按 JUMP 是游泳上浮 (baritone 的正常行为), 不是"跳不上去"。
-        // 水面场景交给 [SwimUp] / GoToSurfaceTask, 这里不挖。
-        if (mod.getPlayer().isTouchingWater()) return null;
-
-        BlockPos obstacle = JumpObstructionHelper.findObstruction(mod);
-        if (obstacle != null) {
-            // 有明确挡路的方块 → 挖掉它。挖完路径自然重算 (改世界是最根本的杠杆,
-            // 也最拟人)。
-            _jumpFixCooldownUntil = now + JUMP_FIX_COOLDOWN_TICKS;
-            _jumpStuckTicks = 0;
-            Debug.logToFile("altoclef_diag.log", "[JumpStuck] clearing obstruction " + obstacle
-                    + " player=" + mod.getPlayer().getBlockPos() + " -> DestroyBlockTask");
-            mod.getClientBaritone().getPathingBehavior().forceCancel();
-            return new DestroyBlockTask(obstacle);
-        }
-
-        // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
-        // 人在半空)。只能撤销路径逼它重算另一条路。
-        _jumpFixCooldownUntil = now + JUMP_REPATH_COOLDOWN_TICKS;
-        _jumpStuckTicks = 0;
-        registerSameSpotStuck(mod);
-        Debug.logToFile("altoclef_diag.log", "[JumpStuck] no obstruction at "
-                + mod.getPlayer().getBlockPos() + " -> forceCancel to re-route (sameSpot="
-                + _jumpSameSpotCount + ")");
-        mod.getClientBaritone().getPathingBehavior().forceCancel();
-        return null;
-    }
-
-    /** 检测口径: baritone 强制按住跳跃键, 但水平速度 ≈ 0。 */
-    private boolean isJumpStuck(AltoClef mod) {
-        boolean jumpForced;
-        try {
-            jumpForced = mod.getClientBaritone().getInputOverrideHandler().isInputForcedDown(Input.JUMP);
-        } catch (Throwable t) {
-            return false;
-        }
-        if (!jumpForced) return false;
-        Vec3d v = mod.getPlayer().getVelocity();
-        return Math.hypot(v.x, v.z) < 0.05;
-    }
-
-    /** 同一格反复卡 → 计数, 达上限进长冷却 (防"挖不出 → 换路 → 又选回来"抖动)。 */
-    private void registerSameSpotStuck(AltoClef mod) {
-        BlockPos p = mod.getPlayer().getBlockPos();
-        if (_jumpLastStuckPos != null
-                && Math.abs(p.getX() - _jumpLastStuckPos.getX()) <= 1
-                && Math.abs(p.getZ() - _jumpLastStuckPos.getZ()) <= 1) {
-            _jumpSameSpotCount++;
-        } else {
-            _jumpLastStuckPos = p;
-            _jumpSameSpotCount = 1;
-        }
-        if (_jumpSameSpotCount >= JUMP_SAME_SPOT_LIMIT) {
-            _jumpFixCooldownUntil = WorldHelper.getTicks() + JUMP_SAME_SPOT_COOLDOWN_TICKS;
-            _jumpSameSpotCount = 0;
-            Debug.logToFile("altoclef_diag.log", "[JumpStuck] same spot " + p + " stuck "
-                    + JUMP_SAME_SPOT_LIMIT + "x -> backing off "
-                    + (JUMP_SAME_SPOT_COOLDOWN_TICKS / 20) + "s");
-        }
-    }
-
-    private void logJumpStuck(AltoClef mod) {
-        BlockPos p = mod.getPlayer().getBlockPos();
-        Vec3d v = mod.getPlayer().getVelocity();
-        Direction facing = mod.getPlayer().getHorizontalFacing();
-        BlockPos ahead = p.offset(facing);
-        String goal;
-        try {
-            Goal g = mod.getClientBaritone().getPathingBehavior().getGoal();
-            goal = g == null ? "null" : g.toString();
-        } catch (Throwable t) {
-            goal = "?";
-        }
-        Debug.logToFile("altoclef_diag.log",
-                "[JumpStuck] " + String.format("%.1f", _jumpStuckTicks / 20.0) + "s"
-                        + " pos=" + p
-                        + " xyz=(" + String.format("%.2f", mod.getPlayer().getX())
-                        + "," + String.format("%.2f", mod.getPlayer().getY())
-                        + "," + String.format("%.2f", mod.getPlayer().getZ()) + ")"
-                        + " vel=(" + String.format("%.2f", v.x) + "," + String.format("%.2f", v.y)
-                        + "," + String.format("%.2f", v.z) + ")"
-                        + " onGround=" + mod.getPlayer().isOnGround()
-                        + " inWater=" + mod.getPlayer().isTouchingWater()
-                        + " facing=" + facing
-                        + " blocks[below=" + bk(mod, p.down())
-                        + " feet=" + bk(mod, p)
-                        + " up1=" + bk(mod, p.up(1))
-                        + " up2=" + bk(mod, p.up(2))
-                        + " up3=" + bk(mod, p.up(3))
-                        + " ahead=" + bk(mod, ahead)
-                        + " aheadUp1=" + bk(mod, ahead.up(1))
-                        + " aheadUp2=" + bk(mod, ahead.up(2)) + "]"
-                        + " goal=" + goal);
-    }
-
-    /** 方块名 (诊断用, 失败不抛)。 */
-    private static String bk(AltoClef mod, BlockPos pos) {
-        try {
-            return Registry.BLOCK.getId(mod.getWorld().getBlockState(pos).getBlock()).getPath();
-        } catch (Throwable t) {
-            return "?";
-        }
+        return JumpStuckResolver.tick(mod);
     }
 
     /** 从 baritone goal 提取目标 XZ, 不支持的类型返回 null (不启用直游)。 */
