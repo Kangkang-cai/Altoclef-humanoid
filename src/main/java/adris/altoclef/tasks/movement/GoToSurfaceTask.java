@@ -73,6 +73,11 @@ import net.minecraft.util.math.Vec3d;
  *       "泡在水里挖上去", 5s 宽限内根本出不了水。bot 站水通道 31 分钟
  *       没淹死 → 眼睛在水面之上。修: 守卫只在【眼睛在水下】(真正封闭
  *       含水层、无处呼吸) 时计时, 脚沾水头在空气的场景放行挖垫。
+ *  - 2026-09-12 v7 重见天日 (会话 20260912-144157, 用户拍板 "没挖到天或
+ *    连着天的海洋不算完"): isDeepUnderground 旧判据 y<58 让 y66 封闭湖底
+ *    口袋里的本任务直接完工退场, 之后所有任务只寻路不挖掘 → 冻结 18+ 分钟。
+ *    修: WorldHelper.isDeepUnderground 改为"头顶无天空视线" (水面也算盖);
+ *    y>=58 顶板下头顶可挖时直接进挖一垫一, 阶梯目标不再向下 (58)。
  */
 public class GoToSurfaceTask extends Task {
 
@@ -98,6 +103,9 @@ public class GoToSurfaceTask extends Task {
     private static final int SCAFFOLD_NO_PROGRESS_TICKS = 20 * 15;
     /** 挖垫模式总时长上限。 */
     private static final int SCAFFOLD_TOTAL_TIMEOUT_TICKS = 20 * 90;
+    /** (2026-09-12 重见天日) y>=58 封闭顶板下挖垫的总时长上限: 可能要空手
+     *  凿穿十几格石头 (7.5s/格), 90s 不够; 无进展闸门 (15s) 负责拦真卡死。 */
+    private static final int SCAFFOLD_TOTAL_TIMEOUT_TICKS_SKY = 20 * 300;
     /** 放弃后的冷却 (触发条件层 static: 任务实例会被重建, 实例层冷却无效)。 */
     private static final int SCAFFOLD_GIVEUP_COOLDOWN_TICKS = 20 * 60;
     private static long _scaffoldGiveUpUntilTick = 0;
@@ -314,10 +322,25 @@ public class GoToSurfaceTask extends Task {
      */
     private Task baritoneStep(AltoClef mod, BlockPos player) {
         int y = player.getY();
+        // (2026-09-12 重见天日) y>=58 且头顶被顶板封死 (isDeepUnderground 新判据
+        // 才会让本任务在口袋里继续跑): 头顶 4 格内有可挖实心就直接进挖一垫一。
+        // 旧版阶梯目标 min(58, y+step) 在口袋里等于"往下走" (y66 口袋被派
+        // GetToYTask(58)), 是 20260912-144157 冻结现场的一半根因。
+        boolean skyward = y >= SURFACE_TARGET_Y;
+        if (skyward && canScaffold(mod, player)) {
+            Debug.logToFile("altoclef_diag.log", "[GoToSurface] y=" + y
+                    + " sealed under cover at " + player + " -> SCAFFOLD_UP (sky criterion)");
+            enterScaffold(mod, player);
+            return tickScaffoldUp(mod, player);
+        }
         int step = STEP_LADDER[_stepIdx];
         // 到达本段目标 (或首次) → 下一段目标。
+        // skyward 段只允许小步上探 (≤4 格): 头顶有盖但 4 格内无实心的少数场景
+        // (悬空檐下), baritone 小步寻路走出盖子, 避免大目标触发搭塔。
         if (_stepTargetY == Integer.MIN_VALUE || y >= _stepTargetY) {
-            _stepTargetY = Math.min(SURFACE_TARGET_Y, y + step);
+            _stepTargetY = skyward
+                    ? Math.min(y + Math.min(step, 4), 250)
+                    : Math.min(SURFACE_TARGET_Y, y + step);
         }
 
         // (2026-09-11) 卡住 → 直接进"挖一垫一", 不再等阶梯耗尽。
@@ -376,8 +399,10 @@ public class GoToSurfaceTask extends Task {
      */
     private Task tickScaffoldUp(AltoClef mod, BlockPos player) {
         if (_scaffoldStartTick < 0) _scaffoldStartTick = WorldHelper.getTicks();
-        if (WorldHelper.getTicks() - _scaffoldStartTick > SCAFFOLD_TOTAL_TIMEOUT_TICKS) {
-            return giveUpScaffold(mod, player, "total timeout " + (SCAFFOLD_TOTAL_TIMEOUT_TICKS / 20) + "s");
+        int totalTicks = player.getY() >= SURFACE_TARGET_Y
+                ? SCAFFOLD_TOTAL_TIMEOUT_TICKS_SKY : SCAFFOLD_TOTAL_TIMEOUT_TICKS;
+        if (WorldHelper.getTicks() - _scaffoldStartTick > totalTicks) {
+            return giveUpScaffold(mod, player, "total timeout " + (totalTicks / 20) + "s");
         }
 
         // (2026-09-11 16:40 崩溃现场) 封闭水体判定 —— 必须在"挖头顶"之前拦住。
@@ -435,8 +460,12 @@ public class GoToSurfaceTask extends Task {
         // 2) 头顶已通 + 已入水 → 交 GetToYTask (CustomBaritoneGoalTask 的 [SwimUp] 接管)。
         if (mod.getPlayer().isTouchingWater()) {
             PillarJumpHelper.release(mod);
-            setDebugState("Scaffold: breached into water, swimming up");
-            return new GetToYTask(SURFACE_TARGET_Y);
+            // (2026-09-12 重见天日) y>=58 的口袋挖穿进水时目标继续向上, 不能用
+            // 固定 58 (y66 口袋挖穿进水, 58 在脚下 → 往下游)。海里 (y<58) 仍是
+            // 游到 58 的旧语义。
+            int swimTarget = Math.max(SURFACE_TARGET_Y, player.getY() + 8);
+            setDebugState("Scaffold: breached into water, swimming up (target y=" + swimTarget + ")");
+            return new GetToYTask(swimTarget);
         }
 
         // 3) 头顶已通但还没水 → 垫塔送进上方空间。

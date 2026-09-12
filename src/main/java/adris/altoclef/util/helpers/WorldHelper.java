@@ -238,7 +238,16 @@ public interface WorldHelper {
         if (mod.getPlayer() == null || mod.getWorld() == null) return false;
         BlockPos pos = mod.getPlayer().getBlockPos();
         // 5+ blocks below sea level: genuinely deep cave/mine.
-        return pos.getY() < 58;
+        if (pos.getY() < 58) return true;
+        // (2026-09-12 重见天日判据, 用户拍板: "没挖到天或连着天的海洋不算完")
+        // 旧版 y>=58 一律算地表 → bot 在 y66 封闭湖底口袋里 GoToSurfaceTask
+        // 完工退场, 之后所有导航任务只寻路不挖掘, 无人再手撸方块 (会话
+        // 20260912-144157 冻结 18+ 分钟的根因)。改为: 头顶没有天空视线仍算
+        // 深处。isSkyVisible 走 MOTION_BLOCKING 高度图, 水面也算盖 → 海里必须
+        // 游到水面才算见天, 即"连着天的海洋"。树冠/屋檐下也会短暂判深, 但
+        // GoToSurfaceTask 首选 baritone 导航 (有路就走出去), 只有真无路才进
+        // 挖一垫一, 误判代价 = 顶多凿掉头顶几片树叶。
+        return !mod.getWorld().isSkyVisible(pos.up());
     }
 
     /**
