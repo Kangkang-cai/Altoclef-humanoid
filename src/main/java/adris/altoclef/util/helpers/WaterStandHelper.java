@@ -8,10 +8,10 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import baritone.api.utils.input.Input;
 
 /**
  * (2026-09-12) 水面原地上下浮动 (bobbing) 的"脚下垫方块止浮"共用实现。
@@ -22,14 +22,22 @@ import net.minecraft.util.math.Vec3d;
  * 站定 (脚下实心) 后瞄准/可达/挖掘速度三者同时恢复 —— 与其加"持续瞄准"层
  * (会和 baritone/任务层抢 rotation), 不如先消除浮动根源。
  *
- * 放置语义与 PlaceBlockNearbyTask 一致: 瞄准承托方块 (floor) 的顶面,
- * 交互命中 floor + UP 面 → 放置目标 = floor.up() = 待垫水格。水是可替换
- * 方块, 可直接垫进水里; 垫完 bot 落上方块站定, 浮动消失。
+ * 放置语义与 PlaceBlockNearbyTask 一致: 对承托方块 (floor) 的顶面 interact,
+ * 交互位置 = floor + UP = 待垫水格。水是可替换方块, 可直接垫进水里;
+ * 垫完 bot 落上方块站定, 浮动消失。
+ *
+ * (2026-09-12 094752 会话返工) 首版依赖"平滑转向收敛后准星命中垫面"才点击,
+ * 实测 6 轮全部 PLACE_TIMEOUT —— baritone 寻路每 tick 也在抢旋转, 准星永远
+ * 落不到垫面上。改为【force-click】: 仍然把准星甩向垫面 (拟人动作保留),
+ * 但不等收敛, 直接按 hit+side 语义构造 BlockHitResult 点下去 (服务端只校验
+ * 触及距离, probe 已收紧到 4.3)。多块垫升: 一格填满后 bot 被抬高一格,
+ * bob 上浮腾出下一格继续垫, 自底向上填满水柱; 站上柱顶后走
+ * {@link #riseTick} 跳起腾空垫脚 (pillar-jump) 一路垫出水面。
  *
  * 设计约束 (与 PillarJumpHelper 同款):
  *  - 无状态: 每 tick 只按"当前世界状态"决定做什么, 被抢占重入天然安全。
  *  - 调用方 (SwimDiveChain) 负责状态机/窗口/冷却, 本类只做单 tick 探测与放置。
- *  - 材料复用 {@link PillarJumpHelper#allMaterials()} (常规建材 + 垂直垫塔
+ *  - 材料复用 {@link PillarJumpHelper#allMaterials()} (常规建材 + 水下垫底
  *    可用的重力方块; 水下垫底下方永远有承托, 沙砾不会掉)。
  *  - 放置禁区走 {@code ExtraBaritoneSettings.shouldAvoidPlacingAt} (黑曜石
  *    传送门保护等全局谓词), 绝不在禁区垫方块。
@@ -46,7 +54,7 @@ public final class WaterStandHelper {
 
     /** 探测结论。 */
     public enum Status {
-        /** 脚下已是实心且着地 —— 已站稳, 无需垫。 */
+        /** 脚下已是实心且着地 —— 已站稳 (在水柱顶, 可能还需要垫出水面)。 */
         SUPPORTED,
         /** 找到了可垫的水格 (cell) 与承托面 (floor)。 */
         FOUND,
@@ -72,6 +80,9 @@ public final class WaterStandHelper {
     private static final Spot SUPPORTED = new Spot(Status.SUPPORTED, null, null);
     private static final Spot WAIT = new Spot(Status.WAIT, null, null);
     private static final Spot NONE = new Spot(Status.NONE, null, null);
+
+    /** riseTick 单 tick 结论 (诊断用)。 */
+    public enum RiseResult { JUMPED, PLACED, STALLED }
 
     /**
      * 探测脚下能否垫方块止浮 (每 tick 调用, 无副作用)。
@@ -116,35 +127,67 @@ public final class WaterStandHelper {
 
     /**
      * 垫方块单 tick (每 tick 调用一次, 仅在 probe=FOUND 时)。
-     * 装备建材 → 平滑瞄准承托面顶面 → 准星命中 floor 顶面 (hit + UP 正是
-     * 待垫水格) 时 interactBlock 放置。
+     * 装备建材 → 准星甩向承托面顶面 → force-click (构造 hit+UP 的
+     * BlockHitResult 直接交互, 不等转向收敛 —— 见类注释返工记录)。
      *
-     * @return true = 放置成功 (服务端已接受); false = 本 tick 未完成
-     *         (还没装备好 / 还没瞄到 / 点击被拒), 调用方下 tick 重试即可。
+     * @return 交互结果; SUCCESS = 放置成功 (服务端已接受)。
      */
-    public static boolean placeTick(AltoClef mod, BlockPos floor) {
+    public static ActionResult placeTick(AltoClef mod, BlockPos floor) {
+        return placeAtFace(mod, floor);
+    }
+
+    /**
+     * 站上垫好的水柱顶 (onGround) 且还在水里 → 向上垫出水面单 tick:
+     * hold 跳; 腾空后脚下腾出的水格 (below, 其下正是柱顶) force-click 垫掉。
+     * 经典 pillar-jump 的水中版, 循环一次净升高 1 格, 直到出水。
+     *
+     * @return 本 tick 结论 (诊断用)。
+     */
+    public static RiseResult riseTick(AltoClef mod) {
         ClientPlayerEntity p = MinecraftClient.getInstance().player;
-        if (p == null) return false;
+        if (p == null) return RiseResult.STALLED;
+        BlockPos feet = p.getBlockPos();
+        BlockPos below = feet.down();
+        if (WorldHelper.isSolid(mod, below)) {
+            // 站在柱顶: 起跳 (跳起来那一刻脚下腾出放置窗口)。
+            mod.getInputControls().hold(Input.JUMP);
+            return RiseResult.JUMPED;
+        }
+        mod.getInputControls().release(Input.JUMP);
+        BlockPos support = below.down();
+        if (!WorldHelper.isSolid(mod, support)) return RiseResult.STALLED;
+        if (WorldHelper.isInsidePlayer(mod, below)) return RiseResult.STALLED;
+        if (mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(below)) return RiseResult.STALLED;
+        return placeAtFace(mod, support) == ActionResult.SUCCESS
+                ? RiseResult.PLACED : RiseResult.STALLED;
+    }
+
+    /** 退出垫升路径必调: 松开 riseTick 期间 hold 的跳跃键。 */
+    public static void releaseJump(AltoClef mod) {
+        mod.getInputControls().release(Input.JUMP);
+    }
+
+    /**
+     * 对承托面 support 的顶面 force-click 放置 (放置目标 = support + UP)。
+     * 装备建材 → 准星甩向垫面 (拟人, 不等收敛) → 构造 BlockHitResult 交互。
+     */
+    private static ActionResult placeAtFace(AltoClef mod, BlockPos support) {
+        ClientPlayerEntity p = MinecraftClient.getInstance().player;
+        if (p == null) return ActionResult.FAIL;
         if (!StorageHelper.isEquipped(mod, PillarJumpHelper.allMaterials())) {
             if (!mod.getSlotHandler().forceEquipItem(PillarJumpHelper.allMaterials())) {
-                return false; // 没建材了 (调用方入口已查过库存, 这里是保险)
+                return ActionResult.FAIL; // 没建材了 (调用方入口已查过库存, 这里是保险)
             }
         }
-        Vec3d face = Vec3d.ofCenter(floor).add(0, 0.5, 0);
+        Vec3d face = Vec3d.ofCenter(support).add(0, 0.5, 0);
         LookHelper.lookAt(mod, face);
-        HitResult hit = MinecraftClient.getInstance().crosshairTarget;
-        if (hit instanceof BlockHitResult bhit
-                && bhit.getType() == HitResult.Type.BLOCK
-                && bhit.getBlockPos().equals(floor)
-                && bhit.getSide() == Direction.UP
-                && MinecraftClient.getInstance().interactionManager != null) {
-            ActionResult r = MinecraftClient.getInstance().interactionManager.interactBlock(
-                    p, mod.getWorld(), Hand.MAIN_HAND, bhit);
-            if (r == ActionResult.SUCCESS) {
-                p.swingHand(Hand.MAIN_HAND);
-                return true;
-            }
+        if (MinecraftClient.getInstance().interactionManager == null) return ActionResult.FAIL;
+        BlockHitResult crafted = new BlockHitResult(face, Direction.UP, support, false);
+        ActionResult r = MinecraftClient.getInstance().interactionManager.interactBlock(
+                p, mod.getWorld(), Hand.MAIN_HAND, crafted);
+        if (r == ActionResult.SUCCESS) {
+            p.swingHand(Hand.MAIN_HAND);
         }
-        return false;
+        return r;
     }
 }

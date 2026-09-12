@@ -11,6 +11,7 @@ import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.vehicle.BoatEntity;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.Vec3d;
 
 /**
@@ -37,9 +38,12 @@ import net.minecraft.util.math.Vec3d;
  *      ① 脚下垫方块止浮 (WaterStandHelper, 优先): 现场 20260912-085838 实锤
  *         bot 在水面 y7↔9 每 0.5s 上下振荡 (bobbing), dive+sprint 10+ 次零
  *         进展, 目标方块距离随 y 振荡在可达边缘闪进闪出, 挖掘无法进行。
- *         往脚下水格垫一块建材, bot 落上站定后瞄准/可达/挖掘速度同时恢复
+ *         往脚下水格垫方块, bot 落上站定后瞄准/可达/挖掘速度同时恢复
  *         (水中悬空挖掘有 5x 水 × 5x 悬空 = 25x 惩罚, 浮着挖不现实)。
- *         站稳后给 6s 宽限期不注入任何输入, 让导航自己走起来。
+ *         【连续垫多块】(09-12 用户要求): 一格垫满 bot 被抬高一格, bob 上浮
+ *         腾出下一格继续垫, 自底向上填满水柱; 站上柱顶后 pillar-jump 一路
+ *         垫出水面。放置用 force-click (构造 hit+UP 直接交互, 不等准星
+ *         收敛 —— 首版等收敛被 baritone 抢旋转, 6 轮全 TIMEOUT 零放置)。
  *      ② 下潜向前游 (原有路径): 无建材 / 没得垫 (深水无底、水草挡路、
  *         放置禁区) / 垫方块窗口超时 / 站稳但非本反应所垫 (浅水底,
  *         垫档让位防死结) → 面向当前前进方向 + 按住 FORWARD +
@@ -56,8 +60,9 @@ public class SwimDiveChain extends TaskChain {
     private static final int DIVE_HOLD_TICKS = 60;
     // 下潜后冷却（tick）。触发一次后即使仍卡，过一段时间才允许再次下潜。
     private static final long RE_DIVE_COOLDOWN_TICKS = 100; // 5s
-    // 垫方块尝试窗口（tick, 60 ≈3s）：覆盖 1-2 个 bob 周期, 内含平滑转向落地。
-    private static final long PLACE_WINDOW_TICKS = 60;
+    // 垫方块尝试窗口（tick, 150 ≈7.5s）：要连垫数块填满水柱 (用户 09-12 要求
+    // "多放几个"), 覆盖多个 bob 周期 + 每块之间的上浮间歇。
+    private static final long PLACE_WINDOW_TICKS = 150;
     // 垫方块成功站稳后的宽限期（tick, 120 ≈6s）：让导航自己走起来,
     // 期间不再触发垫/潜, 避免把站着的 bot 又按回水里。
     private static final long STAND_GRACE_TICKS = 120;
@@ -90,6 +95,9 @@ public class SwimDiveChain extends TaskChain {
     //   防止"垫档空转、下潜档永远轮不到"的阶梯死结）。均不随 resetState 清零。
     private long _lastPlacedTick = Long.MIN_VALUE;
     private long _skipPlaceUntilTick = Long.MIN_VALUE;
+    // 本轮垫方块统计 (诊断): 已成功垫几块 + 最近一次交互结果。
+    private int _placedCount = 0;
+    private String _lastPlaceResult = "none";
 
     // ==== [SWIM-DIVE-DIAG] 2026-09-10 零行为改动诊断 ====
     // 现场：水中卡住全靠 NAV-STUCK/超时兜底，整场日志 0 条 [SWIM-DIVE]。
@@ -121,6 +129,7 @@ public class SwimDiveChain extends TaskChain {
                 mod.getInputControls().release(Input.MOVE_FORWARD);
                 mod.getInputControls().release(Input.SNEAK);
                 mod.getInputControls().release(Input.SPRINT);
+                mod.getInputControls().release(Input.JUMP);
             } catch (Exception ignored) { }
             releaseDive(mod);
             resetState();
@@ -138,6 +147,7 @@ public class SwimDiveChain extends TaskChain {
         // 屏幕开着（容器/合成/聊天/死亡）不触发。
         if (MinecraftClient.getInstance().currentScreen != null) {
             releaseDive(mod);
+            WaterStandHelper.releaseJump(mod); // riseTick 可能 hold 着跳跃键
             resetState();
             return;
         }
@@ -295,6 +305,8 @@ public class SwimDiveChain extends TaskChain {
     private void startPlaceUnderfoot(AltoClef mod, long stuckForTicks) {
         _placing = true;
         _placeStartTick = WorldHelper.getTicks();
+        _placedCount = 0;
+        _lastPlaceResult = "none";
         Vec3d pos = mod.getPlayer().getPos();
         Task main = mod.getUserTaskChain().getCurrentTask();
         String m = "[SWIM-DIVE] stuck in water -> place block underfoot (stop bobbing). player=" + pos
@@ -305,8 +317,9 @@ public class SwimDiveChain extends TaskChain {
     }
 
     /**
-     * 垫方块单 tick 推进。退出路径（站稳/没得垫/超时）统一 endPlace + 重开
-     * 卡住窗口 —— 失败时下潜兜底在下一个窗口自然接管, 无需在此直接触发。
+     * 垫方块单 tick 推进 (09-12 返工: 连续垫多块填满水柱, 站上柱顶后垫出水面)。
+     * 结束路径统一 endPlace + 重开卡住窗口 —— 失败时下潜兜底在下一个窗口
+     * 自然接管, 无需在此直接触发。
      */
     private void tickPlace(AltoClef mod) {
         long nowTick = WorldHelper.getTicks();
@@ -314,29 +327,41 @@ public class SwimDiveChain extends TaskChain {
             resetState();
             return;
         }
+        // 出水即收工 (柱子垫满后 bot 已站到水面之上)。
+        if (!mod.getPlayer().isTouchingWater()) {
+            endWithGrace(mod, "PLACE_OUT_OF_WATER");
+            return;
+        }
+        // 超时: 带上已垫块数与最近交互结果, 方便定位"垫不出"的原因。
+        if (nowTick - _placeStartTick >= PLACE_WINDOW_TICKS) {
+            writeDiag(mod, "PLACE_TIMEOUT placed=" + _placedCount + " last=" + _lastPlaceResult);
+            endPlace(mod);
+            return;
+        }
         WaterStandHelper.Spot spot = WaterStandHelper.probe(mod, mod.getPlayer());
         if (spot.status == WaterStandHelper.Status.SUPPORTED) {
-            if (nowTick - _lastPlacedTick <= PLACE_STAND_MEM_TICKS) {
-                // 站在本反应刚垫的方块上：宽限 6s 让导航走起来
-                _standGraceUntilTick = nowTick + STAND_GRACE_TICKS;
-                writeDiag(mod, "PLACE_ALREADY_SUPPORTED");
-            } else {
+            if (nowTick - _lastPlacedTick > PLACE_STAND_MEM_TICKS) {
                 // 没垫过东西也"站稳" = 本来就站在浅水底, 垫方块帮不上
                 // → 垫档让位, 冷却期内走下潜档（防阶梯死结）
                 _skipPlaceUntilTick = nowTick + RE_DIVE_COOLDOWN_TICKS;
                 writeDiag(mod, "PLACE_SUPPORTED_NO_PLACEMENT");
+                endPlace(mod);
+                return;
             }
-            endPlace(mod);
+            // 站在本反应垫的柱顶但还在水里 → pillar-jump 向上垫出水面
+            // (用户要求多放几块)。JUMPED/STALLED 下 tick 继续, 直到出水。
+            WaterStandHelper.RiseResult rr = WaterStandHelper.riseTick(mod);
+            _lastPlaceResult = rr.toString();
+            if (rr == WaterStandHelper.RiseResult.PLACED) {
+                _lastPlacedTick = nowTick;
+                _placedCount++;
+                writeDiag(mod, "PLACE_PLACED #" + _placedCount + " (rise)");
+            }
             return;
         }
         if (spot.status == WaterStandHelper.Status.NONE) {
             // 深水够不着 / 水草挡路 / 放置禁区 → 本轮放弃, 回退下潜兜底
-            writeDiag(mod, "PLACE_NO_SPOT");
-            endPlace(mod);
-            return;
-        }
-        if (nowTick - _placeStartTick >= PLACE_WINDOW_TICKS) {
-            writeDiag(mod, "PLACE_TIMEOUT");
+            writeDiag(mod, "PLACE_NO_SPOT placed=" + _placedCount);
             endPlace(mod);
             return;
         }
@@ -345,18 +370,29 @@ public class SwimDiveChain extends TaskChain {
             diagGate(mod, "PLACE_WAIT_PLAYER_BOX");
             return;
         }
-        // FOUND: 瞄准承托面 → 准星落上 → interactBlock 放置
-        if (WaterStandHelper.placeTick(mod, spot.floor)) {
+        // FOUND: 装备 → 准星甩向垫面 → force-click 放置
+        ActionResult r = WaterStandHelper.placeTick(mod, spot.floor);
+        _lastPlaceResult = r.toString();
+        if (r == ActionResult.SUCCESS) {
             _lastPlacedTick = nowTick;
-            _standGraceUntilTick = nowTick + STAND_GRACE_TICKS;
-            writeDiag(mod, "PLACE_PLACED");
-            endPlace(mod);
+            _placedCount++;
+            // 不结束: bot 被抬高一格后 bob 上浮会腾出下一格, 继续垫满水柱
+            writeDiag(mod, "PLACE_PLACED #" + _placedCount);
         }
+    }
+
+    /** 垫升收工 (出水/站稳): 宽限 6s 让导航走起来, 再结束本轮。 */
+    private void endWithGrace(AltoClef mod, String tag) {
+        _standGraceUntilTick = WorldHelper.getTicks() + STAND_GRACE_TICKS;
+        writeDiag(mod, tag + " placed=" + _placedCount);
+        endPlace(mod);
     }
 
     private void endPlace(AltoClef mod) {
         _placing = false;
         _placeStartTick = Long.MIN_VALUE;
+        // riseTick 可能 hold 着跳跃键, 退出路径必须松开。
+        WaterStandHelper.releaseJump(mod);
         resetWindow();
     }
 
@@ -421,12 +457,14 @@ public class SwimDiveChain extends TaskChain {
     protected void onStop(AltoClef mod) {
         // 保险：链停止时松开可能正按住的键。
         releaseDive(mod);
+        WaterStandHelper.releaseJump(mod);
         resetState();
     }
 
     @Override
     public void onInterrupt(AltoClef mod, TaskChain other) {
         releaseDive(mod);
+        WaterStandHelper.releaseJump(mod);
         resetState();
     }
 
