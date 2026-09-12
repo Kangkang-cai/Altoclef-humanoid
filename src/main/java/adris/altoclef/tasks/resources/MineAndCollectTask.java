@@ -1778,6 +1778,23 @@ public class MineAndCollectTask extends ResourceTask {
                 }
             }
             for (Block block : _blocks) {
+                if (block == Blocks.GOLD_ORE || block == Blocks.DEEPSLATE_GOLD_ORE) {
+                    // (2026-09-12 主世界金矿高度带, 用户"金子的高度区域理想在哪")
+                    // 1.18 主世界金矿分布在 y=-64~32, 峰值 y=-16 (y<-48 另有额外
+                    // 批次; 恶地 biome 额外批次上限提到 256, 地表/崖壁即可见)。
+                    // 旧实现没有金矿分支 → 落到最后兜底 {50,50} → 在 y=50 平挖,
+                    // 而金矿生成上限只到 y=32, y=50 处金矿近乎为 0 → "找金子做
+                    // 金靴"永远挖不到矿, 叠加金靴链本身无超时 → 永久停在主世界。
+                    // 带取 [-24, 0]: 整段落在富集层, 下限与 TUNNEL_MIN_Y=-24 对齐
+                    // (floorY=max(TUNNEL_MIN_Y, 带下限)=-24, 不依赖截断); 上限 0
+                    // 使带内随机高度仍全部在石/深板岩金矿区间, 避免随机到高处后
+                    // 还要长距离下挖。带下限为负 → ascendTriggerY() 返回
+                    // MIN_VALUE, 不触发上行爬升, 保持"下楼梯到带内再平挖"语义。
+                    // (边界: 未做 biome 检测, 恶地内该带偏保守但仍有矿。)
+                    return new int[]{-24, 0};
+                }
+            }
+            for (Block block : _blocks) {
                 if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
                     // 1.18 diamond band: dig down to y=-24, then MineDownExploreTask
                     // switches to horizontal branch-mining at that depth

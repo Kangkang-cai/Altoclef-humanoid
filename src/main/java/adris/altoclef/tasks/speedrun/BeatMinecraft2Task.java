@@ -356,6 +356,21 @@ public class BeatMinecraft2Task extends Task {
     // give up 后去下界前只补金靴 (4 金锭, 不碰钻石件): 没穿没持有 → 收集合成
     // (粘性实例防每tick重启); 背包有 → 穿上; 已穿 → 放行 _goToNetherTask。
     private Task _preNetherGoldenBootsTask = null;
+    // (2026-09-12 金靴独立超时 + 下界补链, 用户"寻找金子做靴子需要有(时间限制),
+    // 可以在地狱里找到足够金子然后再做") 原实现的两处无界: ① 金靴与钻石件同在
+    // COLLECT_EYE_ARMOR, 共用 DIAMOND_COLLECT_LIMIT_MS (5min) 预算, 金靴收集本身
+    // 在吃钻石的时间; ② 钻石超时后 getPreNetherGoldenBootsTask 单独补金靴, 但那个
+    // 方法自身没有超时 → 主世界凑不到金矿就永久停留, 永远进不了下界。
+    // 现在两道独立窗口: 主世界最多 PRE_NETHER_BOOTS_TIMEOUT_MS; 用尽则置
+    // _preNetherBootsDeferredToNether 并放行 _goToNetherTask, 进下界后由 NETHER
+    // case 的 getNetherGoldenBootsTask 再给 NETHER_BOOTS_TIMEOUT_MS — 下界金矿
+    // (y=10~117 均匀分布, 掉金粒) 极易凑够 4 金锭, 二次窗也用尽才彻底放弃。
+    private long _preNetherBootsStartMs = -1;
+    private boolean _preNetherBootsDeferredToNether = false;
+    private static final long PRE_NETHER_BOOTS_TIMEOUT_MS = 3 * 60_000L;
+    private long _netherBootsStartMs = -1;
+    private boolean _netherBootsGivenUp = false;
+    private static final long NETHER_BOOTS_TIMEOUT_MS = 3 * 60_000L;
     private final Task _buildMaterialsTask;
     private final PlaceBedAndSetSpawnTask _setBedSpawnTask = new PlaceBedAndSetSpawnTask();
     private final GoToStrongholdPortalTask _locateStrongholdTask;
@@ -2078,6 +2093,14 @@ public class BeatMinecraft2Task extends Task {
                         }
                     }
                 }
+                // (2026-09-12 金靴下界补链, 用户"可以在地狱里找到足够金子然后再做")
+                // 主世界补靴超时被顺延下来时在这里补 — 放在就近搜刮之后 (箱子里的
+                // 金锭可能直接把 4 锭凑齐, 见 lootableItems 的 GOLD_INGOT 条件),
+                // 防火药水/烈焰棒之前 (猪灵交易要穿金靴才不被敌对)。
+                Task netherBoots = getNetherGoldenBootsTask(mod);
+                if (netherBoots != null) {
+                    return netherBoots;
+                }
                 if (needsBlazeRods) {
                     // (2026-08-23 防火药水保命) 打烈焰人前先搞防火药水
                     // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。只尝试
@@ -3028,11 +3051,68 @@ public class BeatMinecraft2Task extends Task {
             setDebugState("Equipping golden boots before Nether (diamond gear given up)");
             return new EquipArmorTask(Items.GOLDEN_BOOTS);
         }
+        // (2026-09-12 金靴独立超时) 已顺延到下游 → 不再阻塞, 放行 _goToNetherTask。
+        if (_preNetherBootsDeferredToNether) {
+            return null;
+        }
+        if (_preNetherBootsStartMs < 0) {
+            _preNetherBootsStartMs = System.currentTimeMillis();
+        }
+        if (System.currentTimeMillis() - _preNetherBootsStartMs > PRE_NETHER_BOOTS_TIMEOUT_MS) {
+            _preNetherBootsDeferredToNether = true;
+            Debug.logMessage("(DiamondGiveUp) Golden boots unobtainable in overworld within "
+                    + (PRE_NETHER_BOOTS_TIMEOUT_MS / 60_000) + "min — deferring to Nether (mine nether gold ore).");
+            Debug.logToFile("altoclef_diag.log", "[PreNetherBoots] OVERWORLD TIMEOUT "
+                    + PRE_NETHER_BOOTS_TIMEOUT_MS + "ms, deferred to Nether.");
+            return null;
+        }
         if (_preNetherGoldenBootsTask == null || _preNetherGoldenBootsTask.isFinished(mod)) {
             Debug.logMessage("(DiamondGiveUp) Golden boots missing before Nether — crafting (4 gold ingots), diamond gear stays abandoned.");
             _preNetherGoldenBootsTask = TaskCatalogue.getItemTask(Items.GOLDEN_BOOTS, 1);
         }
         setDebugState("Crafting golden boots before Nether (diamond gear given up)");
+        return _preNetherGoldenBootsTask;
+    }
+
+    /**
+     * (2026-09-12 金靴下界补链) 主世界补金靴超时被顺延到下界时, 在 NETHER case 调用。
+     * 下界金矿 NETHER_GOLD_ORE 分布 y=10~117 均匀 (10 脉/区块, 玄武岩三角洲 ×2),
+     * 掉 2~6 金粒/块, 4 金锭 = 36 金粒, 远好凑过主世界 y=-64~32 的金矿隧道。
+     * CollectGoldIngotTask 的 NETHER 分支会先烧背包 raw_gold, 再金粒合成金锭, 最后
+     * 挖下界金矿 — 不会像"熔炼缺料"那样回主世界造地狱门。
+     * 二次窗口 NETHER_BOOTS_TIMEOUT_MS 用尽后彻底放弃, 不再阻塞烈焰棒主线。
+     * 只补金靴不碰钻石件 (钻石保持 _diamondCollectGivenUp 放弃态)。
+     */
+    private Task getNetherGoldenBootsTask(AltoClef mod) {
+        if (!_preNetherBootsDeferredToNether || _netherBootsGivenUp) {
+            return null;
+        }
+        if (StorageHelper.isArmorEquipped(mod, Items.GOLDEN_BOOTS)) {
+            _netherBootsGivenUp = true;
+            return null;
+        }
+        if (mod.getItemStorage().hasItemInventoryOnly(Items.GOLDEN_BOOTS)) {
+            setDebugState("Equipping golden boots (deferred, Nether)");
+            return new EquipArmorTask(Items.GOLDEN_BOOTS);
+        }
+        if (_netherBootsStartMs < 0) {
+            _netherBootsStartMs = System.currentTimeMillis();
+            // 丢弃主世界残留的收集实例, 让链在下界重建 (走 NETHER 分支)。
+            _preNetherGoldenBootsTask = null;
+        }
+        if (System.currentTimeMillis() - _netherBootsStartMs > NETHER_BOOTS_TIMEOUT_MS) {
+            _netherBootsGivenUp = true;
+            Debug.logMessage("(NetherBoots) Still no golden boots after "
+                    + (NETHER_BOOTS_TIMEOUT_MS / 60_000) + "min in Nether — giving up, proceeding with blaze rods.");
+            Debug.logToFile("altoclef_diag.log", "[NetherBoots] NETHER TIMEOUT "
+                    + NETHER_BOOTS_TIMEOUT_MS + "ms, giving up.");
+            return null;
+        }
+        if (_preNetherGoldenBootsTask == null || _preNetherGoldenBootsTask.isFinished(mod)) {
+            Debug.logMessage("(NetherBoots) Golden boots deferred from overworld — collecting from nether gold ore.");
+            _preNetherGoldenBootsTask = TaskCatalogue.getItemTask(Items.GOLDEN_BOOTS, 1);
+        }
+        setDebugState("Crafting golden boots in Nether (deferred from overworld)");
         return _preNetherGoldenBootsTask;
     }
 
