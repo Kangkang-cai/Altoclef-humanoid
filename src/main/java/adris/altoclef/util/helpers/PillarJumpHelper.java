@@ -106,8 +106,14 @@ public final class PillarJumpHelper {
     public static boolean step(AltoClef mod, Item[] materials) {
         BlockPos feet = mod.getPlayer().getBlockPos();
         BlockPos below = feet.down();
+        // (2026-09-12 v19 人类垫塔时机) 站立/上升途中就把视线钉在脚下支撑面
+        // —— 窗口一开准星已命中, 右键立刻能点; 旧代码只在窗口开时才 lookAt,
+        // 腾空窗口仅几 tick, 转头来不及, 白白错过 (20260912-195050 hand=dirt
+        // 已装备、yRange1.25 正常跳、放置 0 次)。
+        Vec3d supportTop = Vec3d.ofCenter(below).add(0, 0.5, 0);
         if (WorldHelper.isSolid(mod, below)) {
-            // 站在实体上: 起跳 (对着脚下的块顶面看, 跳起来那一刻就进入放置窗口)。
+            // 站在实体上: 起跳 (视线已对准脚下块顶面, 跳起即入放置窗口)。
+            LookHelper.lookAt(mod, supportTop);
             mod.getInputControls().hold(Input.JUMP);
             return true;
         }
@@ -126,7 +132,8 @@ public final class PillarJumpHelper {
             mod.getInputControls().release(Input.JUMP);
             return place(mod, below, materials);
         }
-        // 腾空但窗口还没到 (上升途中): 继续按住跳。
+        // 腾空但窗口还没到 (上升途中): 继续按住跳, 视线保持钉在支撑面。
+        LookHelper.lookAt(mod, supportTop);
         mod.getInputControls().hold(Input.JUMP);
         return true;
     }
@@ -135,6 +142,14 @@ public final class PillarJumpHelper {
      * 瞄准目标块顶面 → 准心落上后 interactBlock 放置。
      * (与 PlaceBlockNearbyTask.place 同款路径; 不用 baritone builder, 因为
      * builder 依赖"脚下接地"的放置语义, 在腾空窗口里不成立。)
+     *
+     * (2026-09-12 v19 命中条件修正 — "疯狂原地跳不放置"的直接死因):
+     * 旧条件 `bhit.getBlockPos().equals(pos)` 恒 false —— below 是【空气格】,
+     * MC 射线检测永远穿过空气, crosshairTarget 命中的是它下面的支撑块顶面
+     * (pos.down()) 或更深处。右键因此一次都没执行过。
+     * 人类垫塔的真实操作 = 低头看脚下支撑块顶面, 跳起瞬间右键 —— MC 自动把
+     * 方块放到该面邻接的空气格 (= below)。故命中 pos 或 pos.down() 都算有效,
+     * 直接对该 hit 交互 (face=UP 时放置位置自动 = pos)。
      */
     private static boolean place(AltoClef mod, BlockPos pos, Item[] materials) {
         if (!StorageHelper.isEquipped(mod, materials)) {
@@ -142,11 +157,11 @@ public final class PillarJumpHelper {
                 return false; // 没方块了 (调用方入口已检查库存, 这里是保险)
             }
         }
-        Vec3d topCenter = Vec3d.ofCenter(pos).add(0, 0.5, 0);
-        LookHelper.lookAt(mod, topCenter);
+        Vec3d supportTop = Vec3d.ofCenter(pos.down()).add(0, 0.5, 0);
+        LookHelper.lookAt(mod, supportTop);
         HitResult hit = MinecraftClient.getInstance().crosshairTarget;
         if (hit instanceof BlockHitResult bhit
-                && bhit.getBlockPos().equals(pos)
+                && (bhit.getBlockPos().equals(pos) || bhit.getBlockPos().equals(pos.down()))
                 && MinecraftClient.getInstance().interactionManager != null) {
             ActionResult r = MinecraftClient.getInstance().interactionManager.interactBlock(
                     mod.getPlayer(), mod.getWorld(), Hand.MAIN_HAND, bhit);
