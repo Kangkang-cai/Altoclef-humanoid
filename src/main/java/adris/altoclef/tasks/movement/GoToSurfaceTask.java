@@ -9,6 +9,7 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 /**
  * (2026-08-22) 回到地表通用前置任务。
@@ -61,6 +62,17 @@ import net.minecraft.util.math.BlockPos;
  *    够不着 (水不会流下) → 原地卡死 + 换列重挖 + 疯狂重导航。→ v5 闸门:
  *    必须"确实卡住"+"头顶有可挖实心"才进, 且带无进展/总超时退出。
  *  - 2026-09-11 DIG_UP 死代码 (见上)。
+ *  - 2026-09-12 (会话 20260912-121705) "sealed water 秒放弃" — v6 修复:
+ *    bot 卡在自挖 1 宽水通道 (x119,y12,z57), 头顶实心, 31 分 46 秒在
+ *    y=20/16/14 目标乒乓中一动不动。两个叠加根因:
+ *    ① TimerGame 新建即"已到期" (_prevTime=0, 而 currentTime() 是连接
+ *       ticks 累计秒数, 会话后期已是数千秒) → enterScaffold 置 null 的
+ *       _waterStuckTimer 在进水第一 tick 就 elapsed → "sealed water"
+ *       秒放弃 (本次 32 次), 挖垫模式在水中完全失效。修: 创建后立刻 reset。
+ *    ② sealed-water 判据用 isTouchingWater (脚沾水就算), 但 v5 本来就是
+ *       "泡在水里挖上去", 5s 宽限内根本出不了水。bot 站水通道 31 分钟
+ *       没淹死 → 眼睛在水面之上。修: 守卫只在【眼睛在水下】(真正封闭
+ *       含水层、无处呼吸) 时计时, 脚沾水头在空气的场景放行挖垫。
  */
 public class GoToSurfaceTask extends Task {
 
@@ -110,6 +122,8 @@ public class GoToSurfaceTask extends Task {
     /** 挖穿进水后的"封闭水体"计时 (见 SEALED_WATER_TICKS)。null = 未进过水。 */
     private TimerGame _waterStuckTimer = null;
     private final TimerGame _scaffoldLogTimer = new TimerGame(2);
+    /** (2026-09-12 v6) findOverheadDigTarget 最近一次返回 null 的原因 (诊断用)。 */
+    private String _noDigReason = null;
 
     // ===== 卡住检测状态 (两种模式共用, 每 tick 采样) =====
     private double _lastSampleX = Double.NaN;
@@ -173,17 +187,37 @@ public class GoToSurfaceTask extends Task {
     /**
      * 头顶向上找第一个"可挖的实心方块"。
      * 第一个实心若不可挖 (基岩/放置保护) → 返回 null (上面更没戏, 不继续找)。
+     * (2026-09-12 v6) 返回 null 时把原因写进 _noDigReason (4 条路径各不相同,
+     * 之前一律"nothing diggable overhead"无法定位现场)。
      */
     private BlockPos findOverheadDigTarget(AltoClef mod, BlockPos player) {
+        StringBuilder window = null;
         for (int dy = 1; dy <= DIG_WINDOW; dy++) {
             BlockPos cand = player.up(dy);
-            if (!mod.getChunkTracker().isChunkLoaded(cand)) return null;
-            if (!WorldHelper.isSolid(mod, cand)) continue;
-            if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) return null;
+            if (!mod.getChunkTracker().isChunkLoaded(cand)) {
+                _noDigReason = "chunk unloaded at " + cand;
+                return null;
+            }
+            if (!WorldHelper.isSolid(mod, cand)) {
+                if (window == null) window = new StringBuilder();
+                window.append("dy=").append(dy).append(':')
+                        .append(mod.getWorld().getBlockState(cand).getBlock()).append(' ');
+                continue;
+            }
+            if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(cand)) {
+                _noDigReason = "avoidBreaking at " + cand;
+                return null;
+            }
             float hardness = mod.getWorld().getBlockState(cand).getHardness(mod.getWorld(), cand);
-            if (hardness < 0) return null; // 不可破坏
+            if (hardness < 0) {
+                _noDigReason = "unbreakable " + mod.getWorld().getBlockState(cand).getBlock() + " at " + cand;
+                return null;
+            }
+            _noDigReason = null;
             return cand;
         }
+        _noDigReason = "no solid within " + DIG_WINDOW + " above feet"
+                + (window != null ? " (non-solid: " + window.toString().trim() + ")" : " (all unloaded/air?)");
         return null;
     }
 
@@ -209,9 +243,22 @@ public class GoToSurfaceTask extends Task {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
         }
         _scaffoldNoProgressTimer.reset();
-        _waterStuckTimer = null; // 每次进挖垫都重新判定水体
+        // (2026-09-12 v6) TimerGame 新建即"已到期" (_prevTime=0 vs 连接 ticks),
+        // 这里必须创建 + reset, 否则进水第一 tick sealed-water 守卫就触发
+        // (会话 20260912-121705 实锤: 32 次秒放弃, 挖垫模式在水中完全失效)。
+        _waterStuckTimer = new TimerGame(SEALED_WATER_TICKS / 20.0);
+        _waterStuckTimer.reset(); // 每次进挖垫都重新判定水体
         _scaffoldLogTimer.reset();
         _stuckTicks = 0;
+    }
+
+    /** (2026-09-12 v6) 眼睛是否在水下 (真正"无处呼吸"的封闭水体判据)。
+     *  isTouchingWater 脚沾水就算, 会把"脚泡在水通道、头在空气"的场景
+     *  (本可以放心挖上去) 误判成封闭含水层。 */
+    private boolean eyesUnderwater(AltoClef mod) {
+        Vec3d eye = mod.getPlayer().getEyePos();
+        BlockPos eyeBlock = new BlockPos(eye);
+        return mod.getWorld().getBlockState(eyeBlock).getFluidState().isNotEmpty();
     }
 
     /** 放弃挖垫模式: 记录触发条件层 static 冷却, 回 baritone。 */
@@ -289,6 +336,7 @@ public class GoToSurfaceTask extends Task {
         if (_noPathTimer == null) {
             int secs = mod.getModSettings().getGoToSurfaceNoPathSeconds();
             _noPathTimer = new TimerGame(secs > 0 ? secs : 1);
+            _noPathTimer.reset(); // (2026-09-12 v6) 新建即到期, 必须 reset (否则同 tick 直缩阶梯)
         }
         if (baritoneHasPath(mod)) {
             _noPathTimer.reset();
@@ -309,7 +357,7 @@ public class GoToSurfaceTask extends Task {
             } else if (_blockedLogTimer.elapsed()) {
                 _blockedLogTimer.reset();
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone foothold at " + player
-                        + " and nothing diggable overhead -> keep waiting on baritone");
+                        + " and nothing diggable overhead (" + _noDigReason + ") -> keep waiting on baritone");
             }
         }
         setDebugState("Going up via baritone (step " + STEP_LADDER[_stepIdx] + ", target y=" + _stepTargetY + ")");
@@ -342,9 +390,15 @@ public class GoToSurfaceTask extends Task {
         // (停止后水稳定, 玩家自然下沉回自己挖上来的通道), 放弃并进冷却。
         // 之后的逃生交给 WorldSurvivalChain 的防溺水 (priority 95): 它会找 16 格内
         // 最近可呼吸方块 —— 在封闭水体里那就是自己刚挖上来的那条通道。
-        if (mod.getPlayer().isTouchingWater()) {
+        //
+        // (2026-09-12 v6 修正) 判据 isTouchingWater → eyesUnderwater:
+        // 脚沾水就算的旧口径把"脚泡在自挖水通道、头在空气"的场景 (本次
+        // 20260912-121705 卡死现场, bot 站 31 分钟没淹死 = 有呼吸) 也当成
+        // 封闭水体秒放弃。真正要拦的是"眼睛在水下无处呼吸"的封闭含水层。
+        if (eyesUnderwater(mod)) {
             if (_waterStuckTimer == null) {
                 _waterStuckTimer = new TimerGame(SEALED_WATER_TICKS / 20.0);
+                _waterStuckTimer.reset(); // (2026-09-12 v6) 新建即到期, 必须 reset
             }
             if (_waterStuckTimer.elapsed()) {
                 return giveUpScaffold(mod, player, "sealed water: " + (SEALED_WATER_TICKS / 20)
@@ -356,6 +410,7 @@ public class GoToSurfaceTask extends Task {
 
         if (_scaffoldNoProgressTimer == null) {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
+            _scaffoldNoProgressTimer.reset(); // (2026-09-12 v6) 新建即到期, 必须 reset
         }
         if (player.getY() > _scaffoldLastY) {
             _scaffoldLastY = player.getY();
