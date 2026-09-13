@@ -383,6 +383,21 @@ public class AltoClef implements ModInitializer {
         // Water bucket placement will be handled by us exclusively
         getExtraBaritoneSettings().configurePlaceBucketButDontFall(true);
 
+        // (2026-09-13 灵魂沙上寻路全盘失败) 下界灵魂沙谷里 baritone 反复
+        // `Open set size: 0 / [Baritone] Failed`, bot 完全站桩 (hSpeed=0,
+        // bIn 全 false)。根因是规划层与执行层对灵魂沙语义不一致:
+        //   - 规划层 MovementHelper.canWalkOn 把灵魂沙当普通实心方块 (第一条
+        //     isBlockNormalCube 直接 return true, 无灵魂沙特判) → 认为可走;
+        //   - 执行层 MovementTraverse.updateState 对灵魂沙走了特判分支
+        //     (below==SOUL_SAND && !shouldTreatSoulSandAsOrdinaryBlock())。
+        // 叠加玩家站在 0.875 高的灵魂沙上时 IPlayerContext.playerFeet() 的
+        // `floor(y + 0.1251)` 只剩 1e-4 容差 (y=88.875 → 89.0001, 起点算 y=89;
+        // y 微降到 88.8749 以下就翻成 88 = 灵魂沙本体格) → baritone 判定起点
+        // 嵌在实心方块里 → 44 种移动全部作废 → openset=0 → Failed。
+        // 打开此开关后执行层走与 SlabBlock 相同的普通分支, 与规划层对齐。
+        // 全 jar 唯一消费点就是 MovementTraverse, 改动面收敛。
+        getExtraBaritoneSettings().treatSoulSandAsOrdinaryBlock(true);
+
         // Give baritone more time to calculate paths. Sometimes they can be really far away.
         // Was: 2000L
         getClientBaritoneSettings().failureTimeoutMS.value = 6000L;
