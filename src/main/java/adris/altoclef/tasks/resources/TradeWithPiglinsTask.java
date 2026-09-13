@@ -91,6 +91,17 @@ public class TradeWithPiglinsTask extends ResourceTask {
     }
 
     /**
+     * (2026-09-13) 交易进行中 (已过预算闸且身上还有金锭可丢) 暂缓"清空合成格"
+     * 兜底, 别在丢金锭的节奏里插一段开背包+挪光标。卡在 2x2 格里的 leftover
+     * 不会丢: 交易自然结束 (达标 / 金锭耗尽) 后本钩子返回 false, 基类照常清。
+     */
+    @Override
+    protected boolean shouldDeferCraftingGridClear(AltoClef mod) {
+        return _startedTrading
+                && StorageHelper.countItemInInventoryReal(mod, Items.GOLD_INGOT) > 0;
+    }
+
+    /**
      * (2026-09-13 交易掉物捡拾升级) 猪灵以物易物会朝玩家丢随机战利品, 这些
      * 一律捡走: 防火药水 (NBT 感知判定, 排除水瓶)、末影珍珠、黑曜石、哭泣的
      * 黑曜石 (猪灵两种黑曜石都会丢, 门框只认普通黑曜石, 哭泣的先拿上不亏)。

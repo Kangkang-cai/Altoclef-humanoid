@@ -287,8 +287,14 @@ public final class VisibilityHelper {
         // wall must not hide them once we've seen the village itself.
         // Underground dungeons are never remembered as structures, so their
         // buried chests stay invisible until we actually walk in.
+        // (2026-09-13 用户"堡垒里面的箱子必须看见才能触发贪婪开箱") 推断豁免
+        // 只留主世界: 下界堡垒因"看见下界砖"被记住后, 32 格内【从未看见过】
+        // 的箱子/木桶也全被推断为可感知 → 就近搜刮隔墙开箱 (透视, 日志实锤
+        // 23:05:26 Looting a container)。下界容器一律走下方真实 LOS
+        // (isBlockVisible), 亲眼看见才进贪婪开箱。
         if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL) {
-            if (mod.getKnowledgeMemory().isNearRememberedStructure(pos, STRUCTURE_INFERENCE_RADIUS)) {
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.OVERWORLD
+                    && mod.getKnowledgeMemory().isNearRememberedStructure(pos, STRUCTURE_INFERENCE_RADIUS)) {
                 return true;
             }
         }

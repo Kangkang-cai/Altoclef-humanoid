@@ -249,16 +249,32 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
 
         // Make sure that items don't get stuck in the player crafting grid. May be an issue if a future task isn't a resource task.
         if(StorageHelper.isPlayerInventoryOpen()){
-            if (!(thisOrChildSatisfies(task -> task instanceof ITaskUsesCraftingGrid)) || _ensureFreeCraftingGridTask.isActive()){
-                for(Slot slot : PlayerSlot.CRAFT_INPUT_SLOTS){
-                    if(!StorageHelper.getItemStackInSlot(slot).isEmpty()) {
-                        return _ensureFreeCraftingGridTask;
+            boolean clearInProgress = _ensureFreeCraftingGridTask.isActive();
+            // (2026-09-13 交易期暂缓清格, 用户"交易途中为什么会被清理合成格打断")
+            // 正在进行的清格照常跑完; 尚未开始的清格允许子任务 (猪灵交易) 申请
+            // 暂缓 — 清格要开背包屏+挪光标, 是一段显眼的插入动作, 插在丢金锭
+            // 节奏里很扎眼 (日志 23:05:59 实锤 Trading with Piglins 被插 9s
+            // "Breaking the crafting grid")。
+            if (!shouldDeferCraftingGridClear(mod) || clearInProgress) {
+                if (!(thisOrChildSatisfies(task -> task instanceof ITaskUsesCraftingGrid)) || clearInProgress){
+                    for(Slot slot : PlayerSlot.CRAFT_INPUT_SLOTS){
+                        if(!StorageHelper.getItemStackInSlot(slot).isEmpty()) {
+                            return _ensureFreeCraftingGridTask;
+                        }
                     }
                 }
             }
         }
 
         return onResourceTick(mod);
+    }
+
+    /**
+     * (2026-09-13) 子任务可申请暂缓"清空 2x2 合成格"兜底。仅当清格尚未开始
+     * 时生效 (正在清的一律跑完, 不留半格状态)。默认 false = 永不让位 (原行为)。
+     */
+    protected boolean shouldDeferCraftingGridClear(AltoClef mod) {
+        return false;
     }
 
     @Override
