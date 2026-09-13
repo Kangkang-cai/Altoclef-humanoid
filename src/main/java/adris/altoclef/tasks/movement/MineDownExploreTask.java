@@ -965,6 +965,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 随父对象丢失导致探索进度作废、同洞反复吸引。
     private static BlockPos _lastFireAnchor;
     public boolean isExploringCave() { return _inCave; }
+    /**
+     * (2026-09-13 遇水改道交接) 交接闸门用 —— "正在遇水改道" 与 "正在探洞" 一样
+     * 是必须被保护的中途状态。旧闸门只看 isExploringCave()，而改道期间 _inCave=false
+     * → 闸门判"上一个探索已结束" → 丢弃实例重建 → onStart 把方向强制回常量
+     * STAIR_DIR_X(1)/STAIR_DIR_Z(0)、水计数归零 → 沿原轨迹重挖撞同一片水。
+     * 09-13 16:38 实锤: 4 轮改道全锁在 x=71~91 / y=54~64 / z=-470~-480 这 20 格内。
+     */
+    public boolean isInWaterDetour() { return _inWaterDetour; }
     public boolean isNetherTask() { return _nether; }
     public static BlockPos getLastFireAnchor() { return _lastFireAnchor; }
 

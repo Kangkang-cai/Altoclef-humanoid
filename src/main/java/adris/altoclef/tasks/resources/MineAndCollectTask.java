@@ -1721,14 +1721,19 @@ public class MineAndCollectTask extends ResourceTask {
             // 同维度且玩家仍在最近 FIRE 锚点 64 格内 → 原样复用(MineDownExploreTask
             // 的 isEqual 是 identity, 同一对象不会被框架重启重置), 探索无缝继续;
             // 玩家已远离/维度已变/探索已结束 → 正常新建。
+            // (2026-09-13 遇水改道纳入交接) "探洞中"与"遇水改道中"都是必须保护的中途
+            // 状态 —— 实例重建会重置 _step/_waterSkipped 并把方向强制回常量
+            // STAIR_DIR(1,0) → 沿原轨迹重挖撞同一片水 (09-13 16:38 实锤: 4 轮改道
+            // 全锁在 x=71~91/y=54~64/z=-470~-480 这 20 格内)。
             // (2026-09-10 探索断裂诊断) 闸门结果与失败原因打点 — 定位"坠落窗口
             // 内 prev 尚未 FIRE(isExploringCave=false) → 交接失败 → 全新实例"。
             boolean dimNowNether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
             String handoffFail = null;
             if (_lastCaveExploration == null) {
                 handoffFail = "no-prev";
-            } else if (!_lastCaveExploration.isExploringCave()) {
-                handoffFail = "prev-not-exploring(inCave=false)";
+            } else if (!_lastCaveExploration.isExploringCave()
+                    && !_lastCaveExploration.isInWaterDetour()) {
+                handoffFail = "prev-not-exploring(inCave=false,detour=false)";
             } else if (_lastCaveExploration.isNetherTask() != dimNowNether) {
                 handoffFail = "dim-changed";
             } else {
