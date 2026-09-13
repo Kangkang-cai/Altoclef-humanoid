@@ -1075,20 +1075,51 @@ public class StorageHelper {
      */
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     public static boolean hasRecipeMaterialsOrTarget(AltoClef mod, RecipeTarget... targets) {
+        return hasRecipeMaterialsOrTarget(mod, 0, targets);
+    }
+
+    /**
+     * (2026-09-13 "料尽即收工"判据) 只问"还能做出【至少一份】吗", 与目标份数无关。
+     *
+     * 存在的理由: {@link #hasRecipeMaterialsOrTarget} 内部算的是
+     * {@code need = targetCount - 已有数} → {@code materialsPerSlotNeeded = ceil(need / outputCount)}。
+     * 当 targetCount 是哨兵值 99999999(`CollectFoodTask` 用"全转换"语义传的值)时
+     * need 恒约 1e8 → 该判据**恒判"缺料"** → 拿它当"原料是否耗尽"的判据会在第一个
+     * tick 就成立, 任务完全不做就结束。
+     *
+     * 本方法把份数固定为 1, 语义 = "配方每个非空槽位都能被真实背包(含合成格)满足
+     * 至少一份"。这才是"还能不能继续转"的正确问法。
+     *
+     * 用途: `collect=false` 的合成任务(调用方声明"料在我手上, 本任务不负责补料")
+     * 在原料耗尽后目标(哨兵值)永不达成, 必须靠本判据给出出口。
+     */
+    public static boolean hasMaterialsForOneCraft(AltoClef mod, RecipeTarget... targets) {
+        return hasRecipeMaterialsOrTarget(mod, 1, targets);
+    }
+
+    /**
+     * 公共实现。{@code forcedCrafts > 0} 时忽略 targetCount, 直接按该份数校验材料。
+     */
+    private static boolean hasRecipeMaterialsOrTarget(AltoClef mod, int forcedCrafts, RecipeTarget... targets) {
         HashMap<Integer, Integer> slotUsedCounts = new HashMap<>();
         for (RecipeTarget target : targets) {
             CraftingRecipe recipe = target.getRecipe();
-            int need = 0;
-            if (target.getOutputItem() != null) {
-                need = target.getTargetCount();
-                // (2026-08-25 真实背包兜底) 输出已有数改用真实背包计数 — tracker
-                // 缓存陈旧会误判"缺材料"→ 派发收集 → 挖洞横跳 (用户实测做金靴子:
-                // 背包有足够金粒却 Collecting 36 nuggets 挖洞, 09:14 日志)。
-                need -= countItemInInventoryReal(mod, target.getOutputItem());
+            int materialsPerSlotNeeded;
+            if (forcedCrafts > 0) {
+                materialsPerSlotNeeded = forcedCrafts;
+            } else {
+                int need = 0;
+                if (target.getOutputItem() != null) {
+                    need = target.getTargetCount();
+                    // (2026-08-25 真实背包兜底) 输出已有数改用真实背包计数 — tracker
+                    // 缓存陈旧会误判"缺材料"→ 派发收集 → 挖洞横跳 (用户实测做金靴子:
+                    // 背包有足够金粒却 Collecting 36 nuggets 挖洞, 09:14 日志)。
+                    need -= countItemInInventoryReal(mod, target.getOutputItem());
+                }
+                // need holds how many items we need to CRAFT
+                // However, a crafting recipe can output more than 1 of an item.
+                materialsPerSlotNeeded = (int) Math.ceil((float) need / target.getRecipe().outputCount());
             }
-            // need holds how many items we need to CRAFT
-            // However, a crafting recipe can output more than 1 of an item.
-            int materialsPerSlotNeeded = (int) Math.ceil((float) need / target.getRecipe().outputCount());
             for (int i = 0; i < materialsPerSlotNeeded; ++i) {
                 for (int slot = 0; slot < recipe.getSlotCount(); ++slot) {
                     ItemTarget needs = recipe.getSlot(slot);

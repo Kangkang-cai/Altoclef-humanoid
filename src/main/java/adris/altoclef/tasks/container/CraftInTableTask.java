@@ -86,6 +86,22 @@ public class CraftInTableTask extends ResourceTask {
     }
 
     @Override
+    public boolean isFinished(AltoClef mod) {
+        // (2026-09-13 料尽即收工) 只对 collect=false 的调用方生效("材料在调用方手上,
+        // 本任务不负责补料"): 连一份都做不出时目标(可能是哨兵值 99999999, "全转换"
+        // 语义)永不达成。默认 collect=true 的调用方语义不变 —— 仍走 ResourceTask 的
+        // ItemTarget/POSSESS 目标达成判定。
+        // 出口必须在这一层: 本类未覆写 isFinished, 继承的是 ResourceTask 的目标数量
+        // 判定, 哨兵值下恒 false; 只让 DoCraftInTableTask._craftCount 置位不足以结束
+        // 外层任务。_craftTask.isFinished 置位后仍会走 onResourceStop 关屏(3x3 残留
+        // 由 vanilla 退料回背包)。
+        if (!_craftTask.isCollecting() && !StorageHelper.hasMaterialsForOneCraft(mod, _targets)) {
+            return true;
+        }
+        return super.isFinished(mod);
+    }
+
+    @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
         // Close the crafting table screen
         StorageHelper.closeScreen();
@@ -439,6 +455,11 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         // 呆住 (2026-09-05 金锭合成 12s 静止实锤, 用户手动停止)。
         _craftCount = _targets.length;
         return null;
+    }
+
+    /** (2026-09-13) collect=false = "材料在调用方手上, 本任务不负责补料"。 */
+    public boolean isCollecting() {
+        return _collect;
     }
 
     @Override

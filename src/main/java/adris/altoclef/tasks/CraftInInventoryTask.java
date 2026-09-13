@@ -95,8 +95,18 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
         // 17:29:53 实锤: 木板 craftAll 一次塞 30 原木进格, 收第一批即达标停链,
         // 输出格 oak_planksx4 + 输入格原木x30 滞留, 阻死下一个 crafting_table
         // 配方填充 (背包满无法退料 → "Waiting for recipe book click..." 死等 26s)。
-        if (super.isFinished(mod)) {
-            setDebugState("Targets met: cleaning up 2x2 grid (no more crafting)");
+        // (2026-09-13 料尽即收工) collect=false = "材料在调用方手上, 本任务不负责补料"。
+        // 此时若连一份都做不出, 目标(可能是哨兵值 99999999, "全转换"语义)永远达不到 →
+        // 本任务既不推进也结束不了, 会被上层"粘性复用"无限 keep(现场 20260913-155648:
+        // 干草块耗尽后 58.7s 零推进到用户手动停)。
+        // 判据用 hasMaterialsForOneCraft(槽位占用口径, 含合成格), 不用
+        // hasRecipeMaterialsOrTarget —— 后者按 targetCount 算份数, 哨兵值下恒判缺料。
+        // 先派清格; 格清空后由 isFinished 放行。
+        boolean noMaterialsLeft = !_collect && !StorageHelper.hasMaterialsForOneCraft(mod, _target);
+        if (super.isFinished(mod) || noMaterialsLeft) {
+            setDebugState(noMaterialsLeft && !super.isFinished(mod)
+                    ? "No materials left for one craft: cleaning up 2x2 grid"
+                    : "Targets met: cleaning up 2x2 grid (no more crafting)");
             return new EnsureFreePlayerCraftingGridTask();
         }
 
@@ -196,7 +206,12 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        if (!super.isFinished(mod)) return false;
+        // (2026-09-13 料尽即收工) collect=false 且连一份材料都凑不出 = 不可能再完成。
+        // 必须在这里也给出口: super.isFinished 走 ItemTarget 的目标数量判定(哨兵值下
+        // 恒 false), 只加 onResourceTick 那侧会让任务卡在"格已清空但 isFinished 仍
+        // false", 上层依然要靠日志/超时才能释放。
+        boolean noMaterialsLeft = !_collect && !StorageHelper.hasMaterialsForOneCraft(mod, _target);
+        if (!super.isFinished(mod) && !noMaterialsLeft) return false;
         // (2026-09-09 收尾防残留) 目标数量够了还不算完: 2x2 输入格/输出格必须
         // 全清 (收尾由 onResourceTick 的收尾模式完成), 防止"主体完成即停"把
         // 残留死格留给下一个配方。
