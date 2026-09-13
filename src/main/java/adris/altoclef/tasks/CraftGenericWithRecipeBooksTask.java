@@ -81,6 +81,23 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         return _gridOwnerOutput != null;
     }
 
+    /**
+     * (2026-09-13 释放阀) 该物品的配方填充刚被停滞看门狗判定"推不动", 且仍在放弃冷却期内。
+     * 供上层"粘性复用"槽位在定期重评估时把它当作不可用并释放 —— 「{@code isActive()==true}
+     * 不等于在推进」: 目标数量不可达(哨兵值)+材料耗尽的合成任务会永久 active 且永不
+     * isFinished, 只靠 isActive 保留会无限 keep。
+     *
+     * 现场 20260913-155648: `CollectFoodTask` 槽位持 `CraftInInventoryTask(wheat x 99999999)`,
+     * 干草块耗尽 + 背包 0 空位 → `[CRAFT-FILL-GIVEUP]` 后每 10s 一条
+     * `[FoodPick] 10s re-eval: keep running sub task <Craft 2x2 wheat x 99999999>`,
+     * 连续 58.7s 零推进直到用户手动停。判据直接复用既有看门狗状态, 不引入新的单调性假设:
+     * 只有合成子系统自己宣告过停滞才会为真。
+     */
+    public static boolean isFillRecentlyStalled(Item outputItem) {
+        return outputItem != null && _giveUpOutputItem == outputItem
+                && System.currentTimeMillis() < _giveUpUntilMs;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _gridOwnerOutput = _target.getOutputItem();

@@ -3,6 +3,7 @@ package adris.altoclef.tasks.resources;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.tasks.CraftGenericWithRecipeBooksTask;
 import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.DoToClosestBlockTask;
@@ -92,6 +93,17 @@ public class CollectFoodTask extends Task {
     // → 路过目标一律不管。过程型语义要求"每 tick 交回上层重判、发现即让路", 故拆出
     // 独立槽位: 终端任务照旧独占 tick, 探索则每 tick 都要先让发现扫描过一遍。
     private Task _exploreTask = null;
+
+    // (2026-09-13 释放阀) 终端槽持有任务的"目标物品"(仅转换分支的合成任务赋值)。
+    // 10s 重评估用它查配方填充是否刚被停滞看门狗判负 → 判负则释放槽位。
+    // 必要性: 「isActive()==true 不等于在推进」—— 转换分支把 bread/wheat 的
+    // targetCount 传成 99999999("全转换"语义), 材料耗尽后任务永久 active 且
+    // 永不 isFinished; L290 的保留判据会永远提前 return, 上层连"现在 wheat>=3
+    // 该改做面包"或"没料可转该收尾 return null"都走不到。现场 20260913-155648
+    // 干草块耗尽 + 背包 0 空位 → 58.7s 零推进到用户手动停。
+    // 通用规则: 凡以 isActive() 做粘性保留判据, 必须再配一条"无进展/自报停滞"
+    // 的释放条件 —— 此处复用合成看门狗的自我宣告, 不引入新的进度假设。
+    private Item _currentResourceItem = null;
 
     // (2026-08-31 攒够一批再统熔炼 rev, 用户) 统一开烧的生肉阈值 = 目标 units 所需
     // 生肉估算数 × 该比例。原固定 4 块被用户否决; 改为按目标所需比例(默认 0.6, 可在
@@ -224,6 +236,39 @@ public class CollectFoodTask extends Task {
         return potentialFood;
     }
 
+    /**
+     * (2026-09-13 转换任务停滞释放) foodMet 分支派出的 wheat/bread 合成任务用的是
+     * 哨兵数量 99999999 (表达"把手上的料全转完"), 于是它的 isFinished 永不成立。
+     * 原料一旦耗尽, 该任务既推不动也结束不了 —— 而且派发时传的是 collect=false
+     * (料在手上, 合成任务不负责补料), 缺料也不会回退去收集 → 被 onTick 的粘性
+     * return 无限 keep。
+     *
+     * 现场 20260913-155648 实锤: 17 个干草块被批量转成 146 个小麦后 (16:03:12),
+     * 到手动停止 (16:04:11) 共 58.7s 零推进; 期间只有 [CRAFT-FILL-GIVEUP]
+     * (15s 无进展 → 30s 冷却) 空转 + [FoodPick] 每 10s 判 "keep running sub task"。
+     *
+     * 转换任务的派发前提就是"手上还有可转化的原料" (见下方两处含合成格判据),
+     * 所以原料没了即视为该任务已完成 —— 与"全转换"语义自洽, 且不需要精确份数
+     * (残留退料会净损 1 份, 精确目标反而可能永远差 1 而换一种卡)。
+     * 释放后 onTick 会重新决策: 小麦够 → 转面包; 两者都不够 → 落到 foodMet 结束路径。
+     */
+    private boolean conversionSourceExhausted(AltoClef mod, Task task) {
+        RecipeTarget target = null;
+        if (task instanceof CraftInInventoryTask craftInInventory) {
+            target = craftInInventory.getRecipeTarget();
+        } else if (task instanceof CraftInTableTask craftInTable && craftInTable.getRecipeTargets().length > 0) {
+            target = craftInTable.getRecipeTargets()[0];
+        }
+        if (target == null) return false;
+        if (target.getOutputItem() == Items.WHEAT) {
+            return StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.HAY_BLOCK) < 1;
+        }
+        if (target.getOutputItem() == Items.BREAD) {
+            return StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.WHEAT) < 3;
+        }
+        return false;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         mod.getBehaviour().push();
@@ -277,14 +322,38 @@ public class CollectFoodTask extends Task {
             _checkNewOptionsTimer.reset();
             // (2026-09-13) 只在当前资源任务已不可用时清空: 原代码无条件置 null,
             // 会把正在长途接近的子任务每 10s 拆一次(见字段注释)。
+            // (2026-09-13 释放阀) 「不可用」还必须包含"自我宣告停滞": 转换分支的
+            // 合成任务(99999999 哨兵目标)材料耗尽后永久 active 且永不 isFinished,
+            // 只看 isActive/isFinished 会把它无限 keep(L290 提前 return, 上层走不到
+            // 面包分支也走不到收尾 return null)。合成看门狗已给出停滞信号, 直接复用。
+            boolean resourceStalled = _currentResourceItem != null
+                    && CraftGenericWithRecipeBooksTask.isFillRecentlyStalled(_currentResourceItem);
             if (_currentResourceTask == null || !_currentResourceTask.isActive()
-                    || _currentResourceTask.isFinished(mod)) {
+                    || _currentResourceTask.isFinished(mod) || resourceStalled) {
+                if (resourceStalled) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[FoodPick] 10s re-eval: RELEASE stalled sub task "
+                                    + _currentResourceTask + " (fill gave up on "
+                                    + _currentResourceItem + ")");
+                }
                 _currentResourceTask = null;
+                _currentResourceItem = null;
                 _wanderSinceTick = -1;
             } else {
                 Debug.logToFile("altoclef_diag.log",
                         "[FoodPick] 10s re-eval: keep running sub task " + _currentResourceTask);
             }
+        }
+
+        // (2026-09-13 停滞释放) 见 conversionSourceExhausted 注释: 转换任务(哨兵目标)
+        // 在原料耗尽后不可能完成, 必须在下面的粘性 return 之前放行, 否则食物任务
+        // 永久卡死。判据放在这里而不是 10s 重评估里, 是为了无延迟释放 (重评估最坏
+        // 要等 10s 才轮到, 期间仍在空转)。
+        if (_currentResourceTask != null && conversionSourceExhausted(mod, _currentResourceTask)) {
+            Debug.logToFile("altoclef_diag.log",
+                    "[FoodPick] conversion source exhausted, releasing sub task " + _currentResourceTask);
+            _currentResourceTask = null;
+            _wanderSinceTick = -1;
         }
 
         if (_currentResourceTask != null && _currentResourceTask.isActive() && !_currentResourceTask.isFinished(mod)) {
@@ -338,12 +407,14 @@ public class CollectFoodTask extends Task {
                 Item[] w = new Item[]{Items.WHEAT};
                 Item[] o = null;
                 // jank
+                _currentResourceItem = Items.BREAD;
                 _currentResourceTask = new CraftInTableTask(new RecipeTarget(Items.BREAD, 99999999, CraftingRecipe.newShapedRecipe("bread", new Item[][]{w, w, w, o, o, o, o, o, o}, 1)), false, false);
                 return _currentResourceTask;
             }
             if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.HAY_BLOCK) >= 1) {
                 setDebugState("Crafting Wheat");
                 Item[] o = null;
+                _currentResourceItem = Items.WHEAT;
                 _currentResourceTask = new CraftInInventoryTask(new RecipeTarget(Items.WHEAT, 99999999, CraftingRecipe.newShapedRecipe("wheat", new Item[][]{new Item[]{Items.HAY_BLOCK}, o, o, o}, 9)), false, false);
                 return _currentResourceTask;
             }
@@ -375,6 +446,10 @@ public class CollectFoodTask extends Task {
                 return _smeltTask;
             }
         } else if (!foodMet) {
+            // (2026-09-13 释放阀不变量) 本分支写的都是导航/交互/猎杀型终端任务, 不是
+            // "转换合成"任务 → 目标物品清零, 防止上一轮转换分支残留的 _currentResourceItem
+            // 在 10s 重评估时把这里正在推进的导航任务误判成"填充停滞"而释放。
+            _currentResourceItem = null;
             // Pick up food items from ground
             for (Item item : ITEMS_TO_PICK_UP) {
                 Task t = this.pickupTaskOrNull(mod, item);
