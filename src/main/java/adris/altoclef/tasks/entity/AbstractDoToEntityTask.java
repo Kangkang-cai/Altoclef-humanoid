@@ -113,17 +113,22 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         }
 
         // If we don't specify a maintain distance, default to within 1 block of our reach.
-        double maintainDistance = _maintainDistance >= 0? _maintainDistance : playerReach - 1;
-
-        // (2026-08-23 退后风筝移除) 用户: "打烈焰人时有退后机制, 把退后风筝机制
+        double maintainDistance = _maintainDistance >= 0? _maintainDistance : playerReach - 1;        // (2026-08-23 退后风筝移除) 用户: "打烈焰人时有退后机制, 把退后风筝机制
         // 直接去掉, 没啥用"。旧逻辑: 敌人进入 maintainDistance (≈ reach-1 ≈ 4.5 格)
         // 就 GoalRunAway 后退 → 打烈焰人打一下退一下, 反复横跳 (日志 15:41 打
         // 烈焰人反复 Escaping/Dodge, 靠近就打不到)。直接去掉退后, bot 贴脸站撸
         // 任务目标, 不再风筝。
         // (2026-08-30 迟滞, 用户) 原条件 `sqDist < reach²` 在边界会每 tick 横跳。
         // 进入射程就锁"交战", 直到明显远离 (> reach+1.5) 才退回靠近。
-        double enterSq = playerReach * playerReach;
-        double exitSq = (playerReach + 1.5) * (playerReach + 1.5);
+        // (2026-09-13 用户"交易距离没生效") enter/exit 阈值原先硬编码 = 射程
+        // 3.2 / +1.5 —— approach 分支还没走到 maintainDistance, 交互分支就在
+        // 3.2 格抢先触发, maintainDistance 形同虚设 (交易 3→2 格肉眼无变化)。
+        // 抽成可覆写钩子, 默认值 = 原行为 (战斗等全部不变), 要真正贴身的任务
+        // (猪灵交易) 自行收紧。
+        double interactEnter = getInteractEnterDistance(mod);
+        double interactExit = getInteractExitDistance(mod);
+        double enterSq = interactEnter * interactEnter;
+        double exitSq = interactExit * interactExit;
         if (sqDist < enterSq || (_withinInteract && sqDist < exitSq)) {
             _withinInteract = true;
             // (2026-08-23 被方块挡修复) 已够近 (射程内) 但射线到实体不是 ENTITY
@@ -198,6 +203,22 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
 
     // Called every tick while we're still approaching the target (outside interact range).
     protected void onEntityApproach(AltoClef mod, Entity entity) {
+    }
+
+    /**
+     * (2026-09-13) 进入交互分支的距离阈值 (迟滞下沿)。默认 = 实体射程
+     * (entityReachRange, 3.2), 与旧行为一致; 需要真正贴身交互的任务覆写收紧。
+     */
+    protected double getInteractEnterDistance(AltoClef mod) {
+        return mod.getModSettings().getEntityReachRange();
+    }
+
+    /**
+     * (2026-09-13) 退出交互分支的距离阈值 (迟滞上沿)。默认 = 射程 +1.5, 与
+     * 旧行为一致; 覆写时须 > getInteractEnterDistance, 否则边界横跳。
+     */
+    protected double getInteractExitDistance(AltoClef mod) {
+        return mod.getModSettings().getEntityReachRange() + 1.5;
     }
 
     /**

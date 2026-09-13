@@ -197,6 +197,20 @@ public class TradeWithPiglinsTask extends ResourceTask {
             super(2);
         }
 
+        // (2026-09-13 用户"交易距离没生效"根因) approach 目标虽改成 2 格, 但
+        // 父类交互分支的进入门槛 = 射程 3.2 —— 还没走到 2 格, 每 tick 重评估
+        // 就在 3.2 格切进交互开丢金锭, maintainDistance 形同虚设。收紧本任务
+        // 的交互门槛: 进 2.0 / 出 2.5 (迟滞防边界横跳), 真正贴脸交易。
+        @Override
+        protected double getInteractEnterDistance(AltoClef mod) {
+            return 2.0;
+        }
+
+        @Override
+        protected double getInteractExitDistance(AltoClef mod) {
+            return 2.5;
+        }
+
         @Override
         protected void onStart(AltoClef mod) {
             super.onStart(mod);
