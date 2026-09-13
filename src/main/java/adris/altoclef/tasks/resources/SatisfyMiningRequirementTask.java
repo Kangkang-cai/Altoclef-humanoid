@@ -7,8 +7,11 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.util.math.BlockPos;
 
 /**
  * Make sure we have a tool at or above a mining level.
@@ -16,25 +19,102 @@ import net.minecraft.item.Items;
 public class SatisfyMiningRequirementTask extends Task {
 
     private final MiningRequirement _requirement;
+    /** 谁派发了本任务 (诊断用, 见 onStart 注释)。 */
+    private final String _src;
 
     public SatisfyMiningRequirementTask(MiningRequirement requirement) {
+        this(requirement, "unlabeled");
+    }
+
+    /**
+     * @param src 触发来源标记 (固定短字符串, 如 "mine-and-collect")。用途: 本任务
+     *            有 7 个派出点, 而 onStart 一次性快照要能自证"是谁在什么场景下要镐"。
+     */
+    public SatisfyMiningRequirementTask(MiningRequirement requirement, String src) {
         _requirement = requirement;
+        _src = src;
     }
 
     @Override
     protected void onStart(AltoClef mod) {
         // (2026-08-23 诊断) 需要镐却触发本任务 → 记录当前背包镐状态, 排查
         // "背包有铁/钻石镐却还要重做镐" (用户反馈: 它似乎把背包里的东西跳过)。
-        int wooden = mod.getItemStorage().getItemCountInventoryOnly(Items.WOODEN_PICKAXE);
-        int stone = mod.getItemStorage().getItemCountInventoryOnly(Items.STONE_PICKAXE);
-        int iron = mod.getItemStorage().getItemCountInventoryOnly(Items.IRON_PICKAXE);
-        int golden = mod.getItemStorage().getItemCountInventoryOnly(Items.GOLDEN_PICKAXE);
-        int diamond = mod.getItemStorage().getItemCountInventoryOnly(Items.DIAMOND_PICKAXE);
-        int netherite = mod.getItemStorage().getItemCountInventoryOnly(Items.NETHERITE_PICKAXE);
-        String m = "(SatisfyMiningReq) " + _requirement + " not met. Pickaxes: wood=" + wooden
-                + " stone=" + stone + " iron=" + iron + " golden=" + golden + " diamond=" + diamond + " netherite=" + netherite;
+        //
+        // (2026-09-13 修正) 旧版本这行被读成 "bot 在下界毫无装备", 是误读 —
+        // 旧探针本身有两个缺陷:
+        //   缺陷 A 采样时机 + 无上下文: 本行是 onStart 一次性快照, 而死亡/重生/
+        //     主链重启都会重建本任务 → 快照系统性落在"世界状态刚被重置"那一刻。
+        //     122323 场次: 死亡 12:40:29.025 → [RESPAWN] → SESSION START 12:40:29.526
+        //     → 本行 12:40:29.546 (死亡后 0.52s), 它描述的是重生点而非下界的背包。
+        //     旧消息不带维度/坐标/触发原因, 读的人无法判断它说的是哪张地图。
+        //   缺陷 B 计数走缓存且"读不到"与"0 个"同码: getItemCountInventoryOnly →
+        //     ItemStorageTracker:106 → InventorySubTracker.getItemCount 读缓存 map;
+        //     而 InventorySubTracker.updateState():199-207 是先 clear 四个 map,
+        //     若 player/handler 为 null 则直接 return → 缓存留空 → 之后全读 0。
+        //     164633 场次实锤 (该场无死亡): 同一诊断 267ms 内给出 ingots=0 与
+        //     ingots=28 (16:52:56.624 / .891), 至少一次为假。
+        // 修正: ① 改用 StorageHelper.countItemInInventoryReal (直读玩家实体:
+        // 36 主背包 + 护甲 + 副手 + 光标, 不过缓存); ② 补 dim / pos / player 空标记 /
+        // src 来源 / hand 主手 / met_cache 与 met_real 双判据, 让这行能自证。
+        String dim = "?";
+        String pos = "?";
+        String hand = "?";
+        boolean playerOk = false;
+        try {
+            ClientPlayerEntity p = mod.getPlayer();
+            playerOk = (p != null);
+            if (p != null) {
+                dim = p.getWorld().getRegistryKey().getValue().toString();
+                BlockPos bp = p.getBlockPos();
+                pos = "(" + bp.getX() + "," + bp.getY() + "," + bp.getZ() + ")";
+                ItemStack main = p.getMainHandStack();
+                hand = main.isEmpty() ? "empty" : main.getItem().toString();
+            }
+        } catch (Throwable ignored) {
+            // 采样期间跨世界切换: 保留已取到的字段, 诊断绝不向上抛
+        }
+        int wooden = countReal(mod, Items.WOODEN_PICKAXE);
+        int stone = countReal(mod, Items.STONE_PICKAXE);
+        int iron = countReal(mod, Items.IRON_PICKAXE);
+        int golden = countReal(mod, Items.GOLDEN_PICKAXE);
+        int diamond = countReal(mod, Items.DIAMOND_PICKAXE);
+        int netherite = countReal(mod, Items.NETHERITE_PICKAXE);
+        // 双判据: met_cache 走既有(缓存+直扫兜底)判定; met_real 纯用上面的真实计数。
+        // 两者不一致 = 计数层在撒谎, 这行自己就能暴露缺陷 B, 不必再去比对别的日志。
+        boolean metCache = false;
+        try {
+            metCache = StorageHelper.miningRequirementMetInventory(mod, _requirement);
+        } catch (Throwable ignored) {
+        }
+        boolean metReal = realMeets(wooden, stone, iron, golden, diamond, netherite);
+        String m = "(SatisfyMiningReq) " + _requirement + " not met."
+                + " dim=" + dim + " pos=" + pos + " player=" + (playerOk ? "ok" : "NULL")
+                + " src=" + _src + " hand=" + hand
+                + " met_cache=" + metCache + " met_real=" + metReal
+                + " Pickaxes(real): wood=" + wooden + " stone=" + stone + " iron=" + iron
+                + " golden=" + golden + " diamond=" + diamond + " netherite=" + netherite;
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /** 直读玩家实体计数 (不走 tracker 缓存)。player 为 null 时返回 0 (由 player=NULL 标记区分)。 */
+    private static int countReal(AltoClef mod, Item item) {
+        try {
+            return StorageHelper.countItemInInventoryReal(mod, item);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /** 纯用真实计数复算"本档位是否达标", 与 miningRequirementMetInner 的分档口径保持一致。 */
+    private boolean realMeets(int wooden, int stone, int iron, int golden, int diamond, int netherite) {
+        return switch (_requirement) {
+            case HAND -> true;
+            case WOOD -> (wooden + stone + iron + golden + diamond + netherite) > 0;
+            case STONE -> (stone + iron + golden + diamond + netherite) > 0;
+            case IRON -> (iron + golden + diamond + netherite) > 0;
+            case DIAMOND -> (diamond + netherite) > 0;
+        };
     }
 
     @Override

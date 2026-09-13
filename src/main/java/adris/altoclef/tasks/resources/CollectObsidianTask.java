@@ -113,7 +113,7 @@ public class CollectObsidianTask extends ResourceTask {
         // Get a diamond pickaxe FIRST
         if (!StorageHelper.miningRequirementMet(mod, MiningRequirement.DIAMOND)) {
             setDebugState("Getting diamond pickaxe first");
-            return new SatisfyMiningRequirementTask(MiningRequirement.DIAMOND);
+            return new SatisfyMiningRequirementTask(MiningRequirement.DIAMOND, "collect-obsidian/needs-diamond");
         }
 
         if (_forceCompleteTask != null && _forceCompleteTask.isActive() && !_forceCompleteTask.isFinished(mod)) {

@@ -138,7 +138,7 @@ public class MineAndCollectTask extends ResourceTask {
     protected Task onResourceTick(AltoClef mod) {
 
         if (!StorageHelper.miningRequirementMet(mod, _requirement)) {
-            return new SatisfyMiningRequirementTask(_requirement);
+            return new SatisfyMiningRequirementTask(_requirement, "mine-and-collect");
         }
 
         // 砍树必须用斧子：没有斧子且【立即能做出斧子】（整条合成链不缺

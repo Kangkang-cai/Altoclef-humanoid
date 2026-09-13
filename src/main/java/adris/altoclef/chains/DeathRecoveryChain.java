@@ -209,7 +209,8 @@ public class DeathRecoveryChain extends SingleTaskChain {
             // 任务】并以死亡恢复优先级运行, 保证不被耗时长的一般收集任务饿死; 镐一到
             // 位 Guard 3 即放行、转入真正去墓地的拾取。主动搞镐不违背"没镐不裸捡"。
             if (!(getCurrentTask() instanceof SatisfyMiningRequirementTask)) {
-                setTask(new SatisfyMiningRequirementTask(MiningRequirement.STONE));
+                setTask(new SatisfyMiningRequirementTask(MiningRequirement.STONE,
+                        "death-recovery-chain/no-pickaxe"));
             }
             return ACTIVE_PRIORITY;
         }

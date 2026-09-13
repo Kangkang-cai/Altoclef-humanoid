@@ -650,7 +650,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // onResourceTick)保持一致: 挖前先保证有镐, 没有就去 SatisfyMiningRequirement
         // 合成。WOOD=木镐及以上即可挖石头, 保底最低成本、立即能解锁, 主线挖矿时再升级。
         if (!StorageHelper.miningRequirementMet(mod, MiningRequirement.WOOD)) {
-            return new SatisfyMiningRequirementTask(MiningRequirement.WOOD);
+            return new SatisfyMiningRequirementTask(MiningRequirement.WOOD, "mine-down-explore/cave-dig");
         }
 
         // (2026-09-10 空跳修复) 进度显示改为真实挖掘预算消耗 (dug X/Y),

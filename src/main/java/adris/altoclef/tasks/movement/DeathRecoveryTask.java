@@ -247,7 +247,8 @@ public class DeathRecoveryTask extends Task {
                 return _currentSub;
             }
             if (_pickaxeSub == null) {
-                _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE);
+                _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE,
+                        "death-recovery-task/buried-grave");
             }
             setDebugState("Buried grave & stalled: getting a pickaxe first");
             return _pickaxeSub;
@@ -270,7 +271,8 @@ public class DeathRecoveryTask extends Task {
                 double net = Math.hypot(now.getX() - oldest.getX(), now.getZ() - oldest.getZ());
                 if (net < STALL_NET_MOVEMENT) {
                     _pickaxeUpgradeActive = true;
-                    _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE);
+                    _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE,
+                            "death-recovery-task/goto-stall");
                     _stallSamples.clear();
                     Debug.logWarning(String.format(
                             "Death recovery GOTO stalled (%.1f blocks net in %ds) with no pickaxe and buried grave — acquiring stone pickaxe first.",

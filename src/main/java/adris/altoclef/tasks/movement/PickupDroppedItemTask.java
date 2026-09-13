@@ -34,7 +34,7 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     // Am starting to regret not making this a singleton
     private AltoClef _mod;
 
-    private static final Task getPickaxeFirstTask = new SatisfyMiningRequirementTask(MiningRequirement.STONE);
+    private static final Task getPickaxeFirstTask = new SatisfyMiningRequirementTask(MiningRequirement.STONE, "pickup-dropped-item/reach-drop");
     // Not clean practice, but it helps keep things self contained I think.
     private static boolean isGettingPickaxeFirstFlag = false;
     private final ItemTarget[] _itemTargets;
