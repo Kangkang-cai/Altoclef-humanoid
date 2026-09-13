@@ -92,6 +92,16 @@ public class CollectFoodTask extends Task {
     private Task _foodDropPickupTask = null;
     private static final double FOOD_DROP_PICKUP_RANGE = 24;
 
+    // (2026-09-13 不再每 10s 拆任务, 用户"三层都修") _checkNewOptionsTimer 到期原
+    // 无条件 _currentResourceTask = null → 正在推进(甚至正在长途接近)的采集/探索子任务
+    // 每 10s 被丢弃重建 → baritone 路径反复作废, 且目标在 hay(50 格外, +x) 与
+    // BiasedExploreTask(-x 平原) 之间交替 → 20260913-144922 15:09-15:13 共 25 轮
+    // 10s 交替、零推进。到期改为只清"已失效"的任务; 子任务树进入 wander 兜底
+    // (TimeoutWanderTask = AbstractDoToClosestObjectTask 的标准等待/找下一个目标)
+    // 也不再瞬时否决, 给 6s 宽限让它自己恢复。
+    private int _wanderSinceTick = -1;
+    private static final int STICKY_WANDER_GRACE_TICKS = 120;
+
     public CollectFoodTask(double unitsNeeded) {
         _unitsNeeded = unitsNeeded;
     }
@@ -254,11 +264,37 @@ public class CollectFoodTask extends Task {
         if (_checkNewOptionsTimer.elapsed()) {
             // Try a new resource task
             _checkNewOptionsTimer.reset();
-            _currentResourceTask = null;
+            // (2026-09-13) 只在当前资源任务已不可用时清空: 原代码无条件置 null,
+            // 会把正在长途接近的子任务每 10s 拆一次(见字段注释)。
+            if (_currentResourceTask == null || !_currentResourceTask.isActive()
+                    || _currentResourceTask.isFinished(mod)) {
+                _currentResourceTask = null;
+                _wanderSinceTick = -1;
+            } else {
+                Debug.logToFile("altoclef_diag.log",
+                        "[FoodPick] 10s re-eval: keep running sub task " + _currentResourceTask);
+            }
         }
 
-        if (_currentResourceTask != null && _currentResourceTask.isActive() && !_currentResourceTask.isFinished(mod) && !_currentResourceTask.thisOrChildAreTimedOut()) {
-            return _currentResourceTask;
+        if (_currentResourceTask != null && _currentResourceTask.isActive() && !_currentResourceTask.isFinished(mod)) {
+            if (!_currentResourceTask.thisOrChildAreTimedOut()) {
+                _wanderSinceTick = -1;
+                return _currentResourceTask;
+            }
+            // (2026-09-13 wander 宽限) 子任务树里出现 TimeoutWanderTask 只说明它暂时
+            // 没目标(等待/流浪兜底), 不是"这个选项失败"。给宽限期, 超时仍不收敛才放弃。
+            if (_wanderSinceTick < 0) {
+                _wanderSinceTick = WorldHelper.getTicks();
+                Debug.logToFile("altoclef_diag.log",
+                        "[FoodPick] sub task entered wander, grace " + STICKY_WANDER_GRACE_TICKS
+                                + " ticks before re-picking: " + _currentResourceTask);
+            }
+            if (WorldHelper.getTicks() - _wanderSinceTick < STICKY_WANDER_GRACE_TICKS) {
+                return _currentResourceTask;
+            }
+            Debug.logToFile("altoclef_diag.log",
+                    "[FoodPick] wander grace expired, re-picking (was " + _currentResourceTask + ")");
+            _wanderSinceTick = -1;
         }
 
         // (2026-08-31 捡掉落优先于找下一只, 用户) 地面有食物掉落就优先去捡(粘性),

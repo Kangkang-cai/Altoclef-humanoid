@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.HashMap;
@@ -24,6 +25,14 @@ public abstract class AbstractObjectBlacklist<T> {
     // 只增不减, unreachable 必然到达。
     private static final int TOTAL_FAILURE_CAP = 12;
 
+    // (2026-09-13 距离改善 RESET 加冷却, 用户"三层都修") 上一版只加"总失败上限",
+    // 没解决【失败频率 > 靠近速度】的场景: 20260913-144922 实锤每 2.1s 一次
+    // requestBlockUnreachable(DestroyBlockTask 2s 放弃), 而 bot 同时在走 → 每次
+    // 都因"距离改善 > 1 格"RESET → 计数永远停在 Try 1/4, 目标无限重选
+    // (干草 50 格外, 4 分钟零推进)。改: "距离改善"路径的 RESET 需间隔 ≥ 5s;
+    // 工具升级路径不受限(那是真实挖掘能力提升)。
+    private static final int RESET_COOLDOWN_TICKS = 100; // 5s
+
     public void blackListItem(AltoClef mod, T item, int numberOfFailuresAllowed) {
         if (!_entries.containsKey(item)) {
             BlacklistEntry entry = new BlacklistEntry();
@@ -40,10 +49,16 @@ public abstract class AbstractObjectBlacklist<T> {
         MiningRequirement newTool = StorageHelper.getCurrentMiningRequirement(mod);
         // For distance, add a slight threshold so it doesn't reset EVERY time we move a tiny bit closer.
         boolean allowReset = entry.totalFailures < TOTAL_FAILURE_CAP;
-        if (allowReset && (newTool.ordinal() > entry.bestTool.ordinal() || (newDistance < entry.bestDistanceSq - 1))) {
-            if (newTool.ordinal() > entry.bestTool.ordinal()) entry.bestTool = newTool;
+        // (2026-09-13) 距离改善路径加 5s 冷却: 失败比靠近更快时 RESET 会变成死循环。
+        int nowTick = WorldHelper.getTicks();
+        boolean toolUpgraded = newTool.ordinal() > entry.bestTool.ordinal();
+        boolean closer = newDistance < entry.bestDistanceSq - 1
+                && nowTick - entry.lastResetTick >= RESET_COOLDOWN_TICKS;
+        if (allowReset && (toolUpgraded || closer)) {
+            if (toolUpgraded) entry.bestTool = newTool;
             if (newDistance < entry.bestDistanceSq) entry.bestDistanceSq = newDistance;
             entry.numberOfFailures = 0;
+            entry.lastResetTick = nowTick;
             Debug.logMessage("Blacklist RESET: " + item.toString());
         }
         entry.numberOfFailures++;
@@ -72,5 +87,7 @@ public abstract class AbstractObjectBlacklist<T> {
         public int totalFailures;
         public double bestDistanceSq;
         public MiningRequirement bestTool;
+        // (2026-09-13) 上次"距离改善 RESET"的时刻(游戏 tick), 用于 RESET 冷却。
+        public int lastResetTick = -RESET_COOLDOWN_TICKS;
     }
 }

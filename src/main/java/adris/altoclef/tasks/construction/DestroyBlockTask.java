@@ -47,6 +47,17 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private int _gettingToBlockTick = 0;
     private static final int GETTING_TO_BLOCK_GIVE_UP_TICKS = 40; // 2s, 够不着即放弃
 
+    // (2026-09-13 距离前提, 用户"三层都修") "2s 拿不到 reach" 只对【已经在身边】的
+    // 目标等于"够不着"; 对几十格外的目标它只是"还没走到" —— baritone 长途跋涉几十秒
+    // 是常态。20260913-144922 实锤: 干草在 50+ 格外(玩家 37,84,-478 vs 目标
+    // 87,89,-524), 本判据每 2.1s 触发一次 requestBlockUnreachable(chat.log
+    // "Blacklist: (87,89,-524): Try 1 / 4" 连发), 黑名单又被"靠近 1 格"RESET →
+    // 4 分钟零推进、上层在 hay 与 explore 之间横跳。
+    // 改为: 只有目标已进入身边范围才累计"够不着"; 远处导航中由 _moveChecker
+    // (6s 无进展 + 5s 无 reach) 兜底, 不会无限走。
+    private static final double GIVE_UP_JUDGE_RANGE = 6;
+    private boolean _farGiveUpSuppressed = false;
+
     // For vines and stuff
     private boolean _wasClose = false;
 
@@ -68,6 +79,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _wasSolidAtStart = WorldHelper.isSolid(mod, _pos);
         _selfDugRecorded = false;
         _gettingToBlockTick = 0;
+        _farGiveUpSuppressed = false;
 
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
@@ -172,7 +184,19 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             setDebugState("Getting to block...");
             // (2026-09-03 够不着即放弃) reach 持续缺失且累计足够长仍够不着 → 判不可达,
             // 黑名单交给上层换目标, 不再无限 "Getting to block → wander → 重试同目标"。
-            if (_gettingToBlockTick++ > GETTING_TO_BLOCK_GIVE_UP_TICKS) {
+            // (2026-09-13 距离前提) 见 GIVE_UP_JUDGE_RANGE 注释: 只有目标已在身边
+            // 范围才累计"够不着"; 远处导航中不判负, 继续走。
+            boolean closeEnoughToJudge = _pos.isWithinDistance(mod.getPlayer().getPos(), GIVE_UP_JUDGE_RANGE);
+            if (!closeEnoughToJudge) {
+                // 还在路上: 清零"够不着"计数, 让导航继续。
+                if (_gettingToBlockTick != 0) _gettingToBlockTick = 0;
+                if (!_farGiveUpSuppressed) {
+                    _farGiveUpSuppressed = true;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[DigGiveUp] target " + _pos.toShortString() + " still far (>"
+                                    + GIVE_UP_JUDGE_RANGE + "): not counting as unreachable, keep navigating");
+                }
+            } else if (_gettingToBlockTick++ > GETTING_TO_BLOCK_GIVE_UP_TICKS) {
                 Debug.logMessage("(DestroyBlockTask) unreachable after " + _gettingToBlockTick
                         + " ticks, abandoning " + _pos.toShortString());
                 mod.getBlockTracker().requestBlockUnreachable(_pos);
