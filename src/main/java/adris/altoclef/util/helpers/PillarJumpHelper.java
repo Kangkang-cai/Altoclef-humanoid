@@ -110,7 +110,12 @@ public final class PillarJumpHelper {
     // 转向松键阈值 0.25 (松键后动量滑行 ~0.1, 自然落进 0.2 内, 防冲过头滑出
     // 支撑块)。
     private static final double CENTER_JUMP_MAX = 0.2;
-    private static final double CENTER_STEER_THRESHOLD = 0.25;
+    // (2026-09-13 v23 死区修复) 转向阈值必须 < CENTER_JUMP_MAX: 20260913-084406
+    // 实锤 offAxis=0.24 落在旧死区 (0.2, 0.25) —— 超起跳阈值不跳, 又低于转向
+    // 阈值四键全 release → 既不跳也不走永久冻结 (用户: "对准了但卡住不搭")。
+    // 0.15 后数学上必有键: offAxis>0.2 时两正交分解分量最大者 >= 0.2/√2 ≈ 0.141
+    // …边界仍可能双分量同落 0.14-0.15, 故 steer 末尾四键全松时按主偏轴补一键。
+    private static final double CENTER_STEER_THRESHOLD = 0.15;
 
     // (2026-09-13 诊断) 20260913-084406 实锤: pillaring 分支每 tick 在跑 (18 条
     // 日志) 但 inputs 全 false + hSpeed=0 + 用户确认完全静止 —— 代码逻辑上该分支
@@ -163,6 +168,18 @@ public final class PillarJumpHelper {
         else in.release(Input.MOVE_RIGHT);
         if (right < -CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_LEFT);
         else in.release(Input.MOVE_LEFT);
+        // (2026-09-13 v23 死区边界保险) offAxis>起跳阈值但双分量都低于转向阈值
+        // (yaw≈45° 时 0.2/√2≈0.141<0.15) → 四键全松仍冻结。此时按分量较大者的
+        // 符号方向强制按一键, 保证"站偏必有移动"。
+        if (fwd <= CENTER_STEER_THRESHOLD && fwd >= -CENTER_STEER_THRESHOLD
+                && right <= CENTER_STEER_THRESHOLD && right >= -CENTER_STEER_THRESHOLD
+                && Math.max(Math.abs(dx), Math.abs(dz)) > CENTER_JUMP_MAX) {
+            if (Math.abs(fwd) >= Math.abs(right)) {
+                if (fwd >= 0) in.hold(Input.MOVE_FORWARD); else in.hold(Input.MOVE_BACK);
+            } else {
+                if (right >= 0) in.hold(Input.MOVE_RIGHT); else in.hold(Input.MOVE_LEFT);
+            }
+        }
         // (2026-09-13 诊断) 记录分解值与实际按键落地状态。
         diag("steer dx=" + String.format("%.2f", dx) + " dz=" + String.format("%.2f", dz)
                 + " yaw=" + String.format("%.0f", mod.getPlayer().getYaw())
