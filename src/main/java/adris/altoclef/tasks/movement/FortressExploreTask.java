@@ -108,8 +108,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 规则: 连续 PROBE_AFTER_FAILS 次失败 且 STALL_TICKS 内无新最远点 → 按偏置
     // 换向试探 (+60° → -75° → +90° → -90° 封顶); 试探方向走到比卡死点更远
     // (radius > 试探时 max + 1) 即转正为新锁定方向。偏置封顶 ±90° —— 禁止反向。
-    private static final int PROBE_AFTER_FAILS = 3;
-    private static final long STALL_TICKS = 300; // 15s 无新最远点 = 停滞
+    private static final int PROBE_AFTER_FAILS = 2;
+    private static final long STALL_TICKS = 100; // 5s 无新最远点 = 停滞 (21:53 用户"15s 观感不好太长")
     private static final double PROBE_STEP_DEG = 60;
     private static final double MAX_PROBE_DEG = 90;
     // (2026-09-13 远征取证) 诊断周期 200 tick = 10s; 距锚点半径每增长 128 格
