@@ -105,9 +105,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double EXPEDITION_ARRIVE_XZ = 5;
     // (2026-09-13 P2 遇障换向) 锁定方向在悬崖/岩浆海前会死顶 (20260913-214110:
     // radius 卡 326 半分钟, fails 连涨, moved 三连 0 —— 用户"方向是不是定的太死")。
-    // 规则: 连续 PROBE_AFTER_FAILS 次失败 且 STALL_TICKS 内无新最远点 → 按偏置
-    // 换向试探 (+60° → -75° → +90° → -90° 封顶); 试探方向走到比卡死点更远
-    // (radius > 试探时 max + 1) 即转正为新锁定方向。偏置封顶 ±90° —— 禁止反向。
+    // (2026-09-13 P2.1 大悬崖修订, 用户"总可以绕一绕, 没有大局观"): 旧版三大死穴
+    // ① 转正判据 = 距锚点半径破纪录, 但绕崖走是绕锚点的圆弧, 半径不变 → 永远
+    //   无法转正; ② 换边乒乓 (+60 → -75 → +90 → -90), 大障碍前左右横跳;
+    // ③ 试探步长 48 格, 沿崖根走不够绕过。修订:
+    //   触发 = 停滞 STALL_TICKS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_TICKS
+    //   且失败 ≥1); 升级 = 同侧加档 +60 → +75 → +90, 同侧到顶才换边; 试探方向
+    //   步长 ×2 (沿崖要走长步); 转正 = 半径破纪录 或 距试探起点净位移 > EXPLORE_STEP
+    //   (绕崖横向走出一个整步程 = 真的绕出去了)。偏置封顶 ±90° —— 禁止反向。
     private static final int PROBE_AFTER_FAILS = 2;
     private static final long STALL_TICKS = 100; // 5s 无新最远点 = 停滞 (21:53 用户"15s 观感不好太长")
     private static final double PROBE_STEP_DEG = 60;
@@ -174,6 +179,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 最近一次刷新最远半径的 tick —— 三个都按 存档:维度 隔离。
     private static final java.util.Map<String, Double> _probeOffsetByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, Double> _probeStartMaxByKey = new java.util.HashMap<>();
+    // (2026-09-13 P2.1) 试探起点位置: 转正判据之二 —— 距起点净位移 > EXPLORE_STEP
+    // (绕崖是圆弧, 半径不变但位移实打实, 旧判据 radius 永远量不到这种进展)。
+    private static final java.util.Map<String, BlockPos> _probeStartPosByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, Long> _lastProgressTickByKey = new java.util.HashMap<>();
 
     // =========================================================================
@@ -718,10 +726,16 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         // 4. 随机: 沿持久锁定方位角 (远征) ±5° 微调, 不原地打转。
+        //    (P2.1) 试探偏置 ≥60° 时步长 ×2: 绕崖要走长步, 48 格沿崖根走不出名堂。
         _lastClue = "heading";
         double angle = nextRandomHeading();
-        int candX = (int) Math.floor(pos.x + Math.cos(angle) * EXPLORE_STEP);
-        int candZ = (int) Math.floor(pos.z + Math.sin(angle) * EXPLORE_STEP);
+        double step = EXPLORE_STEP;
+        Double probeDeg = _probeOffsetByKey.get(expeditionKey());
+        if (probeDeg != null && Math.abs(Math.toDegrees(probeDeg)) >= PROBE_STEP_DEG) {
+            step = EXPLORE_STEP * 2;
+        }
+        int candX = (int) Math.floor(pos.x + Math.cos(angle) * step);
+        int candZ = (int) Math.floor(pos.z + Math.sin(angle) * step);
         // y 只作日志参考 (导航用 GoalXZ 不约束高度, 见 stepTowards 注释)。
         return new BlockPos(candX, (int) Math.floor(pos.y), candZ);
     }
@@ -764,33 +778,44 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-13 P2 遇障换向) 外围步失败时调用: 连续失败且长时间无新最远点
-     * (顶在悬崖/岩浆海边) → 升级试探偏置, 绕障试探。探测方向若走到比卡死点
-     * 更远 (转正逻辑在 maybeLogExpedition), 就成为新的锁定方向; 否则换边加档
-     * 再试, 幅度封顶 ±90° (禁反向 —— 反向等于放弃远征)。
+     * (2026-09-13 P2 遇障换向) 外围步失败时调用: 停滞够久 (无新最远点) → 升级
+     * 试探偏置, 绕障试探。探测方向走到更远 (radius 破纪录) 或 距试探起点净位移
+     * 超过一个步程 (绕崖走通) → 转正为新锁定方向 (转正逻辑在 maybeLogExpedition);
+     * 否则【同侧加档】+60° → +75° → +90° 沿崖根走到底, 同侧到顶仍卡死才换边。
+     * (P2.1: 旧版换边乒乓 + radius 判据, 大悬崖前左右横跳永远绕不出去 —— 用户
+     * "总可以绕一绕, 太不智能没有大局观"。) 偏置封顶 ±90°, 禁止反向。
      */
     private void maybeEscalateProbe(AltoClef mod) {
-        if (_failCounter < PROBE_AFTER_FAILS) return;
         String key = expeditionKey();
         BlockPos anchor = _anchorByKey.get(key);
         if (anchor == null || mod.getPlayer() == null) return;
         long lastProgress = _lastProgressTickByKey.getOrDefault(key, _tickId);
-        if (_tickId - lastProgress < STALL_TICKS) return; // 停滞不够久, 可能只是普通寻路失败
+        long stalledTicks = _tickId - lastProgress;
+        if (stalledTicks < STALL_TICKS) return; // 停滞不够久, 可能只是普通寻路失败
+        // (P2.1) 触发提速: 失败够 2 次即升级; 或 10s 停滞 + 至少 1 次失败 ——
+        // 进度检查器超时慢 (日志实锤 fails 10s 只涨到 1), 苦等第二次太迟钝。
+        boolean enoughFails = _failCounter >= PROBE_AFTER_FAILS;
+        boolean longStall = _failCounter >= 1 && stalledTicks >= STALL_TICKS * 2;
+        if (!enoughFails && !longStall) return;
         double cur = _probeOffsetByKey.getOrDefault(key, 0.0);
         double next;
         if (cur == 0.0) {
-            next = Math.toRadians(PROBE_STEP_DEG);
-        } else {
-            // 换边并加一档, 封顶 ±MAX_PROBE_DEG。
+            next = Math.toRadians(PROBE_STEP_DEG); // 先认准一侧, 之后同侧加档
+        } else if (Math.abs(Math.toDegrees(cur)) < MAX_PROBE_DEG) {
+            // 同侧加一档: 大障碍要沿崖根走到底, 不换边乒乓。
             double mag = Math.min(Math.abs(cur) + Math.toRadians(15), Math.toRadians(MAX_PROBE_DEG));
-            next = cur > 0 ? -mag : mag;
+            next = cur > 0 ? mag : -mag;
+        } else {
+            // 同侧 90° 仍卡死 → 换另一侧从 60° 重新爬档。
+            next = cur > 0 ? -Math.toRadians(PROBE_STEP_DEG) : Math.toRadians(PROBE_STEP_DEG);
         }
         _probeOffsetByKey.put(key, next);
         _probeStartMaxByKey.put(key, _maxRadiusByKey.getOrDefault(key, 0.0));
+        _probeStartPosByKey.put(key, mod.getPlayer().getBlockPos());
         _failCounter = 0; // 给试探方向重新计失败
         Debug.logMessage(String.format(java.util.Locale.ROOT,
-                "[Expedition] stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°)",
-                (_tickId - lastProgress) / 20, Math.toDegrees(next), MAX_PROBE_DEG));
+                "[Expedition] stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°, long step x2)",
+                stalledTicks / 20, Math.toDegrees(next), MAX_PROBE_DEG));
     }
 
     // ------------------------------------------------------------------ //
@@ -843,21 +868,30 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             _lastProgressTickByKey.put(key, _tickId);
             _failCounter = 0;
         }
-        // 试探成功: 走到比卡死点更远 → 试探方向转正为新锁定基向。
+        // 试探成功 → 转正为新锁定基向。两条判据 (P2.1):
+        // ① radius 破纪录 (走比卡死点更远, 原判据);
+        // ② 距试探起点净位移 > EXPLORE_STEP (绕崖是绕锚点的圆弧, 半径不变,
+        //    但横向位移实打实 —— 走出一个整步程 = 试探方向真的可走 = 绕出去了)。
         Double probe = _probeOffsetByKey.get(key);
         if (probe != null && probe != 0.0) {
             Double startMax = _probeStartMaxByKey.get(key);
-            if (startMax != null && radius > startMax + 1.0) {
+            BlockPos startPos = _probeStartPosByKey.get(key);
+            boolean radiusBroken = startMax != null && radius > startMax + 1.0;
+            boolean walkedArc = startPos != null
+                    && Math.hypot(p.getX() - startPos.getX(), p.getZ() - startPos.getZ()) > EXPLORE_STEP;
+            if (radiusBroken || walkedArc) {
                 Double base = _headingByKey.get(key);
                 if (base != null && !Double.isNaN(base)) {
                     _headingByKey.put(key, base + probe);
                     _heading = base + probe;
                     Debug.logMessage(String.format(java.util.Locale.ROOT,
-                            "[Expedition] probe %+.0f° committed, new bearing %s",
-                            Math.toDegrees(probe), fmtDeg(base + probe)));
+                            "[Expedition] probe %+.0f° committed (%s), new bearing %s",
+                            Math.toDegrees(probe), walkedArc ? "walked arc" : "radius broken",
+                            fmtDeg(base + probe)));
                 }
                 _probeOffsetByKey.put(key, 0.0);
                 _probeStartMaxByKey.remove(key);
+                _probeStartPosByKey.remove(key);
             }
         }
         String biome = netherBiomeLabel(mod);
