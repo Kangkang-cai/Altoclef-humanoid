@@ -10,6 +10,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.*;
 import java.util.function.Predicate;
@@ -45,6 +46,15 @@ public class TraceFlowingWaterToSourceTask extends Task {
     private int _lastProgressTick = 0;
     private static final int TRACE_STALL_TIMEOUT_TICKS = 20 * 15;
     private static final int TRACE_MAX_VERTICAL_DELTA = 12;
+    // (2026-09-13 v27 真实接近进度, 20260913-094812 实锤: 溯源 09:48:37.318 起
+    // 目标 122,7,-269, 到 09:48:47.813 被父任务直接分支顶掉 —— 10.5s 只有 attempt 1
+    // 一条日志 = 一步没推进; 期间 JumpStuck 卡墙 + 42.9-44.5 原地一进一退
+    // (x122→123→123→122)。旧 _lastProgressTick 只在【换目标】时刷新, "朝一个到不了
+    // 的格硬走 10 秒"完全漏检, 15s 总超时也够不着。改为按【与目标距离是否变小】
+    // 判定: 4s 内没有实质接近 → 这条水流链走不通, 立刻放弃让父任务直取分支接手。
+    private double _bestApproachSq = Double.MAX_VALUE;
+    private int _lastApproachImproveTick = 0;
+    private static final int TRACE_APPROACH_STALL_TICKS = 20 * 4;
 
     public TraceFlowingWaterToSourceTask(Predicate<BlockPos> isFlowingWater) {
         _isFlowingWater = isFlowingWater;
@@ -61,6 +71,8 @@ public class TraceFlowingWaterToSourceTask extends Task {
         _approachTask = null;
         _approachTarget = null;
         _lastProgressTick = WorldHelper.getTicks();
+        _bestApproachSq = Double.MAX_VALUE;
+        _lastApproachImproveTick = WorldHelper.getTicks();
     }
 
     @Override
@@ -91,6 +103,19 @@ public class TraceFlowingWaterToSourceTask extends Task {
         if (_approachTask != null && _approachTarget != null
                 && _approachTarget.equals(_currentTracePos)
                 && !_approachTask.isFinished(mod)) {
+            // (2026-09-13 v27) 真实接近进度判定 —— 见字段注释。到达前每 tick 只做
+            // 这一件事: 距离实质变小就刷新计时, 长时间没接近就放弃这条水流链。
+            double sq = mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_approachTarget));
+            if (sq < _bestApproachSq - 0.25) {
+                _bestApproachSq = sq;
+                _lastApproachImproveTick = WorldHelper.getTicks();
+            } else if (WorldHelper.getTicks() - _lastApproachImproveTick > TRACE_APPROACH_STALL_TICKS) {
+                Debug.logMessage("TraceFlowingWater: no approach progress for "
+                        + (TRACE_APPROACH_STALL_TICKS / 20) + "s toward "
+                        + _approachTarget.toShortString() + " → giving up");
+                _gaveUp = true;
+                return new TimeoutWanderTask(5f);
+            }
             return _approachTask;
         }
 
@@ -106,8 +131,12 @@ public class TraceFlowingWaterToSourceTask extends Task {
 
         // (2026-09-13 v26) 目标不可达 / 跨层太远 → 这条水流链到不了源头, 放弃
         // (父任务黑名单起点 + 15s 全局冷却), 不要派 GetCloseToBlockTask 空转。
+        // v27: 走近的是 higherLevel.up() (见下), 所以两格都要判可达 —— 与父任务
+        // 直接分支 isSourceLiquid 的 canReach(pos) && canReach(pos.up()) 同口径。
         int dy = Math.abs(higherLevel.getY() - mod.getPlayer().getBlockPos().getY());
-        if (dy > TRACE_MAX_VERTICAL_DELTA || !WorldHelper.canReach(mod, higherLevel)) {
+        if (dy > TRACE_MAX_VERTICAL_DELTA
+                || !WorldHelper.canReach(mod, higherLevel)
+                || !WorldHelper.canReach(mod, higherLevel.up())) {
             Debug.logMessage("TraceFlowingWater: target " + higherLevel.toShortString()
                     + " unreachable (dy=" + dy + ") → giving up");
             _gaveUp = true;
@@ -123,7 +152,13 @@ public class TraceFlowingWaterToSourceTask extends Task {
 
         Debug.logMessage("TraceFlowingWater: tracing to " + higherLevel + " (attempt " + _traceAttempts + ")");
         _approachTarget = higherLevel;
-        _approachTask = new GetCloseToBlockTask(higherLevel);
+        // (2026-09-13 v27) 走近的是液体格【上方】—— 与父任务直接分支
+        // GetCloseToBlockTask(blockPos.up()) 同一约定: 液体格本身站不了, 直接朝它
+        // 寻路会让 baritone 绕墙/爬高 (20260913-094812: 目标 122,7,-269 是水格,
+        // bot 爬到 y10 卡墙)。
+        _approachTask = new GetCloseToBlockTask(higherLevel.up());
+        _bestApproachSq = Double.MAX_VALUE;
+        _lastApproachImproveTick = WorldHelper.getTicks();
         return _approachTask;
     }
 
