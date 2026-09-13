@@ -349,10 +349,17 @@ public class CollectFoodTask extends Task {
         // 在原料耗尽后不可能完成, 必须在下面的粘性 return 之前放行, 否则食物任务
         // 永久卡死。判据放在这里而不是 10s 重评估里, 是为了无延迟释放 (重评估最坏
         // 要等 10s 才轮到, 期间仍在空转)。
+        // 与上面 10s 重评估的 resourceStalled 释放阀分工: 看门狗那支覆盖"任何原因导致
+        // 的填充停滞"(光标被占/背包满/缺料), 最坏 ~25s(15s 判负 + 10s 重评估); 本支只认
+        // "原料耗尽", 但下一 tick 立刻生效 —— 缺料场景实际由本支抢先触发, 日志前缀是
+        // "conversion source exhausted" 而非 "RELEASE stalled sub task"。
         if (_currentResourceTask != null && conversionSourceExhausted(mod, _currentResourceTask)) {
             Debug.logToFile("altoclef_diag.log",
                     "[FoodPick] conversion source exhausted, releasing sub task " + _currentResourceTask);
             _currentResourceTask = null;
+            // 与 10s 重评估的释放路径一致地清空目标物品, 避免残留旧值在后续重评估里
+            // 被 isFillRecentlyStalled 判成假阳性。
+            _currentResourceItem = null;
             _wanderSinceTick = -1;
         }
 
