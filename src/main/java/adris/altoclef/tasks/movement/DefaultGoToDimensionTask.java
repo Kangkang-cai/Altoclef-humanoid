@@ -7,6 +7,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Blocks;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.Optional;
@@ -93,6 +94,22 @@ public class DefaultGoToDimensionTask extends Task {
     }
 
     private Task goToOverworldFromNetherTask(AltoClef mod) {
+        // (2026-09-13 用户"黑曜石够且有打火石/材料就直接造门, 别走原来的门")
+        // 有料直接原地造门回家, 不再长途跋涉去翻 last-used / 记忆旧门 (旧门
+        // 记忆可能过期/死门, 徒步也可能几百上千格)。唯一例外: 眼前 64 格内就
+        // 有已点亮的门, 走进去比烧 10 块黑曜石划算, 人类也会直接进。
+        // 材料闸收死: 黑曜石 ≥10, 且有打火石或"铁锭+燧石"能现场合成 ——
+        // 绝不让 ConstructNetherPortalObsidianTask 在下界触发黑曜石收集
+        // (那条路绕猪灵交易, 是另一个阶段的事)。
+        if (canBuildPortalHome(mod)) {
+            Optional<BlockPos> litNearby = mod.getBlockTracker().getNearestTracking(mod.getPlayer().getPos(), Blocks.NETHER_PORTAL);
+            if (litNearby.isEmpty() || !litNearby.get().isWithinDistance(mod.getPlayer().getPos(), 64)) {
+                setDebugState("Has obsidian + flint&steel (or materials), building portal home directly");
+                return new ConstructNetherPortalObsidianTask();
+            }
+            setDebugState("Lit nether portal within 64 blocks, entering instead of building");
+        }
+
         if (netherPortalIsClose(mod)) {
             setDebugState("Going to nether portal");
             return new EnterNetherPortalTask(Dimension.NETHER);
@@ -155,6 +172,16 @@ public class DefaultGoToDimensionTask extends Task {
             return closest.isPresent() && closest.get().isWithinDistance(mod.getPlayer().getPos(), 2000);
         }
         return false;
+    }
+
+    /**
+     * (2026-09-13) 下界回家"直接造门"材料闸: 黑曜石 ≥10 (门框最低 10 块无四角),
+     * 且有打火石, 或有铁锭+燧石可现场合成打火石。缺任一都走旧的找门链。
+     */
+    private boolean canBuildPortalHome(AltoClef mod) {
+        if (mod.getItemStorage().getItemCount(Items.OBSIDIAN) < 10) return false;
+        if (mod.getItemStorage().hasItem(Items.FLINT_AND_STEEL)) return true;
+        return mod.getItemStorage().hasItem(Items.IRON_INGOT) && mod.getItemStorage().hasItem(Items.FLINT);
     }
 
     public enum OVERWORLD_TO_NETHER_BEHAVIOUR {
