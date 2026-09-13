@@ -8,6 +8,7 @@ import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.trackers.KnowledgeMemory;
 import baritone.api.pathing.goals.GoalNear;
+import baritone.api.pathing.goals.GoalXZ;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
@@ -559,10 +560,20 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 外围模式: 带方向感的游走 (音效 > 看见的下界砖 > 结构推断 > 随机)
     // ------------------------------------------------------------------ //
 
+    /** 水平面 (xz) 欧氏距离。外围目标用 GoalXZ, 到达判定必须同为 2D。 */
+    private static double xzDistance(BlockPos a, BlockPos b) {
+        double dx = a.getX() - b.getX();
+        double dz = a.getZ() - b.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
     private Task tickOutside(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
 
-        if (_currentTarget == null || mod.getPlayer().getBlockPos().isWithinDistance(_currentTarget, 3)) {
+        // (2026-09-13 浮空目标) 到达判定改 2D: GoalXZ 只约束 xz, 站到目标列任意
+        // 高度都算到。旧 3D isWithinDistance(3) 配 GoalXZ 会因 y 差 >3 判"没到",
+        // 卡到 progress 超时才换目标, 白走。
+        if (_currentTarget == null || xzDistance(mod.getPlayer().getBlockPos(), _currentTarget) <= 4) {
             // (2026-09-13) 到达即"查讫": 记忆推断目标扑空一次就登记, 不再去
             // 同一片记忆区反复撞 (getCandidateAreas 每次随机重生成候选点)。
             if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
@@ -579,7 +590,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
             _progress.reset();
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_currentTarget, 2));
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZ(_currentTarget.getX(), _currentTarget.getZ()));
             return null;
         }
 
@@ -596,7 +607,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_currentTarget, 2));
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZ(_currentTarget.getX(), _currentTarget.getZ()));
         }
         setDebugState("Exploring the nether (human-like)");
         return null;
@@ -655,10 +666,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         double angle = nextRandomHeading();
         int candX = (int) Math.floor(pos.x + Math.cos(angle) * EXPLORE_STEP);
         int candZ = (int) Math.floor(pos.z + Math.sin(angle) * EXPLORE_STEP);
+        // y 只作日志参考 (导航用 GoalXZ 不约束高度, 见 stepTowards 注释)。
         return new BlockPos(candX, (int) Math.floor(pos.y), candZ);
     }
 
-    /** 从当前位置朝 (tx, tz) 走一步 EXPLORE_STEP, y 取目标 y (要塞/声源高度)。 */
+    /** 从当前位置朝 (tx, tz) 走一步 EXPLORE_STEP。y 只作日志参考 —— 导航用 GoalXZ, 不约束高度。 */
     private BlockPos stepTowards(Vec3d from, double tx, double tz, double targetY) {
         double toTarget = Math.atan2(tz - from.z, tx - from.x);
         double spread = Math.toRadians(BIAS_ANGLE_DEG);
@@ -670,6 +682,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _heading = angle;
         int candX = (int) Math.floor(from.x + Math.cos(angle) * EXPLORE_STEP);
         int candZ = (int) Math.floor(from.z + Math.sin(angle) * EXPLORE_STEP);
+        // (2026-09-13 浮空目标) 旧版 y 复制出发脚高: 48 格外地形起伏 ±20 格时
+        // 目标悬空, GoalNear(三维) 逼 baritone 搭柱子上天 (用户"空旷环境总搭到
+        // 空中去")。改 GoalXZ 后 y 不参与寻路, 这里只留出发脚高供日志观察。
         return new BlockPos(candX, (int) Math.floor(targetY), candZ);
     }
 
