@@ -12,6 +12,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.biome.BiomeKeys;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -30,8 +31,9 @@ import java.util.Set;
  * 1. 外围探索 (没找到要塞): 带"方向感"的游走 —— 优先朝最近 N 秒内听到的
  *    烈焰人音效方向 (SoundTracker, 人类听觉), 其次朝"亲眼看见"(LOS+FOV,
  *    getPerceivedLocations)的下界砖方向, 再次朝 KnowledgeMemory 里"看见过
- *    的要塞地标"推断的候选区。什么线索都没有就沿一个大致方向随机走
- *    (不传送、不直奔目标, 保持人类式)。
+ *    的要塞地标"推断的候选区。什么线索都没有就沿一个【持久锁定的方位角】
+ *    持续前进 (跨任务实例存活, 只在 ±5° 内微调) —— 即"远征": 不原地打转、
+ *    不回头, 靠持续位移穿过下界生物群系去撞结构 (不传送、不直奔目标, 保持人类式)。
  *
  * 2. 走廊探索 (踏上要塞地面, 用户核心需求): 只在要塞的可行走地面上探索
  *    —— 地面是下界砖(含楼梯/台阶)、上方两格空气的"走廊/桥面/房间"格子。
@@ -86,9 +88,16 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 外围探索一步多远, 偏置锥角 (仿 BiasedExploreTask)。
     private static final double EXPLORE_STEP = 48;
     private static final double BIAS_ANGLE_DEG = 12;
-    private static final double RANDOM_JITTER_DEG = 25;
+    // (2026-09-13 远征) 25° → 5°: 原 ±25° 抖动 + 48 格步长 = 布朗运动,
+    // 净位移 ~√N 而非 N —— 即使实例不重建也是小区域打转。降到 5° 后是
+    // "锁定方向一路向" (用户选定), 净位移 ~N。
+    private static final double RANDOM_JITTER_DEG = 5;
     // 外围探索连续失败的容忍次数 (超过后本任务结束, 交给上层重决策/兜底)。
     private static final int MAX_FAIL_COUNT = 10;
+    // (2026-09-13 远征取证) 诊断周期 200 tick = 10s; 距锚点半径每增长 128 格
+    // 额外打一行 —— 此前日志里没有任何坐标/群系遥测, 无法证明"是否真在远征"。
+    private static final int EXPEDITION_DIAG_INTERVAL_TICKS = 200;
+    private static final double EXPEDITION_RADIUS_MILESTONE = 128;
 
     // =========================================================================
     // (2026-09-09 探深后再巡逻, 用户"还没探索完整怎么就触发巡逻了, 连刷怪笼
@@ -123,6 +132,26 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private double _heading = Double.NaN;
     // 本次到达目标是否走过 (用于日志)。
     private long _tickId = 0;
+    // 上次诊断采样点 / 群系标签 / 上次打点时的最大半径 / 本次目标线索来源。
+    private Vec3d _lastDiagPos;
+    private String _lastBiomeLabel;
+    private double _lastLoggedRadius = 0;
+    private String _lastClue = "none";
+
+    // =========================================================================
+    // (2026-09-13 远征: 方向记忆跨任务实例) 用户明确"bot 在下界打转"。
+    // 根因: _heading / _currentTarget 是实例字段, onStart 复位; 而上层
+    // (TradeWithPiglinsTask / CollectBlazeRodsTask) 每 4-12 分钟被更上层销毁
+    // 重建一次 (日志实锤: TradeWithPiglinsTask START 3 次, "-> null" 后立刻
+    // 重新 SUB) → 每段路指向无关的随机方向, 正负抵消 → 净位移趋近 0。
+    // 修法: 朝向 / 远征锚点 / 已达最大半径一律放 static, 按【存档:维度】隔离
+    // (与走廊记忆 _visitedCellsByKey 同款 key), 实例重建不再失忆。
+    // 注: 仅内存不落盘 —— 要修的是"单次会话内的任务重建"; 跨会话续走意义
+    // 不大且锚点语义会变质, 属刻意收敛的范围。
+    // =========================================================================
+    private static final java.util.Map<String, Double> _headingByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, BlockPos> _anchorByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Double> _maxRadiusByKey = new java.util.HashMap<>();
 
     // =========================================================================
     // (2026-09-05 通用化) 同一套人类式探索复用于不同下界目标: 音效线索前缀 /
@@ -174,12 +203,25 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-09) 探深状态随任务重开复位 (走廊记忆 _visitedCells 仍保留)。
         _expandFailStreak = 0;
         _currentIsProbe = false;
+        // (2026-09-13 远征) 实例重建后恢复朝向/锚点 —— 新实例不重新随机方向,
+        // 接着上一段的方向继续走。key 全程可用 (猪灵模式也走外围)。
+        _persistKey = fortressVisitedKey(mod);
+        Double keptHeading = _headingByKey.get(_persistKey);
+        if (keptHeading != null) {
+            _heading = keptHeading;
+            Debug.logMessage("[Expedition] resumed heading " + fmtDeg(keptHeading)
+                    + "° for " + _persistKey);
+        } else {
+            _heading = Double.NaN;
+        }
+        if (mod.getPlayer() != null) {
+            _anchorByKey.computeIfAbsent(_persistKey, k -> mod.getPlayer().getBlockPos());
+        }
         // 注意: _visitedCells / _lastVisitTicks 故意不清空 —— 上层在超时兜底
         // 与人类式探索间切换重跑本任务时, "走过的路"是人类式记忆, 不该失忆。
         // (2026-09-05 跨会话) 走廊模式再把上次会话走过的格子从文件里读回来
         // —— 重启任务/重开游戏也不重走老走廊。
         if (_corridorEnabled) {
-            _persistKey = fortressVisitedKey(mod);
             seedVisitedCellsFromDisk(_persistKey);
         }
     }
@@ -214,6 +256,10 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (!_corridorMode && (corridorAvailable || _perceivedBrickCache.isPresent())) {
             _corridorMode = corridorAvailable || nearSeenBrick(mod);
         }
+
+        // (2026-09-13 远征取证) 周期 / 里程碑 / 群系切换三种触发, 拿"是否真在
+        // 远征"的硬数据 (此前日志无坐标/群系遥测)。
+        maybeLogExpedition(mod);
 
         if (_corridorMode) {
             return tickCorridor(mod);
@@ -536,12 +582,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         Optional<Vec3d> heard = mod.getSoundTracker()
                 .getNearestRecentSoundPos(_soundPrefix, pos, _hearingRange);
         if (heard.isPresent()) {
+            _lastClue = "sound";
             setDebugState("Heading towards heard sounds (" + _soundPrefix + ")");
             return stepTowards(pos, heard.get().x, heard.get().z, heard.get().y);
         }
 
         // 2. 视觉: 亲眼看见的下界砖 (感知过滤后的缓存)。
         if (_perceivedBrickCache.isPresent()) {
+            _lastClue = "brick";
             BlockPos brick = _perceivedBrickCache.get();
             setDebugState("Heading towards seen fortress bricks");
             return stepTowards(pos, brick.getX(), brick.getZ(), brick.getY());
@@ -551,6 +599,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         //    (明确是 inference 不是 observation, 当方向感用)。
         List<BlockPos> candidates = mod.getKnowledgeMemory().getCandidateAreas(pos);
         if (!candidates.isEmpty()) {
+            _lastClue = "memory";
             BlockPos best = null;
             double bestSq = Double.POSITIVE_INFINITY;
             for (BlockPos c : candidates) {
@@ -566,7 +615,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             }
         }
 
-        // 4. 随机: 沿持久朝向 ±抖动, 不原地打转。
+        // 4. 随机: 沿持久锁定方位角 (远征) ±5° 微调, 不原地打转。
+        _lastClue = "heading";
         double angle = nextRandomHeading();
         int candX = (int) Math.floor(pos.x + Math.cos(angle) * EXPLORE_STEP);
         int candZ = (int) Math.floor(pos.z + Math.sin(angle) * EXPLORE_STEP);
@@ -578,19 +628,93 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         double toTarget = Math.atan2(tz - from.z, tx - from.x);
         double spread = Math.toRadians(BIAS_ANGLE_DEG);
         double angle = toTarget + (Math.random() * 2 - 1) * spread;
+        // 注意: 这里只更新实例级 _heading (日志用), 故意【不】写回 _headingByKey
+        // —— 声音/下界砖等瞬态线索不该永久扭转远征方位角, 线索消失后下一轮
+        // nextRandomHeading 会回到锁定的远征方向 (否则瞬态线索反复把方向来回
+        // 掰, 又变成小区域打转)。
         _heading = angle;
         int candX = (int) Math.floor(from.x + Math.cos(angle) * EXPLORE_STEP);
         int candZ = (int) Math.floor(from.z + Math.sin(angle) * EXPLORE_STEP);
         return new BlockPos(candX, (int) Math.floor(targetY), candZ);
     }
 
+    /**
+     * (2026-09-13 远征) 锁定方向: 首次随机, 之后只在 ±RANDOM_JITTER_DEG 内微调,
+     * 并写回 static —— 跨任务实例存活。旧版每次实例重建重新随机 = 小区域打转。
+     */
     private double nextRandomHeading() {
-        if (Double.isNaN(_heading)) {
-            _heading = Math.random() * 2 * Math.PI;
+        Double stored = _headingByKey.get(expeditionKey());
+        if (stored == null || Double.isNaN(stored)) {
+            stored = Math.random() * 2 * Math.PI;
         } else {
-            _heading += (Math.random() * 2 - 1) * Math.toRadians(RANDOM_JITTER_DEG);
+            stored += (Math.random() * 2 - 1) * Math.toRadians(RANDOM_JITTER_DEG);
         }
-        return _heading;
+        _headingByKey.put(expeditionKey(), stored);
+        _heading = stored;
+        return stored;
+    }
+
+    // ------------------------------------------------------------------ //
+    // (2026-09-13 远征取证) 诊断: 模式 / 群系 / 方位角 / 距锚点半径 / 线索来源
+    // ------------------------------------------------------------------ //
+
+    private String expeditionKey() {
+        return _persistKey != null ? _persistKey : "?:unknown";
+    }
+
+    private void maybeLogExpedition(AltoClef mod) {
+        if (mod.getPlayer() == null) return;
+        Vec3d now = mod.getPlayer().getPos();
+        BlockPos p = mod.getPlayer().getBlockPos();
+        String key = expeditionKey();
+        BlockPos anchor = _anchorByKey.computeIfAbsent(key, k -> p);
+        double radius = Math.hypot(p.getX() - anchor.getX(), p.getZ() - anchor.getZ());
+        double maxRadius = Math.max(_maxRadiusByKey.getOrDefault(key, 0.0), radius);
+        _maxRadiusByKey.put(key, maxRadius);
+        String biome = netherBiomeLabel(mod);
+        String prevBiome = _lastBiomeLabel;
+        boolean biomeChanged = prevBiome != null && !prevBiome.equals(biome);
+        boolean periodic = _tickId % EXPEDITION_DIAG_INTERVAL_TICKS == 0;
+        boolean milestone = maxRadius - _lastLoggedRadius >= EXPEDITION_RADIUS_MILESTONE;
+        if (!periodic && !milestone && !biomeChanged) return;
+
+        _lastLoggedRadius = maxRadius;
+        String moved = _lastDiagPos == null ? "-"
+                : String.format(java.util.Locale.ROOT, "%.1f", _lastDiagPos.distanceTo(now));
+        _lastDiagPos = now;
+        _lastBiomeLabel = biome;
+        Debug.logMessage(String.format(java.util.Locale.ROOT,
+                "[Expedition] mode=%s biome=%s bearing=%s anchor=(%d,%d) radius=%.0f max=%.0f"
+                        + " target=%s moved=%s clue=%s fails=%d",
+                _corridorMode ? "corridor" : "outside", biome,
+                Double.isNaN(_heading) ? "?" : fmtDeg(_heading),
+                anchor.getX(), anchor.getZ(), radius, maxRadius,
+                _currentTarget == null ? "-" : _currentTarget.toShortString(),
+                moved, _lastClue, _failCounter));
+        if (biomeChanged) {
+            Debug.logMessage("[Expedition] biome switch " + prevBiome + " -> " + biome);
+        }
+    }
+
+    /** 当前群系标签 (只认下界五群系, 其余归 "other"; 异常返 "?")。 */
+    private static String netherBiomeLabel(AltoClef mod) {
+        try {
+            var biome = mod.getWorld().getBiome(mod.getPlayer().getBlockPos());
+            if (biome.matchesKey(BiomeKeys.BASALT_DELTAS)) return "basalt_deltas";
+            if (biome.matchesKey(BiomeKeys.SOUL_SAND_VALLEY)) return "soul_sand_valley";
+            if (biome.matchesKey(BiomeKeys.CRIMSON_FOREST)) return "crimson_forest";
+            if (biome.matchesKey(BiomeKeys.WARPED_FOREST)) return "warped_forest";
+            if (biome.matchesKey(BiomeKeys.NETHER_WASTES)) return "nether_wastes";
+            return "other";
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    private static String fmtDeg(double rad) {
+        double deg = Math.toDegrees(rad) % 360;
+        if (deg < 0) deg += 360;
+        return String.format(java.util.Locale.ROOT, "%.0f", deg);
     }
 
     /**
