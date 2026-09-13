@@ -12,6 +12,7 @@ import adris.altoclef.tasks.slot.MoveInaccessibleItemToInventoryTask;
 import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.MoveItemToSlotFromInventoryTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.CraftingRecipe;
@@ -121,6 +122,9 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     private final CollectRecipeCataloguedResourcesTask _collectTask;
     private final TimerGame _craftResetTimer = new TimerGame(CRAFT_RESET_TIMER_BONUS_SECONDS);
     private int _craftCount;
+    // (2026-09-13 CursorArbiter 根修) 同 CraftInInventoryTask._receiveTask: 光标被腾位链
+    // 租用时维持收输出子树不翻面, 避免"搬堆叠 ↔ 清光标"每 2s 互相拆台。
+    private Task _receiveTask = null;
 
     public DoCraftInTableTask(RecipeTarget[] targets, boolean collect, boolean ignoreUncataloguedSlots) {
         super(Blocks.CRAFTING_TABLE, new ItemTarget("crafting_table"));
@@ -137,6 +141,7 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     protected void onStart(AltoClef mod) {
         super.onStart(mod);
         _craftCount = 0;
+        _receiveTask = null;
         StorageHelper.closeScreen();
         mod.getBehaviour().push();
         mod.getBehaviour().addProtectedItems(getMaterialsArray());
@@ -200,6 +205,21 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                 }
             }
             if (readyTarget != null) {
+                // (2026-09-13 CursorArbiter 根修) 光标被腾位链租用 = 下级正在用光标做
+                // "拿起 A → 并进 B"的两拍中转, 不是外来滞留残留。此时翻面派
+                // EnsureFreeCursorSlotTask 会把腾位子树整棵 STOP (2x2 版已由
+                // altoclef_gridwar.log 实锤: consolidate 拿起 → ensurefree 换走, 每 2s
+                // 一轮; 机制见 CursorArbiter 类注释)。复用同一 Receive 实例 = 树不换。
+                if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)
+                        && CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
+                    if (_receiveTask == null) {
+                        _receiveTask = new ReceiveCraftingOutputSlotTask(
+                                PlayerSlot.CRAFT_OUTPUT_SLOT, readyTarget.getTargetCount());
+                    }
+                    setDebugState("Cursor leased by free-space chain, holding receive");
+                    return _receiveTask;
+                }
+                _receiveTask = null;
                 if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)) {
                     setDebugState("Returning stranded cursor item: " + cursor.getItem().getTranslationKey());
                     return new EnsureFreeCursorSlotTask();

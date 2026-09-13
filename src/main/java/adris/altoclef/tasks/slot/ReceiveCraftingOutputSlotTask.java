@@ -2,6 +2,7 @@ package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -27,6 +28,10 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
     private int _lastClickedOutputCount = -1;
     private static final long OUTPUT_CLICK_GRACE_MS = 500;
 
+    // (2026-09-13 CursorArbiter 根修) 跨 tick 持住腾位子树实例。见下方光标守卫:
+    // 光标被腾位链租用时不能翻面抢, 复用同一实例 = 树不换, 让搬堆叠跑完整拍。
+    private Task _freeTask = null;
+
     public ReceiveCraftingOutputSlotTask(Slot slot, int toTake) {
         _slot = slot;
         _toTake = toTake;
@@ -37,7 +42,7 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
 
     @Override
     protected void onStart(AltoClef mod) {
-
+        _freeTask = null;
     }
 
     @Override
@@ -53,6 +58,17 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
             return null;
         }
         if (!cursorSlotFree && !ItemHelper.canStackTogether(inOutput, cursor)) {
+            // (2026-09-13 CursorArbiter 根修) 光标被腾位链租用 = 上面这件东西正是下级
+            // ConsolidateInventoryTask 搬的"拿起→并入"两拍中转态, 不是外来的滞留残留。
+            // 此时派 EnsureFreeCursorSlotTask 会把整条腾位链 STOP (gridwar.log 实锤:
+            // consolidate 45.030 拿起 → ensurefree 45.531 换走, 每 2s 一轮)。维持子树。
+            if (CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
+                if (_freeTask == null) {
+                    _freeTask = new EnsureFreeInventorySlotTask();
+                }
+                setDebugState("Cursor leased by free-space chain, holding");
+                return _freeTask;
+            }
             return new EnsureFreeCursorSlotTask();
         }
 
@@ -68,7 +84,10 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
             // 背包放不下光标物品: 丢弃腾位兜底 (EnsureFreeInventorySlotTask 内部
             // 会清理可丢弃槽位; 全保护时返回自身不动, 上层重置计时器兜底)。
             setDebugState("No room for held output, freeing inventory");
-            return new EnsureFreeInventorySlotTask();
+            if (_freeTask == null) {
+                _freeTask = new EnsureFreeInventorySlotTask();
+            }
+            return _freeTask;
         }
 
         int craftCount = inOutput.getCount() * getCraftMultipleCount(mod);
@@ -105,7 +124,10 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
                 return new ClickSlotTask(_slot, SlotActionType.QUICK_MOVE);
             }
             setDebugState("Making room for output");
-            return new EnsureFreeInventorySlotTask();
+            if (_freeTask == null) {
+                _freeTask = new EnsureFreeInventorySlotTask();
+            }
+            return _freeTask;
             }
             if (now - _lastOutputClickMs < OUTPUT_CLICK_GRACE_MS
                     && inOutput.getCount() == _lastClickedOutputCount) {

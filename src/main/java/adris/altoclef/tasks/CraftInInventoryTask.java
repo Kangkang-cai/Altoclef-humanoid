@@ -8,6 +8,7 @@ import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasks.slot.EnsureFreePlayerCraftingGridTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasksystem.CraftingGridArbiter;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -38,6 +39,12 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
     // 与 CraftInTableTask._collectTask 同构: 一旦派发就持续复用直到 isFinished, 完成
     // 后放行正式合成, 不再每 tick 用 hasRecipeMaterialsOrTarget 反复推翻重派收集。
     private Task _collectTask = null;
+    // (2026-09-13 CursorArbiter 根修) 跨 tick 持住"收输出"子树实例。收产物时背包满,
+    // 收输出链会下沉到 EnsureFreeInventorySlotTask → ConsolidateInventoryTask 用光标
+    // 搬堆叠腾位 —— 这是【合法的多拍占用】。但本任务每 tick 重跑 onTick, 看到"光标
+    // 非空"就会翻面派 EnsureFreeCursorSlotTask, 把正在搬的子树整棵 STOP, 造成每 2s
+    // 一轮的空转 (现场见 CursorArbiter 类注释)。持租期间改为复用本实例、不翻面。
+    private Task _receiveTask = null;
 
     public CraftInInventoryTask(RecipeTarget target, boolean collect, boolean ignoreUncataloguedSlots) {
         super(new ItemTarget(target.getOutputItem(), target.getTargetCount()));
@@ -75,6 +82,7 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
 
         _fullCheckFailed = false;
         _collectTask = null;
+        _receiveTask = null;
         StorageHelper.closeScreen(); // Just to be safe I guess
     }
 
@@ -120,6 +128,23 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
                 }
             }
             if (readyTarget != null) {
+                // (2026-09-13 CursorArbiter 根修) 光标被腾位链租用 = 下级正在用光标做
+                // "拿起 A → 并进 B"的两拍中转 (ReceiveCraftingOutputSlotTask
+                // "Making room for output" → EnsureFreeInventorySlotTask
+                // "Consolidating stacks before freeing space" → ConsolidateInventoryTask)。
+                // 此时翻面派 EnsureFreeCursorSlotTask 会把正在搬堆叠的子树整棵 STOP,
+                // 双方每 2s 一轮互相拆台 (altoclef_gridwar.log 实锤, 现场见 CursorArbiter
+                // 类注释)。复用同一 Receive 实例 = 树不换, 让腾位链跑完这两拍。
+                if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)
+                        && CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
+                    if (_receiveTask == null) {
+                        _receiveTask = new ReceiveCraftingOutputSlotTask(
+                                PlayerSlot.CRAFT_OUTPUT_SLOT, readyTarget.getTargetCount());
+                    }
+                    setDebugState("Cursor leased by free-space chain, holding receive");
+                    return _receiveTask;
+                }
+                _receiveTask = null;
                 if (!cursor.isEmpty() && !isCursorPartOfCraft(cursor)) {
                     setDebugState("Returning stranded cursor item: " + cursor.getItem().getTranslationKey());
                     return new EnsureFreeCursorSlotTask();

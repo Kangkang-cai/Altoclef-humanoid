@@ -3,6 +3,7 @@ package adris.altoclef.tasks.slot;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.container.StoreGarbageInContainerTask;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -34,6 +35,11 @@ public class EnsureFreeInventorySlotTask extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-13 CursorArbiter) 本任务是"腾位"意图的 owner：整条腾位链
+        // （StoreGarbage → Consolidate → 穿甲 → 丢弃级联）期间持光标租约，让上层
+        // 合成链知道"光标的非空是合法的两拍中转"，不要翻面派 EnsureFreeCursorSlotTask
+        // 把子树抢断（现场与机制见 CursorArbiter 类注释）。每 tick 调用即续租。
+        CursorArbiter.begin(CursorArbiter.INTENT_RELOCATE);
         // (2026-08-31 空转修复) 背包有真实空位且光标为空时无需腾位 — 直接返回,
         // 不进"合并/拟抛丢"级联, 消除每 tick 刷屏空转 (日志 13:00 实测:
         // emptySlot=2 cursorEmpty=true 每秒 10+ 条 [DIAG-DROP])。
@@ -43,6 +49,7 @@ public class EnsureFreeInventorySlotTask extends Task {
                 Debug.logToFile("altoclef_diag.log",
                         "[SYNC-FIX]\t[EnsureFree]\temptySlot>=0 & cursorEmpty -> no-op (skip discard cascade)");
                 setDebugState("Inventory already has free space");
+                CursorArbiter.release(CursorArbiter.INTENT_RELOCATE);
                 return null;
             }
         }
@@ -173,6 +180,8 @@ public class EnsureFreeInventorySlotTask extends Task {
                     return new ClickSlotTask(randomThrow);
                 }
                 setDebugState("NO THROWAWAYABLE!");
+                // 腾位彻底无路可走（无可丢/可存/可穿）→ 交还光标租约，不再占着。
+                CursorArbiter.release(CursorArbiter.INTENT_RELOCATE);
                 return null;
             }
         } else {
