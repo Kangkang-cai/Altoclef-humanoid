@@ -13,6 +13,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
 
 /**
  * (2026-08-22) 回到地表通用前置任务。
@@ -200,9 +201,14 @@ public class GoToSurfaceTask extends Task {
     private Integer _pitEscapeY = null;
     private final TimerGame _pitEscapeTimer = new TimerGame(1);
 
-    // (2026-08-27) 表面目标高度 63→58, 与 isDeepUnderground 的硬下限一致:
-    // 挖到 58 露头 (头顶不再被盖) 即视为回到表面即可。
-    private static final int SURFACE_TARGET_Y = 58;
+    // (2026-08-27) 表面目标高度 63→58。2026-09-13 v24 废弃硬编码: 58 在高地形
+    // (真实地表 63+) 的矿洞里仍是地下 → y58 "出来"后还看不见草, baritone 到 58
+    // 就无目标可派 ↔ 完工判据 (天空视线) 不满足 → 反复横跳。改用 MOTION_BLOCKING
+    // 高度图取玩家所在列的真实地表 (含树冠/水面), 见 "surfaceYAt"。
+    private static int surfaceYAt(AltoClef mod, BlockPos pos) {
+        // getTopY = 最高实心/树叶/水面方块的 y+1 = 站在其上的脚部高度。
+        return mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING, pos.getX(), pos.getZ());
+    }
 
     private boolean inPit(AltoClef mod) {
         if (_pitEscapeY == null || _pitEscapeTimer.elapsed()) {
@@ -424,7 +430,8 @@ public class GoToSurfaceTask extends Task {
         // 才会让本任务在口袋里继续跑): 头顶 4 格内有可挖实心就直接进挖一垫一。
         // 旧版阶梯目标 min(58, y+step) 在口袋里等于"往下走" (y66 口袋被派
         // GetToYTask(58)), 是 20260912-144157 冻结现场的一半根因。
-        boolean skyward = y >= SURFACE_TARGET_Y;
+        // (2026-09-13 v24 动态地表) skyward = 脚已达本列真实地表 (高度图)。
+        boolean skyward = y >= surfaceYAt(mod, player);
         // (2026-09-12 v12) 竖井底: 头顶已通无格可挖, canScaffold=false, 但四面
         // 实心仍需垫塔爬出 → inShaft 直接放行 (继续沿井垫跳到井口)。
         boolean shaft = inShaft(mod);
@@ -442,7 +449,7 @@ public class GoToSurfaceTask extends Task {
         if (_stepTargetY == Integer.MIN_VALUE || y >= _stepTargetY) {
             _stepTargetY = skyward
                     ? Math.min(y + Math.min(step, 4), 250)
-                    : Math.min(SURFACE_TARGET_Y, y + step);
+                    : Math.min(surfaceYAt(mod, player), y + step);
         }
 
         // (2026-09-11) 卡住 → 直接进"挖一垫一", 不再等阶梯耗尽。
@@ -476,7 +483,7 @@ public class GoToSurfaceTask extends Task {
                 _stepIdx++;
                 _stepTargetY = skyward
                         ? Math.min(y + Math.min(STEP_LADDER[_stepIdx], 4), 250)
-                        : Math.min(SURFACE_TARGET_Y, y + STEP_LADDER[_stepIdx]);
+                        : Math.min(surfaceYAt(mod, player), y + STEP_LADDER[_stepIdx]);
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone path, shrinking step to "
                         + STEP_LADDER[_stepIdx] + " at " + player);
             } else if (canScaffold(mod, player) || (skyward && inShaft(mod))) {
@@ -681,7 +688,7 @@ public class GoToSurfaceTask extends Task {
 
     private Task tickScaffoldUp(AltoClef mod, BlockPos player) {
         if (_scaffoldStartTick < 0) _scaffoldStartTick = WorldHelper.getTicks();
-        int totalTicks = player.getY() >= SURFACE_TARGET_Y
+        int totalTicks = player.getY() >= surfaceYAt(mod, player)
                 ? SCAFFOLD_TOTAL_TIMEOUT_TICKS_SKY : SCAFFOLD_TOTAL_TIMEOUT_TICKS;
         if (WorldHelper.getTicks() - _scaffoldStartTick > totalTicks) {
             return giveUpScaffold(mod, player, "total timeout " + (totalTicks / 20) + "s");
@@ -777,7 +784,7 @@ public class GoToSurfaceTask extends Task {
             // (2026-09-12 重见天日) y>=58 的口袋挖穿进水时目标继续向上, 不能用
             // 固定 58 (y66 口袋挖穿进水, 58 在脚下 → 往下游)。海里 (y<58) 仍是
             // 游到 58 的旧语义。
-            int swimTarget = Math.max(SURFACE_TARGET_Y, player.getY() + 8);
+            int swimTarget = Math.max(surfaceYAt(mod, player), player.getY() + 8);
             setDebugState("Scaffold: breached into water, swimming up (target y=" + swimTarget + ")");
             return new GetToYTask(swimTarget);
         }
