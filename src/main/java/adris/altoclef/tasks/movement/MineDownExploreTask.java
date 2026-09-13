@@ -269,6 +269,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
     private int _waterSkipped = 0;
+    // (2026-09-13 传送门保护) 跳过的门体方块数, 用于日志节流。
+    private int _protectedDigSkipped = 0;
 
     // ==== (2026-09-10 遇水改道) 挖掘路径真的出现水 → 不再涉水直穿 ====
     // 13:15/13:52 场次实证: 涉水直穿 → bot 在水下方块前卡死 → 下潜 → 溺水
@@ -360,6 +362,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _skipStreak = 0;
         _inCave = false;
         _waterSkipped = 0;
+        _protectedDigSkipped = 0;
         _digQueue.clear();
         // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
@@ -710,13 +713,46 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
     }
 
+    /**
+     * 跳过"挖不了 / 不该挖"的队首方块: 空气、水、门体保护方块。
+     *
+     * (2026-09-13 传送门保护) 原只跳空气与水。下界挖金矿时隧道几何路径恰好穿过
+     * 返回门框, 队首是黑曜石门框 → 无过滤地派发 DestroyBlockTask → 打穿门框,
+     * 门熄灭 (20260913-185026 实锤: dim=the_nether pos=(8,90,-57), 栈
+     * CollectGoldIngotTask > MineAndCollectTask > MineOrCollectTask >
+     * MineDownExploreTask > DestroyBlockTask)。
+     *
+     * 门体按与"水"相同的方式处置: 从队列弹掉, 隧道继续几何推进, 绝不试图挖它。
+     * 这是本事故的**主路径修复**; DestroyBlockTask 侧另有一道独立硬守卫兜底
+     * (覆盖全库其他 40+ 个派发点), 两者判据同源 (BotBehaviour.isPortalBodyBlock)。
+     */
     private void skipAirAndWater(AltoClef mod) {
-        while (!_digQueue.isEmpty()
-                && (WorldHelper.isAir(mod, _digQueue.peek()) || isWater(mod, _digQueue.peek()))) {
-            if (isWater(mod, _digQueue.peek())) {
-                logWaterEncounter(mod, _digQueue.peek());
+        while (!_digQueue.isEmpty()) {
+            BlockPos head = _digQueue.peek();
+            if (isWater(mod, head)) {
+                logWaterEncounter(mod, head);
+            } else if (mod.getBehaviour().isPortalBodyBlock(head)) {
+                logProtectedDigSkip(mod, head);
+            } else if (!WorldHelper.isAir(mod, head)) {
+                break;
             }
             _digQueue.poll();
+        }
+    }
+
+    /**
+     * (2026-09-13 传送门保护) 记录一次"隧道跳过门体方块"。节流口径同 [Diag-water]
+     * (前 3 次 + 每 10 次), 防门框密集区刷屏。
+     */
+    private void logProtectedDigSkip(AltoClef mod, BlockPos pos) {
+        _protectedDigSkipped++;
+        if (_protectedDigSkipped <= 3 || _protectedDigSkipped % 10 == 0) {
+            String m = "[PortalGuard] 隧道跳过受保护方块 " + pos.toShortString()
+                    + " (门体/门框, 累计 " + _protectedDigSkipped + ")"
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " mode=" + (_tunnelMode ? "tunnel" : "staircase");
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
         }
     }
 

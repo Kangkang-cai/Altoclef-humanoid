@@ -67,6 +67,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private boolean _wasSolidAtStart = false;
     private boolean _selfDugRecorded = false;
 
+    // (2026-09-13 传送门保护硬守卫) 命中保护只记一次 [PortalGuard] 日志,
+    // 详见 refuseIfProtected。
+    private boolean _protectedRefusalLogged = false;
+
     public DestroyBlockTask(BlockPos pos) {
         _pos = pos;
     }
@@ -80,14 +84,60 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _selfDugRecorded = false;
         _gettingToBlockTick = 0;
         _farGiveUpSuppressed = false;
+        _protectedRefusalLogged = false;
 
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
         mod.getBehaviour().avoidBlockPlacing(pos -> _pos.up().equals(pos));
     }
 
+    /**
+     * (2026-09-13 传送门保护硬守卫) 见 黑曜石门保护机制报告.md「已知边界 1」。
+     *
+     * 保护谓词只挂在 baritone 挖掘层 (`avoidBlockBreaking` → `AltoClefSettings.
+     * shouldAvoidBreaking`, 由 `WorldHelper.canBreakFailReason` / `JumpObstructionHelper`
+     * 消费), 而本任务走的是两条**手动**破坏路径 —— force `CLICK_LEFT` 长按 (L172)
+     * 与 builder process (L180), 两者都不查该谓词。于是任何显式派发 DestroyBlockTask
+     * 的上层都能直接挖掉门体 (全库 40+ 处 `new DestroyBlockTask`, 无一处过滤)。
+     *
+     * 20260913-185026 实锤: 下界挖金矿时 `MineDownExploreTask` 的隧道队列打穿返回
+     * 门框 → 门熄灭 (dim=the_nether pos=(8,90,-57) / (81,52,-81), 栈
+     * CollectGoldIngotTask > MineAndCollectTask > MineOrCollectTask >
+     * MineDownExploreTask > DestroyBlockTask)。
+     *
+     * 守卫语义 (对齐 PlaceBlockTask.refuseIfProtected 范式): 命中 → 记一次日志 +
+     * 拉黑该位 (让候选选择器类上层当场换目标) + 视作完成 (isFinished 放行, 防上层
+     * 卡死在"永远未完成")。注意本守卫只挡"门体"这一类 (isPortalBodyBlock), 不拦
+     * 其他任务注册的 avoidBlockBreaking 谓词 —— 那些是"临时避让"语义, 上层显式
+     * 要求挖时必须放行 (否则会误伤要塞砖/清场/逃生挖障等合法挖掘)。
+     */
+    private boolean refuseIfProtected(AltoClef mod) {
+        if (mod.getBehaviour().isPortalBodyBlock(_pos)) {
+            if (!_protectedRefusalLogged) {
+                _protectedRefusalLogged = true;
+                mod.getBlockTracker().requestBlockUnreachable(_pos);
+                String m = "[PortalGuard] 拒绝破坏受保护位置: " + _pos.toShortString()
+                        + " (门体/门框), 放弃该目标";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+            return true;
+        }
+        return false;
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (2026-09-13 传送门保护硬守卫) 第一道闸门: 目标是门体 → 立即放弃,
+        // 不做任何 lookAt / CLICK_LEFT / builder 喂料。详见 refuseIfProtected。
+        if (refuseIfProtected(mod)) {
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+            setDebugState("Protected position (portal guard), refusing to break");
+            return null;
+        }
 
         // (2026-09-05 挖完仍挖真因, 用户"挖掉一块金矿不到一秒, 但任务还挖它卡几秒"):
         // 任务框架 (Task.tickInternal) 从不调用子任务 isFinished —— 子任务只在父任务
@@ -244,6 +294,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-13 传送门保护硬守卫) 命中保护视作"完成", 让上层另选目标;
+        // 否则上层 (每 tick 重派同实例) 会因本任务永远未完成而卡死。
+        if (refuseIfProtected(mod)) {
+            return true;
+        }
         boolean air = WorldHelper.isAir(mod, _pos);
         // (2026-09-01 自挖中央记录) 开始时实心、现在变空气 ⇒ 这格空气是我们挖出来的,
         // 记入持久化自挖记忆(幂等)。矿洞检测据此排除自挖隧道, 不再误判"自己的洞"。

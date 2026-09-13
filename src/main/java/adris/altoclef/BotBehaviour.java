@@ -58,8 +58,17 @@ public class BotBehaviour {
      * (2026-09-05 传送门保护) 门体方块判定: 门内传送门方块 / 末地门 / 门框架,
      * 以及与下界门方块 6 面相邻的黑曜石/哭泣黑曜石 (门框主体)。
      * 挖掘与放置两条路径共用同一判定, 避免"挖有保护、放没保护"的单边缺口。
+     *
+     * (2026-09-13 硬守卫公开) 原 private, 只被本类注册的两个谓词消费 —— 而谓词
+     * 只有 baritone 侧 (canBreakFailReason / shouldAvoidBreaking) 会查, altoclef
+     * 自有的手动破坏路径 (DestroyBlockTask 的 force CLICK_LEFT 长按 + builder
+     * process) 从不消费。见 黑曜石门保护机制报告.md「已知边界 1」。
+     * 20260913-185026 实锤: 下界挖金矿 (dim=the_nether pos=(8,90,-57), 栈
+     * CollectGoldIngotTask > MineAndCollectTask > MineOrCollectTask >
+     * MineDownExploreTask > DestroyBlockTask) 的隧道把返回门框打穿 → 门熄灭。
+     * 提为 public, 供手动破坏路径显式复查 (同一判定源, 不再各写一套)。
      */
-    private boolean isPortalBodyBlock(BlockPos pos) {
+    public boolean isPortalBodyBlock(BlockPos pos) {
         // (2026-09-09 死门内部禁放置) 门熄灭后内部是空气, 原判定放行 → bot 会把
         // 工作台/熔炉放进门框缺口 (2026-09-09 11:11 场次实锤: 工作台 -23,59,67 /
         // 熔炉 -23,60,67 被放进下界门框列)。死门内部位置一律禁止破坏判定为真
