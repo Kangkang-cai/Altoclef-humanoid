@@ -112,6 +112,27 @@ public final class PillarJumpHelper {
     private static final double CENTER_JUMP_MAX = 0.2;
     private static final double CENTER_STEER_THRESHOLD = 0.25;
 
+    // (2026-09-13 诊断) 20260913-084406 实锤: pillaring 分支每 tick 在跑 (18 条
+    // 日志) 但 inputs 全 false + hSpeed=0 + 用户确认完全静止 —— 代码逻辑上该分支
+    // 必然 hold 某键, 矛盾。加分支级诊断定案: step 每个出口 + steer 分解值 +
+    // 实际按键状态, 500ms 节流。
+    private static long _lastDiagMs = 0;
+
+    private static void diag(String msg) {
+        long now = System.currentTimeMillis();
+        if (now - _lastDiagMs < 500) return;
+        _lastDiagMs = now;
+        adris.altoclef.Debug.logToFile("altoclef_diag.log", "[PillarDiag] " + msg);
+    }
+
+    private static String heldInputs(adris.altoclef.control.InputControls in) {
+        return "fwd=" + in.isHeldDown(baritone.api.utils.input.Input.MOVE_FORWARD)
+                + " back=" + in.isHeldDown(baritone.api.utils.input.Input.MOVE_BACK)
+                + " left=" + in.isHeldDown(baritone.api.utils.input.Input.MOVE_LEFT)
+                + " right=" + in.isHeldDown(baritone.api.utils.input.Input.MOVE_RIGHT)
+                + " jump=" + in.isHeldDown(baritone.api.utils.input.Input.JUMP);
+    }
+
     private static double offAxisSq(AltoClef mod, BlockPos support) {
         Vec3d c = Vec3d.ofCenter(support);
         double dx = c.x - mod.getPlayer().getX();
@@ -142,6 +163,11 @@ public final class PillarJumpHelper {
         else in.release(Input.MOVE_RIGHT);
         if (right < -CENTER_STEER_THRESHOLD) in.hold(Input.MOVE_LEFT);
         else in.release(Input.MOVE_LEFT);
+        // (2026-09-13 诊断) 记录分解值与实际按键落地状态。
+        diag("steer dx=" + String.format("%.2f", dx) + " dz=" + String.format("%.2f", dz)
+                + " yaw=" + String.format("%.0f", mod.getPlayer().getYaw())
+                + " fwd=" + String.format("%.2f", fwd) + " right=" + String.format("%.2f", right)
+                + " [" + heldInputs(in) + "]");
     }
 
     /**
@@ -153,6 +179,11 @@ public final class PillarJumpHelper {
     public static boolean step(AltoClef mod, Item[] materials) {
         BlockPos feet = mod.getPlayer().getBlockPos();
         BlockPos below = feet.down();
+        // (2026-09-13 诊断) 入口现场: 玩家脚块/支撑块/两格判定/分支走向。
+        diag("step feet=" + feet.toShortString() + " below=" + below.toShortString()
+                + " solid=" + WorldHelper.isSolid(mod, below)
+                + " solidDD=" + WorldHelper.isSolid(mod, below.down())
+                + " offAxis=" + String.format("%.2f", offAxisSq(mod, below)));
         // (2026-09-12 v19 人类垫塔时机) 站立/上升途中就把视线钉在脚下支撑面
         // —— 窗口一开准星已命中, 右键立刻能点; 旧代码只在窗口开时才 lookAt,
         // 腾空窗口仅几 tick, 转头来不及, 白白错过 (20260912-195050 hand=dirt
@@ -165,9 +196,11 @@ public final class PillarJumpHelper {
             // 站偏起跳头蹭开口边沿, 垂直速度被顶掉 = 永远跳不起来。
             if (offAxisSq(mod, below) > CENTER_JUMP_MAX) {
                 steerToCenter(mod, below);
+                diag("GROUND steer (offAxis=" + String.format("%.2f", offAxisSq(mod, below)) + ")");
                 return true;
             }
             mod.getInputControls().hold(Input.JUMP);
+            diag("GROUND jump [" + heldInputs(mod.getInputControls()) + "]");
             return true;
         }
         // 腾空放置窗口: 脚下是空气、其下是实体 (跳过 1 格后的经典窗口)。
@@ -183,7 +216,9 @@ public final class PillarJumpHelper {
                 && !mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(below)) {
             // 放置瞬间松跳, 避免连跳把放置窗口抢掉。
             mod.getInputControls().release(Input.JUMP);
-            return place(mod, below, materials);
+            boolean ok = place(mod, below, materials);
+            diag("PLACE try below=" + below.toShortString() + " ok=" + ok + " [" + heldInputs(mod.getInputControls()) + "]");
+            return ok;
         }
         // 腾空但窗口还没到 (上升途中): 继续按住跳, 视线保持钉在支撑面。
         // (2026-09-12 v21) 上升途中同步向中心收 (空中控制微弱但聊胜于无),
@@ -193,6 +228,7 @@ public final class PillarJumpHelper {
             steerToCenter(mod, below);
         }
         mod.getInputControls().hold(Input.JUMP);
+        diag("AIRBORNE hold-jump [" + heldInputs(mod.getInputControls()) + "]");
         return true;
     }
 
