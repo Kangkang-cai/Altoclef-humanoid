@@ -1126,6 +1126,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 best = p;
             }
         }
+        // (2026-09-13 视野可见) 探索选点此前【没有任何日志】→ "候选集被容量上限砍到
+        // 多少格"完全不可观测, 09-13 的误判(以为视野真有 16 格)就是这样来的。
+        // 这里记录候选集规模、是否触顶、以及候选集【实际覆盖的水平半径】coverR
+        // (对照名义 EXPLORE_SCAN_RADIUS): coverR 长期小于 EXPLORE_SCAN_RADIUS =
+        // 视野仍被截断, 应继续上调 bfsCapacityFor。
+        // 只对 ignoreExploredRegions=true(ExploreCaveTask) 打点, 避免 findNearbyCave
+        // 的每步扫描把日志刷满。
+        if (ignoreExploredRegions) {
+            int cap = bfsCapacityFor(EXPLORE_SCAN_RADIUS);
+            int coverR = 0;
+            for (BlockPos p : reachable) {
+                int d = Math.max(Math.abs(p.getX() - center.getX()), Math.abs(p.getZ() - center.getZ()));
+                if (d > coverR) coverR = d;
+            }
+            Debug.logToFile("altoclef_diag.log",
+                    "[CavePick] reachable=" + reachable.size()
+                            + (reachable.size() >= cap ? "(CAP HIT)" : "")
+                            + " coverR=" + coverR + "/" + EXPLORE_SCAN_RADIUS
+                            + " naturalMaxY=" + naturalMaxY
+                            + " exclude=" + (exclude == null ? 0 : exclude.size())
+                            + " best=" + (best == null ? "null(→done)" : best.toShortString())
+                            + " c=" + center.toShortString());
+        }
         return best;
     }
 
@@ -1152,7 +1175,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             Set<BlockPos> visited = new HashSet<>();
             Deque<BlockPos> queue = new ArrayDeque<>();
             queue.add(start);
-            while (!queue.isEmpty() && visited.size() < 512) {
+            int cap = bfsCapacityFor(radius);
+            while (!queue.isEmpty() && visited.size() < cap) {
                 BlockPos cur = queue.poll();
                 if (cur == null || !visited.add(cur)) continue;
                 for (int dy = -1; dy <= 1; dy++) {
@@ -1171,6 +1195,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 }
             }
             return visited;
+        }
+
+        /**
+         * (2026-09-13 容量上限参数化) BFS 收集的容量上限。
+         *
+         * 旧实现写死 512: 在空气密度高的洞穴里【半径 8 就能收满】(09-13 实测
+         * radius 8 → 464~512 块, 日志 reachable=512(CAP HIT) ×4 + 400-499 ×5),
+         * 于是 radius 16 的扫描在约 8.3 格处被 512 掐死 —— EXPLORE_SCAN_RADIUS=16
+         * 从未生效, 探索视野退化成 8 格。后果: 目标点间隔只有 4~6 格、在近场往复
+         * 横跳, 约 20 个到达点(每个 ±3 膨胀 =343 格)就把视野内空气全部标为已访问
+         * → pickNext 返回 null → 误判"洞已探索完"(09-13 实锤: done 时玩家
+         * 132,42,-232, 而洞延伸到 z=-258; 名义 16 格的视野本该覆盖到 z=-248)。
+         *
+         * 改为随水平半径增长: (2r+1)^2 是横截面格子数, ×4 给垂直方向留约 4 层。
+         * radius=16 → 33*33*4 = 4356, 足以扫完整个 33x33 水平面。
+         *
+         * 边界: radius <= CAVE_SCAN_RADIUS(8) 维持 512 不变 —— findNearbyCave 的
+         * 判据(/FIRE 频率)依赖它, 放大上限会改变行为, 属于本次改动之外的 scope。
+         */
+        private static int bfsCapacityFor(int radius) {
+            if (radius <= CAVE_SCAN_RADIUS) return 512;
+            int span = 2 * radius + 1;
+            return Math.max(512, span * span * 4);
         }
 
         // (2026-09-01 三维开阔度) 连通空气集合的 X/Z/Y 跨度是否都达到阈值。
