@@ -80,7 +80,18 @@ public class CollectFoodTask extends Task {
     private final double _unitsNeeded;
     private final TimerGame _checkNewOptionsTimer = new TimerGame(10);
     private SmeltInFurnaceTask _smeltTask = null;
+    // 终端资源任务槽 (到达型语义): 挖掘/采集/交互/合成/猎杀/拾取 —— 到达(或目的失效)
+    // 之前独占 tick, 不被"路边更近的同类目标"打断。打断它 = 白走 + baritone 路径作废
+    // (09-13 的 25 轮 10s 横跳正是这种打断)。发现通道不走这个槽。
     private Task _currentResourceTask = null;
+    // (2026-09-13 拆槽, 用户"随机探索的意义是发现目标, 不是到达那个随机选择的坐标")
+    // 探索是【过程型/发现】任务, 不是终端采集任务。原实现把它塞进 _currentResourceTask
+    // (与挖干草/收作物/杀羊同槽) → 入口早退在探索运行期间把每 tick 的发现扫描(地面掉落/
+    // 干草/作物/动物/浆果) 全部跳过 → 探索独占 tick 直到自己结束; 而它构造时未传
+    // biasSources → _hadBiasOnce 恒 false → _biasExhausted 永不置位 → 永不结束
+    // → 路过目标一律不管。过程型语义要求"每 tick 交回上层重判、发现即让路", 故拆出
+    // 独立槽位: 终端任务照旧独占 tick, 探索则每 tick 都要先让发现扫描过一遍。
+    private Task _exploreTask = null;
 
     // (2026-08-31 攒够一批再统熔炼 rev, 用户) 统一开烧的生肉阈值 = 目标 units 所需
     // 生肉估算数 × 该比例。原固定 4 块被用户否决; 改为按目标所需比例(默认 0.6, 可在
@@ -484,13 +495,19 @@ public class CollectFoodTask extends Task {
         // BiasedExploreTask.isEqual 是 identity(other==this), 若直接 return new,
         // 每 tick 都是新实例 → 框架判定不同 → 每 tick 重启、onStart 重置 _heading
         // 为随机 → 每走一格就换方向, 永远走不出去找食物(日志 09:53 Biased
-        // exploration 每 tick STOP/START)。存入 _currentResourceTask 交由上方 L255
-        // 复用同一实例, 方向持续才真正走得动。旧 TimeoutWanderTask 因 isEqual
-        // 用 instanceof+距离 不存在此问题, 换 BiasedExploreTask 后必须显式保存。
-        if (_currentResourceTask == null) {
-            _currentResourceTask = new BiasedExploreTask(true);
+        // exploration 每 tick STOP/START)。
+        // (2026-09-13 拆槽) 粘性复用改为存进独立槽 _exploreTask: 它不参与入口
+        // (_currentResourceTask != null ... return) 的"终端任务独占 tick"早退,
+        // 因此每 tick 都会先跑完发现扫描(掉落/干草/作物/动物/浆果), 只有全部扫不到
+        // 才回落到这里继续探索 —— 过程型语义: 成功 = 发现目标(不是到达那个随机坐标),
+        // 目的达成即让路。这是 09-13 "路过目标不管"的直接修复。
+        // 复用同一实例仍是硬要求(isEqual 是 identity): 每 tick new 会重启 onStart
+        // 把 _heading 重置为随机 → 每走一格换方向。仅当上一实例已结束(失败 10 次)
+        // 才换新实例 —— 换新会让框架真正重启它。
+        if (_exploreTask == null || _exploreTask.isFinished(mod)) {
+            _exploreTask = new BiasedExploreTask(true);
         }
-        return _currentResourceTask;
+        return _exploreTask;
     }
 
     @Override
