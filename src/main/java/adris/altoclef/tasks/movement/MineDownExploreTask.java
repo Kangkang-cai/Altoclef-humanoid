@@ -69,6 +69,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (找洞口, 防误判), 但【进洞后的探索目标选择】扫描更远 — collectConnectedAir
     // 以 EXPLORE_SCAN_RADIUS 为界, 探索段更长、推进更连贯, 不再 8 格一小段。
     private static final int EXPLORE_SCAN_RADIUS = 16;
+    // (2026-09-13 导航步长与视野解耦) 视野必须够大(EXPLORE_SCAN_RADIUS)才能判断
+    // "这条洞还有多长", 但【单次导航的目标】不能选在视野边缘 —— 探索是低优先级
+    // 支线, 父任务(挖隧道主线)每 5~10 秒就用 DestroyBlock 抢一次, 长距离目标永远
+    // 走不完。09-13 实锤: 视野修好(coverR=16/16)后首个目标 124,-8,-248 距玩家
+    // 140,-25,-264 有 22.6 格水平 + 17 格上升, 启动 3 秒就触发 JumpStuckResolver
+    // 挖障, 51 秒内 visited=0(零到达, 每次中断只回传"玩家当前位置"一个中心);
+    // 而修复前(视野被 512 上限砍成 8 格)目标只有 4~6 格, 54 秒走了 20 个点。
+    // 折中: 候选集仍按 EXPLORE_SCAN_RADIUS 收集(洞的延伸范围可见), 选目标只在
+    // NAV_STEP_MAX_DIST 格以内挑"离起点最远"的点 —— 保持"一致向外"语义, 同时保证
+    // 单次导航能在抢占窗口内完成。想调推进速度只需改这一个常量。
+    static final int NAV_STEP_MAX_DIST = 10;
     // (2026-09-01 三维开阔度判定, 取代旧 CAVE_AREA_THRESHOLD=40 空气计数)
     // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长通道。
     // 连通空气集合的 X/Z/Y 跨度分别达到下面阈值才算"开阔天然洞", 触发矿洞探索。
@@ -1115,6 +1126,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         double bestDistSq = Double.NEGATIVE_INFINITY;
         for (BlockPos p : reachable) {
             if (p.getY() > naturalMaxY) continue;
+            // (2026-09-13 导航步长上限) 视野里看得见、但不作为本次导航目标 ——
+            // 超出抢占窗口能走完的距离(见 NAV_STEP_MAX_DIST 注释)。
+            if (!p.isWithinDistance(center, NAV_STEP_MAX_DIST)) continue;
             if (isSelfDugAir(mod, p)) continue;
             if (exclude != null && exclude.contains(p)) continue;
             // (2026-09-03 区域记忆) 探索目标也不落到已探索洞穴区域 → 不会导航回刚
@@ -1147,6 +1161,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             + " naturalMaxY=" + naturalMaxY
                             + " exclude=" + (exclude == null ? 0 : exclude.size())
                             + " best=" + (best == null ? "null(→done)" : best.toShortString())
+                            + " navDist=" + (best == null ? "-"
+                                    : String.format("%.1f", Math.sqrt(best.getSquaredDistance(center))))
                             + " c=" + center.toShortString());
         }
         return best;
