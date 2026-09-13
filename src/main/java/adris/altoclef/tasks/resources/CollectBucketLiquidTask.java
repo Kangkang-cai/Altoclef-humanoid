@@ -85,6 +85,8 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // (2026-09-04 溯源任务实例, 用户"看到水流应定位水源") 持有当前溯源任务引用以读取
     // 失败状态; 溯源失败(gaveUp)时把起始流动水加入 _blacklist, 避免重试同一处。
     private TraceFlowingWaterToSourceTask _traceTask = null;
+    // (2026-09-13 v25) 溯源失败后的重试冷却 (static: 实例频繁重建会被绕过)。
+    private static long _traceRetryCooldownUntilMs = 0;
 
     // (2026-09-04 海洋中转头找陆地, 用户"扫描时配合视角转动, 使得陆地满足fov")
     // bot 上浮到海面后不能"透视"biome 直接知道陆地方向 — 像人类一样转头环顾,
@@ -250,6 +252,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
                     Debug.logMessage("[Diag-water] trace failed, blacklisting start "
                             + _traceTask.getStartPos().toShortString());
                 }
+                // (2026-09-13 v25) 失败即给全局溯源冷却, 防"new→秒放弃→再new"刷屏。
+                if (_traceTask.gaveUp()) {
+                    _traceRetryCooldownUntilMs = System.currentTimeMillis() + 15_000;
+                }
                 _traceTask = null;
             }
             Predicate<BlockPos> isFlowingWater = blockPos -> {
@@ -262,7 +268,13 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 return state.getBlock() == Blocks.WATER && !state.getFluidState().isStill();
             };
 
-            if (_traceTask == null && mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)) {
+            if (_traceTask == null && mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)
+                    // (2026-09-13 v25 防重建刷屏, 20260913-091045 实锤: "giving up
+                    // after 0 attempts" 每 50ms 连刷) 溯源放弃后 BlockTracker 里
+                    // 水流记忆仍在 → 下一 tick 立即 new 新实例 → 起点=null → 0
+                    // attempts 放弃 → 再 new, 无冷却死循环。冷却放 static (铁律:
+                    // 实例频繁重建, 实例层冷却会被绕过), 放弃后 15s 内不再发起。
+                    && System.currentTimeMillis() >= _traceRetryCooldownUntilMs) {
                 // 找到流动水，追踪到源头
                 setDebugState("Found flowing water, tracing to source...");
                 _traceTask = new TraceFlowingWaterToSourceTask(isFlowingWater);

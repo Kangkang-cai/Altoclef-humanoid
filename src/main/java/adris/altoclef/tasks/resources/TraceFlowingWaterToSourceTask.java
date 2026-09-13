@@ -30,6 +30,14 @@ public class TraceFlowingWaterToSourceTask extends Task {
     private int _traceAttempts = 0;
     private static final int MAX_TRACE_ATTEMPTS = 50;
     private final Set<BlockPos> _visited = new HashSet<>();
+    // (2026-09-13 v25 锁定追踪修复, 20260913-091045 实锤: 931 条 "tracing to"
+    // 每 50ms 换一格, <Approaching> 任务 46-53ms 即被顶掉 = 人根本不动) 旧 onTick
+    // 每 tick 找下一个更高 level 邻居并 new GetCloseToBlockTask —— 框架铁律
+    // "返回任务≠任务会跑完": 下一 tick 返回新实例, 旧的立刻 STOP, baritone 一步
+    // 都没走。修: 人类溯源行为 = 走到当前格【之后】再评估下一个上游格 ——
+    // 在途子任务未完成时每 tick 原样续租同一实例。
+    private Task _approachTask = null;
+    private BlockPos _approachTarget = null;
 
     public TraceFlowingWaterToSourceTask(Predicate<BlockPos> isFlowingWater) {
         _isFlowingWater = isFlowingWater;
@@ -43,6 +51,8 @@ public class TraceFlowingWaterToSourceTask extends Task {
         _traceAttempts = 0;
         _gaveUp = false;
         _visited.clear();
+        _approachTask = null;
+        _approachTarget = null;
     }
 
     @Override
@@ -59,6 +69,14 @@ public class TraceFlowingWaterToSourceTask extends Task {
             return null; // 找到了，任务完成
         }
 
+        // (2026-09-13 v25) 在途子任务未完成 → 续租同一实例, 不评估下一个目标。
+        // 到达 (GetCloseToBlockTask.isFinished) 后才落到底部的"推进下一格"。
+        if (_approachTask != null && _approachTarget != null
+                && _approachTarget.equals(_currentTracePos)
+                && !_approachTask.isFinished(mod)) {
+            return _approachTask;
+        }
+
         // 找相邻的 level 更高的水方块
         BlockPos higherLevel = findHigherLevelNeighbor(mod, _currentTracePos);
         if (higherLevel == null) {
@@ -69,13 +87,16 @@ public class TraceFlowingWaterToSourceTask extends Task {
             return new TimeoutWanderTask(5f);
         }
 
-        // 移动到更高 level 的位置
+        // 移动到更高 level 的位置 (只在真正推进时计数/记日志 —— 每 tick 一次
+        // 的旧口径让 attempts 2.5s 刷爆 50 上限, 931 条日志全是噪音)。
         _currentTracePos = higherLevel;
         _traceAttempts++;
         _visited.add(higherLevel);
 
         Debug.logMessage("TraceFlowingWater: tracing to " + higherLevel + " (attempt " + _traceAttempts + ")");
-        return new GetCloseToBlockTask(higherLevel);
+        _approachTarget = higherLevel;
+        _approachTask = new GetCloseToBlockTask(higherLevel);
+        return _approachTask;
     }
 
     /** (2026-09-04) 溯源是否已失败放弃(找不到源)。供父任务黑名单起点用。 */
