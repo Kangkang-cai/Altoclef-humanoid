@@ -108,6 +108,18 @@ public class CollectVisibleOresTask extends Task {
             // 生矿: 烧好后生铁跌破 32 会重新触发挖矿 (用户: 烧制产物也
             // 算进 32)。中途被 gear 任务拿去烧一部分同样成立。
             if (countedItems(mod, _activePlan) >= _activePlan.cap() || _active.isFinished(mod)) {
+                // (2026-09-13 批次收尾诊断) 用户"矿脉没挖完就回主线"现场取证:
+                // 分清是①达上限正常收工, 还是②近场判无活提前释放 (后者看 vis8 与
+                // GREEDY_NEAR_FIELD_RADIUS 能否覆盖矿脉延伸)。每批只打一条, 天然节流。
+                int have = countedItems(mod, _activePlan);
+                boolean capHit = have >= _activePlan.cap();
+                OreStat endSt = countAllVisible(mod).get(_activePlan);
+                Debug.logToFile("altoclef_diag.log", "[GreedyBatch] release item="
+                        + _activePlan.item() + " capHit=" + capHit
+                        + " have=" + have + "/" + _activePlan.cap()
+                        + " vis8=" + (endSt == null ? 0 : endSt.count)
+                        + " nearR=" + MineAndCollectTask.GREEDY_NEAR_FIELD_RADIUS
+                        + " player=" + mod.getPlayer().getBlockPos());
                 _active = null;
                 _activePlan = null;
                 _engagedLockLogged = false;

@@ -470,6 +470,25 @@ public class MineAndCollectTask extends ResourceTask {
 
     private static final double MINE_EVERYTHING_RANGE = 16;
 
+    /**
+     * (2026-09-13 贪婪矿脉收尾, 用户"矿脉没挖完就回主线") 贪婪批次的近场扫描半径。
+     *
+     * 旧口径 getNearFieldOreAt 硬编码 dx,dy,dz ∈ [-1,1] (3x3x3 = 27 块)。铁矿脉/钻石脉
+     * 常斜向延伸, 挖穿一块后下一块若落在 2 格外 (含对角), 3x3x3 扫不到 → 同 tick
+     * isFinished 判"近场无活" → 整批退出回主线 (用户现场: 挖了 17 颗铁, rem=11 未达
+     * 上限就交还 Portal 主线, logs 13:13:26 STOP by Going to dimension: NETHER)。
+     *
+     * 2 = 5x5x5 (125 块): 语义是"人挖开一簇矿后环顾四周顺手清掉的暴露面", 不是隔墙
+     * 透视 — 扫描直接读世界方块 (与旧 3x3x3 同一机制), 不含 LOS 放宽, 远处/被岩石
+     * 深埋的矿依旧不计入。非贪婪路径 (木头/工作台/床/羊毛) 保持 radius=1 行为不变。
+     * 回退: 改回 1 即恢复旧行为。
+     *
+     * 【必须同步三处调用点】getClosestTo (L848/L854, 决定"挖哪块") 与
+     * hasNearFieldTarget (L1339, 决定"还有没有活") 必须用同一半径 —— 否则出现
+     * "判还有活但找不到目标"的空转挂住 (L474-475 注释警告过的老问题)。
+     */
+    public static final int GREEDY_NEAR_FIELD_RADIUS = 2;
+
     private boolean hasNearbyMineableTarget(AltoClef mod) {
         // (2026-08-28 贪心=纯贴身) 贪心只看紧贴矿, 不把缓存里远处/被包住的矿
         // 当成"还有活"——否则会把贪心任务一直挂住又不让 getClosestTo 去挖。
@@ -845,13 +864,16 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它周围的 3x3x3:
             // 紧贴刚挖穿的连位矿下一 tick 就被看到并续挖 — 完全不需要缓存/节流,
             // 也不受挖矿位置远近影响 (锚定的是矿, 不是玩家)。
-            Optional<BlockPos> nearField = getNearFieldOreAt(mod, _miningPos);
+            // (2026-09-13) 半径统一由 nearR 决定 (贪婪 5x5x5 / 非贪婪 3x3x3),
+            // 与 hasNearFieldTarget 必须同口径, 见 GREEDY_NEAR_FIELD_RADIUS。
+            int nearR = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
+            Optional<BlockPos> nearField = getNearFieldOreAt(mod, _miningPos, nearR);
             if (nearField.isPresent()) {
                 return nearField.map(Object.class::cast);
             }
             if (_greedy) {
-                // (2026-08-28 贪心=纯贴身) 先认玩家近身 3x3x3 紧贴的矿 (起始/链尾)。
-                Optional<BlockPos> nearMine = getNearFieldOreAt(mod, mod.getPlayer().getBlockPos());
+                // (2026-08-28 贪心=纯贴身) 先认玩家近身紧贴的矿 (起始/链尾)。
+                Optional<BlockPos> nearMine = getNearFieldOreAt(mod, mod.getPlayer().getBlockPos(), nearR);
                 if (nearMine.isPresent()) {
                     return nearMine.map(Object.class::cast);
                 }
@@ -1224,12 +1246,21 @@ public class MineAndCollectTask extends ResourceTask {
          * center 为空 (还没开始挖) 时返回空, 由冷启动的缓存/世界扫描负责首个目标。
          */
         private Optional<BlockPos> getNearFieldOreAt(AltoClef mod, BlockPos center) {
+            return getNearFieldOreAt(mod, center, 1);
+        }
+
+        /**
+         * (2026-09-13 贪婪矿脉收尾) radius 版: 半边长 radius, 覆盖 (2r+1)^3。
+         * 非贪婪保持 radius=1 (3x3x3, 原行为); 贪婪批次用
+         * {@link #GREEDY_NEAR_FIELD_RADIUS} —— 见外层常量注释。
+         */
+        private Optional<BlockPos> getNearFieldOreAt(AltoClef mod, BlockPos center, int radius) {
             if (center == null) return Optional.empty();
             BlockPos best = null;
             double bestSq = Double.POSITIVE_INFINITY;
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dy = -radius; dy <= radius; dy++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
                         BlockPos p = center.add(dx, dy, dz);
                         if (p.equals(center)) continue;
                         if (_blacklist.contains(p)) continue;
@@ -1337,10 +1368,13 @@ public class MineAndCollectTask extends ResourceTask {
         /**
          * (2026-08-28) 近场是否有紧贴正在挖那块的可挖连位矿 (供 isFinished 判断)。 */
         boolean hasNearFieldTarget(AltoClef mod) {
-            Optional<BlockPos> m = getNearFieldOreAt(mod, _miningPos);
+            // (2026-09-13) 与非贪婪/贪婪各自的 getClosestTo 同口径, 见
+            // GREEDY_NEAR_FIELD_RADIUS: 半径不一致会"判还有活但找不到目标"空转。
+            int r = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
+            Optional<BlockPos> m = getNearFieldOreAt(mod, _miningPos, r);
             if (m.isPresent()) return true;
             // 贪心: 玩家近身也有紧贴矿也算"还有活", 任务不结束 (等 getClosestTo 派发)。
-            return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos()).isPresent();
+            return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos(), r).isPresent();
         }
 
         // (2026-09-08 无目标空转兜底) surface 目标(熔炉/工作台等)在全无目标时

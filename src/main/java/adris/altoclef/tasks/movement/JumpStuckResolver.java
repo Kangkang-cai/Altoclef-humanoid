@@ -113,6 +113,27 @@ public final class JumpStuckResolver {
     private static final int SAME_POS_DIG_LIMIT = 2;
     private static BlockPos _lastDigPos = null;
     private static int _digCount = 0;
+
+    // ===== (2026-09-13) 挖掘豁免: 正在破坏方块时不判"跳跃卡死" =====
+    // 用户实锤 (会话 20260913-122323, 前往传送门长途导航): 目标 (167,87,-453) 距
+    // bot 300+ 格且垂直差 130 格, 现场实心岩层只能挖过去。baritone 挖障途中
+    // **水平速度天然为 0** (人在挖方块), 且持续按住 MOVE_FORWARD → 三选一证据
+    // (强制前进) 恒成立 → 每 (检测 20 tick + 挖掘 ~20 tick + 冷却 20 tick) = 3 秒
+    // 就判一次卡死 → forceCancel() 把 baritone 刚算好的长途路径作废、派一格挖障
+    // → 重算 A*。tasks.log 实锤: 55 分钟 874 次 <Destroy block>, z 只推进 138 格,
+    // 每次挖格伴随一次完整重算 = 用户说的"频繁重新导航"。
+    //
+    // 对齐既有语义: MovementProgressChecker.check() (util/progresscheck:40) 对
+    // "正在破坏方块"本就有专门分支 — 走 _mineChecker 判挖掘进度, **不计距离失败**。
+    // 本处是同一件事在 JumpStuckResolver 里的缺失, 不是新增策略。
+    //
+    // 只做"不累计 streak"这一件事: 真卡死 (顶墙/弹跳) 时 bot 并未在挖方块,
+    // isBreakingBlock()=false, 检测与处置链路原样保留。
+    private static int _digGuardSinceTick = 0;
+    /** 豁免连续生效多久后开始打诊断 (5s): 观察"豁免期间 baritone 是否真在推进"。 */
+    private static final int DIG_GUARD_LOG_TICKS = 100;
+    private static final TimerGame _digGuardLogTimer = new TimerGame(5);
+
     /** 共享 wander 任务 (强制脱离用)。 */
     private static final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
 
@@ -162,6 +183,28 @@ public final class JumpStuckResolver {
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] order released (done=" + done
                     + " leaseOver=" + leaseOver + ") at " + mod.getPlayer().getBlockPos());
         }
+
+        // (2026-09-13) 挖掘豁免 —— 见字段区注释。必须在读 velocity 之前返回:
+        // 挖掘中 hSpeed 恒 0, 走下面的 streak 累积只会把正常挖掘读成卡死。
+        if (mod.getControllerExtras().isBreakingBlock()) {
+            int digNow = WorldHelper.getTicks();
+            if (_digGuardSinceTick == 0) {
+                _digGuardSinceTick = digNow;
+                // TimerGame 新建即到期, 首次进入必须显式 reset。
+                _digGuardLogTimer.reset();
+            } else if (digNow - _digGuardSinceTick >= DIG_GUARD_LOG_TICKS
+                    && _digGuardLogTimer.elapsed()) {
+                _digGuardLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[DigGuard] mining exemption held "
+                        + (digNow - _digGuardSinceTick) + " ticks, pos="
+                        + mod.getPlayer().getBlockPos()
+                        + " baritonePathing=" + mod.getClientBaritone().getPathingBehavior().isPathing()
+                        + " breaking=" + mod.getControllerExtras().getBreakingBlockPos());
+            }
+            resetStreak();
+            return null;
+        }
+        _digGuardSinceTick = 0;
 
         Vec3d v = mod.getPlayer().getVelocity();
         boolean hSlow = Math.hypot(v.x, v.z) < HSPEED_STUCK;
