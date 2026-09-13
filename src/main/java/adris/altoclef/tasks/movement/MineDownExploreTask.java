@@ -106,11 +106,23 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 自挖网络里天然空气≈0 → 永不误判; 挖穿进真洞时洞内天然空气连通 → 正常触发。
     private static final int CAVE_NATURAL_AIR_MAX_Y = 45;
     // (2026-09-02 钻石任务矿洞深度上界, 用户"下挖到合法深度却导航到上方矿洞")
-    // 矿洞认定 + 探索导航都只认【目标深度附近】的天然空气: y 不能高于
-    // targetY + 本缓冲 (钻石 targetY=-24 → 只认 -8 以下)。否则 bot 在钻石层
-    // 挖洞时, 连通空气向上蔓延到的浅层洞会被当成"当前深度该探索的洞" → 导航
-    // 离开钻石层。package-private 供 ExploreCaveTask 复用。
-    static final int CAVE_ABOVE_TARGET_BUFFER = 16;
+    // 矿洞认定 + 探索导航都只认【目标矿带附近】的天然空气。
+    // (2026-09-13 双边窗口, 用户"挖钻石时只有高度范围内的矿洞才会触发探索探索")
+    // 原实现是【单边上限】: naturalMaxY = targetY + 16, 没有下限。两个问题:
+    //   1) 16 太宽 → 钻石层 -59 时会认到 y=-43 的浅层洞, bot 被上方洞导航走;
+    //   2) 无下限 → 深部目标不会拒绝"掉到更深处"的洞。
+    // 改为围绕【目标矿带】(不是单点 _targetY) 的双边窗口:
+    //   上限 = 带上限 + CAVE_ABOVE_TARGET_BUFFER
+    //   下限 = 带下限 - CAVE_BELOW_TARGET_BUFFER
+    // 各带实际窗口 (ABOVE/BELOW 均取 8):
+    //   钻石 [-59,-53] → [-67, -45] → 受世界底约束为 [-64,-45]  (峰值段完整覆盖)
+    //   金   [-24, 0]  → [-32,   8]   (金峰值 -16, 窗口内)
+    //   铁   [  5,30]  → [ -3,  38]   (铁带隧道 5~30, 窗口内)
+    //   兜底 [ 50,50]  → [ 42,  45]   (注: CAVE_EXPLORE_MIN_DEPTH_Y=45 已先拦下)
+    // 语义: 隧道挖到目标层后, 只有【与本层高度相当】的洞才值得进去; 向上蔓延到
+    // 浅层、或落在更深处的洞都不再吸引 bot。
+    static final int CAVE_ABOVE_TARGET_BUFFER = 8;
+    static final int CAVE_BELOW_TARGET_BUFFER = 8;
     // 天然空气的最少数量: 配合三维跨度, 过滤"恰好一条天然窄缝穿过扫描区"的小概率情形。
     private static final int MIN_NATURAL_CAVE_AIR = 24;
     // 自挖位置记录上限(每维度, 容量封顶, 超限逐出最旧并重写文件), 防内存/文件无限增长。
@@ -175,11 +187,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // Tunnel mode descends 1 block every this many steps (a walkable 2:1 slope).
     private static final int TUNNEL_DESCEND_EVERY = 2;
     // Tunnels never descend below this Y — at the floor they run flat, which is
-    // exactly how humans branch-mine for diamonds. 1.18 diamond band: stop
-    // sinking around y=-24 and branch-mine flat from there.
+    // exactly how humans branch-mine for diamonds.
+    // (2026-09-13 深度修正) 旧值 -24 源于"钻石带 = -24"的错误前提, 把主世界隧道
+    // 硬地板锁死在 -24, 使钻石挖掘永远上不了峰值层 (floorY=max(TUNNEL_MIN_Y,带下限)
+    // 被截断, 光改带无效)。改 -59 与钻石峰值对齐, 且在基岩起伏带 (-60~-64) 之上。
+    // 对其它带无副作用: 金 [-24,0]→max(-59,-24)=-24, 铁 [5,30]→max(-59,5)=5,
+    // 兜底 [50,50]→50, 均与原值一致 (带下限主导, 地板不参与)。
     // (2026-09-05 下界高度概念) 此下限只适用于主世界: 下界基岩在 y=0~4, 照搬会把
     // bot 一路缓降到 y≈5 被基岩挡死 (实测)。下界隧道不再缓降 (floor=目标高度, 平挖)。
-    private static final int TUNNEL_MIN_Y = -24;
+    private static final int TUNNEL_MIN_Y = -59;
     // (2026-09-05 下界基岩层逃生, 用户"挖到基岩挡住应向上挖矿洞回到Y=70再随便探索")
     // 下界玩家 y 低于此值 → 紧急进入上行模式: 45° 楼梯向上挖回目标高度。
     // 基岩顶面 y=4, 取 10 留出安全缓冲。
@@ -550,7 +566,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     _caveExploreTimer.reset();
                     // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
                     // (其落点被强制抬到 48 格外地表, 从未真正走进洞里)。
-                    _subTask = new ExploreCaveTask(_targetY);
+                    _subTask = new ExploreCaveTask(_targetY, caveWindowMinY(), caveWindowMaxY());
                     return _subTask;
                 }
             }
@@ -584,7 +600,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 // (2026-09-01 真正进洞) 专用洞内导航任务: 直奔最远天然洞空气,
                 // 到达后重扫跟深(见 ExploreCaveTask), 25s 看门狗兜底不影响挖矿主线。
                 // (2026-09-02 传 targetY) 导航目标限目标深度附近, 不导航到上方浅层。
-                _subTask = new ExploreCaveTask(_targetY);
+                _subTask = new ExploreCaveTask(_targetY, caveWindowMinY(), caveWindowMaxY());
                 return _subTask;
             }
         }
@@ -717,11 +733,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // Descend 1 block every TUNNEL_DESCEND_EVERY steps (walkable slope),
             // clamped at the floor so we sink toward the target band and then
             // branch-mine flat. (2026-09-05 下界高度概念) 下界 floor=目标高度 → 不缓降,
-            // 平挖 — 主世界 TUNNEL_MIN_Y=-24 是钻石层逻辑, 下界照搬会一路挖到基岩。
+            // 平挖 — 主世界 TUNNEL_MIN_Y(-59) 是钻石层逻辑, 下界照搬会一路挖到基岩。
             // (2026-09-10 带感知下限, 用户"挖铁不应始终呆在 y=负值") 主世界 floor =
             // max(TUNNEL_MIN_Y, 带下限): 铁带 [5,30] 隧道缓降到 y=5 为止, 不再一路
-            // 沉到 -24 平挖; 钻石带 {-24,-24} 下限不变; {50,50} 兜底带回到"平挖在
-            // 50"的原意 (旧实现会意外缓沉到 -24)。
+            // 沉到地板平挖; 钻石带 [-59,-53] → max(-59,-59)=-59 = 钻石峰值层;
+            // {50,50} 兜底带回到"平挖在 50"的原意 (旧实现会意外缓沉到 -24)。
             int floorY = _nether ? _targetY : Math.max(TUNNEL_MIN_Y, _targetYMin);
             int drop = Math.max(0, Math.min(_digStart.getY() - floorY, k / TUNNEL_DESCEND_EVERY));
             ground = _digStart.add(k * _dirX, -drop, k * _dirZ);
@@ -952,6 +968,26 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     public boolean isNetherTask() { return _nether; }
     public static BlockPos getLastFireAnchor() { return _lastFireAnchor; }
 
+    /**
+     * (2026-09-13 探洞双边窗口) 本次任务认可为"本层矿洞"的天然空气高度【上限】。
+     * 围绕目标【矿带上限】而非随机出来的单点 _targetY —— 单点会让同一条带里
+     * 随机到高值的实例把整条带的上沿都算进来 (钻石 -53 时 -53+8=-45 与
+     * -59+8=-51 只差 6 格, 但语义上应当统一用带的上沿)。
+     * 仍受 CAVE_NATURAL_AIR_MAX_Y 全局硬顶约束 (防自挖楼梯连到地表)。
+     */
+    int caveWindowMaxY() {
+        return Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetYMax + CAVE_ABOVE_TARGET_BUFFER);
+    }
+
+    /**
+     * (2026-09-13 探洞双边窗口) 本次任务认可为"本层矿洞"的天然空气高度【下限】。
+     * 围绕目标【矿带下限】—— 隧道会缓降到 floorY=max(TUNNEL_MIN_Y, 带下限),
+     * 所以带下限就是 bot 实际活动的最低层, 再往下 BELOW 格内的洞仍值得看一眼。
+     */
+    int caveWindowMinY() {
+        return _targetYMin - CAVE_BELOW_TARGET_BUFFER;
+    }
+
     private static String exploredCaveKey(AltoClef mod) {
         String levelName = "?";
         try {
@@ -1118,8 +1154,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      *   - exclude 由调用方传入 visited ∪ failed — 到过的点绝不回头。
      * 无天然空气 → null(洞已探索完/根本不是洞)。
      */
-    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int maxY) {
-        return pickFarthestNaturalCaveAir(mod, center, fromRef, exclude, maxY, false);
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int minY, int maxY) {
+        return pickFarthestNaturalCaveAir(mod, center, fromRef, exclude, minY, maxY, false);
     }
 
     /**
@@ -1127,16 +1163,20 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 探索目标选择豁免区域记忆 — FIRE 时已把本洞标记为已探索, 若选点仍排除该区域,
      * 本次探索自己的目标会被剔空而立即结束。探索任务天然只由 FIRE 创建, 恒豁免。
      */
-    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int maxY, boolean ignoreExploredRegions) {
+    static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int minY, int maxY, boolean ignoreExploredRegions) {
         // 探索目标选择用更远的 EXPLORE_SCAN_RADIUS, 探索段更长(用户"得调远一点")。
         Set<BlockPos> reachable = collectConnectedAir(mod, center, EXPLORE_SCAN_RADIUS);
         // (2026-09-02 目标深度上界) 导航目标也只选目标深度附近的天然空气, 防止
         // 钻石任务在洞内向外推时把目标选到上方浅层, 离开钻石层。
         int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, maxY);
+        int naturalMinY = minY;
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
         for (BlockPos p : reachable) {
             if (p.getY() > naturalMaxY) continue;
+            // (2026-09-13 双边窗口) 导航目标也不落到窗口下方 — 与 findNearbyCave
+            // 的认定窗口同源, 否则会出现"认定时会拒、选点时会选"的判据撕裂。
+            if (p.getY() < naturalMinY) continue;
             // (2026-09-13 导航步长上限) 视野里看得见、但不作为本次导航目标 ——
             // 超出抢占窗口能走完的距离(见 NAV_STEP_MAX_DIST 注释)。
             if (!p.isWithinDistance(center, NAV_STEP_MAX_DIST)) continue;
@@ -1308,14 +1348,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 自挖网络天然空气≈0 → 数量闸门直接拦下; 挖穿进真洞 → 洞内天然空气
         // 经自挖口连通进集合, 数量+三维跨度均达标 → 正常触发。
         Set<BlockPos> naturalAir = new HashSet<>();
-        // (2026-09-02 目标深度上界) 只认目标深度附近的天然空气: 钻石任务在 -24 时,
-        // -8 以上的浅层洞空气不计入 — 防止"下挖到合法深度却被上方矿洞导航走"。
-        int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetY + CAVE_ABOVE_TARGET_BUFFER);
+        // (2026-09-13 双边窗口) 只认与目标矿带高度相当的天然空气: 上限滤掉向上
+        // 蔓延的浅层洞(防"下挖到合法深度却被上方矿洞导航走"), 下限滤掉更深处的
+        // 洞(防"被下方溶洞拖离本层")。窗口推导见 caveWindowMaxY/MinY。
+        int naturalMaxY = caveWindowMaxY();
+        int naturalMinY = caveWindowMinY();
         // (2026-09-06 闸门级诊断) 逐原因计数: 天然空气不足时能直接看出是被
-        // 高度上界/自挖记忆/已探索区域哪一方吃掉的, 以及 BFS 512 上限是否饱和。
-        int aboveMaxY = 0, selfDugCount = 0, exploredCount = 0;
+        // 高度上界/下界/自挖记忆/已探索区域哪一方吃掉的, 以及 BFS 512 上限是否饱和。
+        int aboveMaxY = 0, belowMinY = 0, selfDugCount = 0, exploredCount = 0;
         for (BlockPos p : reachableAir) {
             if (p.getY() > naturalMaxY) { aboveMaxY++; continue; }
+            if (p.getY() < naturalMinY) { belowMinY++; continue; }
             if (isSelfDugAir(mod, p)) { selfDugCount++; continue; }
             // (2026-09-03 区域记忆) 排除已探索洞穴区域内的空气: 整片洞区上次已探索完,
             // 本次连同 team 一起剔除 → 不再触发进洞 (用户"同一个矿洞打转", 防反复进)。
@@ -1327,8 +1370,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // reachable 规模(BFS 512 上限是否打满)、逐原因剔除计数与目标深度上界。
             logCaveScanDiag(mod, center, "REJECT naturalAir=" + naturalAir.size() + "<" + MIN_NATURAL_CAVE_AIR
                     + " reachable=" + reachableAir.size() + (reachableAir.size() >= 512 ? "(CAP HIT)" : "")
-                    + " aboveMaxY=" + aboveMaxY + " selfDug=" + selfDugCount + " explored=" + exploredCount
-                    + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY);
+                    + " aboveMaxY=" + aboveMaxY + " belowMinY=" + belowMinY + " selfDug=" + selfDugCount + " explored=" + exploredCount
+                    + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY + " naturalMinY=" + naturalMinY);
             return Optional.empty();
         }
         // (2026-09-01 三维开阔度判定, 用户"又把自己的洞当成矿洞") 天然洞与
@@ -1369,8 +1412,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 个"natural"里自挖/高度/区域记忆各吃掉多少, 定位分类漏洞缺证据。补齐。
         logCaveScanDiag(mod, center, (best != null ? "FIRE best=" + best.toShortString() : "REJECT no-neighbor x" + noNeighbor)
                 + " natural=" + naturalAir.size() + " reachable=" + reachableAir.size() + (reachableAir.size() >= 512 ? "(CAP HIT)" : "")
-                + " aboveMaxY=" + aboveMaxY + " selfDug=" + selfDugCount + " explored=" + exploredCount
-                + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY + " c=" + center.toShortString());
+                + " aboveMaxY=" + aboveMaxY + " belowMinY=" + belowMinY + " selfDug=" + selfDugCount + " explored=" + exploredCount
+                + " targetY=" + _targetY + " naturalMaxY=" + naturalMaxY + " naturalMinY=" + naturalMinY + " c=" + center.toShortString());
         return Optional.ofNullable(best);
     }
 

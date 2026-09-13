@@ -61,16 +61,29 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-11 重启保状态) 已初始化过洞探索状态; 重启(打断恢复)不清进度。
     private boolean _startedOnce = false;
     // (2026-09-02 目标深度) 钻石任务等深挖目标下, 探索导航只选目标深度附近的
-    // 天然空气 (maxY = targetY + CAVE_ABOVE_TARGET_BUFFER), 防止在洞里向外推时
-    // 把目标选到上方浅层、离开钻石层 (用户"下挖到合法深度却导航到上方矿洞")。
+    // 天然空气, 防止在洞里向外推时把目标选到上方浅层、离开钻石层
+    // (用户"下挖到合法深度却导航到上方矿洞")。
+    // (2026-09-13) 单边上限升级为双边窗口 [_windowMinY, _windowMaxY], 值由
+    // MineDownExploreTask 传入, 与该侧的洞穴认定窗口同源。
     private final int _targetY;
+    // (2026-09-13 双边窗口) 洞内导航选点的天然空气高度窗口。与 findNearbyCave 的
+    // 认定窗口【同源】(由 MineDownExploreTask.caveWindowMinY/MaxY 传入),
+    // 避免"认定时拒绝、选点时选中"的判据撕裂 (v7 教训: 同一概念必须同判据源)。
+    private final int _windowMinY;
+    private final int _windowMaxY;
 
     public ExploreCaveTask() {
-        this(10);
+        this(10, Integer.MIN_VALUE, 10 + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER);
     }
 
     public ExploreCaveTask(int targetY) {
+        this(targetY, Integer.MIN_VALUE, targetY + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER);
+    }
+
+    public ExploreCaveTask(int targetY, int windowMinY, int windowMaxY) {
         _targetY = targetY;
+        _windowMinY = windowMinY;
+        _windowMaxY = windowMaxY;
     }
 
     @Override
@@ -87,6 +100,7 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
         Debug.logToFile("altoclef_diag.log",
                 "[CaveExploreDiag]\tExploreCaveTask STARTED at "
                         + mod.getPlayer().getBlockPos().toShortString()
+                        + " window=[" + _windowMinY + "," + _windowMaxY + "]"
                         + (_startedOnce ? " (resume, visited=" + _visited.size() + " kept)" : ""));
         _progressChecker.reset();
         if (_startedOnce) {
@@ -158,7 +172,7 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-07 FIRE 时标记配套) 本任务只由 FIRE 创建, 而 FIRE 已把本洞标记为
         // 已探索区域 → 选点必须豁免区域记忆, 否则自己的目标被剔空, 探索立即结束。
         return MineDownExploreTask.pickFarthestNaturalCaveAir(mod, center, _exploreStart, exclude,
-                _targetY + MineDownExploreTask.CAVE_ABOVE_TARGET_BUFFER, true);
+                _windowMinY, _windowMaxY, true);
     }
 
     /**

@@ -1806,7 +1806,7 @@ public class MineAndCollectTask extends ResourceTask {
                 if (block == Blocks.IRON_ORE || block == Blocks.DEEPSLATE_IRON_ORE) {
                     // (2026-09-10, 用户"挖铁不应始终呆在 y=负值, 应往上走回 y=5~30,
                     // 非严格值") 铁带取 [5, 30]: 探索隧道被带下限兜住不再沉到负值
-                    // (旧 {50,50} + TUNNEL_MIN_Y=-24 会一路缓沉到 -24 平挖), 深陷
+                    // (旧 {50,50} + 当时地板会一路缓沉到地板平挖), 深陷
                     // 负值时上行楼梯爬回带内 (MineDownExploreTask 主世界上行)。
                     return new int[]{5, 30};
                 }
@@ -1819,8 +1819,9 @@ public class MineAndCollectTask extends ResourceTask {
                     // 旧实现没有金矿分支 → 落到最后兜底 {50,50} → 在 y=50 平挖,
                     // 而金矿生成上限只到 y=32, y=50 处金矿近乎为 0 → "找金子做
                     // 金靴"永远挖不到矿, 叠加金靴链本身无超时 → 永久停在主世界。
-                    // 带取 [-24, 0]: 整段落在富集层, 下限与 TUNNEL_MIN_Y=-24 对齐
-                    // (floorY=max(TUNNEL_MIN_Y, 带下限)=-24, 不依赖截断); 上限 0
+                    // 带取 [-24, 0]: 整段落在富集层, floorY=max(TUNNEL_MIN_Y,-24)
+                    // =-24 由【带下限】主导 (TUNNEL_MIN_Y 已于 09-13 放开到 -59,
+                    // 不影响本带); 上限 0
                     // 使带内随机高度仍全部在石/深板岩金矿区间, 避免随机到高处后
                     // 还要长距离下挖。带下限为负 → ascendTriggerY() 返回
                     // MIN_VALUE, 不触发上行爬升, 保持"下楼梯到带内再平挖"语义。
@@ -1830,11 +1831,15 @@ public class MineAndCollectTask extends ResourceTask {
             }
             for (Block block : _blocks) {
                 if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
-                    // 1.18 diamond band: dig down to y=-24, then MineDownExploreTask
-                    // switches to horizontal branch-mining at that depth
-                    // (TUNNEL_MIN_Y matches). Starting higher wastes the run
-                    // above the diamond band.
-                    return new int[]{-24, -24};
+                    // (2026-09-13 钻石深度带修正, 用户"钻石深度改一下")
+                    // 1.18.2 钻石生成 y=-64~16, 分布自下向上单调递减, 峰值 y=-59。
+                    // 旧值 {-24,-24} 的注释 "1.18 diamond band" 与事实不符 — -24 处
+                    // 密度只有峰值区的几分之一。实锤 (20260913-135927): 300s 里
+                    // diamond 只从 0 涨到 2, [DiamondCollect] GAVE UP cumulative=300037ms,
+                    // bot 全程 y 分布 y=-24(230次)/-25(114)/-28(89) — 六成时间在
+                    // 错误深度平挖。新带 [-59,-53]: 覆盖峰值 -59, 上限 -53 让带内
+                    // 随机仍在钻石富集段 (隧道 floorY=max(TUNNEL_MIN_Y,-59)=-59)。
+                    return new int[]{-59, -53};
                 }
             }
             return new int[]{50, 50}; // Coal/stone fallback (铁已专属 [5,30] 带, 见上).
