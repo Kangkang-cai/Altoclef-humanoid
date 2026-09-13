@@ -80,6 +80,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // NAV_STEP_MAX_DIST 格以内挑"离起点最远"的点 —— 保持"一致向外"语义, 同时保证
     // 单次导航能在抢占窗口内完成。想调推进速度只需改这一个常量。
     static final int NAV_STEP_MAX_DIST = 10;
+    // (2026-09-13 垂直可达性, 修 NAV_STEP_MAX_DIST 的副作用) NAV_STEP_MAX_DIST 用的是
+    // 3D 距离(isWithinDistance), 垂直分量能吃满全部预算 —— 实锤 09-13 13:08:15
+    // best=247,-39,28 c=246,-48,27 navDist=9.1 = (dx1,dy9,dz1), 目标在【正上方 9 格】。
+    // 地下洞穴里垂直上升要垫方块/找斜坡; 纯空腔(四周 9 格全 air)里做不到 → 水平速度
+    // 恒 0 → JumpStuckResolver 判"卡住", 又因无阻挡可挖 → "no obstruction -> forceCancel"
+    // 反复打断爬升(09-13 会话 129 次 ORDER 里 66 次 no obstruction, onGround=false 占 50)。
+    // 上下不对称: 向上靠跳跃/垫方块(严格), 向下重力帮忙(宽松)。两个上限分别建模。
+    // 13:08 段实测 dy 分布: 向下段(玩家从 y-24 沉到 y-54)全在 -1~-6, 属正常沿洞下坡;
+    // 向上段(玩家从 y-54 爬回 y-37)出现 +6/+9, 与 JumpStuck 触发点一一对应。
+    static final int NAV_STEP_MAX_DY_UP = 4;
+    static final int NAV_STEP_MAX_DY_DOWN = 8;
     // (2026-09-01 三维开阔度判定, 取代旧 CAVE_AREA_THRESHOLD=40 空气计数)
     // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长通道。
     // 连通空气集合的 X/Z/Y 跨度分别达到下面阈值才算"开阔天然洞", 触发矿洞探索。
@@ -1129,6 +1140,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // (2026-09-13 导航步长上限) 视野里看得见、但不作为本次导航目标 ——
             // 超出抢占窗口能走完的距离(见 NAV_STEP_MAX_DIST 注释)。
             if (!p.isWithinDistance(center, NAV_STEP_MAX_DIST)) continue;
+            // (2026-09-13 垂直可达性) 3D 距离不约束垂直分量 → 目标可能落在正上方
+            // 9 格(纯空腔里无落脚点, 上不去 → JumpStuck 反复 forceCancel)。见常量注释。
+            int dy = p.getY() - center.getY();
+            if (dy > NAV_STEP_MAX_DY_UP || dy < -NAV_STEP_MAX_DY_DOWN) continue;
             if (isSelfDugAir(mod, p)) continue;
             if (exclude != null && exclude.contains(p)) continue;
             // (2026-09-03 区域记忆) 探索目标也不落到已探索洞穴区域 → 不会导航回刚
@@ -1163,6 +1178,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             + " best=" + (best == null ? "null(→done)" : best.toShortString())
                             + " navDist=" + (best == null ? "-"
                                     : String.format("%.1f", Math.sqrt(best.getSquaredDistance(center))))
+                            + " dy=" + (best == null ? "-" : (best.getY() - center.getY()))
                             + " c=" + center.toShortString());
         }
         return best;
