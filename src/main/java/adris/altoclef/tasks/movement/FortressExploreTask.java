@@ -7,8 +7,8 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.trackers.KnowledgeMemory;
+import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalNear;
-import baritone.api.pathing.goals.GoalXZ;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
@@ -96,6 +96,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double RANDOM_JITTER_DEG = 5;
     // 外围探索连续失败的容忍次数 (超过后本任务结束, 交给上层重决策/兜底)。
     private static final int MAX_FAIL_COUNT = 10;
+    // (2026-09-13 导航目标循环) 远征目标: 走到目标点水平 R 格内【任意高度】即到,
+    // 不要求站上目标柱。GoalXZ 精确柱语义在高地/峡谷地形会逼 baritone 出
+    // "sneak-bridging 数十格" 畸形路径 (cost>3 yolo), 段间重规划 7M 节点 4s 一轮,
+    // 执行两步一停 (走两步停一下循环, 20260913-211736 实锤)。到达判定半径须
+    // >= 目标半径, 否则 baritone 停在 4.4 格而到达判 4 格 → 永远差一点, 无限重设。
+    private static final double EXPEDITION_GOAL_RADIUS = 4.5;
+    private static final double EXPEDITION_ARRIVE_XZ = 5;
     // (2026-09-13 远征取证) 诊断周期 200 tick = 10s; 距锚点半径每增长 128 格
     // 额外打一行 —— 此前日志里没有任何坐标/群系遥测, 无法证明"是否真在远征"。
     private static final int EXPEDITION_DIAG_INTERVAL_TICKS = 200;
@@ -560,20 +567,53 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // 外围模式: 带方向感的游走 (音效 > 看见的下界砖 > 结构推断 > 随机)
     // ------------------------------------------------------------------ //
 
-    /** 水平面 (xz) 欧氏距离。外围目标用 GoalXZ, 到达判定必须同为 2D。 */
+    /** 水平面 (xz) 欧氏距离。外围目标用 GoalXZWithin, 到达判定必须同为 2D。 */
     private static double xzDistance(BlockPos a, BlockPos b) {
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
         return Math.sqrt(dx * dx + dz * dz);
     }
 
+    /**
+     * (2026-09-13 导航目标循环) 水平半径目标: 站到目标点水平 radius 格内任意
+     * 高度即达成。baritone API 没有"xz within"目标类型 —— GoalXZ 是精确柱语义,
+     * 目标柱表面在高地/悬崖顶 (砖块线索 y=96, bot y=64) 时 baritone 只能给出
+     * cost>3 的 sneak-bridge 畸形路径, 执行两步即失效, 4s 一轮全量重规划
+     * (700 万节点, 规划期不按键) → "走两步停一下"死循环。
+     * 远征语义只需要水平净位移, 不需要站上某根柱子, 半径语义正好。
+     */
+    private class GoalXZWithin implements Goal {
+        private final double _cx, _cz, _radiusSq;
+
+        GoalXZWithin(BlockPos target, double radius) {
+            _cx = target.getX() + 0.5;
+            _cz = target.getZ() + 0.5;
+            _radiusSq = radius * radius;
+        }
+
+        @Override
+        public boolean isInGoal(int x, int y, int z) {
+            double dx = x + 0.5 - _cx;
+            double dz = z + 0.5 - _cz;
+            return dx * dx + dz * dz <= _radiusSq;
+        }
+
+        @Override
+        public double heuristic(int x, int y, int z) {
+            double dx = x + 0.5 - _cx;
+            double dz = z + 0.5 - _cz;
+            // 估计剩余代价 = 水平距离 - 半径, 已在圈内则为 0。
+            return Math.max(0, Math.sqrt(dx * dx + dz * dz) - Math.sqrt(_radiusSq));
+        }
+    }
+
     private Task tickOutside(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
 
-        // (2026-09-13 浮空目标) 到达判定改 2D: GoalXZ 只约束 xz, 站到目标列任意
-        // 高度都算到。旧 3D isWithinDistance(3) 配 GoalXZ 会因 y 差 >3 判"没到",
-        // 卡到 progress 超时才换目标, 白走。
-        if (_currentTarget == null || xzDistance(mod.getPlayer().getBlockPos(), _currentTarget) <= 4) {
+        // (2026-09-13 浮空目标) 到达判定改 2D: GoalXZWithin 只约束水平距离, 站到
+        // 目标点水平 R 格内任意高度都算到。旧 3D isWithinDistance(3) 会因 y 差
+        // >3 判"没到", 卡到 progress 超时才换目标, 白走。
+        if (_currentTarget == null || xzDistance(mod.getPlayer().getBlockPos(), _currentTarget) <= EXPEDITION_ARRIVE_XZ) {
             // (2026-09-13) 到达即"查讫": 记忆推断目标扑空一次就登记, 不再去
             // 同一片记忆区反复撞 (getCandidateAreas 每次随机重生成候选点)。
             if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
@@ -590,7 +630,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
             _progress.reset();
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZ(_currentTarget.getX(), _currentTarget.getZ()));
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZWithin(_currentTarget, EXPEDITION_GOAL_RADIUS));
             return null;
         }
 
@@ -607,7 +647,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZ(_currentTarget.getX(), _currentTarget.getZ()));
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZWithin(_currentTarget, EXPEDITION_GOAL_RADIUS));
         }
         setDebugState("Exploring the nether (human-like)");
         return null;
