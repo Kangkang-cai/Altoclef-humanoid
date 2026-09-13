@@ -38,6 +38,13 @@ public class TraceFlowingWaterToSourceTask extends Task {
     // 在途子任务未完成时每 tick 原样续租同一实例。
     private Task _approachTask = null;
     private BlockPos _approachTarget = null;
+    // (2026-09-13 v26 无进展超时 + 可达性门控, 20260913-093823 实锤: attempt 1
+    // 目标 122,7,-269 而玩家在 y58+, 垂直差 51 格 → GetCloseToBlockTask 无路 →
+    // 每 3-4s 一轮 Wander 空转 16s 后被上层放弃) 溯源只应跟随同一层的近邻水流,
+    // 跨层水流走不到也没意义。
+    private int _lastProgressTick = 0;
+    private static final int TRACE_STALL_TIMEOUT_TICKS = 20 * 15;
+    private static final int TRACE_MAX_VERTICAL_DELTA = 12;
 
     public TraceFlowingWaterToSourceTask(Predicate<BlockPos> isFlowingWater) {
         _isFlowingWater = isFlowingWater;
@@ -53,6 +60,7 @@ public class TraceFlowingWaterToSourceTask extends Task {
         _visited.clear();
         _approachTask = null;
         _approachTarget = null;
+        _lastProgressTick = WorldHelper.getTicks();
     }
 
     @Override
@@ -61,6 +69,15 @@ public class TraceFlowingWaterToSourceTask extends Task {
             Debug.logMessage("TraceFlowingWater: giving up after " + _traceAttempts + " attempts");
             _gaveUp = true;
             return new TimeoutWanderTask(10f);
+        }
+
+        // (2026-09-13 v26) 无进展超时: 15s 没推进一格 → 放弃 (旧代码会无限
+        // wander 空转到上层任务放弃, 20260913-093823 空转 16s)。
+        if (WorldHelper.getTicks() - _lastProgressTick > TRACE_STALL_TIMEOUT_TICKS) {
+            Debug.logMessage("TraceFlowingWater: no progress for "
+                    + (TRACE_STALL_TIMEOUT_TICKS / 20) + "s, giving up at " + _currentTracePos);
+            _gaveUp = true;
+            return new TimeoutWanderTask(5f);
         }
 
         // 检查当前位置是否已经是源
@@ -87,10 +104,21 @@ public class TraceFlowingWaterToSourceTask extends Task {
             return new TimeoutWanderTask(5f);
         }
 
+        // (2026-09-13 v26) 目标不可达 / 跨层太远 → 这条水流链到不了源头, 放弃
+        // (父任务黑名单起点 + 15s 全局冷却), 不要派 GetCloseToBlockTask 空转。
+        int dy = Math.abs(higherLevel.getY() - mod.getPlayer().getBlockPos().getY());
+        if (dy > TRACE_MAX_VERTICAL_DELTA || !WorldHelper.canReach(mod, higherLevel)) {
+            Debug.logMessage("TraceFlowingWater: target " + higherLevel.toShortString()
+                    + " unreachable (dy=" + dy + ") → giving up");
+            _gaveUp = true;
+            return new TimeoutWanderTask(5f);
+        }
+
         // 移动到更高 level 的位置 (只在真正推进时计数/记日志 —— 每 tick 一次
         // 的旧口径让 attempts 2.5s 刷爆 50 上限, 931 条日志全是噪音)。
         _currentTracePos = higherLevel;
         _traceAttempts++;
+        _lastProgressTick = WorldHelper.getTicks();
         _visited.add(higherLevel);
 
         Debug.logMessage("TraceFlowingWater: tracing to " + higherLevel + " (attempt " + _traceAttempts + ")");

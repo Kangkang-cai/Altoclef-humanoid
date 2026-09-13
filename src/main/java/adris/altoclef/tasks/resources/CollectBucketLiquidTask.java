@@ -375,8 +375,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
         // (路上近区扫描顺路发现液体源即收), 地表找水(河/湖/海)与裸露岩浆池概率高。
         // 只对主世界生效: 下界/末地 y<58 不代表"地下", 回地表逻辑无意义(且可能挖向
         // 下界基岩天花板)。
-        if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
-                && mod.getPlayer() != null && mod.getPlayer().getY() < BELOW_SURFACE_Y) {
+        if (isBelowSurface(mod)) {
             setDebugState("No " + _liquidName + " underground, returning to surface to search");
             return new GoToSurfaceTask();
         }
@@ -484,13 +483,25 @@ public class CollectBucketLiquidTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-03) 是否属于"深地下应回地表找液体"的场景: 主世界 y<58
-     * (与 WorldHelper.isDeepUnderground 同口径)。下界/末地不算 — 回地表语义
-     * 只对主世界有意义 (下界 y<58 也满是岩浆, 无需回任何"地表")。
+     * (2026-09-03) 是否属于"深地下应回地表找液体"的场景。下界/末地不算 —
+     * 回地表语义只对主世界有意义 (下界 y<58 也满是岩浆, 无需回任何"地表")。
+     * <p>
+     * (2026-09-13 v26 判据对齐, 20260913-093823 实锤) 旧口径只有 y<58, 与
+     * GoToSurfaceTask 的完工判据 (y<58【或】头顶无天空视线) 不一致 → 玩家在
+     * y58~真实地表之间 (矿洞里) 时: 本任务判"不深了, 去 explore 找水" ↔ 回地表
+     * 任务判"还没见天, 继续爬" → 两任务 1-2s 互抢 (09:39:56/58/09:40:00 三秒内
+     * 三次 SUB 交替, 用户"卡死在 y=58")。对齐为同口径: 未见天就当仍需回地表。
      */
     private boolean isBelowSurface(AltoClef mod) {
-        return WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
-                && mod.getPlayer() != null && mod.getPlayer().getY() < BELOW_SURFACE_Y;
+        if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD
+                || mod.getPlayer() == null || mod.getWorld() == null) {
+            return false;
+        }
+        BlockPos pos = mod.getPlayer().getBlockPos();
+        if (pos.getY() < BELOW_SURFACE_Y) return true;
+        // 与 GoToSurfaceTask.isDeepForEscape 同口径 (isSkyVisible 走 MOTION_BLOCKING
+        // 高度图, 水面也算盖 → 海里必须游到水面才算见天)。
+        return !mod.getWorld().isSkyVisible(pos.up());
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {
