@@ -103,6 +103,15 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // >= 目标半径, 否则 baritone 停在 4.4 格而到达判 4 格 → 永远差一点, 无限重设。
     private static final double EXPEDITION_GOAL_RADIUS = 4.5;
     private static final double EXPEDITION_ARRIVE_XZ = 5;
+    // (2026-09-13 P2 遇障换向) 锁定方向在悬崖/岩浆海前会死顶 (20260913-214110:
+    // radius 卡 326 半分钟, fails 连涨, moved 三连 0 —— 用户"方向是不是定的太死")。
+    // 规则: 连续 PROBE_AFTER_FAILS 次失败 且 STALL_TICKS 内无新最远点 → 按偏置
+    // 换向试探 (+60° → -75° → +90° → -90° 封顶); 试探方向走到比卡死点更远
+    // (radius > 试探时 max + 1) 即转正为新锁定方向。偏置封顶 ±90° —— 禁止反向。
+    private static final int PROBE_AFTER_FAILS = 3;
+    private static final long STALL_TICKS = 300; // 15s 无新最远点 = 停滞
+    private static final double PROBE_STEP_DEG = 60;
+    private static final double MAX_PROBE_DEG = 90;
     // (2026-09-13 远征取证) 诊断周期 200 tick = 10s; 距锚点半径每增长 128 格
     // 额外打一行 —— 此前日志里没有任何坐标/群系遥测, 无法证明"是否真在远征"。
     private static final int EXPEDITION_DIAG_INTERVAL_TICKS = 200;
@@ -161,6 +170,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, Double> _headingByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, BlockPos> _anchorByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, Double> _maxRadiusByKey = new java.util.HashMap<>();
+    // (2026-09-13 P2 遇障换向) 试探偏置 (相对锁定基向, 弧度) / 试探起点 max /
+    // 最近一次刷新最远半径的 tick —— 三个都按 存档:维度 隔离。
+    private static final java.util.Map<String, Double> _probeOffsetByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Double> _probeStartMaxByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Long> _lastProgressTickByKey = new java.util.HashMap<>();
 
     // =========================================================================
     // (2026-09-13 记忆分支"查讫"机制) [Expedition] 日志实锤: clue 全是 memory,
@@ -642,6 +656,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 _currentMemoryTarget = null;
             }
             _currentTarget = null;
+            // (2026-09-13 P2 遇障换向) 停滞够久才升级试探, 普通寻路失败不换向。
+            maybeEscalateProbe(mod);
             Debug.logMessage("[FortressExplore] outside step failed, picking a new direction.");
             return null;
         }
@@ -731,6 +747,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     /**
      * (2026-09-13 远征) 锁定方向: 首次随机, 之后只在 ±RANDOM_JITTER_DEG 内微调,
      * 并写回 static —— 跨任务实例存活。旧版每次实例重建重新随机 = 小区域打转。
+     * (2026-09-13 P2) 有效方向 = 锁定基向 + 遇障试探偏置 (见 maybeEscalateProbe)。
      */
     private double nextRandomHeading() {
         Double stored = _headingByKey.get(expeditionKey());
@@ -740,8 +757,40 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             stored += (Math.random() * 2 - 1) * Math.toRadians(RANDOM_JITTER_DEG);
         }
         _headingByKey.put(expeditionKey(), stored);
-        _heading = stored;
-        return stored;
+        Double probe = _probeOffsetByKey.get(expeditionKey());
+        double effective = stored + (probe == null ? 0.0 : probe);
+        _heading = effective;
+        return effective;
+    }
+
+    /**
+     * (2026-09-13 P2 遇障换向) 外围步失败时调用: 连续失败且长时间无新最远点
+     * (顶在悬崖/岩浆海边) → 升级试探偏置, 绕障试探。探测方向若走到比卡死点
+     * 更远 (转正逻辑在 maybeLogExpedition), 就成为新的锁定方向; 否则换边加档
+     * 再试, 幅度封顶 ±90° (禁反向 —— 反向等于放弃远征)。
+     */
+    private void maybeEscalateProbe(AltoClef mod) {
+        if (_failCounter < PROBE_AFTER_FAILS) return;
+        String key = expeditionKey();
+        BlockPos anchor = _anchorByKey.get(key);
+        if (anchor == null || mod.getPlayer() == null) return;
+        long lastProgress = _lastProgressTickByKey.getOrDefault(key, _tickId);
+        if (_tickId - lastProgress < STALL_TICKS) return; // 停滞不够久, 可能只是普通寻路失败
+        double cur = _probeOffsetByKey.getOrDefault(key, 0.0);
+        double next;
+        if (cur == 0.0) {
+            next = Math.toRadians(PROBE_STEP_DEG);
+        } else {
+            // 换边并加一档, 封顶 ±MAX_PROBE_DEG。
+            double mag = Math.min(Math.abs(cur) + Math.toRadians(15), Math.toRadians(MAX_PROBE_DEG));
+            next = cur > 0 ? -mag : mag;
+        }
+        _probeOffsetByKey.put(key, next);
+        _probeStartMaxByKey.put(key, _maxRadiusByKey.getOrDefault(key, 0.0));
+        _failCounter = 0; // 给试探方向重新计失败
+        Debug.logMessage(String.format(java.util.Locale.ROOT,
+                "[Expedition] stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°)",
+                (_tickId - lastProgress) / 20, Math.toDegrees(next), MAX_PROBE_DEG));
     }
 
     // ------------------------------------------------------------------ //
@@ -785,8 +834,32 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         String key = expeditionKey();
         BlockPos anchor = _anchorByKey.computeIfAbsent(key, k -> p);
         double radius = Math.hypot(p.getX() - anchor.getX(), p.getZ() - anchor.getZ());
-        double maxRadius = Math.max(_maxRadiusByKey.getOrDefault(key, 0.0), radius);
+        double prevMax = _maxRadiusByKey.getOrDefault(key, 0.0);
+        double maxRadius = Math.max(prevMax, radius);
         _maxRadiusByKey.put(key, maxRadius);
+        // (2026-09-13 P2 遇障换向) 有真实进展 (刷新最远半径): 记进度时刻 +
+        // 失败归零 —— 只有"长时间无进展的失败"才升级换向。
+        if (radius > prevMax + 0.5) {
+            _lastProgressTickByKey.put(key, _tickId);
+            _failCounter = 0;
+        }
+        // 试探成功: 走到比卡死点更远 → 试探方向转正为新锁定基向。
+        Double probe = _probeOffsetByKey.get(key);
+        if (probe != null && probe != 0.0) {
+            Double startMax = _probeStartMaxByKey.get(key);
+            if (startMax != null && radius > startMax + 1.0) {
+                Double base = _headingByKey.get(key);
+                if (base != null && !Double.isNaN(base)) {
+                    _headingByKey.put(key, base + probe);
+                    _heading = base + probe;
+                    Debug.logMessage(String.format(java.util.Locale.ROOT,
+                            "[Expedition] probe %+.0f° committed, new bearing %s",
+                            Math.toDegrees(probe), fmtDeg(base + probe)));
+                }
+                _probeOffsetByKey.put(key, 0.0);
+                _probeStartMaxByKey.remove(key);
+            }
+        }
         String biome = netherBiomeLabel(mod);
         String prevBiome = _lastBiomeLabel;
         boolean biomeChanged = prevBiome != null && !prevBiome.equals(biome);
@@ -801,12 +874,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _lastBiomeLabel = biome;
         Debug.logMessage(String.format(java.util.Locale.ROOT,
                 "[Expedition] mode=%s biome=%s bearing=%s anchor=(%d,%d) radius=%.0f max=%.0f"
-                        + " target=%s moved=%s clue=%s fails=%d memCk=%d",
+                        + " target=%s moved=%s clue=%s fails=%d memCk=%d probe=%s",
                 _corridorMode ? "corridor" : "outside", biome,
                 Double.isNaN(_heading) ? "?" : fmtDeg(_heading),
                 anchor.getX(), anchor.getZ(), radius, maxRadius,
                 _currentTarget == null ? "-" : _currentTarget.toShortString(),
-                moved, _lastClue, _failCounter, checkedMemoryCount()));
+                moved, _lastClue, _failCounter, checkedMemoryCount(),
+                String.format(java.util.Locale.ROOT, "%+.0f",
+                        Math.toDegrees(_probeOffsetByKey.getOrDefault(key, 0.0)))));
         if (biomeChanged) {
             Debug.logMessage("[Expedition] biome switch " + prevBiome + " -> " + biome);
         }
