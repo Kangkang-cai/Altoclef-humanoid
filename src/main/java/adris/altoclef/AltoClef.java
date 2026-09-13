@@ -29,6 +29,7 @@ import baritone.altoclef.AltoClefSettings;
 import baritone.api.BaritoneAPI;
 import baritone.api.Settings;
 import net.fabricmc.api.ModInitializer;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
@@ -383,19 +384,51 @@ public class AltoClef implements ModInitializer {
         // Water bucket placement will be handled by us exclusively
         getExtraBaritoneSettings().configurePlaceBucketButDontFall(true);
 
-        // (2026-09-13 灵魂沙上寻路全盘失败) 下界灵魂沙谷里 baritone 反复
-        // `Open set size: 0 / [Baritone] Failed`, bot 完全站桩 (hSpeed=0,
-        // bIn 全 false)。根因是规划层与执行层对灵魂沙语义不一致:
-        //   - 规划层 MovementHelper.canWalkOn 把灵魂沙当普通实心方块 (第一条
-        //     isBlockNormalCube 直接 return true, 无灵魂沙特判) → 认为可走;
-        //   - 执行层 MovementTraverse.updateState 对灵魂沙走了特判分支
-        //     (below==SOUL_SAND && !shouldTreatSoulSandAsOrdinaryBlock())。
-        // 叠加玩家站在 0.875 高的灵魂沙上时 IPlayerContext.playerFeet() 的
-        // `floor(y + 0.1251)` 只剩 1e-4 容差 (y=88.875 → 89.0001, 起点算 y=89;
-        // y 微降到 88.8749 以下就翻成 88 = 灵魂沙本体格) → baritone 判定起点
-        // 嵌在实心方块里 → 44 种移动全部作废 → openset=0 → Failed。
-        // 打开此开关后执行层走与 SlabBlock 相同的普通分支, 与规划层对齐。
-        // 全 jar 唯一消费点就是 MovementTraverse, 改动面收敛。
+        // (2026-09-13 v30 灵魂沙 canWalkOn) —— 修 v29 没打中的真根因
+        //
+        // 现场: bot 两次进下界都卡死在同一个灵魂沙格 (10,88,-59) (11:28 与 17:00 两次会话),
+        // xyz 脚高恒 88.88 (灵魂沙顶面 88.875), vel=(0,-0.08,0) 恒定 (半格下沉),
+        // hSpeed=0.000, bIn 全 false, baritone pathing=false pathPresent=false;
+        // latest.log 里 `Open set size: 0` + `PathNode map size: 2` +
+        // `nodes per second` 溢出 Integer.MAX_VALUE (A* 一步未展开) 共 4499 次,
+        // `[Baritone] Failed` 每秒刷 10+ 次, 一路卡到 anomaly 报
+        // `原地停滞 225s / TimeoutWanderTask`。主世界无灵魂沙时同样代码完全正常
+        // (openset 84380 / 83390 / 59979 ...)。
+        //
+        // 真根因在**规划层**, 不在执行层 (v29 的 treatSoulSandAsOrdinaryBlock 打在
+        // MovementTraverse.updateState, 够不着这里, 所以无效):
+        //   MovementHelper.canWalkOn 第一条判据是
+        //     isBlockNormalCube(state) = Block.isShapeFullCube(state.getCollisionShape(null,null))
+        //   灵魂沙的碰撞盒是 (0,0,0,1,0.875,1) —— 14/16 高, 不是 full cube → false。
+        //   后续白名单经 yarn 1.18.2+build.3 映射逐个核对:
+        //     LADDER / VINE / FARMLAND / DIRT_PATH / ENDER_CHEST / CHEST / TRAPPED_CHEST
+        //     / GLASS / END_PORTAL_FRAME / SlabBlock / StairsBlock / AzaleaBlock
+        //     / StainedGlassBlock —— **没有 SoulSandBlock (class_2492)** → 返回 false。
+        //   即 baritone 认为**灵魂沙不能站**。
+        // 连锁: 玩家站在灵魂沙上 → IPlayerContext.playerFeet() 的 `floor(y+0.1251)`
+        // 把脚算到灵魂沙上方那格 (88.875→89.0001→89) → 起点下方 (10,88,-59) 正是
+        // 灵魂沙 → canWalkOn=false → A* 的 44 种移动全部 COST_INF (每种 walk 移动都
+        // 要求"起点有支撑") → openset=0 → Failed → bot 一个输入都不发, 完全站桩。
+        // 下界传送门出口常落在灵魂沙谷, 所以每次进下界必现。
+        //
+        // 修: canWalkOn 的第一个分支就是
+        //   `if (AltoClefSettings.canWalkOnForce(x,y,z)) return true;`
+        // 注册一个 force-can-walk-on 谓词把灵魂沙放行即可 (与规划层同源, 执行层
+        // 的 +0.1251 hack 本来就为灵魂沙准备好了落脚点)。全 jar 只有一个消费点
+        // (MovementHelper), 改动面收敛。谓词跑在 baritone 计算线程, 与既有
+        // avoidBlockBreak 谓词同样直接读世界, 只做 O(1) 的 getBlockState, 不回调
+        // baritone (避免上次那种"谓词回调自己"的栈溢出)。
+        getExtraBaritoneSettings().getForceWalkOnPredicates().add(pos -> {
+            ClientWorld world = MinecraftClient.getInstance().world;
+            if (world == null) return false;
+            int y = pos.getY();
+            if (y < world.getBottomY() || y >= world.getTopY()) return false;
+            return world.getBlockState(pos).getBlock() == Blocks.SOUL_SAND;
+        });
+
+        // 配套 (v29): 执行层也当普通方块走。规划层放行后 baritone 会真的把路径
+        // 规划到灵魂沙上, 此时再走 MovementTraverse 的"灵魂沙特判分支"(接近目标
+        // 中心 <0.85 格就 MOVE_BACK 刹车) 只会在灵魂沙上原地蹭, 关掉它保持一致。
         getExtraBaritoneSettings().treatSoulSandAsOrdinaryBlock(true);
 
         // Give baritone more time to calculate paths. Sometimes they can be really far away.
