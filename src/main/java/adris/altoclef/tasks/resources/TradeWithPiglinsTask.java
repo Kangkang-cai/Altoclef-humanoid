@@ -53,7 +53,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
     // _goldBuffer (熔炼生金矿等); 一旦开始交易, 金锭会随每次丢出而消耗,
     // 只要还剩金锭就继续交易, 不因少于预算而中途回去收集 (否则交易中少 1
     // 锭就回 CollectGoldIngotTask 合成 → 打开工作台 → 卡死, 用户实测)。
-    private boolean _startedTrading = false;
+    // (2026-09-13 改 static, 用户"任务打断拾取了他们后, 32金子任务又触发了")
+    // 上层每 4-12 分钟重建本任务实例 (FortressExploreTask 注释实锤), 实例字段
+    // 一重建就丢 → 拾取掉落物/实例重建后 gold<32 又触发 CollectGoldIngotTask,
+    // bot 半路跑去开工作台。改 static 后整个会话只"预热"一次: 金锭耗尽 (=0)
+    // 仍会照常续挖, 预算闸只挡"中途因实例重建误触发"。
+    private static boolean _startedTrading = false;
 
     public TradeWithPiglinsTask(int goldBuffer, ItemTarget[] itemTargets) {
         super(itemTargets);
@@ -77,7 +82,27 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-        _startedTrading = false;
+        // (2026-09-13) 交易/捡掉落物期间保护金锭与交易战利品, 防"满背包扔杂物"
+        // 把刚到手的黑曜石/珍珠扔了。基类 ResourceTask.onStart 已 push、onStop 已
+        // pop, 这里只往本层添加, 无需自己配对。
+        mod.getBehaviour().addProtectedItems(
+                Items.GOLD_INGOT, Items.OBSIDIAN, Items.CRYING_OBSIDIAN, Items.ENDER_PEARL);
+        // 注意: _startedTrading 是 static, 这里绝不能再置 false (见字段注释)。
+    }
+
+    /**
+     * (2026-09-13 交易掉物捡拾升级) 猪灵以物易物会朝玩家丢随机战利品, 这些
+     * 一律捡走: 防火药水 (NBT 感知判定, 排除水瓶)、末影珍珠、黑曜石、哭泣的
+     * 黑曜石 (猪灵两种黑曜石都会丢, 门框只认普通黑曜石, 哭泣的先拿上不亏)。
+     * 用户实测: 猪灵丢黑曜石/珍珠 bot 视而不见。
+     * 位置放在父层 onResourceTick: 每 tick 先于子任务判定, 接近猪灵途中、
+     * 准心等待中也能捡 (原来只挂在 onEntityInteract 里, 接近阶段视而不见)。
+     */
+    private static boolean isValuableBarterDrop(ItemStack stack) {
+        return ItemHelper.isFireResPotionStack(stack)
+                || stack.getItem() == Items.ENDER_PEARL
+                || stack.getItem() == Items.OBSIDIAN
+                || stack.getItem() == Items.CRYING_OBSIDIAN;
     }
 
     @Override
@@ -110,6 +135,24 @@ public class TradeWithPiglinsTask extends ResourceTask {
             return _goldTask;
         }
         _startedTrading = true;
+
+        // (2026-09-13 交易掉物捡拾升级) 先捡眼前的交易战利品再谈别的。注意
+        // 这里只换"本层返回的子任务", 本任务实例不销毁, _startedTrading(static)
+        // 不丢 → 捡完回来继续交易, 不会触发 32 金锭收集 (用户红线)。
+        Optional<Entity> barterDrop = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
+                e -> e instanceof ItemEntity ie && ie.isAlive() && ie.isInRange(mod.getPlayer(), 16)
+                        && isValuableBarterDrop(ie.getStack()),
+                ItemEntity.class);
+        if (barterDrop.isPresent()) {
+            setDebugState("Picking up piglin barter drop");
+            return new PickupDroppedItemTask(new ItemTarget[]{
+                    new ItemTarget(Items.POTION, 1),
+                    new ItemTarget(Items.SPLASH_POTION, 1),
+                    new ItemTarget(Items.ENDER_PEARL, 1),
+                    new ItemTarget(Items.OBSIDIAN, 1),
+                    new ItemTarget(Items.CRYING_OBSIDIAN, 1)
+            }, true);
+        }
 
         // If we have no piglin nearby, explore until we find piglin.
         if (!mod.getEntityTracker().entityFound(PiglinEntity.class)) {
@@ -148,7 +191,10 @@ public class TradeWithPiglinsTask extends ResourceTask {
         private Entity _currentlyBartering = null;
 
         public PerformTradeWithPiglin() {
-            super(3);
+            // (2026-09-13 用户"交易时距离远了点, 再靠近") 3 → 2: 接近距离取
+            // 2 格 (射程 3.2 内, 交互判定稳过), 站位贴到人类交易的自然距离,
+            // 准心也更容易落在猪灵身上。
+            super(2);
         }
 
         @Override
@@ -193,27 +239,11 @@ public class TradeWithPiglinsTask extends ResourceTask {
             // 13:52)。交互前先确保所有界面关闭 (幂等, 无界面无操作)。
             StorageHelper.closeScreen();
 
-            // (2026-08-23 捡猪灵掉物) 猪灵收走金锭后会把随机物品朝玩家方向丢
-            // 出来 (防火药水/末影珍珠等, 都是 ItemEntity)。用户实测: 猪灵丢了
-            // 瓶防火药水 bot 没捡 ("可能是没看到") — 交易前先捡最近的猪灵掉物。
-            // 优先防火药水 (POTION/SPLASH_POTION + FIRE_RESISTANCE 效果, 用
-            // NBT 感知判定, 排除水瓶), 其次末影珍珠。ItemTarget 只比 Item 类型,
-            // 所以先用 isFireResPotionStack 确认最近的掉落物值得捡, 命中才派
-            // PickupDroppedItemTask (满背包会自动腾位)。
-            Optional<Entity> drop = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
-                    e -> e instanceof ItemEntity ie && ie.isAlive() && ie.isInRange(mod.getPlayer(), 12),
-                    ItemEntity.class);
-            if (drop.isPresent() && drop.get() instanceof ItemEntity itemEntity) {
-                ItemStack dropStack = itemEntity.getStack();
-                if (ItemHelper.isFireResPotionStack(dropStack) || dropStack.getItem() == Items.ENDER_PEARL) {
-                    setDebugState("Picking up piglin barter drop");
-                    return new PickupDroppedItemTask(new ItemTarget[]{
-                            new ItemTarget(Items.POTION, 1),
-                            new ItemTarget(Items.SPLASH_POTION, 1),
-                            new ItemTarget(Items.ENDER_PEARL, 1)
-                    }, true);
-                }
-            }
+            // (2026-09-13 捡猪灵掉物上移) 原先这里 (2026-08-23 版) 捡防火药水/
+            // 末影珍珠, 但只在"已贴近猪灵且准心落上"时才判, 接近途中视而不见,
+            // 且不认黑曜石 (用户实测无视)。整块上移到父层 onResourceTick 的
+            // barterDrop 分支 (16 格、含黑曜石/哭泣黑曜石), 父层每 tick 先判,
+            // 本处成为死代码, 已删除。
 
             // If we didn't run this in a while, we can retry bartering.
             if (_intervalTimeout.elapsed()) {
