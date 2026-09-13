@@ -24,6 +24,7 @@ import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
+import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import baritone.api.process.ICustomGoalProcess;
 import net.minecraft.block.BedBlock;
@@ -41,6 +42,7 @@ import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.world.RaycastContext;
@@ -112,6 +114,28 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // 界面而不是睡床。此日志 2s 节流, 防止每 tick 刷屏。
     private final TimerGame _crosshairBlockedLogTimer = new TimerGame(2);
 
+    // ==== (2026-09-13 睡前挖穿三格根治) ====
+    // 根因 commit = 9dbeb779 (2026-09-08): 它首次把"读 crosshairTarget"接到
+    // "派发破坏方块"上 (`else if (crosshairTarget instanceof BlockHitResult)`),
+    // 同时把拆障改成实例保活 → 上游两个判据缺陷的代价从"点不出手"升级成"真的挖穿":
+    //   ① crosshairTarget 是每帧按【真实当前朝向】raycast 的快照, 而 lookAt 走
+    //      baritone LookBehavior.updateTarget = 带最大转速限制的平滑转向, 需多
+    //      tick 到位 → 同 tick 读到的必然是转向前的旧朝向 (日志铁证: "switch-side"
+    //      与 "blocked" 同毫秒打印);
+    //   ② 只判 `instanceof BlockHitResult`, 未排除 getType()==MISS → MC 射线落空
+    //      返回的 type=MISS BlockHitResult 被当成"被方块挡住" → 派发挖空气
+    //      (日志铁证: 两条 "blocked by block 空气 … destroying it")。
+    // 修法: 瞄准与判定解耦(朝向未到位不做任何判定) + 判据换源为权威瞄准射线 +
+    // MISS 单列 + 拆障累计上限硬闸门。
+    // "等待朝向到位"日志 2s 节流 (同 _crosshairBlockedLogTimer 口径)。
+    private final TimerGame _aimWaitLogTimer = new TimerGame(2);
+    // 朝向到位容差(度): 只需拦住"朝向被劫持压向正下方"(pitch 差常 >30°),
+    // 不必苛求精确到位 —— baritone 逼近会留几度残差, 收太紧会永远等 → 一直换侧。
+    private static final double AIM_ALIGN_TOLERANCE_DEG = 20.0;
+    // 单次睡觉累计拆障方块数上限 (硬闸门): 判据再准也保底"绝不出现大规模挖掘"。
+    private int _blockersClearedTotal = 0;
+    private static final int SLEEP_MAX_BLOCKERS_CLEARED = 10;
+
     // ==== (2026-09-08 睡床卡死三连修, 用户: 瞄准避开了村民却被普通方块挡住,
     // 挡路方块永远没被拆掉, 试了好多次最终卡住) ====
     // (a) 拆障保活: 清障 DestroyBlockTask 缓存保活到拆完。旧版每 tick 重进
@@ -145,13 +169,53 @@ public class PlaceBedAndSetSpawnTask extends Task {
         return System.currentTimeMillis() < s_sleepGiveUpUntilMs;
     }
 
-    /** 开始拆一个挡路方块; 连续 2 次拆不动则返回 null (不再重试, 走换侧/放弃)。 */
+    /**
+     * 开始拆一个挡路方块; 连续 2 次拆不动则返回 null (不再重试, 走换侧/放弃)。
+     * (2026-09-13 硬闸门) 单次睡觉累计拆障数上限 —— 判据再准也要保底"绝不出现
+     * 大规模挖掘"。超限即认定"这张床从当前站位根本够不到", 直接放弃本次 + 触发层
+     * 冷却, 而不是继续挖下去 (用户诉求: 睡前不再把床旁挖穿)。
+     */
     private Task startBlockerClear(BlockPos blocker) {
         if (_blockerClearFails >= 2) return null;
+        if (_blockersClearedTotal >= SLEEP_MAX_BLOCKERS_CLEARED) {
+            s_sleepGiveUpUntilMs = System.currentTimeMillis() + SLEEP_GIVEUP_COOLDOWN_MS;
+            _sleepGaveUp = true;
+            String m = "[Diag-bed] sleep give-up: blocker-clear budget exhausted ("
+                    + _blockersClearedTotal + "/" + SLEEP_MAX_BLOCKERS_CLEARED
+                    + "), cooldown " + (SLEEP_GIVEUP_COOLDOWN_MS / 1000) + "s";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return null;
+        }
+        _blockersClearedTotal++;
         _blockerClearTask = new DestroyBlockTask(blocker);
         _blockerClearPos = blocker;
         _blockerClearStartMs = System.currentTimeMillis();
         return _blockerClearTask;
+    }
+
+    /**
+     * (2026-09-13 修复B) 权威瞄准射线: 从眼位朝床头瞄点做方块射线
+     * (OUTLINE + 不含流体, 与 MC 准心同口径), 长度取"眼位→瞄点距离 + 0.5 格"
+     * 余量, 避免瞄点恰好落在方块表面时被浮点边界判成落空。
+     *
+     * 用它取代 crosshairTarget 作为"该不该破坏方块"的判据。crosshairTarget 是
+     * 渲染帧快照: 转向未完成时是旧朝向, 且落空返回 type=MISS 的 BlockHitResult,
+     * 与真命中的 BLOCK 同型不可区分 —— 这正是 9dbeb779 引入的误判源。
+     * 本射线的方向只由 aimPoint 决定, 与"当前转到哪了"无关, 因此天然不受
+     * 转向时序影响, 也天然满足"只有挡在瞄准线上的方块才可拆"的限权要求。
+     *
+     * @return 命中(可能为 MISS 类型); 眼位与瞄点重合(极罕见)时返回 null。
+     */
+    private HitResult raycastToAimPoint(AltoClef mod, Vec3d aimPoint) {
+        Vec3d eye = mod.getPlayer().getEyePos();
+        Vec3d delta = aimPoint.subtract(eye);
+        double len = delta.length();
+        if (len < 1.0E-4) return null;
+        Vec3d end = eye.add(delta.multiply((len + 0.5) / len));
+        return mod.getWorld().raycast(new RaycastContext(
+                eye, end, RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, mod.getPlayer()));
     }
 
     public PlaceBedAndSetSpawnTask() {
@@ -176,6 +240,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _blockerClearFails = 0;
         _humanSleepAttempts = 0;
         _sleepGaveUp = false;
+        _blockersClearedTotal = 0;
 
         // Don't break our bed thing.
         mod.getBehaviour().push();
@@ -555,12 +620,29 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
                 // 空手 (避免对着床按右键先吃东西/放方块, 睡不了)
                 mod.getSlotHandler().forceDeequipRightClickableItem();
-                // (2026-09-06 准心避开村民实体框, 用户: 床上躺着村民, 右键点到
-                // 村民实体框会打开交易界面而不是睡床) 与击打准心校验同款原则:
-                // crosshairTarget 是实体(床边/床上的村民, 或任何挡在准星前的
-                // 实体) → 本 tick 不点右键, 让 3s 小超时换侧/换站位; 准心落在
-                // 床方块(或落空)上才点。
-                if (MinecraftClient.getInstance().crosshairTarget instanceof EntityHitResult) {
+
+                // ===== (2026-09-13 修复A: 瞄准与判定解耦) =====
+                // LookHelper.lookAt 走 baritone LookBehavior.updateTarget = 带最大转速
+                // 限制的平滑转向, 需多 tick 才到位; 而 crosshairTarget 是每帧按玩家
+                // 【真实当前朝向】raycast 的快照 → 同 tick 读到的必然是转向前的旧朝向
+                // (日志铁证: "switch-side" 与 "blocked" 同毫秒打印)。
+                // 朝向未到位 → 本 tick 不点右键、不做任何阻挡判定、绝不派发拆障;
+                // ⑥ 的 3s 小超时照常计时(到时换侧/放弃), 不会卡死。
+                Rotation aimRot = LookHelper.getLookRotation(mod, aimPoint);
+                Rotation curRot = LookHelper.getLookRotation();
+                double yawOff = Math.abs(MathHelper.wrapDegrees(curRot.getYaw() - aimRot.getYaw()));
+                double pitchOff = Math.abs(curRot.getPitch() - aimRot.getPitch());
+                if (yawOff > AIM_ALIGN_TOLERANCE_DEG || pitchOff > AIM_ALIGN_TOLERANCE_DEG) {
+                    if (_aimWaitLogTimer.elapsed()) {
+                        _aimWaitLogTimer.reset();
+                        String m = "[Diag-bed] aim not aligned yet, holding (no click / no blocker judge)"
+                                + " yawOff=" + String.format("%.1f", yawOff)
+                                + " pitchOff=" + String.format("%.1f", pitchOff)
+                                + " (player=" + pp.toShortString() + ")";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                    }
+                } else if (MinecraftClient.getInstance().crosshairTarget instanceof EntityHitResult) {
                     // (2026-09-06 v2, 用户: 换侧毫无意义, "获取不到实体框吗"—
                     // 能拿到。准心被实体(床上的村民)挡住时直接按实体框重新选
                     // 瞄准点: 在床两半块的顶面/朝玩家侧面网格采样, 找第一个
@@ -579,55 +661,71 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     if (alt != null) {
                         LookHelper.lookAt(mod, alt);
                     }
-                } else if (MinecraftClient.getInstance().crosshairTarget instanceof BlockHitResult) {
-                    // (2026-09-08 准心避开方块遮挡, 用户: 避开了村民却被普通方块
-                    // 挡住, 旧版此分支每 tick 盲点右键全点在挡路方块上, 永远点不到床)
-                    // 准心先命中非床方块 → 不点右键:
-                    //   可拆 → 保活拆障 (拆完重开瞄准窗口, 见分支顶部 keep-alive);
-                    //   不可拆 → 尝试重取瞄点, 重取不到就等 3s 小超时换侧/放弃。
-                    BlockHitResult bhr = (BlockHitResult) MinecraftClient.getInstance().crosshairTarget;
-                    BlockPos hitPos = bhr.getBlockPos();
-                    boolean hitIsBed = mod.getWorld().getBlockState(hitPos).getBlock() instanceof BedBlock;
-                    if (hitIsBed) {
-                        mod.getInputControls().tryPress(Input.CLICK_RIGHT);
-                        // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
-                        _inBedTimer.reset();
-                    } else if (WorldHelper.canBreak(mod, hitPos)) {
-                        Task clearTask = startBlockerClear(hitPos);
-                        if (_crosshairBlockedLogTimer.elapsed()) {
-                            _crosshairBlockedLogTimer.reset();
-                            String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by block "
-                                    + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
-                                    + " at " + hitPos.toShortString()
-                                    + (clearTask != null ? ", destroying it" : ", unbreakable/failed twice, holding click")
-                                    + " (player=" + pp.toShortString() + ")";
-                            Debug.logMessage(m);
-                            Debug.logToFile("altoclef_diag.log", m);
-                        }
-                        if (clearTask != null) {
-                            return clearTask;
-                        }
-                        // 拆不动 → 重取瞄点碰运气, 否则干等 3s 换侧
-                        Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
-                        if (alt != null) LookHelper.lookAt(mod, alt);
-                    } else {
-                        Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
-                        if (_crosshairBlockedLogTimer.elapsed()) {
-                            _crosshairBlockedLogTimer.reset();
-                            String m = "[Diag-bed] sleep right-click HELD: crosshair blocked by unbreakable block "
-                                    + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
-                                    + " at " + hitPos.toShortString()
-                                    + (alt != null ? ", retargeting to " + alt : ", no clear bed point from this side")
-                                    + " (player=" + pp.toShortString() + ")";
-                            Debug.logMessage(m);
-                            Debug.logToFile("altoclef_diag.log", m);
-                        }
-                        if (alt != null) LookHelper.lookAt(mod, alt);
-                    }
                 } else {
-                    mod.getInputControls().tryPress(Input.CLICK_RIGHT);
-                    // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
-                    _inBedTimer.reset();
+                    // ===== (2026-09-13 修复B+C: 判据换源 + MISS 单列) =====
+                    // 不再用 crosshairTarget 决定"该不该破坏方块"。旧版 (9dbeb779:582)
+                    // 只判 `instanceof BlockHitResult` 就当"被方块挡住" → MC 射线落空
+                    // 返回的 type=MISS BlockHitResult 也被当成挡路 (15:41:03 / 16:03:04
+                    // 两条 "blocked by block 空气 … destroying it" 铁证), 且同 tick 读到
+                    // 的是转向前的旧朝向 → 误判后 DestroyBlockTask 每 tick lookAt 劫持
+                    // 朝向, 竖直挖穿自锁。
+                    // 权威判据改为"眼位 → 床头瞄点"的方块射线(OUTLINE, 同 MC 准心口径):
+                    //   命中床      → 点右键睡觉
+                    //   命中非床方块 → 确实挡在这条射线上, 拆它合法(限权内建, 无需额外校验)
+                    //   落空/非方块 → 瞄点几何不可达, 不点不拆, 等 3s 换侧
+                    HitResult probe = raycastToAimPoint(mod, aimPoint);
+                    if (probe instanceof BlockHitResult pbhr && pbhr.getType() == HitResult.Type.BLOCK) {
+                        BlockPos hitPos = pbhr.getBlockPos();
+                        boolean hitIsBed = mod.getWorld().getBlockState(hitPos).getBlock() instanceof BedBlock;
+                        if (hitIsBed) {
+                            mod.getInputControls().tryPress(Input.CLICK_RIGHT);
+                            // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
+                            _inBedTimer.reset();
+                        } else if (WorldHelper.canBreak(mod, hitPos)) {
+                            Task clearTask = startBlockerClear(hitPos);
+                            if (_crosshairBlockedLogTimer.elapsed()) {
+                                _crosshairBlockedLogTimer.reset();
+                                String m = "[Diag-bed] sleep right-click HELD: aim ray blocked by block "
+                                        + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
+                                        + " at " + hitPos.toShortString()
+                                        + (clearTask != null ? ", destroying it" : ", unbreakable/failed twice, holding click")
+                                        + " (player=" + pp.toShortString() + ")";
+                                Debug.logMessage(m);
+                                Debug.logToFile("altoclef_diag.log", m);
+                            }
+                            if (clearTask != null) {
+                                return clearTask;
+                            }
+                            // 拆不动 → 重取瞄点碰运气, 否则干等 3s 换侧
+                            Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
+                            if (alt != null) LookHelper.lookAt(mod, alt);
+                        } else {
+                            Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
+                            if (_crosshairBlockedLogTimer.elapsed()) {
+                                _crosshairBlockedLogTimer.reset();
+                                String m = "[Diag-bed] sleep right-click HELD: aim ray blocked by unbreakable block "
+                                        + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
+                                        + " at " + hitPos.toShortString()
+                                        + (alt != null ? ", retargeting to " + alt : ", no clear bed point from this side")
+                                        + " (player=" + pp.toShortString() + ")";
+                                Debug.logMessage(m);
+                                Debug.logToFile("altoclef_diag.log", m);
+                            }
+                            if (alt != null) LookHelper.lookAt(mod, alt);
+                        }
+                    } else {
+                        // (修复C) 射线落空 / 未命中方块: 不点右键、不拆障。
+                        // 旧版走到这里会直接 tryPress(CLICK_RIGHT) = 纯盲点(朝向不对时
+                        // 点了也白点), 且把"落空"这一事实掩盖成"可以点"。改为静默等 ⑥
+                        // 的小超时换侧 —— 既不误拆, 也不假装能点。
+                        if (_crosshairBlockedLogTimer.elapsed()) {
+                            _crosshairBlockedLogTimer.reset();
+                            String m = "[Diag-bed] aim ray miss (nothing between eye and bed aim point), holding"
+                                    + " (player=" + pp.toShortString() + ")";
+                            Debug.logMessage(m);
+                            Debug.logToFile("altoclef_diag.log", m);
+                        }
+                    }
                 }
             } else {
                 // 距离还是超了 (被挤开/站错) → 重走 GetToBlock, 不耗超时
