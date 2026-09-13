@@ -13,6 +13,9 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Material;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.AbstractSkeletonEntity;
@@ -24,8 +27,12 @@ import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.registry.Registry;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -70,6 +77,40 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     private static final double CREEPER_SHIELD_BLOCK_RANGE = 16;
     // (2026-08-31 无盾近战并行诊断) 移动+攻击并行关键 tick 节流 (1 秒一条)。
     private static long _lastMeleeFixLog = 0;
+
+    // =====================================================================
+    // (2026-09-13 草挡准心, 用户"杀猪被草挡住好几秒, 猪走开才打到猪")
+    // 反透视下新增的一类"人眼可见但代码判不出来"的遮障 —— 软植物:
+    //   · MC 准心射线走 OUTLINE 形状 → 草/高草/藤蔓/蕨/枯木/花/作物会把准心
+    //     吃掉 (PlayerExtraController.attack().isCrosshairOn == false → 一刀不挥);
+    //   · 本项目自己的"被挡"判定 (AbstractDoToEntityTask.findObstructingBlock /
+    //     computeVisibleAimPoint) 走 COLLIDER 形状 → 上述植物全部穿透 →
+    //     判定"没被挡" → 既不进绕位, 也进不了 onObstructionPersistent 清障。
+    // 于是 bot 站在射程内反复"干瞄准 + 被拦刀", 一路到 killGiveUpSeconds
+    // 超时拉黑。人类玩家在这种场合会顺手把草砍掉, 这里照做: 准心被软植物挡住
+    // 时按左键清掉, 下一 tick 准心自然落到目标身上。
+    // 实心方块 (树叶/石头/墙) 不走这里 —— 它们 COLLIDER 可测, 交给既有绕位 +
+    // 树叶清障 (onObstructionPersistent)。
+    // 会话 20260913-155648 现场: 猪死时猪排掉落位 (334,68,-691) 的 itemBlock
+    // =grass_block 上的 grass —— 猪站在高草里, 命中前先被自己脚下的草挡住。
+    // =====================================================================
+    /** 连续清草 tick 上限: 正常 1~4 tick 清完一层草, 1s 清不完就不是"一层草"的问题。 */
+    private static final int PLANT_CLEAR_MAX_TICKS = 20;
+    /** 清草放弃后的冷却 (写在放弃那一刻, 不放 onStop)。 */
+    private static final int PLANT_CLEAR_COOLDOWN_TICKS = 40;
+    // 下面三项必须是 static: MobDefenseChain 会按秒重建 `<Killing entity.X>` 实例
+    // (tasks.log 里 START/STOP 成对出现), 实例字段会被重建清零 → 清草计数永远
+    // 回不到 20 (上限失效)、冷却永远被重置 (等于没写)。本项目铁律: 冷却/计数
+    // 放触发条件层, 不放实例。
+    /** 是否由本任务按住左键清草 —— 只松开"自己按下的", 不抢别人的左键。 */
+    private static boolean _plantClickHeld = false;
+    /** 本次连续清草 tick 数。 */
+    private static int _plantClearTicks = 0;
+    /** 清草放弃后的冷却到期 tick。 */
+    private static long _plantClearCooldownUntil = Long.MIN_VALUE;
+    /** 清草 / 被拦刀诊断日志节流 (各 1 秒一条)。 */
+    private static long _lastPlantClearLogMs = 0;
+    private static long _lastCrosshairDeclineLogMs = 0;
 
     // ---- 盾战状态 (2026-08-30 状态机) ----
     private boolean _arrowInbound = false;   // 当前有箭正朝我们飞 (轨迹预测)
@@ -270,6 +311,13 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         _lastInboundTick = Long.MIN_VALUE;
         _lastClearedObstruction = null;
         _lastClearAttemptTick = Long.MIN_VALUE;
+        // (2026-09-13 草挡准心) 清草按下的左键要松开, 否则残留长按变成持续挖方块。
+        // 清草计数与冷却都是 static (跨实例), 这里不动 —— 上层重建实例时不重置,
+        // 冷却从"放弃那一刻"起算, 不被 START/STOP 洗掉。
+        if (_plantClickHeld) {
+            _plantClickHeld = false;
+            mod.getInputControls().release(Input.CLICK_LEFT);
+        }
     }
 
     @Override
@@ -314,9 +362,20 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         boolean inReach = entity.squaredDistanceTo(mod.getPlayer()) <= reach * reach;
         // Equip weapon
         equipWeapon(mod);
+        // (2026-09-13 草挡准心) 准心被软植物挡住时先清草 —— 这一 tick 不出刀
+        // (草一碰即碎, 下一 tick 准心自然落到目标)。清草与攻击冷却无关, 放冷却
+        // 判断之前, 不浪费攻击冷却窗口。
+        if (inReach && clearPlantBlockingCrosshair(mod)) {
+            return move;
+        }
         float hitProg = mod.getPlayer().getAttackCooldownProgress(0);
         if (inReach && hitProg >= 0.75f) {
+            // (2026-09-13 被拦刀诊断) 出刀前先记录准心是否真在目标身上: attack()
+            // 内部 isCrosshairOn 不通过就只登记瞄准、不挥刀, 而旧日志写在调用之后
+            // 且不分"出手/被拦" —— 现场无法区分。这里补一条被拦记录。
+            boolean crosshairOnTarget = mod.getControllerExtras().isCrosshairOn(entity);
             mod.getControllerExtras().attack(entity);
+            if (!crosshairOnTarget) logDeclinedSwing(mod, entity);
             long nowMs = System.currentTimeMillis();
             if (nowMs - _lastMeleeFixLog > 1000) {
                 _lastMeleeFixLog = nowMs;
@@ -325,6 +384,117 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             }
         }
         return move;
+    }
+
+    /**
+     * (2026-09-13 草挡准心) 准心被"软植物"挡住 → 人类式左键清掉, 本 tick 不出刀。
+     *
+     * 纪律 (与 InstantBreakTask / MineAndCollectTask 清草同一套, 教训见
+     * InstantBreakTask:71-74): ① 必须确认准心射线真的命中该植物再按左键,
+     * 否则攻击会发生在"看得见怪"的错觉下、打到别的东西; ② 只松开本任务自己
+     * 按下的左键, 不碰别的模块 (挖矿 / InstantBreakTask) 持有的左键。
+     *
+     * @return true = 本 tick 左键已用在清草上, 调用方不要再 attack()
+     */
+    private boolean clearPlantBlockingCrosshair(AltoClef mod) {
+        long now = WorldHelper.getTicks();
+        if (now < _plantClearCooldownUntil) return false;
+
+        BlockPos plant = null;
+        HitResult result = MinecraftClient.getInstance().crosshairTarget;
+        if (result instanceof BlockHitResult bhr && bhr.getType() == HitResult.Type.BLOCK) {
+            BlockState state = mod.getWorld().getBlockState(bhr.getBlockPos());
+            if (isSoftPlantBlock(mod, state, bhr.getBlockPos())) plant = bhr.getBlockPos();
+        }
+
+        if (plant == null) {
+            // 准心已离开植物 (清完了 / 目标挪开了) → 松开自己按的那次左键。
+            if (_plantClickHeld) {
+                _plantClickHeld = false;
+                _plantClearTicks = 0;
+                mod.getInputControls().release(Input.CLICK_LEFT);
+            }
+            return false;
+        }
+
+        if (_plantClearTicks >= PLANT_CLEAR_MAX_TICKS) {
+            // 止损: 清了一秒还没清完, 不是"一层草"的问题 → 放弃并按冷却
+            // (冷却写在放弃这一刻, 不写 onStop)。
+            _plantClickHeld = false;
+            _plantClearTicks = 0;
+            _plantClearCooldownUntil = now + PLANT_CLEAR_COOLDOWN_TICKS;
+            mod.getInputControls().release(Input.CLICK_LEFT);
+            setDebugState("Gave up clearing plant at " + plant.toShortString());
+            Debug.logToFile("altoclef_diag.log", "[MELEE-Clear]\tTIMEOUT " + PLANT_CLEAR_MAX_TICKS
+                    + "t clearing " + blockName(mod, plant) + " at " + plant.toShortString()
+                    + ", cooldown " + PLANT_CLEAR_COOLDOWN_TICKS + "t");
+            return false;
+        }
+
+        _plantClearTicks++;
+        _plantClickHeld = true;
+        mod.getInputControls().hold(Input.CLICK_LEFT);
+        setDebugState("Clearing plant blocking melee target at " + plant.toShortString());
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - _lastPlantClearLogMs > 1000) {
+            _lastPlantClearLogMs = nowMs;
+            Debug.logToFile("altoclef_diag.log", "[MELEE-Clear]\tcrosshair blocked by "
+                    + blockName(mod, plant) + " at " + plant.toShortString() + ", left-click swinging");
+        }
+        return true;
+    }
+
+    /**
+     * (2026-09-13) "软植物"判据 = 有轮廓 (能挡准心) + 无碰撞 (COLLIDER 视线射线
+     * 穿透) + hardness 0 (一碰即碎)。草/高草/蕨/藤蔓/枯木/树苗/花/作物都落在这里;
+     * 树叶 (hardness 0.2) / 竹 / 石头 / 墙 不满足, 仍走既有绕位与树叶清障。
+     * 流体防御性排除 (准心射线本来就不测流体, 但别让 WATER/LAVA 的 material 混进来)。
+     */
+    private static boolean isSoftPlantBlock(AltoClef mod, BlockState state, BlockPos pos) {
+        if (state.isAir()) return false;
+        Material material = state.getMaterial();
+        if (material == Material.WATER || material == Material.LAVA) return false;
+        return state.getHardness(mod.getWorld(), pos) == 0.0f
+                && state.getCollisionShape(mod.getWorld(), pos).isEmpty()
+                && !state.getOutlineShape(mod.getWorld(), pos).isEmpty();
+    }
+
+    /** 方块名 (诊断用, 失败不抛)。 */
+    private static String blockName(AltoClef mod, BlockPos pos) {
+        try {
+            return Registry.BLOCK.getId(mod.getWorld().getBlockState(pos).getBlock()).getPath();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    /**
+     * (2026-09-13 被拦刀诊断) 射程内 + 攻击冷却就绪, 但准心没落在目标身上 →
+     * 这一刀被 isCrosshairOn 拦下 (拟人化出刀纪律, 不是 bug)。把准心实际命中的
+     * 东西记下来: 下次"打不到怪"就有现场证据 (block 名 + 是否软植物 / entity /
+     * miss)。1 秒一条节流。
+     */
+    private void logDeclinedSwing(AltoClef mod, Entity entity) {
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - _lastCrosshairDeclineLogMs < 1000) return;
+        _lastCrosshairDeclineLogMs = nowMs;
+        String what;
+        HitResult result = MinecraftClient.getInstance().crosshairTarget;
+        if (result instanceof EntityHitResult ehr) {
+            what = "entity " + ehr.getEntity().getType().getTranslationKey();
+        } else if (result instanceof BlockHitResult bhr) {
+            BlockPos pos = bhr.getBlockPos();
+            BlockState state = mod.getWorld().getBlockState(pos);
+            boolean soft = isSoftPlantBlock(mod, state, pos);
+            what = "block " + blockName(mod, pos) + " at " + pos.toShortString()
+                    + (soft ? " [soft-plant]" : "");
+        } else if (result == null) {
+            what = "null";
+        } else {
+            what = result.getType().toString();
+        }
+        Debug.logToFile("altoclef_diag.log", "[MELEE-Crosshair]\tswing DECLINED on "
+                + entity.getType().getTranslationKey() + " (crosshair not on target), crosshair=" + what);
     }
 
     /**
