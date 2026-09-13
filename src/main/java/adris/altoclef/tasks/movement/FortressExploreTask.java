@@ -6,6 +6,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.helpers.VisibilityHelper;
+import adris.altoclef.trackers.KnowledgeMemory;
 import baritone.api.pathing.goals.GoalNear;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -152,6 +153,22 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, Double> _headingByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, BlockPos> _anchorByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, Double> _maxRadiusByKey = new java.util.HashMap<>();
+
+    // =========================================================================
+    // (2026-09-13 记忆分支"查讫"机制) [Expedition] 日志实锤: clue 全是 memory,
+    // radius 11~48 震荡、max 卡 49 —— bot 在记忆推断区之间往返, 走不到锁定
+    // 方向分支。根因: KnowledgeMemory.getCandidateAreas 每次调用都【随机重新
+    // 生成】候选点, 永远消耗不完; 且旧版把 bot 自建门的黑曜石记成
+    // RUINED_PORTAL 地标, 候选全锚在门附近。
+    // 修法: ① 只认 NETHER_FORTRESS 类型候选 ( RUINED_PORTAL 黑名单语义放
+    // KnowledgeMemory 过载里); ② 记忆候选【到达扑空 / 寻路失败】即登记"查讫",
+    // 32 格内的候选不再重复前往, 全部查讫 → 自然落空到锁定方向分支。
+    // =========================================================================
+    private static final java.util.Map<String, java.util.Set<BlockPos>> _checkedMemoryByKey = new java.util.HashMap<>();
+    private static final double MEMORY_CHECK_RADIUS = 32;
+    private static final int MAX_CHECKED_MEMORY = 64;
+    // 当前目标是否为记忆推断目标 (到达/失败时登记"查讫"用)。
+    private BlockPos _currentMemoryTarget;
 
     // =========================================================================
     // (2026-09-05 通用化) 同一套人类式探索复用于不同下界目标: 音效线索前缀 /
@@ -546,6 +563,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         Vec3d pos = mod.getPlayer().getPos();
 
         if (_currentTarget == null || mod.getPlayer().getBlockPos().isWithinDistance(_currentTarget, 3)) {
+            // (2026-09-13) 到达即"查讫": 记忆推断目标扑空一次就登记, 不再去
+            // 同一片记忆区反复撞 (getCandidateAreas 每次随机重生成候选点)。
+            if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
+                markMemoryChecked(_currentTarget);
+                _currentMemoryTarget = null;
+            }
             _currentTarget = pickOutsideTarget(mod, pos);
             if (_currentTarget == null) {
                 if (++_failCounter > MAX_FAIL_COUNT) {
@@ -562,6 +585,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
         if (!_progress.check(mod)) {
             _failCounter++;
+            // (2026-09-13) 寻路失败同样记"查讫" —— 走不到的地方不该反复试。
+            if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
+                markMemoryChecked(_currentTarget);
+                _currentMemoryTarget = null;
+            }
             _currentTarget = null;
             Debug.logMessage("[FortressExplore] outside step failed, picking a new direction.");
             return null;
@@ -595,9 +623,15 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             return stepTowards(pos, brick.getX(), brick.getZ(), brick.getY());
         }
 
-        // 3. 结构推断: KnowledgeMemory 里"看见过的要塞地标"生成的候选区
-        //    (明确是 inference 不是 observation, 当方向感用)。
-        List<BlockPos> candidates = mod.getKnowledgeMemory().getCandidateAreas(pos);
+        // 3. 结构推断: 记忆地标生成的候选区 (明确是 inference 不是 observation,
+        //    当方向感用)。只认 NETHER_FORTRESS —— RUINED_PORTAL 的 landmark 是
+        //    黑曜石, 会把 bot 自建的下界门记成地标, 候选全锚在门附近导致绕门
+        //    打转 (20260913-202230 [Expedition] clue=memory 实锤)。
+        //    "查讫"过的区域 (32 格内已扑空过) 直接跳过, 全查讫 → 落到锁定方向。
+        _currentMemoryTarget = null;
+        List<BlockPos> candidates = mod.getKnowledgeMemory()
+                .getCandidateAreas(pos, KnowledgeMemory.StructureType.NETHER_FORTRESS);
+        candidates.removeIf(this::isCheckedMemory);
         if (!candidates.isEmpty()) {
             _lastClue = "memory";
             BlockPos best = null;
@@ -610,6 +644,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 }
             }
             if (best != null) {
+                _currentMemoryTarget = best;
                 setDebugState("Heading towards remembered fortress area (inference)");
                 return stepTowards(pos, best.getX(), best.getZ(), best.getY());
             }
@@ -662,6 +697,32 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         return _persistKey != null ? _persistKey : "?:unknown";
     }
 
+    /** 该候选是否落在已"查讫"(扑空过) 的记忆区 32 格内。 */
+    private boolean isCheckedMemory(BlockPos candidate) {
+        java.util.Set<BlockPos> checked = _checkedMemoryByKey.get(expeditionKey());
+        if (checked == null || checked.isEmpty()) return false;
+        for (BlockPos p : checked) {
+            if (p.isWithinDistance(candidate, MEMORY_CHECK_RADIUS)) return true;
+        }
+        return false;
+    }
+
+    private void markMemoryChecked(BlockPos target) {
+        if (target == null) return;
+        java.util.Set<BlockPos> checked = _checkedMemoryByKey
+                .computeIfAbsent(expeditionKey(), k -> new java.util.HashSet<>());
+        if (checked.size() >= MAX_CHECKED_MEMORY) return;
+        if (checked.add(target.toImmutable())) {
+            Debug.logMessage("[Expedition] memory area checked-empty at " + target.toShortString()
+                    + " (" + checked.size() + "/" + MAX_CHECKED_MEMORY + " total)");
+        }
+    }
+
+    private int checkedMemoryCount() {
+        java.util.Set<BlockPos> checked = _checkedMemoryByKey.get(expeditionKey());
+        return checked == null ? 0 : checked.size();
+    }
+
     private void maybeLogExpedition(AltoClef mod) {
         if (mod.getPlayer() == null) return;
         Vec3d now = mod.getPlayer().getPos();
@@ -685,12 +746,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _lastBiomeLabel = biome;
         Debug.logMessage(String.format(java.util.Locale.ROOT,
                 "[Expedition] mode=%s biome=%s bearing=%s anchor=(%d,%d) radius=%.0f max=%.0f"
-                        + " target=%s moved=%s clue=%s fails=%d",
+                        + " target=%s moved=%s clue=%s fails=%d memCk=%d",
                 _corridorMode ? "corridor" : "outside", biome,
                 Double.isNaN(_heading) ? "?" : fmtDeg(_heading),
                 anchor.getX(), anchor.getZ(), radius, maxRadius,
                 _currentTarget == null ? "-" : _currentTarget.toShortString(),
-                moved, _lastClue, _failCounter));
+                moved, _lastClue, _failCounter, checkedMemoryCount()));
         if (biomeChanged) {
             Debug.logMessage("[Expedition] biome switch " + prevBiome + " -> " + biome);
         }

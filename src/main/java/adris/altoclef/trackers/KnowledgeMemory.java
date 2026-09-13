@@ -117,8 +117,20 @@ public final class KnowledgeMemory {
      * These are guesses, not observations.
      */
     public List<BlockPos> getCandidateAreas(Vec3d fromPos) {
+        return getCandidateAreas(fromPos, StructureType.values());
+    }
+
+    /**
+     * (2026-09-13 类型过滤版) 旧版把三种结构混在一起出候选 —— 其中
+     * RUINED_PORTAL 的 landmark 是 OBSIDIAN/CRYING_OBSIDIAN, 而 bot 自建的
+     * 下界门正是黑曜石 → 门被记成"废弃传送门地标", 候选区全锚在门附近。
+     * 下界远征任务因此每轮都先绕门打转, 永远走不到"锁定方向"分支
+     * ([Expedition] clue=memory 实锤: 目标全在门 ±50 格, radius 11~48 震荡,
+     * bearing 每轮跳变)。按类型取用: 远征只认 NETHER_FORTRESS。
+     */
+    public List<BlockPos> getCandidateAreas(Vec3d fromPos, StructureType... types) {
         List<BlockPos> out = new ArrayList<>();
-        for (StructureType type : StructureType.values()) {
+        for (StructureType type : types) {
             Set<BlockPos> centers = _knownStructures.getOrDefault(type, Collections.emptySet());
             for (BlockPos center : centers) {
                 if (center.isWithinDistance(fromPos, CANDIDATE_MAX_DISTANCE)) {
