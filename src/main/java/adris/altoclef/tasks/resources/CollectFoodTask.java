@@ -185,8 +185,13 @@ public class CollectFoodTask extends Task {
                 potentialFood += getFoodPotential(offhand);
             }
         }
-        int wheatCount = StorageHelper.countItemsInInventoryReal(mod, Items.WHEAT);
-        int hayCount = StorageHelper.countItemsInInventoryReal(mod, Items.HAY_BLOCK);
+        // (2026-09-13 材料口径改含合成格) 同上: 配方书"批量填满"会把整堆小麦/干草块
+        // 搬进合成格 → 纯背包口径骤降 → foodPotential 跌破 _unitsNeeded → 判"食物不够"
+        // → 把正在跑的面包/小麦合成切走 → 材料退回 → 又够 → 反复横跳。本函数开头的
+        // 注释(L174-177)记录过同类抖动("做面包时制作卡顿"), 口径必须与"合成中的材料
+        // 仍算我们的"这一事实一致。
+        int wheatCount = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.WHEAT);
+        int hayCount = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.HAY_BLOCK);
         int potentialBread = (wheatCount / 3) + hayCount * 3;
         potentialFood += Objects.requireNonNull(Items.BREAD.getFoodComponent()).getHunger() * potentialBread;
         // Check smelting
@@ -275,7 +280,13 @@ public class CollectFoodTask extends Task {
             // - If we have raw foods, smelt all of them
 
             // Convert Hay+Wheat -> Bread
-            if (StorageHelper.countItemsInInventoryReal(mod, Items.WHEAT) >= 3) {
+            // (2026-09-13 材料口径改含合成格) 原先用纯背包口径 countItemsInInventoryReal。
+            // 配方书"批量填满"会把整堆小麦/干草块搬进合成格(3x3 台格或 2x2 格), 纯背包
+            // 口径随即归 0 → 本分支判"没小麦"→ 切走正在跑的面包/小麦合成 → 台格材料
+            // 退回背包 → 计数又 >=3 → 再做 → 死循环。与 344bd043(做床时羊毛进 3x3 格
+            // 判缺料翻面 ~15 轮) 同一模式。改含合成格口径(真实背包+护甲+副手+光标+
+            // 2x2 格+3x3 台格), 语义 = "手上可用于合成的材料有多少"。
+            if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.WHEAT) >= 3) {
                 setDebugState("Crafting Bread");
                 Item[] w = new Item[]{Items.WHEAT};
                 Item[] o = null;
@@ -283,7 +294,7 @@ public class CollectFoodTask extends Task {
                 _currentResourceTask = new CraftInTableTask(new RecipeTarget(Items.BREAD, 99999999, CraftingRecipe.newShapedRecipe("bread", new Item[][]{w, w, w, o, o, o, o, o, o}, 1)), false, false);
                 return _currentResourceTask;
             }
-            if (StorageHelper.countItemsInInventoryReal(mod, Items.HAY_BLOCK) >= 1) {
+            if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.HAY_BLOCK) >= 1) {
                 setDebugState("Crafting Wheat");
                 Item[] o = null;
                 _currentResourceTask = new CraftInInventoryTask(new RecipeTarget(Items.WHEAT, 99999999, CraftingRecipe.newShapedRecipe("wheat", new Item[][]{new Item[]{Items.HAY_BLOCK}, o, o, o}, 9)), false, false);

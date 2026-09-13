@@ -53,6 +53,10 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
     // 新产出循环(输入格还有料时输出格会立刻再产出一份)。全清后复位。
     private boolean _leftoverOutputTaken = false;
 
+    // (2026-09-13 填充份数决策留痕) 决策(bulk/remaining/perCraft)变化时才打一条
+    // [CraftFill], 供校验"无限目标是否真的走了批量、真实需求是否仍走单份"。
+    private String _lastFillLogKey = "";
+
     public CraftGenericWithRecipeBooksTask(RecipeTarget target) {
         _target = target;
     }
@@ -250,16 +254,37 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         }
 
         // Request to fill in a recipe. Just piggy back off of the slot delay system.
-        // (2026-09-10 铁剑超量合成修复) craftAll=true = shift 点配方书 = 按背包
-        // 材料尽量填满格子(10 铁+整堆棍全进 3x3)。目标只要 1 把剑时, 收 1 把达标
-        // 后格内余料经"残留成品接收"分支被 QUICK_MOVE 连续合成榨干 — 全部铁锭
-        // 变铁剑(用户实测 15:56 场次)。以前不暴露是因为旧逻辑残留时死等 12s 关台,
-        // 关台副作用把超量材料退回背包; 91b0408d 修死循环后副作用消失。
-        // 改 craftAll=false: fill 只填精确 1 份配方, 格子永不超量, 下游收货/清格
-        // 全部自然安全。速度损失 = 每份多一轮 fill 点击, 目标数量普遍 ≤2, 可忽略。
+        // (2026-09-13 填充份数按需 — 取代 958108b5 的"一律只填 1 份")
+        // 958108b5 为修"铁剑超量合成"把 craftAll 硬编码为 false(只填精确 1 份),
+        // 注释判断"目标数量普遍 ≤2, 速度损失可忽略"。但目标数量并不总是小:
+        // CollectFoodTask 把 bread/wheat 传成 99999999(食物按 unit 折算不出个数),
+        // 于是退化成"每轮合成 1 个"(20260913-104826 实锤: 面包 1 秒 1 个、小麦
+        // 每次只拆 1 个干草块, 20 秒才做 8 个面包)。
+        // 现按"还需份数"决定, 恢复批量能力同时不超量:
+        //   remaining = 目标总数 - 已有数  (与上方收货判定同一口径 getItemCount)
+        //   remaining > 每份产出 → craftAll=true  (还需不止一次合成, 批量填满)
+        //   remaining ≤ 每份产出 → craftAll=false (恰好一份就够, 精确填 1 份)
+        // 超量由收货端兜住: ReceiveCraftingOutputSlotTask 的 takeAll 判定是
+        // "还差多少 ≥ 格内能做的总量"才 QUICK_MOVE 榨干, 否则走 PICKUP 按需单拿。
+        // 因此铁剑 x1 / 木板 x12 这类真实需求仍逐份按需拿取(不超量), 只有"无限"
+        // 目标(还差数远大于格容量)才会一次榨干格内材料 —— 正是批量想要的行为。
+        // 旧"收够后残留被 QUICK_MOVE 连带榨干"的路径已由残留分支改退料消除。
+        int have = mod.getItemStorage().getItemCount(_target.getOutputItem());
+        int remaining = _target.getTargetCount() - have;
+        if (remaining <= 0) {
+            // 已达标: 不再发填充(旧行为达标后仍会再 fill 一次 → 白多合成一份),
+            // 格内余料交给上层清格(CraftInInventoryTask 的
+            // EnsureFreePlayerCraftingGridTask / 3x3 关屏退料)处理, 本任务
+            // 只等父任务判定完成切走。
+            setDebugState("Target count met, letting parent move on");
+            return null;
+        }
+        int perCraft = Math.max(1, _target.getRecipe().outputCount());
+        boolean bulkFill = remaining > perCraft;
+        logFillDecision(remaining, perCraft, bulkFill, have);
         if (mod.getSlotHandler().canDoSlotAction()) {
             mod.getSlotHandler().registerSlotAction();
-            StorageHelper.instantFillRecipeViaBook(mod, _target.getRecipe(), _target.getOutputItem(), false);
+            StorageHelper.instantFillRecipeViaBook(mod, _target.getRecipe(), _target.getOutputItem(), bulkFill);
         }
 
 
@@ -275,9 +300,24 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         }
     }
 
+    /**
+     * (2026-09-13) [CraftFill] 填充份数决策留痕: 决策或数量变化时打一条, 防刷屏。
+     * 校验要点: item=bread/wheat(无限目标) 应恒 bulk=true; 工具/精确数量目标
+     * (如 stick x4, pickaxe x1) 应 bulk=false 走精确单份。
+     */
+    private void logFillDecision(int remaining, int perCraft, boolean bulkFill, int have) {
+        String key = bulkFill + "|" + remaining + "|" + perCraft;
+        if (key.equals(_lastFillLogKey)) return;
+        _lastFillLogKey = key;
+        Debug.logToFile("altoclef_craftclick.log",
+                "[CraftFill] item=" + _target.getOutputItem().getTranslationKey()
+                        + " bulk=" + bulkFill + " remaining=" + remaining
+                        + " perCraft=" + perCraft + " have=" + have
+                        + " target=" + _target.getTargetCount());
+    }
+
     /** 停滞看门狗的进度签名: 输出格 + 输入格 + 光标 + 背包空位数。 */
-    private String buildProgressSignature(AltoClef mod, Slot outputSlot) {
-        StringBuilder sb = new StringBuilder();
+    private String buildProgressSignature(AltoClef mod, Slot outputSlot) {        StringBuilder sb = new StringBuilder();
         ItemStack out = StorageHelper.getItemStackInSlot(outputSlot);
         sb.append(out.isEmpty() ? "-" : out.getItem() + "x" + out.getCount());
         for (Slot s : (StorageHelper.isBigCraftingOpen()
