@@ -109,13 +109,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 矿洞认定 + 探索导航都只认【目标矿带附近】的天然空气。
     // (2026-09-13 双边窗口, 用户"挖钻石时只有高度范围内的矿洞才会触发探索探索")
     // 原实现是【单边上限】: naturalMaxY = targetY + 16, 没有下限。两个问题:
-    //   1) 16 太宽 → 钻石层 -59 时会认到 y=-43 的浅层洞, bot 被上方洞导航走;
+    //   1) 16 太宽 → 钻石层 -57 时会认到 y=-43 的浅层洞, bot 被上方洞导航走;
     //   2) 无下限 → 深部目标不会拒绝"掉到更深处"的洞。
     // 改为围绕【目标矿带】(不是单点 _targetY) 的双边窗口:
     //   上限 = 带上限 + CAVE_ABOVE_TARGET_BUFFER
     //   下限 = 带下限 - CAVE_BELOW_TARGET_BUFFER
     // 各带实际窗口 (ABOVE/BELOW 均取 8):
-    //   钻石 [-59,-53] → [-67, -45] → 受世界底约束为 [-64,-45]  (峰值段完整覆盖)
+    //   钻石 [-57,-53] → [-65, -45] → 受世界底/基岩约束为 [-59,-45]  (含 -53 以上的探洞层)
     //   金   [-24, 0]  → [-32,   8]   (金峰值 -16, 窗口内)
     //   铁   [  5,30]  → [ -3,  38]   (铁带隧道 5~30, 窗口内)
     //   兜底 [ 50,50]  → [ 42,  45]   (注: CAVE_EXPLORE_MIN_DEPTH_Y=45 已先拦下)
@@ -188,14 +188,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int TUNNEL_DESCEND_EVERY = 2;
     // Tunnels never descend below this Y — at the floor they run flat, which is
     // exactly how humans branch-mine for diamonds.
-    // (2026-09-13 深度修正) 旧值 -24 源于"钻石带 = -24"的错误前提, 把主世界隧道
-    // 硬地板锁死在 -24, 使钻石挖掘永远上不了峰值层 (floorY=max(TUNNEL_MIN_Y,带下限)
-    // 被截断, 光改带无效)。改 -59 与钻石峰值对齐, 且在基岩起伏带 (-60~-64) 之上。
-    // 对其它带无副作用: 金 [-24,0]→max(-59,-24)=-24, 铁 [5,30]→max(-59,5)=5,
-    // 兜底 [50,50]→50, 均与原值一致 (带下限主导, 地板不参与)。
+    // (2026-09-13 深度修正) 旧值 -24 源于"钻石带 = -24"的错误前提。
+    // (2026-09-14 再修正: -59 → -58 —— 【镐子碰到的行】比【目标脚位】再低一格)
+    // 楼梯下行为了把玩家的脚放进 targetY, 必须把脚下的那一格(ground 行)也挖掉 ⇒
+    // 实际开挖的最深一行 = targetY - 1。1.18.2 基岩带 y=-64~-60 (20260914-132420 实锤
+    // <Destroy block at -214,-60,279> 傻挖 17s), 所以任何带的目标脚位都必须 ≥ -58,
+    // 最深的镐子行(-59)才不会落在基岩上。本硬地板取 -58 作为最后一道防线: 今后谁把一个
+    // 更深的带传进来, 也会被抬回 -58 (虽已有不可破坏拦截兜底, 但每次命中都要改道, 成本高)。
+    // 对其它带无副作用: 金 [-24,0]→max(-58,-24)=-24, 铁 [5,30]→max(-58,5)=5,
+    // 兜底 [50,50]→50, 均与原值一致 (带下限主导, 地板不参与); 钻石 [-57,-53]→
+    // max(-58,-57)=-57, 同样由带下限主导。
     // (2026-09-05 下界高度概念) 此下限只适用于主世界: 下界基岩在 y=0~4, 照搬会把
     // bot 一路缓降到 y≈5 被基岩挡死 (实测)。下界隧道不再缓降 (floor=目标高度, 平挖)。
-    private static final int TUNNEL_MIN_Y = -59;
+    private static final int TUNNEL_MIN_Y = -58;
     // (2026-09-05 下界基岩层逃生, 用户"挖到基岩挡住应向上挖矿洞回到Y=70再随便探索")
     // 下界玩家 y 低于此值 → 紧急进入上行模式: 45° 楼梯向上挖回目标高度。
     // 基岩顶面 y=4, 取 10 留出安全缓冲。
@@ -738,13 +743,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 logProtectedDigSkip(mod, head);
             } else if (isUnbreakable(mod, head)) {
                 // (2026-09-14 不可破坏拦截, 主路径) 隧道几何路径撞上基岩类方块
-                // (hardness<0, 1.18.2 基岩带最高到 y=-60, 钻石隧道 -59/-60 两行
-                // 恰好贴着)。旧逻辑无过滤派发 DestroyBlockTask → "Block in range,
-                // mining..." 无限左键, 20260914-132420 实锤: 对 (-214,-60,279) 傻挖
-                // 17s 到用户手动退出 (snapshot.log reason=stuck 每秒一条, dug 卡 3/80),
-                // 唯一逃逸是 45s "Mining stalled" 兜底。与水/门体同款处置: 从队列
-                // 弹掉, 几何继续推进 —— 脚行(-60)碰基岩=跨过去的一格台阶, 头行在
-                // -59 以上不会出现基岩(1.18.2 基岩带 -64~-60), 不会造成 1 格高
+                // (hardness<0, 1.18.2 基岩带最高到 y=-60; 09-14 前钻石带下沿 -59, 下行要挖
+                // -60 行, 恰好贴着基岩顶 —— 该带已于同日上抬到 [-57,-53], 正常情况不再
+                // 碰到这一行, 本拦截改为兜底而非常态路径)。旧逻辑无过滤派发
+                // DestroyBlockTask → "Block in range, mining..." 无限左键, 20260914-132420
+                // 实锤: 对 (-214,-60,279) 傻挖 17s 到用户手动退出 (snapshot.log reason=stuck
+                // 每秒一条, dug 卡 3/80), 唯一逃逸是 45s "Mining stalled" 兜底。与水/门体
+                // 同款处置: 从队列弹掉, 几何继续推进 —— 脚行被弹掉等于跨过去的一格台阶,
+                // 头行在基岩带之上不会出现基岩(1.18.2 基岩带 -64~-60), 不会造成 1 格高
                 // 不可通行断面。DestroyBlockTask 侧另有独立硬守卫兜底(覆盖其他
                 // 40+ 派发点), 判据同源 (getHardness < 0)。
                 logUnbreakableSkip(mod, head);
@@ -809,10 +815,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // Descend 1 block every TUNNEL_DESCEND_EVERY steps (walkable slope),
             // clamped at the floor so we sink toward the target band and then
             // branch-mine flat. (2026-09-05 下界高度概念) 下界 floor=目标高度 → 不缓降,
-            // 平挖 — 主世界 TUNNEL_MIN_Y(-59) 是钻石层逻辑, 下界照搬会一路挖到基岩。
+            // 平挖 — 主世界 TUNNEL_MIN_Y(-58) 是最后安全行事线, 下界照搬会一路挖到基岩。
             // (2026-09-10 带感知下限, 用户"挖铁不应始终呆在 y=负值") 主世界 floor =
             // max(TUNNEL_MIN_Y, 带下限): 铁带 [5,30] 隧道缓降到 y=5 为止, 不再一路
-            // 沉到地板平挖; 钻石带 [-59,-53] → max(-59,-59)=-59 = 钻石峰值层;
+            // 沉到地板平挖; 钻石带 [-57,-53] → max(-58,-57)=-57 (带下限主导; 见
+            // MineAndCollectTask.targetShaftBand 09-14 注释: 再往下就要挖到 -60 基岩行);
             // {50,50} 兜底带回到"平挖在 50"的原意 (旧实现会意外缓沉到 -24)。
             int floorY = _nether ? _targetY : Math.max(TUNNEL_MIN_Y, _targetYMin);
             int drop = Math.max(0, Math.min(_digStart.getY() - floorY, k / TUNNEL_DESCEND_EVERY));
@@ -1056,7 +1063,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * (2026-09-13 探洞双边窗口) 本次任务认可为"本层矿洞"的天然空气高度【上限】。
      * 围绕目标【矿带上限】而非随机出来的单点 _targetY —— 单点会让同一条带里
      * 随机到高值的实例把整条带的上沿都算进来 (钻石 -53 时 -53+8=-45 与
-     * -59+8=-51 只差 6 格, 但语义上应当统一用带的上沿)。
+     * -57+8=-49 只差 4 格, 但语义上应当统一用带的上沿)。
      * 仍受 CAVE_NATURAL_AIR_MAX_Y 全局硬顶约束 (防自挖楼梯连到地表)。
      */
     int caveWindowMaxY() {
