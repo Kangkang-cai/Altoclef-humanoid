@@ -463,6 +463,17 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             endPillar(mod);
             return false;
         }
+        // ③b (2026-09-14 低净空闸门) 头顶上方一格 (feet.up(2)) 实心 → 垫塔必然
+        //    原地跳 (起跳蹭天花板, 净高度永不上升), 判据见 headroomBlockedForPillar。
+        //    此时正确的人类行为不是垫塔, 是走到目标正下方再仰挖 —— 落回 false 交
+        //    下面原有 GoalXZ 导航, 走到正下方后 reach (竖直射线干净) 自然成立,
+        //    下一 tick 走正常挖掘分支。现场 20260914-132420 实锤: 2 格高隧道里
+        //    目标是 -57 行天花板矿, bot 在 (-215,277) 垫塔 GROUND jump 死循环
+        //    4s (feet 恒 -59, PLACE 分支 0 次) → 超时拉黑 → 上层挑回同目标 churn。
+        if (headroomBlockedForPillar(mod)) {
+            endPillar(mod);
+            return false;
+        }
         if (!_pillarActive) {
             _pillarActive = true;
             _pillarLastY = Integer.MIN_VALUE;
@@ -521,7 +532,27 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (_acquireStarted) return false; // 每实例只采一次, 采完仍不够就落回放弃路径
         if (!targetAboveEye(mod)) return false;
         if (horizontalDistanceSqToPlayer(mod) > 4.0) return false;
+        // (2026-09-14 低净空闸门) 净空被挡时垫塔不可能发生, 别去采垫块。
+        // 与 tryPillarUpToReach 的 ③b 同源 —— "同一概念只留一个判据源"。
+        if (headroomBlockedForPillar(mod)) return false;
         return !PillarJumpHelper.hasMaterials(mod, _pillarMaterials);
+    }
+
+    /**
+     * (2026-09-14 低净空闸门) 起跳必需净空是否被挡: 脚块上方第二格
+     * (feet.up(2), 即头块再上一格) 实心 → 起跳头蹭天花板, 垂直速度被顶掉,
+     * 脚下永远实心 → 永远进不了放置窗口 = 原地跳死循环 (PillarJumpHelper
+     * 只看脚下/腾空窗口, 不查净空 —— 净空是调用方的前置责任)。
+     *
+     * 放行一整格净空的原因: 放置窗口在脚块变更 (净升 1.0) 时即开, 需要的
+     * bbox 最高点只到头块上方一格; 1.18.2 基岩带最高到 -60 而钻石隧道头行
+     * 在 -59, 常见"净空被挡"场景就是 -57 行天花板。区块未加载时不判负
+     * (与本仓 isAir 同款语义, "读不到"不等于"被挡")。
+     */
+    private boolean headroomBlockedForPillar(AltoClef mod) {
+        BlockPos aboveHead = mod.getPlayer().getBlockPos().up(2);
+        if (!mod.getChunkTracker().isChunkLoaded(aboveHead)) return false;
+        return WorldHelper.isSolid(mod, aboveHead);
     }
 
     /**
