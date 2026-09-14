@@ -9,6 +9,7 @@ import adris.altoclef.util.helpers.JumpObstructionHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.utils.input.Input;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -134,6 +135,40 @@ public final class JumpStuckResolver {
     private static final int DIG_GUARD_LOG_TICKS = 100;
     private static final TimerGame _digGuardLogTimer = new TimerGame(5);
 
+    // ===== (2026-09-14) 岩浆豁免: 在岩浆里不判"水平卡死" =====
+    // 第 4 个"合法零速状态" (前三个: 挖方块中 / 下落中 / 垂直上不去)。
+    //
+    // 现场实锤 (会话 20260914-095600, 下界岩浆池 -223,22,-307, 用户"差一秒成功上岸,
+    // 药水效果停了"):
+    //   09:56:39.020 [LavaEscape] pos=-223,30,-307 pathing=true  ← baritone 首次算出
+    //                                                              上岸路径 (新 jar 的
+    //                                                              allowSwimThroughLava
+    //                                                              生效, 方向是对的)
+    //   09:56:41.051 [LavaEscape] fireRes=false                  ← 防火药水到期
+    //   09:56:41.902 [JumpStuck] 1.0s pos=-223,31,-305
+    //                blocks[below=lava feet=lava up1=air up2=air up3=air
+    //                       ahead=cobblestone aheadUp1=air]      ← 已浮到岩浆表面,
+    //                                                              前方一格就是岸
+    //   09:56:41.903 [JumpStuck] clearing obstruction -223,31,-304 solid=true
+    //                -> DestroyBlockTask                          ← forceCancel 掉刚算好
+    //                                                              的上岸路径, 改成挖岸石
+    //   09:56:43.101 [LavaEscape] pathing=false
+    //   09:56:41→48 血 13.0→8.16→4.25→1.64→死; 挖那格花了 6.7s 没挖完
+    //
+    // 成因: 在岩浆里按 JUMP 上浮时水平速度天然为 0 (垂直位移不算水平移动), 而
+    // EscapeFromLavaTask.onTick 全程强制 hold(JUMP) → "证据三选一"里的强制跳跃恒成立
+    // → 检测 1s + 挖障/冷却各 1s 就是一个死循环节奏点。
+    //
+    // 为什么旧版一格都没覆盖: 水面豁免 (:248) 的判据是 isTouchingWater(), 而
+    // **isTouchingWater() 对岩浆返回 false** —— 灵魂沙那次已吃过同一个亏。故岩浆
+    // 场景对"岸边浅水"那套兜底是完全裸奔的。
+    //
+    // 保留 ascentCapped 例外: 头顶正上方被封 = 上浮通道死了, 此时"不干预"等于永久
+    // 静止, 必须放行给挖障兜底 (敞口岩浆池如本次现场不会走到这里)。
+    private static int _lavaGuardSinceTick = 0;
+    private static final int LAVA_GUARD_LOG_TICKS = 100;
+    private static final TimerGame _lavaGuardLogTimer = new TimerGame(5);
+
     /** 共享 wander 任务 (强制脱离用)。 */
     private static final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
 
@@ -205,6 +240,31 @@ public final class JumpStuckResolver {
             return null;
         }
         _digGuardSinceTick = 0;
+
+        // (2026-09-14) 岩浆豁免 —— 见字段区注释。必须同样在累积 streak 之前返回:
+        // 在岩浆里上浮的水平零速会一路攒满 20 tick, 等离开岩浆那一刻立刻触发处置。
+        if (mod.getPlayer().isInLava() && !ascentCapped(mod)) {
+            int lavaNow = WorldHelper.getTicks();
+            if (_lavaGuardSinceTick == 0) {
+                _lavaGuardSinceTick = lavaNow;
+                // TimerGame 新建即到期, 首次进入必须显式 reset。
+                _lavaGuardLogTimer.reset();
+            } else if (lavaNow - _lavaGuardSinceTick >= LAVA_GUARD_LOG_TICKS
+                    && _lavaGuardLogTimer.elapsed()) {
+                _lavaGuardLogTimer.reset();
+                Debug.logToFile("altoclef_diag.log", "[LavaGuard] lava exemption held "
+                        + (lavaNow - _lavaGuardSinceTick) + " ticks, pos="
+                        + mod.getPlayer().getBlockPos()
+                        + " y=" + String.format("%.2f", mod.getPlayer().getY())
+                        + " baritonePathing="
+                        + mod.getClientBaritone().getPathingBehavior().isPathing()
+                        + " fireRes="
+                        + mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE));
+            }
+            resetStreak();
+            return null;
+        }
+        _lavaGuardSinceTick = 0;
 
         Vec3d v = mod.getPlayer().getVelocity();
         boolean hSlow = Math.hypot(v.x, v.z) < HSPEED_STUCK;
