@@ -545,6 +545,15 @@ public class BeatMinecraft2Task extends Task {
     private boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(18 * 60);
 
+    // (2026-09-14 用户"两瓶都喝完就不再重收"要改成允许重收, 但加冷却时间, 不要马上触发)
+    // 旧行为: _fireResPhaseDone 一次闩 → 2 瓶喝完后下界后半程全程裸奔, 再也不会去收。
+    // 新行为: 阶段关闭时起算冷却; 冷却是 static —— BeatMinecraft2Task 实例会因死亡重开/
+    // 任务重建而重建, 放实例字段会被洗掉, 直接退化成"立刻重收"(用户明确不要)。
+    // 180s: 给 bot 一个"先用现有条件活下去"的窗口; 猪灵交易一轮约 12 分钟,
+    // 反复进本阶段会阻塞主线, 所以宁可长一点。
+    private static final long FIRE_RES_REOPEN_COOLDOWN_MS = 180_000;
+    private static long _fireResReopenAtMs = 0;
+
     // (2026-09-09 进下界前排空熔炉, 用户"把烧金子挪到进传送门之前") 进下界前若
     // 16 格内有非空熔炉 (input/fuel/output 任一有物), 先 EmptyFurnaceTask 取尽
     // 并连炉带走: ①炉里的金锭/物资不丢 — 11:11 场次实测, 门旁炉内 8 金锭被
@@ -2103,38 +2112,47 @@ public class BeatMinecraft2Task extends Task {
                 }
                 if (needsBlazeRods) {
                     // (2026-08-23 防火药水保命) 打烈焰人前先搞防火药水
-                    // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。只尝试
-                    // 一轮: 达标或超时后不再重试, 不阻塞主线。
-                    // (2026-09-06 用户) 目标提为 2 瓶 (FIRE_RES_POTION_TARGET);
-                    // _fireResPhaseDone 闩保证之后喝掉也不会重新进本阶段
-                    // (防任务打架), 花不花由 CollectBlazeRodsTask 的喝药门槛管。
+                    // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。
+                    // (2026-09-06 用户) 目标提为 2 瓶 (FIRE_RES_POTION_TARGET); 花不花由
+                    // CollectBlazeRodsTask 的喝药门槛管。
+                    // (2026-09-14 用户"要重收, 但加冷却, 不要马上触发") 旧注释写的
+                    // "_fireResPhaseDone 闩保证之后喝掉也不会重新进本阶段"已废除 ——
+                    // 那等于两瓶喝完后下界全程裸奔 (本次事故: 09:56 药效到期后 7 秒烧死,
+                    // 背包 0 瓶, 且此后再也不会去收)。现在阶段可重开, 但必须过冷却。
                     if (!_fireResPhaseDone) {
                         if (!_fireResPhaseActive) {
                             if (ItemHelper.countFireResPotions(mod) < FIRE_RES_POTION_TARGET) {
                                 _fireResPhaseActive = true;
                                 _fireResPhaseTimer.reset();
                             } else {
-                                _fireResPhaseDone = true;
+                                closeFireResPotionPhase();
                             }
                         }
                         if (_fireResPhaseActive) {
                             if (ItemHelper.countFireResPotions(mod) >= FIRE_RES_POTION_TARGET) {
                                 Debug.logMessage("(FireRes) Target reached: " + FIRE_RES_POTION_TARGET
                                         + " fire resistance potions. Proceeding to blaze rods.");
-                                _fireResPhaseActive = false;
-                                _fireResPhaseDone = true;
+                                closeFireResPotionPhase();
                             } else if (_fireResPhaseTimer.elapsed()) {
                                 Debug.logMessage("(FireRes) Phase timed out with " + ItemHelper.countFireResPotions(mod)
                                         + " potions. Proceeding to blaze rods anyway.");
                                 Debug.logToFile("altoclef_diag.log", "[FireRes] outer phase TIMEOUT, potions="
                                         + ItemHelper.countFireResPotions(mod));
-                                _fireResPhaseActive = false;
-                                _fireResPhaseDone = true;
+                                closeFireResPotionPhase();
                             } else {
                                 setDebugState("Getting fire resistance potions (gold + piglin trading)");
                                 return new CollectFireResPotionsTask(FIRE_RES_POTION_TARGET);
                             }
                         }
+                    } else if (shouldReopenFireResPotionPhase(mod)) {
+                        // (2026-09-14 用户) 药水耗尽 + 冷却已过 → 重开收药阶段。
+                        // 不马上触发: 冷却由 closeFireResPotionPhase() 在阶段关闭那一刻起算。
+                        Debug.logMessage("(FireRes) No potions left, reopening the potion phase.");
+                        Debug.logToFile("altoclef_diag.log", "[FireRes] phase REOPENED (potions exhausted, cooldown "
+                                + (FIRE_RES_REOPEN_COOLDOWN_MS / 1000) + "s elapsed)");
+                        _fireResPhaseActive = true;
+                        _fireResPhaseTimer.reset();
+                        _fireResPhaseDone = false;
                     }
                     setDebugState("Getting Blaze Rods");
                     return getBlazeRodsTask(mod, blazeRodTarget);
@@ -2459,6 +2477,22 @@ public class BeatMinecraft2Task extends Task {
         }
         setDebugState("Stockpiling wood: crafting stone axe first (gather cobble/table/sticks)");
         return TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
+    }
+
+    /** (2026-09-14) 关闭收药阶段, 并起算"允许重开"的冷却。见 FIRE_RES_REOPEN_COOLDOWN_MS 注释。 */
+    private void closeFireResPotionPhase() {
+        _fireResPhaseActive = false;
+        _fireResPhaseDone = true;
+        _fireResReopenAtMs = System.currentTimeMillis() + FIRE_RES_REOPEN_COOLDOWN_MS;
+    }
+
+    /**
+     * (2026-09-14 用户"要重收, 但是加冷却时间, 不要马上触发") 是否该重开收药阶段。
+     * 只在"一瓶都没有"时重开 —— 还剩 1 瓶说明上一轮收的药还没用完, 不必重收。
+     */
+    private boolean shouldReopenFireResPotionPhase(AltoClef mod) {
+        if (ItemHelper.countFireResPotions(mod) > 0) return false;
+        return System.currentTimeMillis() >= _fireResReopenAtMs;
     }
 
     private Task getBlazeRodsTask(AltoClef mod, int count) {

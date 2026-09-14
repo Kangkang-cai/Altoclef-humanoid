@@ -7,6 +7,7 @@ import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
+import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.TradeWithPiglinsTask;
 import adris.altoclef.tasksystem.TaskRunner;
@@ -23,6 +24,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FluidBlock;
+import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
@@ -37,6 +39,34 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // (2026-09-14 防火岩浆自救取证) 逃岩浆任务运行期 2s 一条诊断节流 (static:
     // 链实例重建不洗掉)。
     private static long _lastLavaEscapeLogMs = 0;
+
+    // ===== (2026-09-14 防火药水自动补给, 用户"如果背包有额外药水, 然后要烧死了,
+    //       会自动补药水对吧") =====
+    // 旧版**完全不会**: 全仓 DrinkFireResPotionTask 只有一处调用
+    // (CollectBlazeRodsTask:129 打烈焰人前的门槛), 与"身上着火 / 泡在岩浆里"无关;
+    // WorldSurvivalChain 的所有保命分支都不碰药水。
+    //
+    // 门槛 (用户 2026-09-14 选"严一点", 只认两个时刻, 其余不浪费药):
+    //   ① 补杯: 药效将尽 (≤ FIRE_RES_TOPUP_TICKS) 且身处危险 (着火或岩浆)。
+    //      趁药效还在时喝 —— 此时停在岩浆里不挨任何伤害, 喝完无缝衔接。
+    //   ② 急救: 已断档 + 血 ≤ FIRE_RES_EMERGENCY_HEALTH + 只是着火 (不在岩浆里)。
+    //
+    // 【"断档 + 在岩浆里"故意不喝】停下喝药的 1.6s 里: EscapeFromLavaTask 被顶掉
+    // → 其 onStop 释放 JUMP → 身体下沉, 且边沉边挨岩浆伤 (本场实测 3.2/s), 1.6s
+    // ≈ 5~6 血; 断档 + 血 ≤10 时这几乎必死, 让位给逃岩浆链跑完更划算。
+    // 真正防的是"永远别进入这个状态", 由 ① 保证。
+    /** 药效剩余低于此 tick 数 = "将尽" (15s @ 20tps)。 */
+    private static final int FIRE_RES_TOPUP_TICKS = 300;
+    /** 已断档时的急救健康值门槛。 */
+    private static final float FIRE_RES_EMERGENCY_HEALTH = 10.0f;
+    /** 喝药任务连续占链硬顶 (8s): 喝完/喝不成都必须放行, 防 prio 105 焊死在链上。 */
+    private static final long FIRE_RES_DRINK_TIMEOUT_MS = 8000;
+    /** 喝不成后的静默期 (30s): 防"立刻重试 → 再喝不成"死循环。 */
+    private static final long FIRE_RES_DRINK_GIVEUP_MS = 30000;
+    /** 本轮喝药开始时刻 (static: 链实例重建不洗掉)。 */
+    private static long _fireResDrinkSinceMs = 0;
+    /** 放弃重试的截止时刻。 */
+    private static long _fireResDrinkGiveUpUntilMs = 0;
     // (2026-09-14 坠落取证) 上一次是否处于自由落体, 用于抓"进入坠落"的边沿。
     private static boolean _wasFalling = false;
     private boolean _wasAvoidingDrowning;
@@ -111,6 +141,13 @@ public class WorldSurvivalChain extends SingleTaskChain {
         // 岩浆", 需要区分三种假设: 格挡抢寻路 (MobDefenseChain [ShieldVsPath]) /
         // JumpStuckResolver 误触发 / 上层拆任务。零行为, 只写诊断文件。
         traceFallEdge(mod);
+
+        // Fire resistance potion (2026-09-14) —— 必须在 Lava Escape **之前**:
+        // 补杯发生在"已有防火 + 人还在岩浆里", 而岩浆分支会先 return 100 把机会
+        // 吃掉。给 105 (>100) 是为了让喝药任务不被下一 tick 的岩浆分支顶掉
+        // (同类型 setTask + isEqual 保留实例 → 任务能连续拿到 tick, 见 TaskSystem)。
+        float fireResDrink = tryDrinkFireResPotion(mod);
+        if (fireResDrink != Float.NEGATIVE_INFINITY) return fireResDrink;
 
         // Lava Escape
         if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()) {
@@ -424,6 +461,74 @@ public class WorldSurvivalChain extends SingleTaskChain {
             }
         }
         _wasFalling = falling;
+    }
+
+    /**
+     * (2026-09-14 防火药水自动补给) 现在是否该喝一瓶防火药水。
+     * 判据与理由见字段区注释; 这里只管"该不该", 派发与超时兜底在本方法内完成。
+     *
+     * @return 任务优先级 105 (必须 > Lava Escape 的 100, 否则下一 tick 就被顶掉);
+     *         {@link Float#NEGATIVE_INFINITY} = 不需要 / 本轮已放弃。
+     */
+    private float tryDrinkFireResPotion(AltoClef mod) {
+        if (mod.getPlayer() == null) return Float.NEGATIVE_INFINITY;
+        boolean inLava = mod.getPlayer().isInLava();
+        boolean onFire = mod.getPlayer().isOnFire();
+        if (!inLava && !onFire) {
+            // 脱离危险 → 本轮作废, 下次从零计时。
+            _fireResDrinkSinceMs = 0;
+            return Float.NEGATIVE_INFINITY;
+        }
+        if (ItemHelper.countFireResPotions(mod) <= 0) {
+            // 没药 (本次事故现场就是这种: 两瓶都喝完了) → 交既有保命链。
+            _fireResDrinkSinceMs = 0;
+            return Float.NEGATIVE_INFINITY;
+        }
+        long nowMs = System.currentTimeMillis();
+        if (nowMs < _fireResDrinkGiveUpUntilMs) return Float.NEGATIVE_INFINITY;
+
+        StatusEffectInstance eff = mod.getPlayer().getStatusEffect(StatusEffects.FIRE_RESISTANCE);
+        boolean hasRes = eff != null;
+        boolean want;
+        if (hasRes) {
+            // ① 补杯: 药效将尽 + 身处危险。
+            want = eff.getDuration() <= FIRE_RES_TOPUP_TICKS;
+        } else if (inLava) {
+            // ② 断档 + 在岩浆里: 故意不喝 —— 停下这 1.6s 会被顶掉逃岩浆任务
+            //    (onStop 释放 JUMP → 下沉) 且边沉边挨岩浆伤, 见字段区注释。
+            want = false;
+        } else {
+            // ③ 断档 + 只是着火 (不在岩浆): 掉血 1/s, 停 1.6s 成本低, 血低就喝。
+            want = mod.getPlayer().getHealth() <= FIRE_RES_EMERGENCY_HEALTH;
+        }
+        if (!want) {
+            _fireResDrinkSinceMs = 0;
+            return Float.NEGATIVE_INFINITY;
+        }
+
+        if (_fireResDrinkSinceMs == 0) {
+            _fireResDrinkSinceMs = nowMs;
+            Debug.logToFile("altoclef_diag.log", "[FireResDrink] start (pos="
+                    + mod.getPlayer().getBlockPos().toShortString()
+                    + " inLava=" + inLava + " onFire=" + onFire
+                    + " health=" + String.format("%.1f", mod.getPlayer().getHealth())
+                    + " hasRes=" + hasRes
+                    + " potions=" + ItemHelper.countFireResPotions(mod) + ")");
+        } else if (nowMs - _fireResDrinkSinceMs > FIRE_RES_DRINK_TIMEOUT_MS) {
+            // 硬顶: 喝不下去 (槽位操作失败 / 被反复打断) 就放弃 30s,
+            // 绝不把 prio 105 焊死在链上 (铁律: 占链必须有超时放弃)。
+            _fireResDrinkSinceMs = 0;
+            _fireResDrinkGiveUpUntilMs = nowMs + FIRE_RES_DRINK_GIVEUP_MS;
+            Debug.logToFile("altoclef_diag.log", "[FireResDrink] GIVE UP after "
+                    + FIRE_RES_DRINK_TIMEOUT_MS + "ms (pos="
+                    + mod.getPlayer().getBlockPos().toShortString()
+                    + " inLava=" + inLava + " onFire=" + onFire
+                    + " potions=" + ItemHelper.countFireResPotions(mod) + ")");
+            return Float.NEGATIVE_INFINITY;
+        }
+
+        setTask(new DrinkFireResPotionTask());
+        return 105;
     }
 
     /**
