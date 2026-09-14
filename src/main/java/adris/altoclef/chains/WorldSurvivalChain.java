@@ -34,6 +34,9 @@ import java.util.Optional;
 public class WorldSurvivalChain extends SingleTaskChain {
 
     private final TimerGame _wasInLavaTimer = new TimerGame(1);
+    // (2026-09-14 防火岩浆自救取证) 逃岩浆任务运行期 2s 一条诊断节流 (static:
+    // 链实例重建不洗掉)。
+    private static long _lastLavaEscapeLogMs = 0;
     private boolean _wasAvoidingDrowning;
     private TimerGame _portalStuckTimer = new TimerGame(5);
 
@@ -105,6 +108,26 @@ public class WorldSurvivalChain extends SingleTaskChain {
         // Lava Escape
         if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()) {
             setTask(new EscapeFromLavaTask());
+            // (2026-09-14 防火岩浆自救取证) 2s 一条: 位置/速度/防火/baritone 是否在
+            // 规划。用于区分"baritone 在游"与"baritone 又 A* 起点判据全灭"。
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastLavaEscapeLogMs > 2000) {
+                _lastLavaEscapeLogMs = nowMs;
+                Vec3d v = mod.getPlayer().getVelocity();
+                boolean pathing = false;
+                try {
+                    pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+                } catch (Throwable ignored) {
+                }
+                Debug.logToFile("altoclef_diag.log", "[LavaEscape]\tpos="
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + " y=" + String.format("%.2f", mod.getPlayer().getY())
+                        + " vel=" + String.format("%.2f/%.2f/%.2f", v.x, v.y, v.z)
+                        + " onGround=" + mod.getPlayer().isOnGround()
+                        + " fireRes=" + mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                        + " onFire=" + mod.getPlayer().isOnFire()
+                        + " pathing=" + pathing);
+            }
             return 100;
         }
 
@@ -373,8 +396,23 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
     }
 
+    /**
+     * 是否要立刻脱离岩浆。
+     *
+     * (2026-09-14 防火岩浆自救, 用户现场) 旧判据把带 FIRE_RESISTANCE 的 bot 直接从
+     * "岩浆危险"里剔除 → EscapeFromLavaTask 永不派发 → 它 onStart 里的
+     * allowSwimThroughLava(true) 永不执行 → baritone 不认岩浆可游泳 → 玩家所在格
+     * 既非整高碰撞盒也非 canWalkOn → A* 一步不展开。latest.log 09:29 现场:
+     * "Open set size: 0 / PathNode map size: 1 / 22 movements considered" ×80,
+     * [Baritone] Failed 刷屏, 所有移动 (含 Wander 兜底) 全部 fail → bot 不死但
+     * 永久静止。与灵魂沙那次同构: A* 一步不展开永远先怀疑起点判据。
+     *
+     * 有防火只代表"烧不死", 不代表"可以留在岩浆里" —— bot 必须能动才能上岸。
+     * 所以只要身体浸在岩浆里就派任务, 让 baritone 拿到可游泳模式自行规划上岸。
+     * EscapeFromLavaGoal 给岩浆格 +100 惩罚、水格 -100, 不会主动规划穿岩浆。
+     */
     private boolean isInLavaOhShit(AltoClef mod) {
-        if (mod.getPlayer().isInLava() && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+        if (mod.getPlayer().isInLava()) {
             _wasInLavaTimer.reset();
             return true;
         }

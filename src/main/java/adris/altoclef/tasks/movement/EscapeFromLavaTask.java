@@ -8,6 +8,7 @@ import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.math.BlockPos;
 
 public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
@@ -62,7 +63,13 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return !mod.getPlayer().isInLava() && !mod.getPlayer().isOnFire();
+        // (2026-09-14 防火岩浆自救) 有 FIRE_RESISTANCE 时出了岩浆身上仍会带着火
+        // (防火不阻止着火状态, 只免疫伤害) → 旧的 isOnFire 判据会让任务粘着不放,
+        // prio 100 长占主链。有防火时"离开岩浆"即完成。无防火维持原语义: 要继续
+        // 到火灭 (火还在掉血)。
+        if (mod.getPlayer().isInLava()) return false;
+        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) return true;
+        return !mod.getPlayer().isOnFire();
     }
 
     @Override
