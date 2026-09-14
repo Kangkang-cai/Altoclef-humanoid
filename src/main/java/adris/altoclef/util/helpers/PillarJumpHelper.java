@@ -61,6 +61,38 @@ public final class PillarJumpHelper {
     }
 
     /**
+     * 木板 + 原木。不受重力, 垂直垫塔不会掉 —— 挖树时背包里通常【只有原木】,
+     * SAFE_MATERIALS 一个都不含, 只用常规清单会"足量木头却零垫材料"。
+     */
+    public static final Item[] WOOD_MATERIALS = new Item[]{
+            Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
+            Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS,
+            Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG,
+            Items.JUNGLE_LOG, Items.ACACIA_LOG, Items.DARK_OAK_LOG
+    };
+
+    /**
+     * 挖垫场景材料全集: 常规垫块 + 重力块 + 木板/原木。
+     *
+     * (2026-09-12 v9 在 GoToSurfaceTask 定型: 20260912-171248 现场"足量木头"
+     *  却零垫材料 → giveUp 循环。2026-09-14 提到此处, 与 DestroyBlockTask 的
+     *  垫塔接近共用同一份清单 —— 同一概念只留一个判据源。)
+     */
+    private static Item[] _withWoodCache = null;
+
+    public static Item[] withWood() {
+        if (_withWoodCache == null) {
+            Item[] base = allMaterials();
+            Item[] wood = WOOD_MATERIALS;
+            Item[] all = new Item[base.length + wood.length];
+            System.arraycopy(base, 0, all, 0, base.length);
+            System.arraycopy(wood, 0, all, base.length, wood.length);
+            _withWoodCache = all;
+        }
+        return _withWoodCache;
+    }
+
+    /**
      * 背包 (主背包 + 副手) 里可用垫塔方块的总数。
      * (2026-08-23 统计修正同款) 直接扫背包, 不走 ItemStorageTracker 缓存。
      */

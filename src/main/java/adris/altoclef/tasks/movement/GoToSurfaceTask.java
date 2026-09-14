@@ -808,22 +808,11 @@ public class GoToSurfaceTask extends Task {
         return giveUpScaffold(mod, player, "nothing diggable overhead and no pillar materials");
     }
 
-    /** (2026-09-12 v9) 本任务垫塔材料: 常规垫块 + 重力块 + 木板/原木 (垂直垫不掉)。 */
-    private static Item[] _scaffoldMaterialsCache = null;
-
+    /** (2026-09-12 v9) 本任务垫塔材料: 常规垫块 + 重力块 + 木板/原木 (垂直垫不掉)。
+     *  (2026-09-14) 清单提到 {@link PillarJumpHelper#withWood()}, 与 DestroyBlockTask
+     *  的垫塔接近共用同一份 —— 逐行等价, 无行为变更。 */
     private static Item[] scaffoldMaterials() {
-        if (_scaffoldMaterialsCache == null) {
-            Item[] base = PillarJumpHelper.allMaterials();
-            Item[] wood = new Item[]{Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
-                    Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS,
-                    Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG, Items.JUNGLE_LOG,
-                    Items.ACACIA_LOG, Items.DARK_OAK_LOG};
-            Item[] all = new Item[base.length + wood.length];
-            System.arraycopy(base, 0, all, 0, base.length);
-            System.arraycopy(wood, 0, all, base.length, wood.length);
-            _scaffoldMaterialsCache = all;
-        }
-        return _scaffoldMaterialsCache;
+        return PillarJumpHelper.withWood();
     }
 
     @Override

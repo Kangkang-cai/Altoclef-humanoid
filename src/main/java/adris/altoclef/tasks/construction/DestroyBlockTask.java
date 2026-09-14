@@ -10,14 +10,18 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.PlaceBlockSchematic;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalNear;
+import baritone.api.pathing.goals.GoalXZ;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.Blocks;
+import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.Optional;
@@ -43,7 +47,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 空转 30s, 既不搭方块垫脚也不放弃)。requestBlockUnreachable 原只在 _moveChecker
     // 失败触发, 但 bot 能走动(moveChecker 通过)就不触发 → 永远不判不可达。这里补:
     // reach 持续缺失超时仍够不着 → 判不可达黑名单并【直接放弃】(返回 null 交上层
-    // MineAndCollectTask 换下一个目标), 不再随机探索空转。不做搭方块垫脚(用户判定放弃)。
+    // MineAndCollectTask 换下一个目标), 不再随机探索空转。
+    //
+    // ⚠ (2026-09-14 需求反转) 本段原结尾"不做搭方块垫脚(用户判定放弃)"已作废 ——
+    // 用户明确改要求"搭方块垫脚上去够"。见 tryPillarUpToReach: 够不着时先垫塔升
+    // 上去, 垫不动(无材料/被头顶挡住/超时)才落回这里的放弃路径。
     private int _gettingToBlockTick = 0;
     private static final int GETTING_TO_BLOCK_GIVE_UP_TICKS = 40; // 2s, 够不着即放弃
 
@@ -71,6 +79,41 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 详见 refuseIfProtected。
     private boolean _protectedRefusalLogged = false;
 
+    // ==================== (2026-09-14 垫塔接近) ====================
+    // 用户推翻 2026-09-03 的"够不到直接放弃, 不做搭方块垫脚", 明确要求
+    // "搭方块垫脚上去够" (原话: "怎么没触发搭过去靠近")。
+    //
+    // 现场 20260914-113531: bot 站在 (88.50, 63.00, 0.79), feet y=63 → 眼 y=64.62;
+    // 目标悬空原木 (89/90,70,2~3) 下表面 y=70 → 眼到方块 5.38 格 (> 4.5 真实
+    // blockReachDistance), 用户现场确认"那个方块确实够不到"; 3D 距离 7.55。
+    // 用户确认现场形态: 树干是 bot 自己挖空的 —— memory/selfdug.log 有据:
+    //   overworld 90 63 2 / 90 64 2 / … / 90 69 2 / 91 70 2
+    // 即 x=90, z=2 的树干被从 y=63 一路挖到 y=69, 只剩 (90,70,2) 悬空一格。
+    //
+    // 旧行为(两步都坏): reach 缺失 → 落 "Getting to block…" → 只
+    // setGoalAndPath(GoalNear(_pos,1)) → 对"站立面之上 7 格"不可满足 → baritone
+    // 每 6s 一轮全展开失败 (latest.log 11:35:59 = 7562368 movements / 11:36:05 =
+    // 8514176 movements, 均无 "Path goes for") → 原地冻结 26s 到用户手动停。
+    // diag.log 的 [NAV-STUCK] 快照全为 customGoal=true pathing=false path=absent、
+    // bIn/inputs 全 false、hand=stone_axe。
+    //
+    // 新行为: reach 持续缺失 + 目标在眼睛及上方 + 背包有垫块 → 复用
+    // PillarJumpHelper 竖直垫塔 (每步净上升 1 格), 直到 LookHelper.getReach 变
+    // present, 下一 tick 自然走正常挖掘分支。
+    private static final Item[] _pillarMaterials = PillarJumpHelper.withWood();
+    /** 垫塔总时长上限: 20s 净升 ~15 格有余, 超了就是垫不动。 */
+    private final TimerGame _pillarTotalTimer = new TimerGame(20);
+    /** 连续 4s 净高度没上升 (原地跳 / 头顶被挡) = 垫不动。 */
+    private final TimerGame _pillarNoProgressTimer = new TimerGame(4);
+    /**
+     * 上次【落地时】采到的脚块 y。
+     * ⚠ 必须用落地采样: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1, 拿它当
+     * "高度上升了"会让无进展计时恒被重置 → 反复原地跳永不超时 (这正是本仓
+     * "卡死检测必须排除合法零速状态"教训的镜像: 这里要排除的是【合法瞬时升高】)。
+     */
+    private int _pillarLastY = Integer.MIN_VALUE;
+    private boolean _pillarActive = false;
+
     public DestroyBlockTask(BlockPos pos) {
         _pos = pos;
     }
@@ -85,6 +128,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _gettingToBlockTick = 0;
         _farGiveUpSuppressed = false;
         _protectedRefusalLogged = false;
+        // (2026-09-14 垫塔接近) 新实例归零。timer 新建即到期, 进垫塔分支时才 reset。
+        _pillarActive = false;
+        _pillarLastY = Integer.MIN_VALUE;
+        // 保险: 若上一实例被抢占, 其 onStop 已 release; 这里再松一次防残漏长按。
+        PillarJumpHelper.release(mod);
 
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
@@ -176,7 +224,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // requestBlockUnreachable 拉黑 + 强制 Wander → 回来重挖 → 循环永不穿。
         // (上次成功是脚下泥土 0.75s < 6s, 掩盖了该 bug。)
         // 只在"最近 5s reach 都缺失"(真走不到) 时 moveChecker 失败才拉黑。
-        if (!_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
+        // (2026-09-14 垫塔接近) 垫塔期间同样豁免: 竖直垫塔 XZ 天然零位移, 不豁免
+        // 就会 6s 一到被 moveChecker 判"卡住" → 强制 Wander 把垫塔打断。
+        if (!_pillarActive && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
             _moveChecker.reset();
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             _wanderTask.resetWander();
@@ -194,6 +244,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // We're trying to mine
         Optional<Rotation> reach = LookHelper.getReach(_pos);
         if (reach.isPresent()) {
+            // (2026-09-14 垫塔接近) 垫塔期间够到了 → 收工并松开跳跃键。垫塔的退出
+            // 路径必须 release, 否则 residual hold(JUMP) 会让 bot 持续起跳
+            // (PillarJumpHelper 的设计约束)。
+            endPillar(mod);
             // (2026-09-12 v17) 转换沿: tryToMine 刚从"缺 reach 超时"回到可达 = 开始
             // 一轮新挖掘, 重置总挖掘计时 (TimerGame 新建即到期, 不能 onStart reset)。
             if (_tryToMineTimer.elapsed()) {
@@ -232,19 +286,37 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         } else {
             setDebugState("Getting to block...");
+
+            // (2026-09-14 垫塔接近) 目标在眼睛及上方 + reach 够不到 + 背包有垫块
+            // → 垫方块升上去够 (用户"搭方块垫脚上去够", 推翻 09-03 的放弃决定)。
+            // 垫塔接管时本 tick 直接返回, 且不累计下面的"够不着"计数 —— 垫塔本身
+            // 要跑好几秒, 累计会让它在半路被放弃闸门打断。
+            if (tryPillarUpToReach(mod)) {
+                _gettingToBlockTick = 0;
+                return null;
+            }
+
             // (2026-09-03 够不着即放弃) reach 持续缺失且累计足够长仍够不着 → 判不可达,
             // 黑名单交给上层换目标, 不再无限 "Getting to block → wander → 重试同目标"。
             // (2026-09-13 距离前提) 见 GIVE_UP_JUDGE_RANGE 注释: 只有目标已在身边
             // 范围才累计"够不着"; 远处导航中不判负, 继续走。
-            boolean closeEnoughToJudge = _pos.isWithinDistance(mod.getPlayer().getPos(), GIVE_UP_JUDGE_RANGE);
+            // (2026-09-14 水平前提) 单靠 3D 距离把"正上方 5 格"(3D 5.4) 与"正上方
+            // 7 格"(3D 7.55, 现场 20260914-113531) 推到了 6 的两侧, 两侧都错:
+            //   <6 → 判"在身边、够不着" → 拉黑 → 上层重选同格 → churn (Try 5/4);
+            //   >6 → 判"还在路上" → 计数清零 → 永不放弃 → 冻结 26s。
+            // 修正: 水平距离已在身边 (<=2 格) 同样算"到位" —— 剩下的垂直差距是
+            // "够不够得着"的问题, 不是"还没走到"的问题。
+            boolean horizontallyInPlace = horizontalDistanceSqToPlayer(mod) <= 4.0;
+            boolean closeEnoughToJudge = horizontallyInPlace
+                    || _pos.isWithinDistance(mod.getPlayer().getPos(), GIVE_UP_JUDGE_RANGE);
             if (!closeEnoughToJudge) {
                 // 还在路上: 清零"够不着"计数, 让导航继续。
                 if (_gettingToBlockTick != 0) _gettingToBlockTick = 0;
                 if (!_farGiveUpSuppressed) {
                     _farGiveUpSuppressed = true;
                     Debug.logToFile("altoclef_diag.log",
-                            "[DigGiveUp] target " + _pos.toShortString() + " still far (>"
-                                    + GIVE_UP_JUDGE_RANGE + "): not counting as unreachable, keep navigating");
+                            "[DigGiveUp] target " + _pos.toShortString() + " still far (3D>"
+                                    + GIVE_UP_JUDGE_RANGE + " and horizontal>2): not counting as unreachable, keep navigating");
                 }
             } else if (_gettingToBlockTick++ > GETTING_TO_BLOCK_GIVE_UP_TICKS) {
                 Debug.logMessage("(DestroyBlockTask) unreachable after " + _gettingToBlockTick
@@ -260,12 +332,111 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
             if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
                 mod.getClientBaritone().getBuilderProcess().onLostControl();
-                // If we're close, go TO the block (potentially disrupts vines and stuff)
-                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(isClose? new GoalBlock(_pos) : new GoalNear(_pos, 1));
+                // (2026-09-14 垫塔接近) 目标在头顶时不能再用 3D GoalNear/GoalBlock ——
+                // 它们要求把脚放到目标那一格, 对"站立面之上 7 格"不可满足: baritone
+                // 全展开后直接放弃 (现场 20260914-113531: 11:35:59 = 7562368 /
+                // 11:36:05 = 8514176 movements considered, 均无 "Path goes for",
+                // [NAV-STUCK] pathing=false path=absent) → 原地冻结 26s。
+                // 改用 GoalXZ 只要求水平走到它【正下方】—— 可满足, 也正是垫塔前的
+                // 必要站位 (人也是先站到方块底下再垫)。
+                Goal goal = targetAboveEye(mod)
+                        ? new GoalXZ(_pos.getX(), _pos.getZ())
+                        : (isClose ? new GoalBlock(_pos) : new GoalNear(_pos, 1));
+                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(goal);
             }
         }
 
         return null;
+    }
+
+    /**
+     * (2026-09-14 垫塔接近) reach 够不到时竖直垫塔升上去够 —— 用户"搭方块垫脚上去
+     * 够", 推翻 2026-09-03 的"够不到直接放弃"。见字段区注释的现场证据链。
+     *
+     * @return true = 本 tick 已由垫塔接管 (含"垫不动 → 判不可达"); false = 垫塔
+     *         不适用 (目标不在上方 / 水平还没到位 / 没材料), 交回原导航+放弃逻辑。
+     */
+    private boolean tryPillarUpToReach(AltoClef mod) {
+        // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
+        //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
+        if (!targetAboveEye(mod)) {
+            endPillar(mod);
+            return false;
+        }
+        // ② 水平已在身边 (<=2 格) 才垫 —— 与 closeEnoughToJudge 的 horizontallyInPlace
+        //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发垫塔。
+        if (horizontalDistanceSqToPlayer(mod) > 4.0) {
+            endPillar(mod);
+            return false;
+        }
+        // ③ 没垫块 → 交回原逻辑。09-14 已给放弃闸门补水平前提, 这里会正常判
+        //    不可达并换目标, 不会像修复前那样永久冻结。
+        if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
+            endPillar(mod);
+            return false;
+        }
+        if (!_pillarActive) {
+            _pillarActive = true;
+            _pillarLastY = Integer.MIN_VALUE;
+            _pillarNoProgressTimer.reset();
+            _pillarTotalTimer.reset();
+            Debug.logToFile("altoclef_diag.log", "[PillarApproach] start target="
+                    + _pos.toShortString()
+                    + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString());
+        }
+        // ④ 只在【落地时】采样高度: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1,
+        //    拿它当"上升了"会让无进展计时被反复重置 → 原地跳永不超时。
+        if (mod.getPlayer().isOnGround()) {
+            int y = mod.getPlayer().getBlockPos().getY();
+            if (y > _pillarLastY) {
+                _pillarLastY = y;
+                _pillarNoProgressTimer.reset();
+            }
+        }
+        if (_pillarNoProgressTimer.elapsed() || _pillarTotalTimer.elapsed()) {
+            // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限) → 判不可达换目标。
+            Debug.logToFile("altoclef_diag.log", "[PillarApproach] give up target="
+                    + _pos.toShortString()
+                    + " y=" + mod.getPlayer().getBlockPos().getY()
+                    + " lastY=" + _pillarLastY
+                    + " noProgress=" + _pillarNoProgressTimer.elapsed()
+                    + " total=" + _pillarTotalTimer.elapsed());
+            endPillar(mod);
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            return true;
+        }
+        setDebugState("Pillaring up to reach " + _pos.toShortString());
+        // ⑥ 垫塔靠自己按输入 + interactBlock 放置, 必须让 baritone 松开自定义目标 ——
+        //    否则 GoalNear 会同时抢移动输入 (与挖掘分支同一处理)。
+        if (mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        }
+        PillarJumpHelper.step(mod, _pillarMaterials);
+        return true;
+    }
+
+    /** 收尾垫塔: 幂等松开跳跃/移动键 (所有退出路径必调, 见 PillarJumpHelper 设计约束)。 */
+    private void endPillar(AltoClef mod) {
+        if (!_pillarActive) return;
+        _pillarActive = false;
+        PillarJumpHelper.release(mod);
+    }
+
+    /** 目标方块中心到玩家的水平 (XZ) 距离平方。 */
+    private double horizontalDistanceSqToPlayer(AltoClef mod) {
+        double dx = (_pos.getX() + 0.5) - mod.getPlayer().getX();
+        double dz = (_pos.getZ() + 0.5) - mod.getPlayer().getZ();
+        return dx * dx + dz * dz;
+    }
+
+    /**
+     * 目标方块整体在眼睛及上方。
+     * "垫塔接近"与"水平接近 goal"共用这一个判据源 —— 同一概念只留一个判据,
+     * 避免两处各写一份后在边界上打架 (本仓元规矩)。
+     */
+    private boolean targetAboveEye(AltoClef mod) {
+        return _pos.getY() + 1.0 >= mod.getPlayer().getEyeY();
     }
 
     @Override
@@ -285,6 +456,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             adris.altoclef.tasks.movement.MineDownExploreTask.recordBrokenBlock(mod, _pos);
         }
         mod.getBehaviour().pop();
+        // (2026-09-14 垫塔接近) 垫塔期间 hold 的跳跃/移动键必须在【所有】退出路径上
+        // 松开 (被抢占 / 上层换目标 / 链停止都走这里), 否则残漏长按会让 bot 持续起跳。
+        endPillar(mod);
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // Do not keep breaking.
