@@ -27,17 +27,25 @@ import java.util.Optional;
  */
 public interface LookHelper {
 
+    /**
+     * 【右键交互语义】side==null 时用 3.0 的收紧距离 —— bot 走到容器旁再点。
+     *
+     * (2026-09-02 持盾右键变举盾, 用户"开箱/熔炉走太远右键变举盾") MC 方块交互距
+     * 离是 4.5, 但 bot 在 4.5 格边缘点击时射线常差一点没点中方块 → 副手持盾右键被
+     * MC 当成举盾 (不开容器)。点击判定距离收紧到 3 格内: 导航 GoalNear(target,1)
+     * 本就停在 1 格, 收紧只改变"何时开始点击", 不影响已走近的交互。
+     *
+     * ⚠ 本方法只服务【右键交互】(InteractWithBlockTask.getCurrentReach / 水桶链)。
+     * 挖掘与舀液体请走单参 {@link #getReach(BlockPos)} —— 那里要的是真实游戏 reach。
+     */
+    static final double INTERACT_REACH_NO_SIDE = 3.0;
+
     static Optional<Rotation> getReach(BlockPos target, Direction side) {
         Optional<Rotation> reachable;
         IPlayerContext ctx = BaritoneAPI.getProvider().getPrimaryBaritone().getPlayerContext();
         if (side == null) {
             assert MinecraftClient.getInstance().player != null;
-            // (2026-09-02 持盾右键变举盾, 用户"开箱/熔炉走太远右键变举盾") MC 方块
-            // 交互距离是 4.5, 但 bot 在 4.5 格边缘点击时射线常差一点没点中方块 →
-            // 副手持盾右键被 MC 当成举盾 (不开容器)。点击判定距离收紧到 3 格内:
-            // bot 走到容器旁再点, 保证点中方块不举盾。导航 GoalNear(target,1) 本
-            // 就停在 1 格, 收紧只改变"何时开始点击", 不影响已走近的交互。
-            reachable = RotationUtils.reachable(ctx.player(), target, 3.0);
+            reachable = RotationUtils.reachable(ctx.player(), target, INTERACT_REACH_NO_SIDE);
         } else {
             Vec3i sideVector = side.getVector();
             Vec3d centerOffset = new Vec3d(0.5 + sideVector.getX() * 0.5, 0.5 + sideVector.getY() * 0.5, 0.5 + sideVector.getZ() * 0.5);
@@ -63,8 +71,30 @@ public interface LookHelper {
         return reachable;
     }
 
+    /**
+     * 【挖掘 / 舀液体语义】side==null 时用**真实游戏 reach**(生存 4.5 / 创造 5.0)。
+     *
+     * (2026-09-14 挖掘 reach 回归修复) 2026-09-03 `ee06bbe9` 为"持盾右键变举盾"把
+     * side==null 分支改成了硬编码 3.0, 但那条分支同时被挖掘/舀液体消费 ——
+     * `DestroyBlockTask:195`(挖掘) 与 `CollectBucketLiquidTask:334`(舀液体) 的 reach
+     * 被连带从 4.5 削到 3.0, **副作用从未被察觉**。
+     *
+     * 20260914-110653 实锤: bot feet y=65 / 眼 66.62, 目标悬空原木 (92,70,2) 下表面
+     * y=70.0 → 眼到方块 **3.38 格**, 恰好卡在 3.0 之外 → `getReach` 返空 →
+     * `DestroyBlockTask` 落 "Getting to block…" 分支(该分支整段无 lookAt) → 给 baritone
+     * 派 `GoalNear(_pos,1)`(对"站立面之上 5 格"不可满足, A* 烧掉 10.5M 元素无路径) →
+     * 原地冻结 16.3s, 表现为"不瞄准、不撸、站死"; 木料停在 11/25 后任务终止。
+     * (同场 `RotationUtils.reachable` 首行有 `ctx.isLookingAt(pos)` 短路 —— 准心恰好压在
+     *  该方块上就无条件返回 present, 所以同一格时好时坏, 取决于头当时指哪。)
+     *
+     * 这里拆回两条语义: 挖掘/舀液体 = 真实 reach; 右键交互 = 上面那条 3.0 方法。
+     * 举盾问题不会被重新引入 —— 真正挡住它的是 `InteractWithBlockTask.isPreciselyAiming`
+     * (要求 crosshair 是 BLOCK 命中且 blockPos==_target) + 0.3s 点击节流, 3.0 只是叠加保险。
+     */
     static Optional<Rotation> getReach(BlockPos target) {
-        return getReach(target, null);
+        IPlayerContext ctx = BaritoneAPI.getProvider().getPrimaryBaritone().getPlayerContext();
+        assert MinecraftClient.getInstance().player != null;
+        return RotationUtils.reachable(ctx.player(), target, ctx.playerController().getBlockReachDistance());
     }
 
     static EntityHitResult raycast(Entity from, Entity to, double reachDistance) {
