@@ -238,14 +238,23 @@ public class TradeWithPiglinsTask extends ResourceTask {
         private final TimerGame _intervalTimeout = new TimerGame(10);
         private final HashSet<Entity> _blacklisted = new HashSet<>();
         private Entity _currentlyBartering = null;
+        // (2026-09-14 212757 场次 误拉黑宽限窗) 上一次"猪灵丢出战利品"边沿的
+        // 墙钟时间。丢战利品 = 上一笔交易成功的铁证; 之后即使 2s barterTimeout
+        // 因任务切换延迟 (见 notifyBarterLootCycle 注释) 到期, 也不该拉黑刚
+        // 做完成功交易的猪灵。真实交易失败不会产生战利品, 不会误进此宽限。
+        private long _lastLootCycleWallMs = 0;
 
         /**
          * (2026-09-14 掉物吸附误拉黑) 猪灵丢出战利品 = 上一笔交易成功的明确信号。
          * 父层在捡拾期间每 tick / 捡拾结束的边沿调用: 重置 barterTimeout 与
          * intervalTimeout, 保证"捡战利品"这段成功后的合法空窗不会吃掉 2 秒
          * 超时, 导致刚做完交易的猪灵被误拉黑。
+         * (2026-09-14 212757 场次补记) 边沿重置本身会被 Task.tickInternal 的
+         * 2s 横跳去抖拖住回切 (捡拾僵尸任务霸占 _sub, 期间零 interact tick),
+         * 单次边沿重置挡不住超时到期 → 另加 3s 墙钟宽限窗兜底 (拉黑分支)。
          */
         public void notifyBarterLootCycle() {
+            _lastLootCycleWallMs = System.currentTimeMillis();
             _barterTimeout.reset();
             _intervalTimeout.reset();
         }
@@ -338,12 +347,19 @@ public class TradeWithPiglinsTask extends ResourceTask {
             }
 
             if (_barterTimeout.elapsed()) {
-                // We failed bartering.
-                Debug.logMessage("Failed bartering with current piglin, blacklisting.");
-                _blacklisted.add(_currentlyBartering);
-                _barterTimeout.reset();
-                _currentlyBartering = null;
-                return null;
+                // (2026-09-14 212757 场次 宽限窗) 距上次战利品边沿 <3s = 刚做完
+                // 一笔成功交易, 超时到期多半是任务切换延迟 (去抖吞掉回切) 造成
+                // 的空窗, 不拉黑, 只重开 2s 窗口续交。
+                if (System.currentTimeMillis() - _lastLootCycleWallMs < 3000) {
+                    _barterTimeout.reset();
+                } else {
+                    // We failed bartering.
+                    Debug.logMessage("Failed bartering with current piglin, blacklisting.");
+                    _blacklisted.add(_currentlyBartering);
+                    _barterTimeout.reset();
+                    _currentlyBartering = null;
+                    return null;
+                }
             }
 
             if (AVOID_HOGLINS && _currentlyBartering != null && !EntityHelper.isTradingPiglin(_currentlyBartering)) {

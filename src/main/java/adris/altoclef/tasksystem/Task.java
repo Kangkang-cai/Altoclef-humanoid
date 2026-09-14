@@ -82,9 +82,18 @@ public abstract class Task {
                     // (2026-08-22 横跳去抖) 若新子任务 == 上一次被 stop 的
                     // 子任务 (来回横跳 A→B→A→B) 且距上次切换 < 2 秒 → 拒绝
                     // 切换, 保持当前 _sub。全新目标不受影响。
+                    // (2026-09-14 豁免, 212757 场次) 当前 _sub 已 isFinished
+                    // (僵尸兜底任务: 掉物已消失还在 wander) 时不再占位 ——
+                    // 父层边沿回切被去抖吞掉 1.55s, 期间零 interact tick,
+                    // 2s barterTimeout 照样到期 → 刚成功的猪灵被误拉黑。
                     long nowMs = System.currentTimeMillis();
-                    boolean bounceBack = newSub.isEqual(_lastStoppedSub)
+                    boolean subZombie = _sub != null && _sub.isFinished(mod);
+                    boolean bounceBack = !subZombie
+                            && newSub.isEqual(_lastStoppedSub)
                             && (nowMs - _lastSwitchMs) < SWITCH_DEBOUNCE_MS;
+                    if (bounceBack && subZombie) {
+                        Debug.logInternal("(Task.tickInternal: bounce debounce bypassed, current sub isFinished zombie)");
+                    }
                     if (!bounceBack) {
                         // Our sub task is new
                         if (_sub != null) {
