@@ -21,6 +21,7 @@ import baritone.api.pathing.goals.GoalNear;
 import baritone.api.pathing.goals.GoalXZ;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
@@ -517,7 +518,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
                     + " player=" + mod.getPlayer().getBlockPos().toShortString()
                     + " headroom=" + (_pillarBaseFeet.up(2).toShortString() + " solid="
-                    + WorldHelper.isSolid(mod, _pillarBaseFeet.up(2))));
+                    + WorldHelper.isSolid(mod, _pillarBaseFeet.up(2))
+                    + " block=" + mod.getWorld().getBlockState(_pillarBaseFeet.up(2)).getBlock()
+                    + " blocked=" + headroomBlockedForPillar(mod, _pillarBaseFeet)));
         }
         // ④ 只在【落地时】采样高度: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1,
         //    拿它当"上升了"会让无进展计时被反复重置 → 原地跳永不超时。
@@ -537,7 +540,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (_pillarBaseFeet != null && headroomBlockedForPillar(mod, _pillarBaseFeet)) {
             Debug.logToFile("altoclef_diag.log", "[PillarApproach] headroom blocked at "
                     + _pillarBaseFeet.toShortString() + " (aboveHead="
-                    + _pillarBaseFeet.up(2).toShortString() + ") target=" + _pos.toShortString());
+                    + _pillarBaseFeet.up(2).toShortString() + " block="
+                    + mod.getWorld().getBlockState(_pillarBaseFeet.up(2)).getBlock()
+                    + ") target=" + _pos.toShortString());
             endPillar(mod);
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             return true;
@@ -607,7 +612,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private boolean headroomBlockedForPillar(AltoClef mod, BlockPos feet) {
         BlockPos aboveHead = feet.up(2);
         if (!mod.getChunkTracker().isChunkLoaded(aboveHead)) return false;
-        return WorldHelper.isSolid(mod, aboveHead);
+        BlockState st = mod.getWorld().getBlockState(aboveHead);
+        if (st.isAir()) return false;
+        if (WorldHelper.isSolid(mod, aboveHead)) return true;
+        // (2026-09-14 v3 碰撞≠实心) 树叶/半砖/灯笼/台阶一类: isSolidBlock() 返回
+        // false 但【有碰撞箱】, 起跳照样被顶掉。现场 20260914-193231 实锤: 目标是
+        // 树上的 acacia_log(1,114,4), 头顶 (1,112,4) 判定 solid=false 放行 → 跳起来
+        // 撞树叶 → 跳跃幅度只有 0.95 格 (NAV-STUCK yRange) → 脚块 BlockPos 永不变 →
+        // PillarJumpHelper 的放置窗口 (需要 below 变空气) 永不打开 → 只 hold JUMP
+        // 空跳 5s, noProgress 放弃 → 重入, 连着三轮。
+        // 判据必须落到"起跳路径上有没有碰撞", 不能停在"是不是实心方块"
+        // (本仓"轮廓≠碰撞"铁律, 见 detail/03-consistency.md)。
+        return !st.getCollisionShape(mod.getWorld(), aboveHead).isEmpty();
     }
 
     /**
