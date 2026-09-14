@@ -8,7 +8,9 @@ import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.*;
+import adris.altoclef.tasks.resources.TradeWithPiglinsTask;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -62,6 +64,12 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private static final float SHIELD_WATCHDOG_PRIORITY = 55;
     private static final int SHIELD_PLANKS_REQUIRED = 6;
     private final TimerGame _shieldWatchdogTimer = new TimerGame(SHIELD_WATCHDOG_INTERVAL);
+    // (2026-09-14 续租, 232015 场次) 已派发的盾牌合成任务引用。原实现只在计时
+    // 到点那一 tick 返回 55, 下一 tick 落到方法末尾 NEGATIVE_INFINITY → 所有权
+    // 54ms 内弹回 User Tasks (日志 23:21:35.983→36.037), 合成任务挂链上一 tick
+    // 没跑, 卡死 "Waiting for recipe book click" → 半成品: 4 木板留 2x2 格 +
+    // 合成台留输出格, 整场未清。铁律: "返回任务"≠"任务会跑完", 侧线任务必须续租。
+    private Task _shieldCraftTask = null;
 
     public WorldSurvivalChain(TaskRunner runner) {
         super(runner);
@@ -171,10 +179,17 @@ public class WorldSurvivalChain extends SingleTaskChain {
             if (!offHandShield && !mod.getItemStorage().hasItem(Items.SHIELD)
                     && mod.getItemStorage().hasItem(Items.IRON_INGOT)
                     && mod.getItemStorage().getItemCount(ItemHelper.PLANKS) >= SHIELD_PLANKS_REQUIRED) {
-                Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present (iron ingot + "
-                        + mod.getItemStorage().getItemCount(ItemHelper.PLANKS) + " planks), crafting one.");
-                setTask(TaskCatalogue.getItemTask(Items.SHIELD, 1));
-                return SHIELD_WATCHDOG_PRIORITY;
+                // (2026-09-14 交易让位, 232015 场次) 交易进行中插队会开背包屏打断
+                // 丢金锭节奏 → 跳过本轮, 交易结束 (金锭耗尽/任务停 3s) 后下轮再合成。
+                if (TradeWithPiglinsTask.isTradeInProgress()) {
+                    Debug.logMessage("[Shield-Watchdog] no shield + materials present, but piglin trading in progress — deferring to next check.");
+                } else {
+                    Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present (iron ingot + "
+                            + mod.getItemStorage().getItemCount(ItemHelper.PLANKS) + " planks), crafting one.");
+                    _shieldCraftTask = TaskCatalogue.getItemTask(Items.SHIELD, 1);
+                    setTask(_shieldCraftTask);
+                    return SHIELD_WATCHDOG_PRIORITY;
+                }
             }
         }
 
@@ -192,6 +207,19 @@ public class WorldSurvivalChain extends SingleTaskChain {
             // Don't allow breaking while we're inside the portal.
             setTask(new SafeRandomShimmyTask());
             return 60;
+        }
+
+        // (2026-09-14 续租) 已派发的盾牌合成未完成前持续持有 prio 55, 保证任务
+        // 拿得到 tick 直至跑完。放在岩浆/火/溺水/传送门卡住等紧急分支之后: 紧急
+        // 任务 (90/60) 仍可 setTask 顶掉合成 (引用比对自动放开续租), 与优先级
+        // 设计一致 —— 紧急 > 合成(55) > 常规(50)。
+        if (_shieldCraftTask != null) {
+            if (_mainTask == _shieldCraftTask && !_shieldCraftTask.isFinished(mod)) {
+                return SHIELD_WATCHDOG_PRIORITY;
+            }
+            // 被更高优先级紧急任务顶掉或已完成 → 放开; 材料条件仍真时下一轮
+            // 看门狗 (60s 内) 会重新派发。
+            _shieldCraftTask = null;
         }
 
         return Float.NEGATIVE_INFINITY;

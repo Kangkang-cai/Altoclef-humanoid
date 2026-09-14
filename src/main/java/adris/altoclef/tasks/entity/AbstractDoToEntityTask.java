@@ -53,6 +53,13 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     private long _losBlockedSinceTick = Long.MIN_VALUE;
     private long _lastObstructionLogTick = Long.MIN_VALUE;
 
+    // (2026-09-14 接近失败诊断, 232015 场次) wander 两个触发点的取证日志节流
+    // key (5s)。目的: 区分"目标从感知/候选消失"与"接近无进展", 并拿到触发时
+    // 的目标距离 —— 232015 场次猪灵 2.1 格处反复触发, 疑似 enter 边界徘徊
+    // (piglin 2.1-2.5 晃, 进不了 enter 2.0) 而非 baritone 无路径, 待日志证实。
+    private long _lastNoTargetLogTick = Long.MIN_VALUE;
+    private long _lastProgressFailLogTick = Long.MIN_VALUE;
+
     public AbstractDoToEntityTask(double maintainDistance, double combatGuardLowerRange, double combatGuardLowerFieldRadius) {
         _maintainDistance = maintainDistance;
         _combatGuardLowerRange = combatGuardLowerRange;
@@ -93,6 +100,16 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         if (checkEntity.isEmpty()) {
             mod.getMobDefenseChain().resetTargetEntity();
             mod.getMobDefenseChain().resetForceField();
+            // (2026-09-14 诊断) 目标从感知/候选里消失 (被拉黑/超感知窗口/死亡)。
+            // 232015 场次: hoglin 规则拉黑唯一猪灵 → 无目标 wander 循环, 被
+            // 随机方向累计带离 30+ 格。节流 5s。
+            long nowTicks = WorldHelper.getTicks();
+            if (nowTicks - _lastNoTargetLogTick > 100) {
+                _lastNoTargetLogTick = nowTicks;
+                Debug.logToFile("altoclef_diag.log", "[APPROACH-FAIL]\tno target (lost/blacklisted), player="
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + " dim=" + mod.getWorld().getRegistryKey().getValue());
+            }
             return _wanderTask;
         } else {
             mod.getMobDefenseChain().setTargetEntity(checkEntity.get());
@@ -191,6 +208,19 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             onEntityApproach(mod, entity);
 
             if (!_progress.check(mod)) {
+                // (2026-09-14 诊断) 接近无进展触发 wander。232015 场次: 猪灵在
+                // enter(2.0) 边界 2.1-2.5 晃, 5s 进不去 → wander 10 格随机方向,
+                // 反复累积带离目标 30+ 格。节流 5s。若日志显示 dist 恒 ~2.1,
+                // 即"enter 边界徘徊"而非寻路失败, 修法另议 (放宽 enter 容差)。
+                long nowTicks = WorldHelper.getTicks();
+                if (nowTicks - _lastProgressFailLogTick > 100) {
+                    _lastProgressFailLogTick = nowTicks;
+                    Debug.logToFile("altoclef_diag.log", "[APPROACH-FAIL]\tprogress stall, target="
+                            + entity.getType().toString()
+                            + " dist=" + String.format("%.1f", Math.sqrt(sqDist))
+                            + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                            + " dim=" + mod.getWorld().getRegistryKey().getValue());
+                }
                 Debug.logMessage("Failed to get to target, wandering.");
                 return _wanderTask;
             }

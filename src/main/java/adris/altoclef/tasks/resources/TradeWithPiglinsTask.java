@@ -60,6 +60,20 @@ public class TradeWithPiglinsTask extends ResourceTask {
     // 仍会照常续挖, 预算闸只挡"中途因实例重建误触发"。
     private static boolean _startedTrading = false;
 
+    // =========================================================================
+    // (2026-09-14 盾牌看门狗让位心跳, 232015 场次) 盾牌看门狗 (prio 55) 在交易
+    // 进行中插队合成 → 开背包屏打断丢金锭节奏, 且插队半途被拉回时留下半成品
+    // (4 木板留 2x2 格 + 合成台留输出格, 整场未清)。WorldSurvivalChain 据此
+    // 跳过本轮看门狗。心跳+TTL 范式 (铁律): 只在任务真跑着且金锭可丢时每 tick
+    // 刷新, 任务停了/实例重建 3s 后自动失效 —— 不依赖 onStart/onStop 清理。
+    // =========================================================================
+    private static volatile long _lastTradeFlowMs = 0;
+
+    /** 交易流程真正进行中 (已过预算闸且身上有金锭可丢, 3s 心跳窗口)。 */
+    public static boolean isTradeInProgress() {
+        return System.currentTimeMillis() - _lastTradeFlowMs < 3000;
+    }
+
     public TradeWithPiglinsTask(int goldBuffer, ItemTarget[] itemTargets) {
         super(itemTargets);
         _goldBuffer = goldBuffer;
@@ -146,6 +160,10 @@ public class TradeWithPiglinsTask extends ResourceTask {
             return _goldTask;
         }
         _startedTrading = true;
+        // (2026-09-14 盾牌看门狗让位) 交易流程进行中每 tick 刷新心跳 (见字段注释)。
+        if (goldIngots > 0) {
+            _lastTradeFlowMs = System.currentTimeMillis();
+        }
 
         // (2026-09-13 交易掉物捡拾升级) 先捡眼前的交易战利品再谈别的。注意
         // 这里只换"本层返回的子任务", 本任务实例不销毁, _startedTrading(static)
