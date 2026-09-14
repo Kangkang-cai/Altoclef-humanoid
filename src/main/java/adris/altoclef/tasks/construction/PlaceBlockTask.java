@@ -21,6 +21,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3i;
 import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.Arrays;
@@ -128,6 +129,20 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // Perform timeout wander
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
             setDebugState("Wandering.");
+            _progressChecker.reset();
+            return _wanderTask;
+        }
+
+        // (2026-09-14 站在目标格里) 必须在 progressChecker 之前: 站在目标格内
+        // 必然"无移动进展", 走 checker 会先被超时打断成 wander → 又掉回坑里
+        // 死循环。这里确定性走出目标格后再交给 baritone。
+        if (mod.getPlayer().getBlockPos().equals(_target)) {
+            BlockPos stepOut = pickStepOutPos(mod);
+            if (stepOut != null) {
+                setDebugState("Standing inside target cell, stepping out first");
+                return new GetToBlockTask(stepOut, false);
+            }
+            setDebugState("Standing inside target cell, no walkable neighbor, wandering");
             _progressChecker.reset();
             return _wanderTask;
         }
@@ -242,6 +257,29 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             return true;
         }
         return false;
+    }
+
+    // (2026-09-14 站在目标格里) 水平四向, 供走出目标格用。
+    private static final Vec3i[] STEP_OUT_OFFSETS = new Vec3i[]{
+            new Vec3i(1, 0, 0), new Vec3i(-1, 0, 0), new Vec3i(0, 0, 1), new Vec3i(0, 0, -1)
+    };
+
+    /**
+     * (2026-09-14 站在目标格里) 玩家 feet 正好站在目标格内时, vanilla 禁止往
+     * 自身占据的格子放方块 → baritone 不放置也不报错, 只空转寻路 (现场
+     * 20260914 传送门浇铸: 模具残块围出 1 格深坑, wander 掉进去后
+     * "Failed to place, wandering timeout" 每 5s 死循环, 见
+     * memory/detail/04-symptoms.md「bot 站在目标格里」)。返回一个可站立的
+     * 水平邻格 (非固体 + 头顶非固体), 让 bot 先走出目标格。
+     */
+    private BlockPos pickStepOutPos(AltoClef mod) {
+        for (Vec3i offset : STEP_OUT_OFFSETS) {
+            BlockPos p = _target.add(offset);
+            if (WorldHelper.isSolid(mod, p)) continue;      // 被堵
+            if (WorldHelper.isSolid(mod, p.up())) continue; // 头顶被堵
+            return p;
+        }
+        return null;
     }
 
     private class PlaceStructureSchematic extends AbstractSchematic {
