@@ -2,6 +2,7 @@ package adris.altoclef.tasks.construction;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -22,6 +23,7 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.Optional;
@@ -100,7 +102,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 新行为: reach 持续缺失 + 目标在眼睛及上方 + 背包有垫块 → 复用
     // PillarJumpHelper 竖直垫塔 (每步净上升 1 格), 直到 LookHelper.getReach 变
     // present, 下一 tick 自然走正常挖掘分支。
-    private static final Item[] _pillarMaterials = PillarJumpHelper.withWood();
+    //
+    // ⚠ (2026-09-14 用户约束) **不含原木** —— 原木是挖树任务结算的目标物, 拿它
+    // 垫 1 格就等于木料 -1。用户原话"别用原木, 木板可以"。没木板/土石时由
+    // needScaffoldMaterials / startAcquireMaterials 去挖几格 (见下), 绝不动原木。
+    private static final Item[] _pillarMaterials = PillarJumpHelper.withWoodNoLogs();
     /** 垫塔总时长上限: 20s 净升 ~15 格有余, 超了就是垫不动。 */
     private final TimerGame _pillarTotalTimer = new TimerGame(20);
     /** 连续 4s 净高度没上升 (原地跳 / 头顶被挡) = 垫不动。 */
@@ -113,6 +119,25 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      */
     private int _pillarLastY = Integer.MIN_VALUE;
     private boolean _pillarActive = false;
+
+    // ---- (2026-09-14 缺垫块 → 去挖几格) 用户: "没方块为什么不触发挖几个方块" ----
+    // 旧行为: tryPillarUpToReach 一发现没垫块就 return false, 落回导航 → 对"站立面
+    // 之上 N 格"的目标导航永远不可满足 → 冻结或拉黑换目标。现场 20260914-115322
+    // 里 bot 只有原木(按新约束不算垫块)时走的正是这条死路。
+    // 新行为: 目标是头顶的 + 水平已在身边 + 无可用垫块 → 派采集任务挖 3 格泥土
+    // (草方块/土/土径, 手挖即可), 拿到后下一轮自然进垫塔分支。
+    /** 一次采集几格垫块。净升 1 格即可把"眼→方块下表面"缩进 reach (本现场 5.38→4.38)。 */
+    private static final int ACQUIRE_MATERIALS_COUNT = 3;
+    /**
+     * 采集子任务: **实例缓存 keep-alive** —— 父 onTick 每 tick 重跑, 每 tick new 一个
+     * 会被框架的 isEqual/防横跳逻辑挡下或反复重启 (本仓"侧线子任务必须实例缓存"铁律)。
+     */
+    private Task _acquireMaterialsTask = null;
+    /** 每个 DestroyBlockTask 实例只采一次; 采完仍不够就落回原有放弃路径, 不无限循环。 */
+    private boolean _acquireStarted = false;
+    /** 单次采集总时长上限。超了收工, 交回原有放弃路径换目标。 */
+    private final TimerGame _acquireTotalTimer = new TimerGame(30);
+    private boolean _acquireDoneLogged = false;
 
     public DestroyBlockTask(BlockPos pos) {
         _pos = pos;
@@ -131,6 +156,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 垫塔接近) 新实例归零。timer 新建即到期, 进垫塔分支时才 reset。
         _pillarActive = false;
         _pillarLastY = Integer.MIN_VALUE;
+        // (2026-09-14 缺垫块采集) 子任务引用必须清 —— 残留会让新实例 keep-alive 一个
+        // 已经不该跑的采集任务。标记归零: 实例重建即新一轮, 允许再采一次。
+        _acquireMaterialsTask = null;
+        _acquireStarted = false;
+        _acquireDoneLogged = false;
         // 保险: 若上一实例被抢占, 其 onStop 已 release; 这里再松一次防残漏长按。
         PillarJumpHelper.release(mod);
 
@@ -287,6 +317,25 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         } else {
             setDebugState("Getting to block...");
 
+            // (2026-09-14 缺垫块 → 先去挖几格) 用户: "没方块为什么不触发挖几个方块"。
+            // 目标在头顶 + 水平已在身边 + 完全没有可用垫块 (原木不算, 见 _pillarMaterials)
+            // → 先派采集任务挖 3 格泥土, 采到后下一轮自然进下面的垫塔分支。
+            // 必须排在 tryPillarUpToReach 之前 —— 后者见无材料会直接 return false。
+            // 子任务实例缓存 keep-alive, 完成/超时才收工 (见 pumpAcquireMaterials)。
+            if (_acquireMaterialsTask != null) {
+                Task acquire = pumpAcquireMaterials(mod);
+                if (acquire != null) {
+                    _gettingToBlockTick = 0;
+                    return acquire;
+                }
+            } else if (needScaffoldMaterials(mod)) {
+                Task acquire = startAcquireMaterials(mod);
+                if (acquire != null) {
+                    _gettingToBlockTick = 0;
+                    return acquire;
+                }
+            }
+
             // (2026-09-14 垫塔接近) 目标在眼睛及上方 + reach 够不到 + 背包有垫块
             // → 垫方块升上去够 (用户"搭方块垫脚上去够", 推翻 09-03 的放弃决定)。
             // 垫塔接管时本 tick 直接返回, 且不累计下面的"够不着"计数 —— 垫塔本身
@@ -369,8 +418,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             endPillar(mod);
             return false;
         }
-        // ③ 没垫块 → 交回原逻辑。09-14 已给放弃闸门补水平前提, 这里会正常判
-        //    不可达并换目标, 不会像修复前那样永久冻结。
+        // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
+        //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
+        //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
         if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
             endPillar(mod);
             return false;
@@ -412,8 +462,89 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (mod.getClientBaritone().getCustomGoalProcess().isActive()) {
             mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         }
+        // ⑦ (2026-09-14 实锤补漏) 只放 customGoal **不够** —— 上一轮 reach 短暂出现时
+        //    "Breaking the normal way." 分支已启动 baritone builder (见上 L312), 它不会
+        //    自己停: builder 持续占着输入通道, 垫塔的 hold(JUMP) / interactBlock 全被压掉。
+        //    现场 20260914-115322 的 [NAV-STUCK] 快照全是 builder=true + inputs 全 false,
+        //    bot 站在原地 7~18s 一格上不去 —— 这正是"材料在手上却垫不起来"的现场机制。
+        //    与挖掘分支 (L295-296) 同款处理: 两个进程都要放。
+        mod.getClientBaritone().getBuilderProcess().onLostControl();
         PillarJumpHelper.step(mod, _pillarMaterials);
         return true;
+    }
+
+    /**
+     * (2026-09-14 缺垫块 → 先去挖几格) 是否该派采集任务。
+     *
+     * 三条前置与 tryPillarUpToReach 完全同源 —— 采垫块就是为了垫塔, 前置不满足时
+     * 采了也是白采 (目标在几十格外时那是导航问题, 不该先去挖土)。
+     */
+    private boolean needScaffoldMaterials(AltoClef mod) {
+        if (_acquireStarted) return false; // 每实例只采一次, 采完仍不够就落回放弃路径
+        if (!targetAboveEye(mod)) return false;
+        if (horizontalDistanceSqToPlayer(mod) > 4.0) return false;
+        return !PillarJumpHelper.hasMaterials(mod, _pillarMaterials);
+    }
+
+    /**
+     * 派采集垫块子任务 (实例缓存, 只建一次)。
+     *
+     * @return 子任务实例 (keep-alive); null = 建不出来 (目录里没有 / 已达尝试上限)。
+     */
+    private Task startAcquireMaterials(AltoClef mod) {
+        Task t = TaskCatalogue.getItemTask(Items.DIRT, ACQUIRE_MATERIALS_COUNT);
+        _acquireStarted = true;
+        _acquireDoneLogged = false;
+        if (t == null) {
+            Debug.logToFile("altoclef_diag.log", "[PillarAcquire] no task for " + Items.DIRT
+                    + " target=" + _pos.toShortString() + " → 落回放弃路径");
+            return null;
+        }
+        _acquireMaterialsTask = t;
+        _acquireTotalTimer.reset();
+        // 采集期间不能留残余长按 (垫塔可能上一 tick 还在 hold(JUMP))。
+        endPillar(mod);
+        Debug.logToFile("altoclef_diag.log", "[PillarAcquire] start target=" + _pos.toShortString()
+                + " want=" + ACQUIRE_MATERIALS_COUNT + " X " + Items.DIRT
+                + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
+                + " have=" + PillarJumpHelper.countMaterials(mod, _pillarMaterials));
+        return t;
+    }
+
+    /**
+     * 采集子任务 keep-alive。
+     *
+     * @return 仍在跑 → 返回同一实例 (框架 isEqual 判等, 不会换实例); 已完成/超时 →
+     *         null (调用方不再返回它, 框架会 stop 掉)。
+     */
+    private Task pumpAcquireMaterials(AltoClef mod) {
+        if (_acquireTotalTimer.elapsed()) {
+            logAcquireDone(mod, "timeout");
+            _acquireMaterialsTask = null;
+            return null;
+        }
+        boolean finished;
+        try {
+            finished = _acquireMaterialsTask.isFinished(mod);
+        } catch (Throwable t) {
+            // 没 start 过就查 isFinished 可能炸 → 当作完成, 不再重派 (本仓"读不到与 0 同码"
+            // 教训的同款防御: 宁可少采一轮, 不要卡在这个判断上)。
+            finished = true;
+        }
+        if (finished) {
+            logAcquireDone(mod, "finished");
+            _acquireMaterialsTask = null;
+            return null;
+        }
+        return _acquireMaterialsTask;
+    }
+
+    private void logAcquireDone(AltoClef mod, String why) {
+        if (_acquireDoneLogged) return;
+        _acquireDoneLogged = true;
+        Debug.logToFile("altoclef_diag.log", "[PillarAcquire] done(" + why + ") target="
+                + _pos.toShortString()
+                + " have=" + PillarJumpHelper.countMaterials(mod, _pillarMaterials));
     }
 
     /** 收尾垫塔: 幂等松开跳跃/移动键 (所有退出路径必调, 见 PillarJumpHelper 设计约束)。 */
@@ -459,6 +590,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 垫塔接近) 垫塔期间 hold 的跳跃/移动键必须在【所有】退出路径上
         // 松开 (被抢占 / 上层换目标 / 链停止都走这里), 否则残漏长按会让 bot 持续起跳。
         endPillar(mod);
+        // (2026-09-14 缺垫块采集) 子任务引用同样在两个清除点 (onStart/onStop) 都要清 ——
+        // 否则被抢占后残留引用会让下一实例 keep-alive 一个不该跑的采集任务。
+        _acquireMaterialsTask = null;
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // Do not keep breaking.
