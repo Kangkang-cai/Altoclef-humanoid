@@ -115,6 +115,15 @@ public abstract class DoStuffInContainerTask extends Task {
         // infinity if such a container does not exist.
         double costToWalk = Double.POSITIVE_INFINITY;
 
+        // (2026-09-14 距离判据统一) 本函数内"容器可用性"只允许有一个距离上限:
+        // getMaxWalkDistance (熔炉 40 格)。旧实现只在 L155 用它置空 nearest, 而
+        // L194 的 isItemOwned(USE) 是距离-blind 的、L231 又用 p->true 无过滤查找 ——
+        // 三个回合里前一个说"太远不用", 后两个把同一台 392 格外的炉捡回来。
+        // 提取到函数级, 让 L231 复用同一上限 (默认子类 Double.MAX_VALUE → 平方为
+        // Infinity, 判定恒真, 行为与旧版完全一致)。
+        double maxWalk = getMaxWalkDistance(mod);
+        double maxWalkSq = maxWalk * maxWalk;
+
         Optional<BlockPos> nearest;
 
         Vec3d currentPos = mod.getPlayer().getPos();
@@ -151,8 +160,7 @@ public abstract class DoStuffInContainerTask extends Task {
             // 成本, 强制走下方"现做/放置容器"分支。Baritone 启发式对上百格平坦/水路
             // 路线系统性低估, 曾导致 bot 舍近求远去上百格熔炉(日志 10:35 Walking to
             // container 118,70,449)。近炉(≤上限)照常复用, 不受影响。
-            double maxWalk = getMaxWalkDistance(mod);
-            if (nearest.get().getSquaredDistance(currentPos) > maxWalk * maxWalk) {
+            if (nearest.get().getSquaredDistance(currentPos) > maxWalkSq) {
                 costToWalk = Float.MAX_VALUE;
                 // 视同为"无可用近容器": 置空 nearest 让下方 nearestMissing=true,
                 // 即使后备背包无熔炉物品也走现做/获取容器分支, 而非傻走去远炉。
@@ -193,17 +201,18 @@ public abstract class DoStuffInContainerTask extends Task {
             // 单独维护任何状态。
             if (!StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, _containerTarget.getMatches())) {
                 setDebugState("Getting container item");
-                Debug.logTrace("craft-place", "要造/取新容器 " + _containerTarget.toString()
+                Debug.logTrace("craft-place-get", "要造/取新容器 " + _containerTarget.toString()
                         + ", isItemOwned(USE)=" + StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, _containerTarget.getMatches())
                         + ", 背包实时数=" + StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches())
-                        + ", nearest=" + nearest.orElse(null));
+                        + ", nearest=" + nearest.orElse(null)
+                        + ", maxWalk=" + maxWalk);
                 return TaskCatalogue.getItemTask(_containerTarget);
             }
 
             if (StorageHelper.countItemsInInventoryReal(mod, _containerTarget.getMatches()) > 0) {
                 // 台子真背在包里: 放下来用。
                 setDebugState("Placing container...");
-                Debug.logTrace("craft-place", "背包有容器 " + _containerTarget.toString() + ", 放下来用");
+                Debug.logTrace("craft-place-reuse", "背包有容器 " + _containerTarget.toString() + ", 放下来用");
                 _justPlacedTimer.reset();
                 return _placeTask;
             }
@@ -212,7 +221,7 @@ public abstract class DoStuffInContainerTask extends Task {
             BlockPos stillThere = _placeTask.getPlaced();
             if (stillThere != null && mod.getBlockTracker().blockIsValid(stillThere, _containerBlocks)) {
                 setDebugState("Using the container we already placed");
-                Debug.logTrace("craft-place", "复用已放置容器 " + _containerTarget.toString() + " @" + stillThere.toShortString());
+                Debug.logTrace("craft-place-reuse", "复用已放置容器 " + _containerTarget.toString() + " @" + stillThere.toShortString());
                 _cachedContainerPosition = stillThere;
                 _placeForceTimer.reset();
                 _justPlacedTimer.reset();
@@ -228,11 +237,19 @@ public abstract class DoStuffInContainerTask extends Task {
             // → 空放置 20s → 又做一张新炉, 场上越堆越多)。isItemOwned(USE)
             // 刚才为 true 说明 tracker 明确知道世界里有同类容器 → 去开它
             // (不带 canReach 过滤, 走到跟前自然能开), 而不是空着手假装能放。
+            // (2026-09-14 远炉横跳定案) 补上 getMaxWalkDistance 距离过滤: 旧版
+            // `p->true` 会把 L163 刚按 40 格上限排除掉的 392 格远炉捡回来, 与
+            // L202 的距离-blind `isItemOwned(USE)` 一起造成"走去远炉 ↔ 现做炉"
+            // 每 1~4 秒横跳 (根因是 isBlockPerceivable 对射程外目标的假阳性,
+            // 已在 VisibilityHelper 加距离门; 这里是调用侧的第二道闸)。
             Optional<BlockPos> trackedExisting = mod.getBlockTracker()
-                    .getNearestTracking(currentPos, blockPos -> true, _containerBlocks);
+                    .getNearestTracking(currentPos, blockPos -> blockPos.getSquaredDistance(currentPos) <= maxWalkSq, _containerBlocks);
             if (trackedExisting.isPresent()) {
                 setDebugState("Using existing container (tracker knows one)");
-                Debug.logTrace("craft-place", "复用 tracker 已知容器 @" + trackedExisting.get().toShortString());
+                Debug.logTrace("craft-place-reuse", "复用 tracker 已知容器 " + _containerTarget.toString()
+                        + " @" + trackedExisting.get().toShortString()
+                        + ", dist=" + (int) Math.sqrt(trackedExisting.get().getSquaredDistance(currentPos))
+                        + ", maxWalk=" + maxWalk);
                 _cachedContainerPosition = trackedExisting.get();
                 _placeForceTimer.reset();
                 _justPlacedTimer.reset();
@@ -242,7 +259,7 @@ public abstract class DoStuffInContainerTask extends Task {
             // tracker 完全没货 (理论上到不了: isItemOwned(USE)=true 需要世界里有):
             // 兜底回"获取容器物品"重造, 别空手放置。
             setDebugState("Getting container item (no usable container found)");
-            Debug.logTrace("craft-place", "世界与手头都没有可用容器, 回去造 " + _containerTarget.toString());
+            Debug.logTrace("craft-place-get", "距离上限 " + maxWalk + " 格内没有容器, 世界与手头都没有可用容器, 回去造 " + _containerTarget.toString());
             return TaskCatalogue.getItemTask(_containerTarget);
         }
 

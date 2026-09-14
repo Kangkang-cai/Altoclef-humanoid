@@ -235,6 +235,21 @@ public final class VisibilityHelper {
 
     private static boolean isBlockPerceivableInner(AltoClef mod, BlockPos pos) {
         Block block = mod.getWorld().getBlockState(pos).getBlock();
+        // (2026-09-14 远距 LOS 假阳性定案) 射线射程之外的目标,"LOS 通过"是空洞证据。
+        // 根因: LookHelper.raycast 对 |end-start| > maxRange 的目标会把终点**截断**到
+        // maxRange 再 cast (LookHelper.java:211-213) → 目标永远不在射线的可达范围内 →
+        // raycast 必然 MISS/命中别的方块 → 而 cleanLineOfSight(Entity,BlockPos,double)
+        // 对 MISS 直接 `return true`(LookHelper.java:150-153, "保持原语义: 视为可见")。
+        // 于是"392 格外的熔炉是否可感知"退化成"玩家眼前 256 格内有没有遮挡":
+        // bot 在开阔地/沿通道 → true; 挖进隧道 → false。实测 (20260914-132420)
+        // isItemOwned(USE,FURNACE) 随之 1~4s 翻面 → DoStuffInContainerTask L194/L195
+        // 在"走去 392 格外的炉"与"现做炉+挖圆石"之间横跳。
+        // 修法: 超出射程即判不可感知 (fail-closed)。只收紧不放宽 —— portal/bed 的
+        // "显式无视距离"在下方分支里, 不受影响; 其余分支自带的距离上限
+        // (工作台 16/结构推断 32/原木 64) 都远小于射程, 行为不变。
+        // 注意: 不能去改 cleanLineOfSight 的 MISS→true — isFluidSurfaceVisible 的目标
+        // 就是流体上方的空气块, 正是靠 MISS 才成立, 改了会破坏流体感知。
+        boolean withinRayRange = isWithinRayRange(mod, pos);
         // (2026-08-23 流体表面可见感知) 水/岩浆: 流体正上方是空气 (表面暴露)
         // 且玩家能看到该空气位置 (LOS 无遮挡) 即感知。用户实测侧面看平坦岩浆
         // 湖时, LOS 到岩浆方块中心被湖边缘/地面挡住 (视线几乎平行湖面) → 判
@@ -254,6 +269,7 @@ public final class VisibilityHelper {
         // 隔岩壁的岩浆, 其上方必然是岩石(表面被封) → 前置失败 → 绝不感知。洞穴里
         // 侧视可见的水池/岩浆 (上方是空气) 不受影响, 仍可感知收集。
         if (block == Blocks.WATER || block == Blocks.LAVA) {
+            if (!withinRayRange) return false; // 射程外: LOS 证据空洞, 防远距流体假阳性
             BlockPos above = pos.up();
             BlockState aboveState = mod.getWorld().getBlockState(above);
             if (!aboveState.isAir() && aboveState.getBlock() != Blocks.CAVE_AIR) {
@@ -307,6 +323,7 @@ public final class VisibilityHelper {
         if (isWoodBlock(block) && isWoodVisibleThroughLeaves(mod, pos)) {
             return true;
         }
+        if (!withinRayRange) return false; // (2026-09-14) 射程外: 不让 isBlockVisible 的 MISS 兜底放行
         if (isBlockVisible(mod, pos)) {
             // (2026-08-22 防透视) 普通矿石被岩石完全包围时, 即使 LOS 射线
             // 判定通过也视为不可感知 — 用户实测 19:19: 被岩石包住的铁矿
@@ -318,6 +335,21 @@ public final class VisibilityHelper {
         if (!EXPERIENCE_KNOWN_BLOCKS.contains(block)) return false;
         return mod.getPlayer() != null
                 && mod.getPlayer().getBlockPos().isWithinDistance(pos, EXPERIENCE_PERCEIVE_DISTANCE);
+    }
+
+    /**
+     * (2026-09-14) 目标是否落在 LOS 射线的可达射程内 (眼睛到方块中心)。
+     *
+     * 超出 {@link #BLOCK_RAY_MAX_DISTANCE} 时, 射线会被截断而够不到目标,
+     * {@link LookHelper#cleanLineOfSight} 的 MISS 分支依然返回 true —— 那是空洞
+     * 证据, 必须在调用侧挡住 (见 isBlockPerceivableInner 顶部注释)。
+     */
+    private static boolean isWithinRayRange(AltoClef mod, BlockPos pos) {
+        ClientPlayerEntity player = mod.getPlayer();
+        if (player == null) return false;
+        Vec3d center = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        return player.getCameraPosVec(1.0f).squaredDistanceTo(center)
+                <= BLOCK_RAY_MAX_DISTANCE * BLOCK_RAY_MAX_DISTANCE;
     }
 
     /**
