@@ -88,7 +88,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static boolean _visitedCellsLoaded = false;
 
     // 外围探索一步多远, 偏置锥角 (仿 BiasedExploreTask)。
-    private static final double EXPLORE_STEP = 48;
+    // (2026-09-14 短步修订, 用户"目标太远, 模仿人类先短距离走起来"):
+    // 48 → 24。实测 (20260914-204117): 48 格目标横穿岩浆碎块地形, baritone
+    // 4s primaryTimeout 预算内算不完, 只回 cost>3 的 ~15 格 best-so-far 段,
+    // bot 走两步又停。短目标 = 搜索空间小, 单轮规划大概率秒级算完, bot 连续
+    // 走; 到达即换下一小步, 方向仍由锁定方位角保证净位移 (抖动 5° 不变)。
+    // 试探长步 ×2 = 48 (沿崖根长步保留)。
+    private static final double EXPLORE_STEP = 24;
     private static final double BIAS_ANGLE_DEG = 12;
     // (2026-09-13 远征) 25° → 5°: 原 ±25° 抖动 + 48 格步长 = 布朗运动,
     // 净位移 ~√N 而非 N —— 即使实例不重建也是小区域打转。降到 5° 后是
