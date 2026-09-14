@@ -1563,9 +1563,38 @@ public class MobDefenseChain extends SingleTaskChain {
         mod.getControllerExtras().requestDefenseAim(nearest.position);
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         if (BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().isPathing()) {
+            // (2026-09-14 搭路中断取证, 用户) 用户观察到"空中搭路没搭好掉进岩浆",
+            // 怀疑格挡逻辑抢了 baritone, 但现象未经确证 → 只加零行为诊断: 每次真要
+            // cancel 寻路时记录当时的位置/速度/脚下方块/是否悬空/是否在搭建 + 弹射物
+            // 距离。下个会话带 [ShieldVsPath] 复盘即可判定格挡是不是元凶
+            // (若没出现该行, 则去查 JumpStuckResolver / [FakePath] / 上层拆任务)。
+            logPathCancelForShieldBlock(mod, nearest);
             BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything();
         }
         return true;
+    }
+
+    /**
+     * (2026-09-14) 格挡抢占 baritone 寻路时的取证日志 —— 见调用点注释。
+     * 诊断不参与决策, 任何异常都吞掉, 绝不影响格挡本身。
+     */
+    private void logPathCancelForShieldBlock(AltoClef mod, CachedProjectile proj) {
+        try {
+            Vec3d v = mod.getPlayer().getVelocity();
+            BlockPos below = mod.getPlayer().getBlockPos().down();
+            boolean builder = BaritoneAPI.getProvider().getPrimaryBaritone().getBuilderProcess().isActive();
+            double projDist = proj == null || proj.position == null
+                    ? -1 : Math.sqrt(proj.position.squaredDistanceTo(mod.getPlayer().getPos()));
+            Debug.logToFile("altoclef_diag.log", "[ShieldVsPath]\tCANCEL baritone pathing for shield block"
+                    + " pos=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " y=" + String.format("%.2f", mod.getPlayer().getY())
+                    + " vel=" + String.format("%.2f/%.2f/%.2f", v.x, v.y, v.z)
+                    + " onGround=" + mod.getPlayer().isOnGround()
+                    + " below=" + mod.getWorld().getBlockState(below).getBlock().getTranslationKey()
+                    + " builder=" + builder
+                    + " projDist=" + String.format("%.1f", projDist));
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 最近的弹射物 (箭/烈焰人火球等, 忽略恶魂大球和龙息)。 */

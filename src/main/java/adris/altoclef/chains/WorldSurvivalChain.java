@@ -37,6 +37,8 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // (2026-09-14 防火岩浆自救取证) 逃岩浆任务运行期 2s 一条诊断节流 (static:
     // 链实例重建不洗掉)。
     private static long _lastLavaEscapeLogMs = 0;
+    // (2026-09-14 坠落取证) 上一次是否处于自由落体, 用于抓"进入坠落"的边沿。
+    private static boolean _wasFalling = false;
     private boolean _wasAvoidingDrowning;
     private TimerGame _portalStuckTimer = new TimerGame(5);
 
@@ -104,6 +106,11 @@ public class WorldSurvivalChain extends SingleTaskChain {
 
         // Drowning
         handleDrowning(mod);
+
+        // (2026-09-14 坠落取证) 进入自由落体的瞬间快照。用户现场"空中搭路没搭好掉进
+        // 岩浆", 需要区分三种假设: 格挡抢寻路 (MobDefenseChain [ShieldVsPath]) /
+        // JumpStuckResolver 误触发 / 上层拆任务。零行为, 只写诊断文件。
+        traceFallEdge(mod);
 
         // Lava Escape
         if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()) {
@@ -394,6 +401,29 @@ public class WorldSurvivalChain extends SingleTaskChain {
             mod.getInputControls().release(Input.JUMP);
             //mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.JUMP, false);
         }
+    }
+
+    /**
+     * (2026-09-14 坠落取证) 进入自由落体那一刻打一条快照, 不改变任何行为。
+     * 判定口径与 MLG 水桶链一致 (vy < -0.6 且非 onGround), 只在"开始坠落"的边沿记一次。
+     */
+    private void traceFallEdge(AltoClef mod) {
+        boolean falling = !mod.getPlayer().isOnGround() && mod.getPlayer().getVelocity().y < -0.6;
+        if (falling && !_wasFalling) {
+            try {
+                Vec3d v = mod.getPlayer().getVelocity();
+                boolean pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+                Task userTask = mod.getUserTaskChain().getCurrentTask();
+                Debug.logToFile("altoclef_diag.log", "[FallTrace]\tpos="
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + " y=" + String.format("%.2f", mod.getPlayer().getY())
+                        + " vel=" + String.format("%.2f/%.2f/%.2f", v.x, v.y, v.z)
+                        + " pathing=" + pathing
+                        + " userTask=" + (userTask == null ? "null" : userTask.toString()));
+            } catch (Throwable ignored) {
+            }
+        }
+        _wasFalling = falling;
     }
 
     /**
