@@ -330,6 +330,37 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private final TimerGame _waterDetourTimer = new TimerGame(WATER_DETOUR_TIMEOUT);
     private int _lastDetourWaterMark = 0;
 
+    // ==== (2026-09-14 遇岩浆弃道) 岩浆不能按水处置, 见一次立刻换通道 ====
+    // 背景 (代码考古): 本类此前完全没有 lava 概念, skipAirAndWater 里的 isWater()
+    // 判据是 `getBlock() instanceof FluidBlock` —— LavaBlock 是 FluidBlock 子类,
+    // 于是【岩浆被当作水】: 从队列 poll 掉当空气走过去, 且要累计到
+    // WATER_DETOUR_TRIGGER_SKIPS(2 次) 才后撤一次, 撤完回原地继续挖同一条通道。
+    // 即"挖穿岩浆 → 走进去", 掉进去只能靠 WorldSurvivalChain 的 EscapeFromLavaTask
+    // 救, 救完又挖回原处。人类绝不这样挖。
+    // 与水的处置对照 (两者物理性质相反, 不能共用参数):
+    //   水  : 能走过去 → 累计 2 次才撤, 撤完回原地继续挖, 撤 10 格。
+    //   岩浆: 走过去=死 → 第【一】次遇到就立刻弃道(清队列+后撤+换方向), 不再回原道。
+    // 后撤距离按维度分: 下界岩浆流动范围 7 格、流速为主世界 3 倍 → 12 格; 主世界
+    // 流动范围 3 格 → 6 格 (撤更远只是白跑)。
+    // 反透视合规 (沿用 09-10 "直直挖" 结论): 只认【已经挖开、肉眼可见】的岩浆 ——
+    // 判据仅取队列队首那一格, 绝不扫半径、绝不查未挖石头背后的液体。
+    private static final int LAVA_RETREAT_NETHER = 12;
+    private static final int LAVA_RETREAT_OVERWORLD = 6;
+    // 下界撤 12 格要实跑一段, 水的 20s 不够。
+    private static final double LAVA_DETOUR_TIMEOUT = 30.0;
+    // 一轮内弃道次数上限 (水平方向总共只有 TUNNEL_DIRS.length=4 个): 4 个方向全撞上
+    // 岩浆 = 这片就是岩浆区, 再换向只会原地打转 → 结束本轮交回父任务重新选址。
+    private static final int LAVA_ABANDON_LIMIT = 4;
+    private boolean _inLavaDetour = false;
+    private final TimerGame _lavaDetourTimer = new TimerGame(LAVA_DETOUR_TIMEOUT);
+    private int _lavaEncounters = 0;
+    private int _lavaAbandonCount = 0;
+    private BlockPos _lastLavaPos = null;
+    private boolean _lavaGiveUp = false;
+    // 本轮亲眼见过的岩浆点 (不是预测)。用于给 RunAwayFromPositionTask 多个逃跑
+    // 目标 —— 第二次撤离时能同时避开先前那一处, 不至于在两处岩浆之间来回跑。
+    private final Set<BlockPos> _lavaHazards = new HashSet<>();
+
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
     // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
@@ -411,6 +442,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _protectedDigSkipped = 0;
         _unbreakableSkipped = 0;
         _digQueue.clear();
+        // (2026-09-14 岩浆弃道) 执行态归零, 但【记忆不丢】: 见过的岩浆是事实, 不会
+        // 因为父层重派/被打断就消失。典型打断链 = 挖穿岩浆 → 掉进去 → 生存链
+        // EscapeFromLavaTask(prio 100) 抢占 → 救回来 onStart 重入 → 若无记忆, bot
+        // 会立刻挖回刚把自己烧过的那条通道。保留 _lastLavaPos/_lavaHazards 后, 换向
+        // 会自动避开那个方向。计数按"新一轮"归零 (同 waterSkipped 口径)。
+        _inLavaDetour = false;
+        _lavaEncounters = 0;
+        _lavaAbandonCount = 0;
+        _lavaGiveUp = false;
         // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
         // (2026-09-05 下界基岩层逃生) 任务开始时已被压到目标高度之下很深 (如上一轮
@@ -519,6 +559,43 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 09-12 日志实锤: 探索结束 22:51:52.4 之后第一个扫描点 22:51:54.1(step=3)
         // 就已经在冷却外。递减移到【真实挖掉方块】处 (见 _realDigs++ 分支), 恢复
         // "再挖 12 格通道才允许重新探洞"的原意。
+
+        // (2026-09-14 岩浆弃道) 岩浆改道优先于水改道: 水只是麻烦, 岩浆是致命的。
+        // 同样放在洞穴探索之前。
+        if (_inLavaDetour) {
+            if (_subTask != null && !_subTask.isFinished(mod) && !_lavaDetourTimer.elapsed()) {
+                setDebugState("Lava retreat: backing away from lava in dig path");
+                return _subTask;
+            }
+            // 撤完(或超时): 换向重挖。注意与上面的 ascend 分支的交互 —— 玩家若已掉到
+            // 行事线以下, ascend 分支会先把 _subTask 置空并换向, 这里紧接着再按"背离
+            // 岩浆"重选一次方向, 两者不冲突 (都以玩家当前位置为新锚点)。
+            boolean timedOut = _lavaDetourTimer.elapsed();
+            BlockPos lava = _lastLavaPos;
+            _inLavaDetour = false;
+            _subTask = null;
+            _lavaAbandonCount++;
+            String m = "[MineDown-LavaRetreat] 后撤" + (timedOut ? "超时" : "完成") + " at "
+                    + mod.getPlayer().getBlockPos().toShortString()
+                    + " (本轮弃道 " + _lavaAbandonCount + "/" + LAVA_ABANDON_LIMIT + ")"
+                    + " lava=" + (lava != null ? lava.toShortString() : "?")
+                    + " nether=" + _nether;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            if (_lavaAbandonCount >= LAVA_ABANDON_LIMIT) {
+                // 4 个水平方向都试过了还撞岩浆 = 这一片就是岩浆区 (下界尤其常见),
+                // 继续换向只会原地打转 → 结束本轮, 由父任务重新选址/重派。
+                _lavaGiveUp = true;
+                String g = "[MineDown-LavaGiveUp] 本轮弃道达上限 " + _lavaAbandonCount
+                        + ", 结束本轮交回父任务 at "
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + " hazards=" + _lavaHazards.size();
+                Debug.logMessage(g);
+                Debug.logToFile("altoclef_diag.log", g);
+                return null;
+            }
+            retreatAndRedig(mod, lava);
+        }
 
         // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
         // 放在洞穴探索之前——水是当前挖掘路径的直接危险源, 优先于洞穴分心。
@@ -794,17 +871,42 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * （与旧方向不同）重新开始楼梯/隧道。
      */
     private void retreatAndRedig(AltoClef mod) {
+        retreatAndRedig(mod, null);
+    }
+
+    /**
+     * @param awayFrom 需要背离的危险点 (岩浆), 传 null 时只保证换一个方向。
+     *
+     * (2026-09-14 岩浆弃道) 原实现只排除"与旧方向相同", 换出来的新方向有 1/3 概率
+     * 正好朝着刚撤出来的那处岩浆 —— 撤了等于白撤, 挖两格又撞回去, 直接把
+     * LAVA_ABANDON_LIMIT 烧穿。这里加一条: 新方向与 (危险点 - 玩家) 的水平分量同向
+     * 则重选。试 12 次仍选不出 (四面都是岩浆的极端情况) 就接受最后一个, 由上限兜底。
+     */
+    private void retreatAndRedig(AltoClef mod, BlockPos awayFrom) {
         _digQueue.clear();
         _step = 0;
         _skipStreak = 0;
         _miningTarget = null;
-        _digStart = mod.getPlayer().getBlockPos().down();
-        int[] newDir;
-        do {
-            newDir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-        } while (newDir[0] == _dirX && newDir[1] == _dirZ);
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        _digStart = feet.down();
+        int[] newDir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        for (int i = 0; i < 12; i++) {
+            int[] cand = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+            if (cand[0] == _dirX && cand[1] == _dirZ) continue;
+            if (pointsToward(feet, cand, awayFrom)) continue;
+            newDir = cand;
+            break;
+        }
         _dirX = newDir[0];
         _dirZ = newDir[1];
+    }
+
+    /** 方向 dir 是否朝向 hazard (只看水平分量; 同格/无法判定时不算朝向)。 */
+    private boolean pointsToward(BlockPos from, int[] dir, BlockPos hazard) {
+        if (hazard == null) return false;
+        int dx = hazard.getX() - from.getX();
+        int dz = hazard.getZ() - from.getZ();
+        return dx * dir[0] + dz * dir[1] > 0;
     }
 
     /**
@@ -816,7 +918,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 第一块实体方块为止。
      */
     private void advanceToSolid(AltoClef mod) {
-        while (_digQueue.isEmpty() && !reachedBottom(mod) && _skipStreak < SKIP_STEPS_PER_TICK) {
+        // (2026-09-14 岩浆弃道) _inLavaDetour 时【不得再沿几何路径延伸】: 弃道已经把
+        // 队列清空了, 若这里继续 enqueueNextStep, 弃道等于没弃 —— 队列会被立刻重新
+        // 填满并再次撞上同一处岩浆。
+        while (_digQueue.isEmpty() && !_inLavaDetour && !reachedBottom(mod) && _skipStreak < SKIP_STEPS_PER_TICK) {
             _step++;
             _skipStreak++;
             enqueueNextStep();
@@ -852,6 +957,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private void skipAirAndWater(AltoClef mod) {
         while (!_digQueue.isEmpty()) {
             BlockPos head = _digQueue.peek();
+            if (isLava(mod, head)) {
+                // (2026-09-14 岩浆弃道) 必须排在【水之前】: 旧判据 isWater() 用
+                // `instanceof FluidBlock`, 岩浆会被它先吃掉, 然后按水的方式"跳过
+                // 继续走" —— 直接走进岩浆。这里命中后立刻弃道并 return, 不 poll、
+                // 不继续几何推进。判据只取队首 (即将挖的那一格), 不扫周边: 队首是
+                // 岩浆意味着它前方那格已经挖开、岩浆就在眼前, 属于合规的"亲眼看到"。
+                abandonTunnelForLava(mod, head);
+                return;
+            }
             if (isWater(mod, head)) {
                 logWaterEncounter(mod, head);
             } else if (mod.getBehaviour().isPortalBodyBlock(head)) {
@@ -985,8 +1099,68 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         Debug.logToFile("altoclef_diag.log", m);
     }
 
+    /**
+     * 注意 (2026-09-14): FluidBlock 同时是 WaterBlock 和 LavaBlock 的父类, 单看这条
+     * 判据【岩浆也会被算作水】。调用方 skipAirAndWater 已把 isLava 排在前面拦截,
+     * 所以走到这里的一定不是岩浆。别在别处单独复用本方法当"能安全走过去的液体"用。
+     */
     private boolean isWater(AltoClef mod, BlockPos pos) {
         return mod.getWorld().getBlockState(pos).getBlock() instanceof net.minecraft.block.FluidBlock;
+    }
+
+    /**
+     * (2026-09-14 岩浆弃道) 岩浆判定。用 Blocks.LAVA 而不是 FluidBlock 的流体状态:
+     * 源岩浆和流动岩浆都是同一个 Block 实例 (只是 state.level 不同), 一律算危险。
+     * 区块未加载时不判危险 (未加载读作空气, 与本仓 isAir 同款语义, 见 isUnbreakable)。
+     */
+    private boolean isLava(AltoClef mod, BlockPos pos) {
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+        return mod.getWorld().getBlockState(pos).getBlock() == Blocks.LAVA;
+    }
+
+    /**
+     * (2026-09-14 岩浆弃道) 立即放弃当前这条通道: 清空挖掘队列、切到后撤子任务,
+     * 等后撤结束后由 onTick 的 _inLavaDetour 分支换向重挖。
+     *
+     * 与水的三点本质差异 (共用一套代码会出人命):
+     *   1. 触发阈值 1 次 (水要攒 2 次);
+     *   2. 不 poll 掉这一格继续走 (水能走过去, 岩浆不能);
+     *   3. 后撤完【换方向】, 不回原通道继续挖。
+     */
+    private void abandonTunnelForLava(AltoClef mod, BlockPos lava) {
+        _lavaEncounters++;
+        BlockPos lavaFixed = lava.toImmutable();
+        _lavaHazards.add(lavaFixed);
+        if (_lavaEncounters <= 3 || _lavaEncounters % 10 == 0) {
+            String m = "[MineDown-Lava] 挖通道撞上岩浆 " + lavaFixed.toShortString()
+                    + " (y=" + lavaFixed.getY() + ", 累计 " + _lavaEncounters + ")"
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " mode=" + (_tunnelMode ? "tunnel" : _ascendMode ? "ascend" : "staircase")
+                    + " step=" + _step + " nether=" + _nether;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
+        if (_inLavaDetour) return; // 已经在撤了, 别把计时器和撤离目标重置掉
+        _digQueue.clear();
+        _step = 0;
+        _skipStreak = 0;
+        _miningTarget = null;
+        _stallTarget = null;
+        _inLavaDetour = true;
+        _lavaDetourTimer.reset();
+        _lastLavaPos = lavaFixed;
+        double dist = _nether ? LAVA_RETREAT_NETHER : LAVA_RETREAT_OVERWORLD;
+        // maintainY = 当前高度: 后撤只许水平跑, 不许上下乱窜 —— 下界往上跑可能一头
+        // 扎进头顶的岩浆海, 往下跑可能踩空。逃跑目标带上本轮所有见过的岩浆点, 避免
+        // 在两处岩浆之间来回。
+        _subTask = new RunAwayFromPositionTask(dist, mod.getPlayer().getBlockPos().getY(),
+                _lavaHazards.toArray(new BlockPos[0]));
+        String m = "[MineDown-LavaAbandon] 弃道 -> 后撤 " + (int) dist + " 格, 撤完换方向"
+                + " (撤离目标 " + _lavaHazards.size() + " 处, 上限 "
+                + (int) LAVA_DETOUR_TIMEOUT + "s) from " + lavaFixed.toShortString()
+                + " player=" + mod.getPlayer().getBlockPos().toShortString();
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
     }
 
     /**
@@ -1733,7 +1907,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // FIX (stuck bug): once we've hit the bottom the shaft's job is done.
         // Requiring an empty queue here could deadlock the task (and the bot)
         // forever when leftover blocks remained from an interrupted final step.
-        boolean result = !_inCave && reachedBottom(mod);
+        // (2026-09-14 岩浆弃道) _lavaGiveUp: 本轮换向 4 次都撞上岩浆 (见
+        // LAVA_ABANDON_LIMIT), 这片区域挖不下去了 —— 收工, 由父任务重新选址重派,
+        // 比在岩浆里反复打转强。短路在前, 避免再算一次 reachedBottom。
+        boolean result = _lavaGiveUp || (!_inCave && reachedBottom(mod));
         // (2026-09-10 探索断裂诊断) 翻转沿打点, 重点抓"空中宣告到底"瞬间。
         if (result != _finishedDiagLastState) {
             _finishedDiagLastState = result;
