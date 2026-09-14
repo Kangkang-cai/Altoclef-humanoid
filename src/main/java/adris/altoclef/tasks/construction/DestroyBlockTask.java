@@ -518,6 +518,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *         null (调用方不再返回它, 框架会 stop 掉)。
      */
     private Task pumpAcquireMaterials(AltoClef mod) {
+        // (2026-09-14 实时计数早停, 现场 20260914-125213 实锤) 不能只信子任务自己的
+        // isFinished —— 它走 ItemTarget/POSSESS 判量(本仓"哨兵 targetCount 陷阱"),
+        // 收够了也判不完: 该现场要 3 份泥土, 实际收了 17 份、自挖 6 格深坑 + 3x3 环
+        // (20+ 方块), 最后靠 30s 硬超时掐掉(还被游戏 5.2s 卡顿吃掉 3.7s)。这里每
+        // tick 直读【真实背包】(getItemCountReal, 不走 500ms 缓存层 —— 判"够没够"
+        // 属于判定关键资源, 按本仓"背包权威计数"惯例一律走 Real)。
+        int haveDirt = mod.getItemStorage().getItemCountReal(Items.DIRT);
+        if (haveDirt >= ACQUIRE_MATERIALS_COUNT) {
+            logAcquireDone(mod, "enough(dirt=" + haveDirt + ")");
+            _acquireMaterialsTask = null;
+            return null;
+        }
         if (_acquireTotalTimer.elapsed()) {
             logAcquireDone(mod, "timeout");
             _acquireMaterialsTask = null;
