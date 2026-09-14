@@ -271,6 +271,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _waterSkipped = 0;
     // (2026-09-13 传送门保护) 跳过的门体方块数, 用于日志节流。
     private int _protectedDigSkipped = 0;
+    // (2026-09-14 不可破坏拦截) 跳过的基岩类方块数, 用于日志节流。
+    private int _unbreakableSkipped = 0;
 
     // ==== (2026-09-10 遇水改道) 挖掘路径真的出现水 → 不再涉水直穿 ====
     // 13:15/13:52 场次实证: 涉水直穿 → bot 在水下方块前卡死 → 下潜 → 溺水
@@ -363,6 +365,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _inCave = false;
         _waterSkipped = 0;
         _protectedDigSkipped = 0;
+        _unbreakableSkipped = 0;
         _digQueue.clear();
         // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
@@ -733,10 +736,47 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 logWaterEncounter(mod, head);
             } else if (mod.getBehaviour().isPortalBodyBlock(head)) {
                 logProtectedDigSkip(mod, head);
+            } else if (isUnbreakable(mod, head)) {
+                // (2026-09-14 不可破坏拦截, 主路径) 隧道几何路径撞上基岩类方块
+                // (hardness<0, 1.18.2 基岩带最高到 y=-60, 钻石隧道 -59/-60 两行
+                // 恰好贴着)。旧逻辑无过滤派发 DestroyBlockTask → "Block in range,
+                // mining..." 无限左键, 20260914-132420 实锤: 对 (-214,-60,279) 傻挖
+                // 17s 到用户手动退出 (snapshot.log reason=stuck 每秒一条, dug 卡 3/80),
+                // 唯一逃逸是 45s "Mining stalled" 兜底。与水/门体同款处置: 从队列
+                // 弹掉, 几何继续推进 —— 脚行(-60)碰基岩=跨过去的一格台阶, 头行在
+                // -59 以上不会出现基岩(1.18.2 基岩带 -64~-60), 不会造成 1 格高
+                // 不可通行断面。DestroyBlockTask 侧另有独立硬守卫兜底(覆盖其他
+                // 40+ 派发点), 判据同源 (getHardness < 0)。
+                logUnbreakableSkip(mod, head);
             } else if (!WorldHelper.isAir(mod, head)) {
                 break;
             }
             _digQueue.poll();
+        }
+    }
+
+    /**
+     * (2026-09-14 不可破坏拦截) 目标方块 hardness<0 (基岩/末地门框/强化深板岩)
+     * → 物理上永远挖不掉。区块未加载时不判负 (未加载读作空气, 与本仓 isAir 同款语义)。
+     */
+    private boolean isUnbreakable(AltoClef mod, BlockPos pos) {
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+        return mod.getWorld().getBlockState(pos).getHardness(mod.getWorld(), pos) < 0;
+    }
+
+    /**
+     * (2026-09-14 不可破坏拦截) 记录一次"隧道跳过不可破坏方块"。节流口径同
+     * [Diag-water] / [PortalGuard] (前 3 次 + 每 10 次)。
+     */
+    private void logUnbreakableSkip(AltoClef mod, BlockPos pos) {
+        _unbreakableSkipped++;
+        if (_unbreakableSkipped <= 3 || _unbreakableSkipped % 10 == 0) {
+            String m = "[MineDown-Unbreakable] 隧道跳过不可破坏方块 " + pos.toShortString()
+                    + " (hardness<0 基岩类, 累计 " + _unbreakableSkipped + ")"
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " mode=" + (_tunnelMode ? "tunnel" : "staircase");
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
         }
     }
 

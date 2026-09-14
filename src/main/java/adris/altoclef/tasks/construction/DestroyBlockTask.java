@@ -153,6 +153,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _gettingToBlockTick = 0;
         _farGiveUpSuppressed = false;
         _protectedRefusalLogged = false;
+        _unbreakableRefusedLogged = false;
         // (2026-09-14 垫塔接近) 新实例归零。timer 新建即到期, 进垫塔分支时才 reset。
         _pillarActive = false;
         _pillarLastY = Integer.MIN_VALUE;
@@ -204,6 +205,33 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         return false;
     }
 
+    // (2026-09-14 不可破坏方块硬守卫) 目标是基岩类 (hardness<0) → 物理上永远
+    // 挖不掉, 旧逻辑会 "Block in range, mining..." 无限左键直到 45s 兜底。
+    // 现场 20260914-132420 实锤: 隧道挖 -60 行撞基岩 (1.18.2 基岩带最高到 -60),
+    // 对 (-214,-60,279) 傻挖 17s 到用户手动退出, snapshot.log reason=stuck 每秒
+    // 一条、dug 卡 3/80, 全程无任何报错 —— 用户视角就是"对着基岩挥镐不停止"。
+    //
+    // 守卫语义 (对齐 refuseIfProtected 范式): 命中 → 记一次日志 + requestBlock-
+    // Unreachable 拉黑 (候选选择器当场换目标) + 视作完成 (isFinished 放行, 防上层
+    // 卡死)。MineDownExploreTask 隧道选块侧另有一道独立拦截 (skipAirAndWater,
+    // 主路径), 判据同源: getHardness(world, pos) < 0 (与 WorldHelper.canBreak
+    // / JumpObstructionHelper 同款判据)。
+    private boolean _unbreakableRefusedLogged = false;
+
+    private boolean refuseIfUnbreakable(AltoClef mod) {
+        if (!mod.getChunkTracker().isChunkLoaded(_pos)) return false; // 未加载读作空气, 不判负
+        if (mod.getWorld().getBlockState(_pos).getHardness(mod.getWorld(), _pos) >= 0) return false;
+        if (!_unbreakableRefusedLogged) {
+            _unbreakableRefusedLogged = true;
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            String m = "[UnbreakableGuard] 拒绝挖掘不可破坏方块: " + _pos.toShortString()
+                    + " (hardness<0 基岩类), 放弃该目标";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
+        return true;
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
 
@@ -214,6 +242,16 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             mod.getClientBaritone().getBuilderProcess().onLostControl();
             mod.getClientBaritone().getCustomGoalProcess().onLostControl();
             setDebugState("Protected position (portal guard), refusing to break");
+            return null;
+        }
+
+        // (2026-09-14 不可破坏方块硬守卫) 第二道闸门: 目标是基岩类 → 立即拉黑
+        // 放弃, 不喂任何 lookAt / CLICK_LEFT / builder。详见 refuseIfUnbreakable。
+        if (refuseIfUnbreakable(mod)) {
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, false);
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+            setDebugState("Unbreakable block (bedrock-like), refusing to break");
             return null;
         }
 
@@ -617,6 +655,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-13 传送门保护硬守卫) 命中保护视作"完成", 让上层另选目标;
         // 否则上层 (每 tick 重派同实例) 会因本任务永远未完成而卡死。
         if (refuseIfProtected(mod)) {
+            return true;
+        }
+        // (2026-09-14 不可破坏方块硬守卫) 同款: 不可破坏视作"完成", 让上层另选目标。
+        if (refuseIfUnbreakable(mod)) {
             return true;
         }
         boolean air = WorldHelper.isAir(mod, _pos);
