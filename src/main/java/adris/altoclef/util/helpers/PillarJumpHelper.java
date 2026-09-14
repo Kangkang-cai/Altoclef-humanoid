@@ -60,16 +60,32 @@ public final class PillarJumpHelper {
         return all;
     }
 
-    /**
-     * 木板 + 原木。不受重力, 垂直垫塔不会掉 —— 挖树时背包里通常【只有原木】,
-     * SAFE_MATERIALS 一个都不含, 只用常规清单会"足量木头却零垫材料"。
-     */
-    public static final Item[] WOOD_MATERIALS = new Item[]{
+    /** 木板。不受重力, 垂直垫塔不会掉。 */
+    public static final Item[] PLANK_MATERIALS = new Item[]{
             Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
-            Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS,
+            Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS
+    };
+
+    /**
+     * 原木。⚠ **在"挖树/囤木料"任务里这是随任务进度结算的收集目标**, 拿它当垫块
+     * 会把已采集数打回去 (垫 1 格 = 木料 -1)。用户 2026-09-14 明确: "别用原木,
+     * 木板可以"。故只有"不结算木头进度"的场景 (如 GoToSurfaceTask 洞穴逃生) 才
+     * 允许把它纳入垫塔清单 —— 见 {@link #withWood()} 与 {@link #withWoodNoLogs()}。
+     */
+    public static final Item[] LOG_MATERIALS = new Item[]{
             Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG,
             Items.JUNGLE_LOG, Items.ACACIA_LOG, Items.DARK_OAK_LOG
     };
+
+    /** 木板 + 原木 (含原木)。仅供"不保留原木"的场景, 见 LOG_MATERIALS 注释。 */
+    public static final Item[] WOOD_MATERIALS = concat(PLANK_MATERIALS, LOG_MATERIALS);
+
+    private static Item[] concat(Item[] a, Item[] b) {
+        Item[] all = new Item[a.length + b.length];
+        System.arraycopy(a, 0, all, 0, a.length);
+        System.arraycopy(b, 0, all, a.length, b.length);
+        return all;
+    }
 
     /**
      * 挖垫场景材料全集: 常规垫块 + 重力块 + 木板/原木。
@@ -77,19 +93,32 @@ public final class PillarJumpHelper {
      * (2026-09-12 v9 在 GoToSurfaceTask 定型: 20260912-171248 现场"足量木头"
      *  却零垫材料 → giveUp 循环。2026-09-14 提到此处, 与 DestroyBlockTask 的
      *  垫塔接近共用同一份清单 —— 同一概念只留一个判据源。)
+     *
+     * ⚠ 这份**含原木**, 只给"不结算木料进度"的场景 (洞穴逃生)。挖树类任务请用
+     * {@link #withWoodNoLogs()} —— 原木是它的收集目标, 消耗会打回进度。
      */
     private static Item[] _withWoodCache = null;
 
     public static Item[] withWood() {
         if (_withWoodCache == null) {
-            Item[] base = allMaterials();
-            Item[] wood = WOOD_MATERIALS;
-            Item[] all = new Item[base.length + wood.length];
-            System.arraycopy(base, 0, all, 0, base.length);
-            System.arraycopy(wood, 0, all, base.length, wood.length);
-            _withWoodCache = all;
+            _withWoodCache = concat(allMaterials(), WOOD_MATERIALS);
         }
         return _withWoodCache;
+    }
+
+    /**
+     * 常规垫块 + 重力块 + 木板 (**不含原木**)。
+     *
+     * 给"原木是任务目标物"的场景 (挖树/囤木料) 用 —— 用户 2026-09-14 明确
+     * "别用原木, 木板可以"。没木板时由调用方负责去采集垫块, 不允许偷偷消耗原木。
+     */
+    private static Item[] _withWoodNoLogsCache = null;
+
+    public static Item[] withWoodNoLogs() {
+        if (_withWoodNoLogsCache == null) {
+            _withWoodNoLogsCache = concat(allMaterials(), PLANK_MATERIALS);
+        }
+        return _withWoodNoLogsCache;
     }
 
     /**
@@ -154,11 +183,27 @@ public final class PillarJumpHelper {
     // 必然 hold 某键, 矛盾。加分支级诊断定案: step 每个出口 + steer 分解值 +
     // 实际按键状态, 500ms 节流。
     private static long _lastDiagMs = 0;
+    private static long _lastEntryDiagMs = 0;
 
     private static void diag(String msg) {
         long now = System.currentTimeMillis();
         if (now - _lastDiagMs < 500) return;
         _lastDiagMs = now;
+        adris.altoclef.Debug.logToFile("altoclef_diag.log", "[PillarDiag] " + msg);
+    }
+
+    /**
+     * (2026-09-14 诊断盲区修复) 入口行【单独】节流。
+     *
+     * 旧实现入口行与分支行共用一个 500ms 槽: 入口 "step feet=..." 先调用并吃掉槽,
+     * 同 tick 的 GROUND jump / PLACE / steer 行必被吞掉。现场 20260914-115322 实锤
+     * —— 全程只有 7 条 "step feet=..." 行, **没有一条**记录到"到底起跳了没有 /
+     * 放置成功没有", 无法定位"材料在手上却上不去"。
+     */
+    private static void diagEntry(String msg) {
+        long now = System.currentTimeMillis();
+        if (now - _lastEntryDiagMs < 1000) return;
+        _lastEntryDiagMs = now;
         adris.altoclef.Debug.logToFile("altoclef_diag.log", "[PillarDiag] " + msg);
     }
 
@@ -229,7 +274,7 @@ public final class PillarJumpHelper {
         BlockPos feet = mod.getPlayer().getBlockPos();
         BlockPos below = feet.down();
         // (2026-09-13 诊断) 入口现场: 玩家脚块/支撑块/两格判定/分支走向。
-        diag("step feet=" + feet.toShortString() + " below=" + below.toShortString()
+        diagEntry("step feet=" + feet.toShortString() + " below=" + below.toShortString()
                 + " solid=" + WorldHelper.isSolid(mod, below)
                 + " solidDD=" + WorldHelper.isSolid(mod, below.down())
                 + " offAxis=" + String.format("%.2f", offAxisSq(mod, below)));
