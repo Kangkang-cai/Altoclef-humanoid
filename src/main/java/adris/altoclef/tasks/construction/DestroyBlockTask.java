@@ -19,6 +19,7 @@ import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalNear;
 import baritone.api.pathing.goals.GoalXZ;
+import baritone.api.pathing.goals.GoalYLevel;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.BlockState;
@@ -120,6 +121,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      */
     private int _pillarLastY = Integer.MIN_VALUE;
     private boolean _pillarActive = false;
+    // (2026-09-14 v4 交还 baritone) 头顶被【可挖】方块挡住 (树叶/土/木/半砖…) 时,
+    // 自写 PillarJumpHelper 只会 hold(JUMP) 空跳 —— 它不挖头顶, 而"脚块变空气"的
+    // 放置窗口永远开不了 ⇒ 空跳到超时。但这类挡头不该判"垫不到": baritone 的
+    // MovementPillar 构造就是 positionsToBreak={start.above(2)} + positionToPlace=start
+    // (反编译实锤), **它本来就是"挖头顶 + 放脚下"**。用户原话: "baritone 会处理悬空方块"。
+    // 所以: 让位给 baritone, 用 GoalYLevel(目标层) 驱动; 只有挖不动的 (基岩) 才拉黑。
+    private boolean _pillarHandoff = false;
+    /** 交还后的观察窗口 20s; 期间 y 有上升就重置 (baritone 在爬只是慢)。 */
+    private final TimerGame _pillarHandoffTimer = new TimerGame(20);
+    private int _pillarHandoffLastY = Integer.MIN_VALUE;
+    /** 本实例是否已交过一次 —— 交过还失败才拉黑, 避免"交还↔自写"来回抖。 */
+    private boolean _pillarHandoffTried = false;
     /**
      * (2026-09-14 垫塔判据滞后) 垫塔期间【锁定】的落脚基准, 净空闸门只按它算。
      *
@@ -179,6 +192,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 垫塔判据滞后) 垫塔基准脚块同样归零: 残留会让新实例沿用上一次
         // 落脚层位的 aboveHead 判净空, 与当前玩家实际位置错位。
         _pillarBaseFeet = null;
+        // (2026-09-14 交还 baritone) 同上, 交还状态也必须随实例归零 —— 残留会让
+        // 新目标一上来就被送去爬上一次的 GoalYLevel。
+        _pillarHandoff = false;
+        _pillarHandoffLastY = Integer.MIN_VALUE;
+        _pillarHandoffTried = false;
         // (2026-09-14 缺垫块采集) 子任务引用必须清 —— 残留会让新实例 keep-alive 一个
         // 已经不该跑的采集任务。标记归零: 实例重建即新一轮, 允许再采一次。
         _acquireMaterialsTask = null;
@@ -466,6 +484,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *         不适用 (目标不在上方 / 水平还没到位 / 没材料), 交回原导航+放弃逻辑。
      */
     private boolean tryPillarUpToReach(AltoClef mod) {
+        // (2026-09-14 交还 baritone) 已经让位给 baritone 的垂直搭高: 期间不要抢
+        // 输入通道, 只盯着"够到了没 / 超时没"。抢回去 = 把它的 pillar 腰斩。
+        if (_pillarHandoff) {
+            return tickBaritoneHandoff(mod);
+        }
         // (2026-09-14 v2 判据滞后) 用户现场"(bot) 一跳起来任务立马就跳了, 反复横跳"。
         // 旧实现【每 tick 重算】下面四个前置, 而垫塔本身靠 hold(JUMP) 起跳 —— 起跳
         // 那一瞬间玩家的 BlockPos y 会 +1, 判据随之自激翻转 (证据与完整机理见
@@ -502,7 +525,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // ③b (2026-09-14 低净空闸门, 2026-09-14 v2 基准改为垫塔基准脚块)
             //    即时位置版本见 headroomBlockedForPillar(mod, feet) 的注释。
             //    首次准入仍用即时位置: 开跑前玩家应站稳在地面, 不存在"跳到一半"。
+            //    (2026-09-14 v4) 挡头【可挖】⇒ 不是"垫不到", 是 baritone 的活
+            //    (它会挖 up(2) + 放脚下) —— 让位, 别自写空跳也别拉黑目标。
             if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())) {
+                if (isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) {
+                    startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(), "entry headroom diggable");
+                    return true;
+                }
                 endPillar(mod);
                 return false;
             }
@@ -537,25 +566,41 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         }
         // ④b 净空闸门 (垫塔中用锁定基准, 见 ③b / _pillarBaseFeet 注释): 垫到某一层
         //     后发现净空已经不够再上一格, 而目标还在上面 ⇒ 垫不到了, 收工判不可达。
+        //     (2026-09-14 v4) 但"挡头可挖"不等于垫不到 —— 树叶/半砖/木头/土,
+        //     baritone 的 MovementPillar 会挖掉它再放脚下。只有挖不动的 (基岩)
+        //     才是真·不可达。错判的代价: 囤木头时整棵树的原木被逐个拉黑。
         if (_pillarBaseFeet != null && headroomBlockedForPillar(mod, _pillarBaseFeet)) {
-            Debug.logToFile("altoclef_diag.log", "[PillarApproach] headroom blocked at "
+            BlockPos aboveHead = _pillarBaseFeet.up(2);
+            if (isBlockerDiggable(mod, aboveHead)) {
+                startBaritoneHandoff(mod, _pillarBaseFeet, "diggable blocker mid-pillar");
+                return true;
+            }
+            Debug.logToFile("altoclef_diag.log", "[PillarApproach] headroom UNBREAKABLE at "
                     + _pillarBaseFeet.toShortString() + " (aboveHead="
-                    + _pillarBaseFeet.up(2).toShortString() + " block="
-                    + mod.getWorld().getBlockState(_pillarBaseFeet.up(2)).getBlock()
-                    + ") target=" + _pos.toShortString());
+                    + aboveHead.toShortString() + " block="
+                    + mod.getWorld().getBlockState(aboveHead).getBlock()
+                    + ") target=" + _pos.toShortString() + " -> unreachable");
             endPillar(mod);
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             return true;
         }
         if (_pillarNoProgressTimer.elapsed() || _pillarTotalTimer.elapsed()) {
-            // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限) → 判不可达换目标。
+            // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限)。
+            //    (2026-09-14 v4) 自写垫塔垫不动 ≠ 目标不可达 —— baritone 的
+            //    MovementPillar 是另一套实现, 它会挖。先让位一次, 再失败才拉黑。
             Debug.logToFile("altoclef_diag.log", "[PillarApproach] give up target="
                     + _pos.toShortString()
                     + " y=" + mod.getPlayer().getBlockPos().getY()
                     + " lastY=" + _pillarLastY
                     + " noProgress=" + _pillarNoProgressTimer.elapsed()
-                    + " total=" + _pillarTotalTimer.elapsed());
+                    + " total=" + _pillarTotalTimer.elapsed()
+                    + " handoffTried=" + _pillarHandoffTried);
             endPillar(mod);
+            if (!_pillarHandoffTried) {
+                startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(),
+                        "self-pillar no progress");
+                return true;
+            }
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             return true;
         }
@@ -588,7 +633,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (horizontalDistanceSqToPlayer(mod) > 4.0) return false;
         // (2026-09-14 低净空闸门) 净空被挡时垫塔不可能发生, 别去采垫块。
         // 与 tryPillarUpToReach 的 ③b 同源 —— "同一概念只留一个判据源"。
-        if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())) return false;
+        // (2026-09-14 v4) 但"挡头可挖"时 baritone 会挖掉它再【放脚下】——
+        // 依然需要垫块, 采集照旧。只有挖不动的挡头才真的不用采。
+        if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())
+                && !isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) return false;
         return !PillarJumpHelper.hasMaterials(mod, _pillarMaterials);
     }
 
@@ -624,6 +672,85 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 判据必须落到"起跳路径上有没有碰撞", 不能停在"是不是实心方块"
         // (本仓"轮廓≠碰撞"铁律, 见 detail/03-consistency.md)。
         return !st.getCollisionShape(mod.getWorld(), aboveHead).isEmpty();
+    }
+
+    /**
+     * (2026-09-14 v4 交还 baritone) 头顶挡头能不能被挖掉。
+     *
+     * 只有挖不动的 (hardness < 0: 基岩/末地传送门框架/屏障) 才是真·"垫不到"。
+     * 树叶、木头、土、半砖、灯笼全都可挖 —— 而 baritone 的 MovementPillar 会把
+     * 头顶那格 ({@code start.above(2)}) 列进 positionsToBreak, 挖完再放脚下,
+     * 本来就是"挖一垫一"。判成不可达会把整棵树的目标逐个拉黑。
+     */
+    private boolean isBlockerDiggable(AltoClef mod, BlockPos pos) {
+        BlockState st = mod.getWorld().getBlockState(pos);
+        if (st.isAir()) return true;
+        return st.getHardness(mod.getWorld(), pos) >= 0;
+    }
+
+    /**
+     * (2026-09-14 v4 交还 baritone 垂直搭高) 自写 PillarJumpHelper 只放不挖,
+     * 遇到挡头只会空跳到超时; 而 baritone 会挖。让位: 挂 GoalYLevel(目标层),
+     * 由它的 A* 自己选 MovementPillar (挖 up(2) + 放脚下) 爬上去。
+     *
+     * 用 GoalYLevel 而不是 GoalNear/GoalBlock 的原因: 后者要求把【脚】放进
+     * 目标格, 对"站立面之上若干格"不可满足 —— baritone 全展开 700 万节点后
+     * 直接放弃 (现场 20260914-113531)。GoalYLevel 只约束高度, 可满足。
+     */
+    private void startBaritoneHandoff(AltoClef mod, BlockPos feet, String reason) {
+        endPillar(mod);
+        if (!_pillarHandoff) {
+            _pillarHandoff = true;
+            _pillarHandoffTried = true;
+            _pillarHandoffLastY = mod.getPlayer().getBlockPos().getY();
+            _pillarHandoffTimer.reset();
+            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] start target="
+                    + _pos.toShortString()
+                    + " from y=" + _pillarHandoffLastY
+                    + " blockedBy=" + mod.getWorld().getBlockState(feet.up(2)).getBlock()
+                    + " (" + reason + ") -> GoalYLevel(" + _pos.getY() + ")");
+        }
+        // 与自写垫塔同款: builder 不会自己停, 占着输入通道会让 baritone 的
+        // pillar 动不了 (现场 20260914-115322)。
+        mod.getClientBaritone().getBuilderProcess().onLostControl();
+        mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalYLevel(_pos.getY()));
+    }
+
+    /**
+     * (2026-09-14 v4) 交还期间每 tick 只做三件事, **绝不动输入** —— 抢回去等于
+     * 把 baritone 正在执行的 pillar 腰斩 (与 GoToSurfaceTask 踩过的同一个坑):
+     *   ① 够到了 (目标不在眼睛上方) 或已到目标层 → 收工, 交回常规挖掘;
+     *   ② y 有上升 → 续命 (baritone 搭高每格 1.5s 上下, 别用固定窗口砍它);
+     *   ③ goal 掉线 → 重挂。
+     */
+    private boolean tickBaritoneHandoff(AltoClef mod) {
+        int y = mod.getPlayer().getBlockPos().getY();
+        if (!targetAboveEye(mod) || y >= _pos.getY()) {
+            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] done y=" + y
+                    + " target=" + _pos.toShortString() + " -> back to normal mining");
+            _pillarHandoff = false;
+            endPillar(mod);
+            return false;
+        }
+        if (y > _pillarHandoffLastY) {
+            _pillarHandoffLastY = y;
+            _pillarHandoffTimer.reset();
+        }
+        if (_pillarHandoffTimer.elapsed()) {
+            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] timeout 20s at y=" + y
+                    + " lastY=" + _pillarHandoffLastY
+                    + " target=" + _pos.toShortString() + " -> unreachable");
+            _pillarHandoff = false;
+            endPillar(mod);
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            return true;
+        }
+        if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalYLevel(_pos.getY()));
+        }
+        setDebugState("Baritone pillar to " + _pos.toShortString());
+        return true;
     }
 
     /**
