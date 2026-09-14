@@ -84,6 +84,19 @@ import net.minecraft.world.Heightmap;
  *    WorldHelper.isDeepUnderground 全局语义, 2026-09-12 实测树冠/门框下 deep
  *    闪烁 → 睡觉↔囤木头分支横跳, 已回滚全局口径; 本任务保留 v7 完工语义)。
  *    y>=58 顶板下头顶可挖时直接进挖一垫一, 阶梯目标不再向下 (58)。
+ *  - 2026-09-14 v25 (会话 20260914-173711) 自写爬升【收窄成水专用】:
+ *    自写"挖一垫一 + 游泳"存在的唯一正当理由是"头顶是海洋/封闭水体, baritone
+ *    找不到路" (水体里 MovementPillar 的 canWalkOn / canPlaceAgainst 均不成立,
+ *    assumeWalkOnWater 默认关, 挖穿后还得游)。而干竖井/干口袋 baritone 的
+ *    MovementPillar 本来就会挖 start.above(2) (头顶上方那格) + 在脚下放一格
+ *    + 跳 —— 与自写"挖一垫一"等价。之前无条件触发, 于是:
+ *    ① 17:52:55 只因"XZ 位移 0 达 2s"就把 baritone 的垂直搭高抢走 (sampleMovement
+ *       只看 XZ, 垂直上升被误判成卡死);
+ *    ② 自写爬了 52 格后在 y=49 被固定 90s 总超时切断 (该列真实地表脚位 50,
+ *       差 1 格; 挖一垫一净升 1 格 ≈1.7s ⇒ 90s 只够 ~53 格)。
+ *    修: 三条 SCAFFOLD 入口加"水场景"门 (waterAscentContext), 非水最多等
+ *    baritone 阶梯到底 + 20s 无路才当兜底; sampleMovement 纳入 Y; 总超时按
+ *    井深缩放 (每格 3s)。
  */
 public class GoToSurfaceTask extends Task {
 
@@ -172,6 +185,22 @@ public class GoToSurfaceTask extends Task {
      *  而"挖穿海底/湖底 → 上浮出水"的正常场景几秒内就会脱离水体, 不会误伤。 */
     private static final int SEALED_WATER_TICKS = 20 * 5;
 
+    // ===== (2026-09-14 v25) 自写爬升的准入收窄 =====
+    /**
+     * 非水场景动了自写"挖一垫一"的最后门槛: baritone 阶梯已缩到最短【且】
+     * 连续这么久拿不到路径, 才承认它真的没辙, 放自写上。
+     * 见 {@link #waterAscentContext} —— 自写爬升存在的唯一正当理由是水。
+     */
+    private static final int SCAFFOLD_LAST_RESORT_TICKS = 20 * 20;
+    /**
+     * 自写爬升总超时按井深缩放: 实测挖一垫一净升 1 格 ≈1.7s, 固定 90s 只够爬
+     * ~53 格 (会话 20260914-173711 实锤: y=-3 垫到 49, 地表 50, 差 1 格被切断)。
+     * 每格 3s = 1.7s × 1.75 余量。
+     */
+    private static final double SCAFFOLD_TICKS_PER_BLOCK_OF_DEPTH = 20 * 3.0;
+    /** 判"头顶上方是水"时沿本列向上最多扫多少格 (海底/湖底/含水层预判)。 */
+    private static final int LIQUID_SCAN_UP = 24;
+
     private AscentMode _mode = AscentMode.BARITONE;
 
     // ===== BARITONE 分段导航状态 =====
@@ -180,6 +209,8 @@ public class GoToSurfaceTask extends Task {
     private TimerGame _noPathTimer = null;    // baritone 无路径持续时间
     // "找不到落脚点/不可挖垫"的节流诊断 (防刷屏)。
     private final TimerGame _blockedLogTimer = new TimerGame(5);
+    /** (2026-09-14 v25) "卡住但非水 → 不抢"的节流诊断 (防刷屏)。 */
+    private final TimerGame _stuckDryLogTimer = new TimerGame(5);
 
     // ===== SCAFFOLD_UP 状态 =====
     private long _scaffoldStartTick = -1;
@@ -194,7 +225,14 @@ public class GoToSurfaceTask extends Task {
     // ===== 卡住检测状态 (两种模式共用, 每 tick 采样) =====
     private double _lastSampleX = Double.NaN;
     private double _lastSampleZ = Double.NaN;
+    /** (2026-09-14 v25) Y 也纳入采样: 只看 XZ 会在 baritone 垂直搭高时把合法
+     *  的"水平零位移"误判成卡死 (框架铁律: 卡死检测必须排除合法零速状态)。 */
+    private double _lastSampleY = Double.NaN;
     private int _stuckTicks = 0;
+    /** (2026-09-14 v25) 进自写爬升时的起始脚高 (总超时按井深缩放用)。 */
+    private int _scaffoldStartY = Integer.MIN_VALUE;
+    /** (2026-09-14 v25) 非水场景下 baritone 连续拿不到路径的 tick 数 (兜底判据)。 */
+    private int _dryNoPathTicks = 0;
 
     // 峡谷脱困目标 Y (getPitEscapeY): 壁顶+1。搭到壁顶后水平走出去。
     // 每 1 秒重算一次 (getPitEscapeY 扫 960 个方块, 不能每 tick 调)。
@@ -262,22 +300,32 @@ public class GoToSurfaceTask extends Task {
         }
     }
 
-    /** 每 tick 采样 XZ 位移: 没动就累计, 动了就清零。 */
+    /**
+     * 每 tick 采样位移: 没动就累计, 动了就清零。
+     * (2026-09-14 v25) 只看 XZ 会把 baritone 垂直搭高 (MovementPillar 挖头顶 +
+     * 放脚下 + 跳) 的合法"水平零位移"判成卡死, 2s 后抢走输入通道把它的搭高腰斩
+     * —— 这正是"卡死检测必须排除合法零速状态"铁律的翻版 (DestroyBlockTask 的
+     * _pillarLastY 已修过同一件事)。Y 方向上升同样算"在动"。
+     */
     private void sampleMovement(AltoClef mod) {
         double x = mod.getPlayer().getX();
+        double y = mod.getPlayer().getY();
         double z = mod.getPlayer().getZ();
         if (Double.isNaN(_lastSampleX)) {
             _lastSampleX = x;
+            _lastSampleY = y;
             _lastSampleZ = z;
             return;
         }
         double moved = Math.hypot(x - _lastSampleX, z - _lastSampleZ);
-        if (moved < 0.05) {
+        double climbed = Math.abs(y - _lastSampleY);
+        if (moved < 0.05 && climbed < 0.5) {
             _stuckTicks++;
         } else {
             _stuckTicks = 0;
         }
         _lastSampleX = x;
+        _lastSampleY = y;
         _lastSampleZ = z;
     }
 
@@ -332,10 +380,52 @@ public class GoToSurfaceTask extends Task {
         return findOverheadDigTarget(mod, player) != null;
     }
 
+    /**
+     * (2026-09-14 v25) 自写"挖一垫一 + 游泳"的【正当性】判据: 只有水场景才需要它。
+     *
+     * 历史依据 (commit 23ece415 / 7b33eec0 / d336b201): 自写爬升存在的唯一理由是
+     * "bot 头顶是海洋/封闭水体, baritone 找不到路" —— 水体里 MovementPillar 的
+     * canWalkOn / canPlaceAgainst 都不成立 (assumeWalkOnWater 默认关), 挖穿后水
+     * 灌进来还得靠 GetToYTask 的 [SwimUp] 游上去。
+     *
+     * 而非水的竖井/封闭口袋, baritone 的 MovementPillar 本来就是"挖一垫一":
+     * positionsToBreak = {start.above(2)} (头顶上方那格), positionToPlace = start
+     * (脚下), cost() 里就调了 getMiningDurationTicks 算挖掉它的耗时。自写那套在
+     * 这些场景是重复劳动, 还带来固定 90s 超时被切断、判据随起跳自激翻转等问题
+     * (会话 20260914-173711 实锤)。
+     *
+     * 判据 (两条命中任一即算水场景):
+     *  1. 人已经泡在水里 (接触水 / 眼睛在水下) —— 半途进水的场景。
+     *  2. 本列向上 (到真实地表为止, 上限 LIQUID_SCAN_UP) 存在流体 —— 海底/湖底/
+     *     含水层在挖穿之前人并不碰水, 必须扫描预判, 否则等挖穿再放行已经晚了。
+     */
+    private boolean waterAscentContext(AltoClef mod, BlockPos player) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
+        if (mod.getPlayer().isTouchingWater() || eyesUnderwater(mod)) return true;
+        int top = Math.min(player.getY() + LIQUID_SCAN_UP,
+                Math.max(player.getY(), surfaceYAt(mod, player)) + 2);
+        for (int y = player.getY(); y <= top; y++) {
+            BlockPos cand = new BlockPos(player.getX(), y, player.getZ());
+            if (!mod.getChunkTracker().isChunkLoaded(cand)) break; // 未加载: 不猜, 当没有
+            if (!mod.getWorld().getBlockState(cand).getFluidState().isEmpty()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-14 v25) 非水场景的最后兜底: baritone 阶梯已缩到最短【且】连续
+     * SCAFFOLD_LAST_RESORT_TICKS 拿不到路径 —— 这时才承认它真的规划不出来,
+     * 放行自写爬升。有水时不必等这个。
+     */
+    private boolean baritoneExhausted(AltoClef mod) {
+        return _stepIdx >= STEP_LADDER.length - 1 && _dryNoPathTicks >= SCAFFOLD_LAST_RESORT_TICKS;
+    }
+
     private void enterScaffold(AltoClef mod, BlockPos player) {
         _mode = AscentMode.SCAFFOLD_UP;
         _scaffoldStartTick = WorldHelper.getTicks();
         _scaffoldLastY = player.getY();
+        _scaffoldStartY = player.getY(); // (2026-09-14 v25) 总超时按井深缩放的基准
         _scaffoldDigTarget = null;
         if (_scaffoldNoProgressTimer == null) {
             _scaffoldNoProgressTimer = new TimerGame(SCAFFOLD_NO_PROGRESS_TICKS / 20.0);
@@ -369,6 +459,8 @@ public class GoToSurfaceTask extends Task {
         _stepTargetY = Integer.MIN_VALUE;
         _noPathTimer = null;
         _scaffoldStartTick = -1;
+        _scaffoldStartY = Integer.MIN_VALUE;
+        _dryNoPathTicks = 0;
         PillarJumpHelper.release(mod);
         return baritoneStep(mod, player);
     }
@@ -435,12 +527,30 @@ public class GoToSurfaceTask extends Task {
         // (2026-09-12 v12) 竖井底: 头顶已通无格可挖, canScaffold=false, 但四面
         // 实心仍需垫塔爬出 → inShaft 直接放行 (继续沿井垫跳到井口)。
         boolean shaft = inShaft(mod);
-        if (skyward && (canScaffold(mod, player) || shaft)) {
+        // (2026-09-14 v25) 自写爬升准入: 水场景立即放行; 非水场景必须等 baritone
+        // 彻底无路 (SCAFFOLD_LAST_RESORT) —— 干竖井它自己的 MovementPillar 会挖头顶
+        // + 放脚下, 我们抢过去只会重复劳动并踩固定 90s 超时。详见 waterAscentContext。
+        boolean water = waterAscentContext(mod, player);
+        boolean selfAllowed = water || baritoneExhausted(mod);
+        // 兜底计时 (只在阶梯到底之后累计, 语义 = "最短段也拿不到路径"的持续时长)。
+        if (!water && _stepIdx >= STEP_LADDER.length - 1 && !baritoneHasPath(mod)) {
+            _dryNoPathTicks++;
+        } else {
+            _dryNoPathTicks = 0;
+        }
+        if (skyward && (canScaffold(mod, player) || shaft) && selfAllowed) {
             Debug.logToFile("altoclef_diag.log", "[GoToSurface] y=" + y
                     + (shaft ? " in shaft bottom at " : " sealed under cover at ") + player
-                    + " -> SCAFFOLD_UP (sky criterion)");
+                    + " -> SCAFFOLD_UP (sky criterion, water=" + water + ")");
             enterScaffold(mod, player);
             return tickScaffoldUp(mod, player);
+        }
+        if (skyward && (canScaffold(mod, player) || shaft) && _blockedLogTimer.elapsed()) {
+            _blockedLogTimer.reset();
+            Debug.logToFile("altoclef_diag.log", "[GoToSurface] y=" + y
+                    + (shaft ? " in shaft bottom at " : " sealed under cover at ") + player
+                    + " -> dry ascent, leave to baritone (water=false, exhausted=" + baritoneExhausted(mod)
+                    + ", dryNoPath=" + (_dryNoPathTicks / 20.0) + "s)");
         }
         int step = STEP_LADDER[_stepIdx];
         // 到达本段目标 (或首次) → 下一段目标。
@@ -456,13 +566,22 @@ public class GoToSurfaceTask extends Task {
         // 旧入口要 20s 且不能被打断, 而每次抢占都会重跑 onStart 把 _stepIdx
         // 归零 → 永远到不了最短段 (20260911-151743 实锤)。这里用"人不动但
         // baritone 自称有路"直接判定, 与阶梯进度解耦。
+        // (2026-09-14 v25) 非水场景【不】因为"卡住 2s"就抢走控制权: baritone 自称
+        // 有路时多半正在做垂直搭高 (XZ 位移为 0), 抢过去等于腰斩它。只有水场景
+        // (baritone 在水里本来就无解) 才沿用这条快通道。
         if (_stuckTicks >= STUCK_TICKS_TO_SCAFFOLD
                 && (baritoneHasPath(mod) || pathingActive(mod))
-                && canScaffold(mod, player)) {
+                && canScaffold(mod, player)
+                && water) {
             Debug.logToFile("altoclef_diag.log", "[GoToSurface] stuck " + (_stuckTicks / 20.0)
-                    + "s while baritone claims a path at " + player + " -> SCAFFOLD_UP");
+                    + "s while baritone claims a path at " + player + " -> SCAFFOLD_UP (water)");
             enterScaffold(mod, player);
             return tickScaffoldUp(mod, player);
+        }
+        if (_stuckTicks >= STUCK_TICKS_TO_SCAFFOLD && !water && _stuckDryLogTimer.elapsed()) {
+            _stuckDryLogTimer.reset();
+            Debug.logToFile("altoclef_diag.log", "[GoToSurface] stuck " + (_stuckTicks / 20.0)
+                    + "s at " + player + " but dry -> keep baritone (no steal)");
         }
 
         if (_noPathTimer == null) {
@@ -486,16 +605,19 @@ public class GoToSurfaceTask extends Task {
                         : Math.min(surfaceYAt(mod, player), y + STEP_LADDER[_stepIdx]);
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone path, shrinking step to "
                         + STEP_LADDER[_stepIdx] + " at " + player);
-            } else if (canScaffold(mod, player) || (skyward && inShaft(mod))) {
+            } else if ((canScaffold(mod, player) || (skyward && inShaft(mod))) && selfAllowed) {
                 // 最短段仍无路 → 挖一垫一 (竖井底也走这: 垫塔爬出)。
+                // (2026-09-14 v25) 非水场景必须再等 SCAFFOLD_LAST_RESORT 才认输。
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no foothold (shortest step) at "
-                        + player + " -> SCAFFOLD_UP");
+                        + player + " -> SCAFFOLD_UP (water=" + water
+                        + ", dryNoPath=" + (_dryNoPathTicks / 20.0) + "s)");
                 enterScaffold(mod, player);
                 return tickScaffoldUp(mod, player);
             } else if (_blockedLogTimer.elapsed()) {
                 _blockedLogTimer.reset();
                 Debug.logToFile("altoclef_diag.log", "[GoToSurface] no baritone foothold at " + player
-                        + " and nothing diggable overhead (" + _noDigReason + ") -> keep waiting on baritone");
+                        + " and nothing diggable overhead (" + _noDigReason + ") -> keep waiting on baritone"
+                        + " (water=" + water + ", dryNoPath=" + (_dryNoPathTicks / 20.0) + "s)");
             }
         }
         setDebugState("Going up via baritone (step " + STEP_LADDER[_stepIdx] + ", target y=" + _stepTargetY + ")");
@@ -688,10 +810,20 @@ public class GoToSurfaceTask extends Task {
 
     private Task tickScaffoldUp(AltoClef mod, BlockPos player) {
         if (_scaffoldStartTick < 0) _scaffoldStartTick = WorldHelper.getTicks();
-        int totalTicks = player.getY() >= surfaceYAt(mod, player)
+        if (_scaffoldStartY == Integer.MIN_VALUE) _scaffoldStartY = player.getY();
+        // (2026-09-14 v25) 总超时按井深缩放。旧版是固定 90s (地表以上封闭口袋 300s),
+        // 而挖一垫一净升 1 格实测 ≈1.7s ⇒ 90s 只够爬 ~53 格。会话 20260914-173711
+        // 实锤: y=-3 一路垫到 49 (该列真实地表脚位 50), 90.05s 被切断, 差 1 格。
+        // 预算写反的问题也一并修: 旧判据是"已在地表高度以上 → 300s", 深井反而
+        // 只拿 90s; 现在 base 之上再取 max(按井深算出的预算)。
+        int baseTicks = player.getY() >= surfaceYAt(mod, player)
                 ? SCAFFOLD_TOTAL_TIMEOUT_TICKS_SKY : SCAFFOLD_TOTAL_TIMEOUT_TICKS;
+        int depth = Math.max(0, surfaceYAt(mod, player) - _scaffoldStartY);
+        int depthTicks = (int) (depth * SCAFFOLD_TICKS_PER_BLOCK_OF_DEPTH);
+        int totalTicks = Math.max(baseTicks, depthTicks);
         if (WorldHelper.getTicks() - _scaffoldStartTick > totalTicks) {
-            return giveUpScaffold(mod, player, "total timeout " + (totalTicks / 20) + "s");
+            return giveUpScaffold(mod, player, "total timeout " + (totalTicks / 20) + "s"
+                    + " (startY=" + _scaffoldStartY + ", surfaceY=" + surfaceYAt(mod, player) + ")");
         }
 
         // (2026-09-11 16:40 崩溃现场) 封闭水体判定 —— 必须在"挖头顶"之前拦住。
@@ -832,6 +964,8 @@ public class GoToSurfaceTask extends Task {
         _noPathTimer = null;
         _scaffoldStartTick = -1;
         _scaffoldLastY = Integer.MIN_VALUE;
+        _scaffoldStartY = Integer.MIN_VALUE;
+        _dryNoPathTicks = 0;
         _scaffoldNoProgressTimer = null;
         _waterStuckTimer = null;
         _scaffoldLogTimer.reset();
@@ -843,7 +977,10 @@ public class GoToSurfaceTask extends Task {
         _pickEscapeStartTick = -1;
         _stuckTicks = 0;
         _lastSampleX = Double.NaN;
+        _lastSampleY = Double.NaN;
         _lastSampleZ = Double.NaN;
+        _dryNoPathTicks = 0;
+        _scaffoldStartY = Integer.MIN_VALUE;
     }
 
     @Override
