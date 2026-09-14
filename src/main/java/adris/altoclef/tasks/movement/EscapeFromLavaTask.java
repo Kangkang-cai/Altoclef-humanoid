@@ -2,15 +2,26 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3i;
+
+import java.util.Arrays;
 
 public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
 
@@ -37,6 +48,35 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
     private boolean _stuckPrimed = false;
     private long _lastRerouteMs = 0;
 
+    // ===== (2026-09-14 横跳修复) 防火状态下"浮出岩浆一瞬即完成"滞回 =====
+    // 有 FIRE_RESISTANCE 时 isFinished 只看 isInLava() —— 游动 bob 浮出水面的
+    // 半秒里任务直接判完成 → 链让位 → 沉回去再重开 (latest.log 20:54 每秒一轮
+    // "Task START: <Escaping lava>")。要求离岩浆持续 out-of-lava 1.5s 才算完成;
+    // 期间重新入水即重置计时。无防火路径维持原语义 (等火灭), 不受影响。
+    private static final double OUT_OF_LAVA_GRACE_S = 1.5;
+    private final TimerGame _outOfLavaTimer = new TimerGame(OUT_OF_LAVA_GRACE_S);
+    // (EatItemTask 同款防御) SingleTaskChain 可能在 onStart 前就查 isFinished,
+    // BaseTimer 初始 _prevTime=0 会误判 elapsed —— onStart 没跑过绝不判完成。
+    private boolean _started = false;
+
+    // ===== (2026-09-14 岸边垫块上岸, 用户"差一步上岸爬不上去, 岸边放方块走上去
+    //       就逃生") =====
+    // 20260914-205250 场次实锤: bot 贴岸 y=31.20 零位移 40s+, baritone
+    // "22 movements considered / Open set size: 0" 算不出路 (从岩浆里够不着 +2
+    // 高的岸), 本任务只会 2.5s 一轮 forceCancel 重算, 永远同一条死路。
+    // 处置: 僵持 >=1s 时扫四个水平方向, 若存在"可垫的岸"——
+    //   T = 脚边相邻格 (岩浆/可替换), B = T 再往前一格的实心岸块,
+    //   B 上方两格 + T 上方可通行 (垫完能站上 T, 再一步踏上 B 顶)——
+    // 就朝 B 朝向 T 的面右键放方块, 造一级台阶。材料用可丢弃方块
+    // (getThrowawayItems 过滤 BlockItem, 与 BeatMinecraft2Task 建筑料同源)。
+    // 放块动作交给 InteractWithBlockTask (wanderOnFailure=false: 岩浆里绝不高优 wander)。
+    private static final long BANK_PLACE_MIN_STALL_MS = 1000;
+    private static final long BANK_PLACE_COOLDOWN_MS = 4000;
+    private long _lastBankPlaceMs = 0;
+    private static final Direction[] HORIZONTALS = {
+            Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
+    };
+
     public EscapeFromLavaTask(float strength) {
         _strength = strength;
     }
@@ -54,6 +94,9 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
 
         // do NOT ever wander
         _checker = new MovementProgressChecker(999999);
+        // (2026-09-14 横跳修复) 离场滞回计时从"进任务"起算。
+        _started = true;
+        _outOfLavaTimer.reset();
     }
 
     @Override
@@ -64,7 +107,57 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
             mod.getInputControls().hold(Input.SPRINT);
         }
         checkEscapeStall(mod);
+        // (2026-09-14 岸边垫块上岸) 僵持且岸边可垫 → 返回放块子任务 (跑完自动回本任务)。
+        Task bankStep = tryPlaceBankStep(mod);
+        if (bankStep != null) return bankStep;
         return super.onTick(mod);
+    }
+
+    /**
+     * (2026-09-14 岸边垫块上岸) 僵持 >= BANK_PLACE_MIN_STALL_MS 且四个方向里
+     * 找得到"可垫的岸"时, 返回一个朝岸块侧面右键放方块的子任务; 否则 null。
+     * 判据见字段区注释。冷却 BANK_PLACE_COOLDOWN_MS, 失败也不刷屏 (重算路径
+     * 的 forceCancel 兜底仍在 checkEscapeStall 里独立运行)。
+     */
+    private Task tryPlaceBankStep(AltoClef mod) {
+        if (_stuckSinceMs == 0) return null;
+        long now = System.currentTimeMillis();
+        if (now - _stuckSinceMs < BANK_PLACE_MIN_STALL_MS) return null;
+        if (now - _lastBankPlaceMs < BANK_PLACE_COOLDOWN_MS) return null;
+        // 建筑料: 可丢弃方块 (速度跑流程背的圆石/黑石/泥土都在这里)。
+        Item[] mats = Arrays.stream(mod.getModSettings().getThrowawayItems(mod, true))
+                .filter(item -> item instanceof BlockItem).toArray(Item[]::new);
+        if (mats.length == 0 || mod.getItemStorage().getItemCount(mats) == 0) return null;
+
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        for (Direction dir : HORIZONTALS) {
+            BlockPos t = feet.offset(dir);
+            BlockState ts = mod.getWorld().getBlockState(t);
+            boolean replaceable = ts.isAir() || ts.getBlock() == Blocks.LAVA || ts.getMaterial().isReplaceable();
+            if (!replaceable) continue;
+            BlockPos bank = t.offset(dir);
+            if (!WorldHelper.isSolid(mod, bank)) continue;
+            // 垫完要能站上 T (T 上方空气), 并从 T 踏上 B 顶 (B 上方两格通行)。
+            if (!mod.getWorld().getBlockState(t.up()).isAir()) continue;
+            if (!isPassableForStand(mod, bank.up()) || !isPassableForStand(mod, bank.up(2))) continue;
+
+            _lastBankPlaceMs = now;
+            Debug.logMessage("[LavaEscape] 岸边垫块上岸: 放 " + t.toShortString()
+                    + " (岸块 " + bank.toShortString() + ")");
+            Debug.logToFile("altoclef_diag.log", "[LavaEscape-BankStep] place="
+                    + t.toShortString() + " bank=" + bank.toShortString()
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString());
+            // direction = 岸块上朝向 T 的面 (从 B 指向 T)。walkInto=false:
+            // 不主动走进岩浆格, 站原地够得着 B 的面即可点。
+            return new InteractWithBlockTask(new ItemTarget(mats, 1), dir.getOpposite(),
+                    bank, Input.CLICK_RIGHT, false, Vec3i.ZERO, true, false);
+        }
+        return null;
+    }
+
+    private static boolean isPassableForStand(AltoClef mod, BlockPos pos) {
+        BlockState s = mod.getWorld().getBlockState(pos);
+        return s.isAir() || s.getMaterial().isReplaceable();
     }
 
     /**
@@ -135,10 +228,17 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
     public boolean isFinished(AltoClef mod) {
         // (2026-09-14 防火岩浆自救) 有 FIRE_RESISTANCE 时出了岩浆身上仍会带着火
         // (防火不阻止着火状态, 只免疫伤害) → 旧的 isOnFire 判据会让任务粘着不放,
-        // prio 100 长占主链。有防火时"离开岩浆"即完成。无防火维持原语义: 要继续
-        // 到火灭 (火还在掉血)。
-        if (mod.getPlayer().isInLava()) return false;
-        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) return true;
+        // prio 100 长占主链。有防火时"离开岩浆"即完成 —— 但要滞回: 游动 bob 浮出
+        // 水面的半秒不算逃生, 持续离场 OUT_OF_LAVA_GRACE_S 才收尾 (横跳修复,
+        // 见字段区注释)。无防火维持原语义: 要继续到火灭 (火还在掉血)。
+        if (mod.getPlayer().isInLava()) {
+            _outOfLavaTimer.reset();
+            return false;
+        }
+        if (!_started) return false; // onStart 前计时器不可信 (BaseTimer 初始态)
+        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+            return _outOfLavaTimer.elapsed();
+        }
         return !mod.getPlayer().isOnFire();
     }
 

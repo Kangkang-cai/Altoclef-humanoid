@@ -35,7 +35,14 @@ import java.util.Optional;
 
 public class WorldSurvivalChain extends SingleTaskChain {
 
-    private final TimerGame _wasInLavaTimer = new TimerGame(1);
+    // (2026-09-14 横跳修复, 用户"岩浆中游动上下浮动, 每次短暂离开岩浆任务就切换,
+    // 反复横跳") 原 1s 窗口太短: bot 在岩浆面 bob 浮出水面 >1s 时 isInLava=false 且
+    // 计时器到期 → 本链优先级掉回 -INF → User Tasks(50) 接管 → 沉回岩浆又抢回
+    // (100) → latest.log 20:54:01~20:55:25 每秒一轮 "Chain Interrupted" +
+    // "Task START: <Escaping lava>" 死循环。拉长到 4s: 浮出 4s 内 priority 保持
+    // 100, 任务连续; 而 EscapeFromLavaTask.isFinished 的离场判据不变, 真上岸后
+    // 自然让位。4s 里 bot 若真上岸, 任务空转几秒无害 (isFinished 会因火灭/离场收尾)。
+    private final TimerGame _wasInLavaTimer = new TimerGame(4);
     // (2026-09-14 防火岩浆自救取证) 逃岩浆任务运行期 2s 一条诊断节流 (static:
     // 链实例重建不洗掉)。
     private static long _lastLavaEscapeLogMs = 0;

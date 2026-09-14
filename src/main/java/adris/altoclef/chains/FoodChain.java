@@ -99,6 +99,18 @@ public class FoodChain extends SingleTaskChain {
             return Float.NEGATIVE_INFINITY;
         }
 
+        // (2026-09-14 空中禁食, 用户"baritone 空中跳跃中途触发吃东西, 减速掉下去了")
+        // 使用物品强制减速 → 跳跃/坠落中开吃 = 跳距砍半, 落点差一格就是岩浆/深坑。
+        // 口径与 ITaskRequiresGrounded 相同 (onGround/swimming/touchingWater/
+        // climbing 任一即算"稳定"), 空中一律不吃, 落地下一 tick 自动恢复 —— 最多
+        // 晚 1~2 秒吃上, 换跳跃全程满速。同时挡住前台接管 (62) 和异步补食两条路。
+        if (!(mod.getPlayer().isOnGround() || mod.getPlayer().isSwimming()
+                || mod.getPlayer().isTouchingWater() || mod.getPlayer().isClimbing())) {
+            stopEat(mod);
+            logFoodDiag(mod, "wait", "airborne");
+            return Float.NEGATIVE_INFINITY;
+        }
+
         /*
         - Eats if:
         - We're hungry and have food that fits

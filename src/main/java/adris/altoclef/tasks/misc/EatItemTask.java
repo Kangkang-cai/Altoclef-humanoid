@@ -49,6 +49,14 @@ public class EatItemTask extends Task {
         _timeout.reset();
         _eating = false;
         _started = true;
+        // (2026-09-14 空中禁食配套, 用户"跳跃中途吃东西减速掉下去") 设计意图是
+        // "站定吃完", 但被抢占的导航任务若不是 CustomBaritoneGoalTask 系, baritone
+        // 路径可能残留 → 吃着吃着 baritone 又起跳/走到坎边。前台接管时明确取消
+        // 寻路, 保证站定。吃完后导航任务 onTick 会自动重新 setGoalAndPath。
+        try {
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
@@ -58,6 +66,16 @@ public class EatItemTask extends Task {
         if (mod.getPlayer().isInLava()) {
             releaseEat(mod);
             setDebugState("Not eating (in lava)");
+            return null;
+        }
+
+        // (2026-09-14 空中禁食配套) 吃到一半 baritone/惯性起跳: 立刻松右键,
+        // vanilla 停止使用物品 → 速度恢复满值跳完这一跳, 落地后下一 tick 继续吃。
+        // 口径与 FoodChain 空中闸门 / ITaskRequiresGrounded 一致。
+        if (!(mod.getPlayer().isOnGround() || mod.getPlayer().isSwimming()
+                || mod.getPlayer().isTouchingWater() || mod.getPlayer().isClimbing())) {
+            releaseEat(mod);
+            setDebugState("Not eating (airborne)");
             return null;
         }
 
