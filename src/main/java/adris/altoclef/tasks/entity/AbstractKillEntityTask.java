@@ -18,6 +18,7 @@ import net.minecraft.block.Material;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.AbstractSkeletonEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.CreeperEntity;
@@ -57,6 +58,10 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     private static final int COUNTER_COOLDOWN_TICKS = 26;
     // (2026-08-30 多怪自适应格挡节奏, 用户) 每次反击段连挥几下而已。
     private static final int COUNTER_HITS_PER_PHASE = 2;
+    // (2026-09-14 烈焰人 3 刀, 用户实测) 烈焰人一波连发结束后进 ~3s 装填冷却, 放盾
+    // 窗口时间上够连砍 3 刀 (3 × 0.75s 攻击冷却 ≈ 45t < 60t 装填); 小白箭冷却是
+    // ~1s 级别, 放盾打 3 刀会白漏 2 箭, 所以只给烈焰人加长, 小白维持 2 刀。
+    private static final int BLAZE_COUNTER_HITS_PER_PHASE = 3;
     // 连续举盾到此 tick 仍没格满 n 下 (小白哑火) → 强制开反击, 避免干举盾不打。
     // (2026-08-30 加大耐心, 用户"等一会儿没格挡就放弃") 30→80: 之前 1.5s 就放盾
     // 去 counter, 箭还在飞就露出挨箭; 现在耐心格挡 4s, 只有小白长时间哑火才出手。
@@ -343,8 +348,14 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 烈焰人与小白节奏不同: 一轮连发 3 球, 走"波内只格挡、波次间反击"分支
         // (见 shieldCombatTick 内 blazeTarget 处理)。
         boolean hasShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
+        // (2026-09-14 防火免盾, 用户实测) 烈焰人的威胁几乎全是火球火焰伤害, 身上带
+        // FIRE_RESISTANCE 时被命中完全不掉血 (用户确认) → 举盾纯属空转: 盾战一轮
+        // 只放 3 刀, 而有防火时贴身连砍效率高得多。有防火效果时烈焰人直接落到下面
+        // 的无盾近战并行分支; 小白/苦力怕不受影响 (它们的伤害与防火无关)。
+        boolean blazeShieldPointless = entity instanceof BlazeEntity
+                && mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE);
         boolean shieldTarget = entity instanceof AbstractSkeletonEntity || entity instanceof CreeperEntity
-                || entity instanceof BlazeEntity;
+                || (entity instanceof BlazeEntity && !blazeShieldPointless);
         if (hasShield && shieldTarget) {
             return shieldCombatTick(mod, entity);
         }
@@ -598,8 +609,10 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     }
     boolean forced = (nowTick - _blockPhaseStartTick) > BLOCK_FORCE_COUNTER_TICKS;
     if (enoughBlocks || forced) {
-        setDebugState("Opening counter window (" + n + " threats, " + _blockStreak + " blocked)");
-        _counterHitsLeft = COUNTER_HITS_PER_PHASE;
+        // (2026-09-14 烈焰人 3 刀) 烈焰人波次间隔长, 反击段延长到 3 刀; 小白维持 2 刀。
+        _counterHitsLeft = blazeTarget ? BLAZE_COUNTER_HITS_PER_PHASE : COUNTER_HITS_PER_PHASE;
+        setDebugState("Opening counter window (" + n + " threats, " + _blockStreak + " blocked, "
+                + _counterHitsLeft + " hits)");
         _blockStreak = 0;
         _blockPhaseStartTick = nowTick;
         mod.getInputControls().release(Input.CLICK_RIGHT);
