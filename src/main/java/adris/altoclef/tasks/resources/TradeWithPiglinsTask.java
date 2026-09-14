@@ -41,7 +41,11 @@ public class TradeWithPiglinsTask extends ResourceTask {
     // If we're too far away from a trading piglin, we risk deloading them and losing the trade.
     private static final double TRADING_PIGLIN_TOO_FAR_AWAY = 64 + 8;
     private final int _goldBuffer;
-    private final Task _tradeTask = new PerformTradeWithPiglin();
+    // (2026-09-14 掉物吸附误拉黑) 持有交易子任务的具名引用, 供父层在"猪灵丢出
+    // 战利品/掉物消失"时重置其 barterTimeout (见 onResourceTick barterDrop 分支)。
+    private final PerformTradeWithPiglin _tradeTask = new PerformTradeWithPiglin();
+    // 上一 tick 是否正处于"捡拾交易战利品"分支 (用于检测掉物消失的边沿)。
+    private boolean _pickingUpLoot = false;
     private Task _goldTask = null;
     // (2026-09-05 找猪灵真探索) 无猪灵时不再用 TimeoutWanderTask 假探索 —
     // 那玩意进度检查器一失败就切 GoalRunAway 随机向, 表现为"选个目的地走
@@ -173,6 +177,13 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         && isValuableBarterDrop(ie.getStack()),
                 ItemEntity.class);
         if (barterDrop.isPresent()) {
+            // (2026-09-14 用户定位) 猪灵丢出战利品 = 上一笔交易已成功。掉物在
+            // 地上的每一 tick 都重置交易超时——捡拾期间 2s barterTimeout 绝不
+            // 到期 (084153 场次: 贴身 1.7 格, 腾空掉物朝玩家飞、撞身入包仅
+            // 10 tick, 捡拾任务空手而归, 超时在窗口内到期 → 刚做完成功交易
+            // 的猪灵被误拉黑 "Failed bartering, blacklisting")。
+            _tradeTask.notifyBarterLootCycle();
+            _pickingUpLoot = true;
             setDebugState("Picking up piglin barter drop");
             return new PickupDroppedItemTask(new ItemTarget[]{
                     new ItemTarget(Items.POTION, 1),
@@ -181,6 +192,15 @@ public class TradeWithPiglinsTask extends ResourceTask {
                     new ItemTarget(Items.OBSIDIAN, 1),
                     new ItemTarget(Items.CRYING_OBSIDIAN, 1)
             }, true);
+        }
+        if (_pickingUpLoot) {
+            // 掉物从候选消失: 多半已被原版吸附机制收进背包 (贴身交易时猪灵
+            // 朝玩家抛物, 高概率撞身入包, 捡拾任务根本来不及导航)。捡拾周期
+            // 结束, 给交易子任务一个全新的超时窗口, 重新贴近续下一笔交易。
+            _pickingUpLoot = false;
+            _tradeTask.notifyBarterLootCycle();
+            Debug.logToFile("altoclef_diag.log",
+                    "[PiglinTrade]\tloot cycle done (drop gone, likely vacuumed into inventory) — barter timeout reset");
         }
 
         // If we have no piglin nearby, explore until we find piglin.
@@ -218,6 +238,17 @@ public class TradeWithPiglinsTask extends ResourceTask {
         private final TimerGame _intervalTimeout = new TimerGame(10);
         private final HashSet<Entity> _blacklisted = new HashSet<>();
         private Entity _currentlyBartering = null;
+
+        /**
+         * (2026-09-14 掉物吸附误拉黑) 猪灵丢出战利品 = 上一笔交易成功的明确信号。
+         * 父层在捡拾期间每 tick / 捡拾结束的边沿调用: 重置 barterTimeout 与
+         * intervalTimeout, 保证"捡战利品"这段成功后的合法空窗不会吃掉 2 秒
+         * 超时, 导致刚做完交易的猪灵被误拉黑。
+         */
+        public void notifyBarterLootCycle() {
+            _barterTimeout.reset();
+            _intervalTimeout.reset();
+        }
 
         public PerformTradeWithPiglin() {
             // (2026-09-13 用户"交易时距离远了点, 再靠近") 3 → 2: 接近距离取
