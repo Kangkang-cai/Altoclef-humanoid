@@ -119,6 +119,24 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      */
     private int _pillarLastY = Integer.MIN_VALUE;
     private boolean _pillarActive = false;
+    /**
+     * (2026-09-14 垫塔判据滞后) 垫塔期间【锁定】的落脚基准, 净空闸门只按它算。
+     *
+     * 为什么不能每 tick 取 getBlockPos(): PillarJumpHelper 靠 hold(JUMP) 起跳,
+     * 起跳那一瞬间玩家的 BlockPos y 会 +1 —— 而 headroomBlockedForPillar 看的是
+     * feet.up(2)。玩家踩在自己的隧道底 (y=-60) 时 aboveHead=-58 (空气, 放行);
+     * 一跳起来 feet 变 -59, aboveHead 立刻变成 -57 —— **那正是要挖的目标方块本身
+     * (实心)** → 判"净空被挡" → endPillar → 下一 tick 判据又翻转回来重开。
+     *
+     * 现场 20260914-162715 实锤: [PillarApproach] start 重入 13 次、PillarDiag 里
+     * PLACE 分支 0 次 (从没进入过放置窗口), debugstate 每 300ms 在
+     * "Pillaring up to reach" 与 "Getting to block..." 之间横跳 10s。
+     * 而且 start 会顺带 reset _pillarLastY/_pillarNoProgressTimer/_pillarTotalTimer
+     * ⇒ 20s 总超时闸门永远被重置, 只能靠上层的 DigStuck 超时拽出来。
+     *
+     * 滞后语义: 只在【落地且高度真的提升了】时用新的落脚点重锁基准。
+     */
+    private BlockPos _pillarBaseFeet = null;
 
     // ---- (2026-09-14 缺垫块 → 去挖几格) 用户: "没方块为什么不触发挖几个方块" ----
     // 旧行为: tryPillarUpToReach 一发现没垫块就 return false, 落回导航 → 对"站立面
@@ -157,6 +175,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 垫塔接近) 新实例归零。timer 新建即到期, 进垫塔分支时才 reset。
         _pillarActive = false;
         _pillarLastY = Integer.MIN_VALUE;
+        // (2026-09-14 垫塔判据滞后) 垫塔基准脚块同样归零: 残留会让新实例沿用上一次
+        // 落脚层位的 aboveHead 判净空, 与当前玩家实际位置错位。
+        _pillarBaseFeet = null;
         // (2026-09-14 缺垫块采集) 子任务引用必须清 —— 残留会让新实例 keep-alive 一个
         // 已经不该跑的采集任务。标记归零: 实例重建即新一轮, 允许再采一次。
         _acquireMaterialsTask = null;
@@ -444,45 +465,59 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *         不适用 (目标不在上方 / 水平还没到位 / 没材料), 交回原导航+放弃逻辑。
      */
     private boolean tryPillarUpToReach(AltoClef mod) {
-        // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
-        //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
-        if (!targetAboveEye(mod)) {
-            endPillar(mod);
-            return false;
-        }
-        // ② 水平已在身边 (<=2 格) 才垫 —— 与 closeEnoughToJudge 的 horizontallyInPlace
-        //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发垫塔。
-        if (horizontalDistanceSqToPlayer(mod) > 4.0) {
-            endPillar(mod);
-            return false;
-        }
-        // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
-        //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
-        //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
-        if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
-            endPillar(mod);
-            return false;
-        }
-        // ③b (2026-09-14 低净空闸门) 头顶上方一格 (feet.up(2)) 实心 → 垫塔必然
-        //    原地跳 (起跳蹭天花板, 净高度永不上升), 判据见 headroomBlockedForPillar。
-        //    此时正确的人类行为不是垫塔, 是走到目标正下方再仰挖 —— 落回 false 交
-        //    下面原有 GoalXZ 导航, 走到正下方后 reach (竖直射线干净) 自然成立,
-        //    下一 tick 走正常挖掘分支。现场 20260914-132420 实锤: 2 格高隧道里
-        //    目标是 -57 行天花板矿, bot 在 (-215,277) 垫塔 GROUND jump 死循环
-        //    4s (feet 恒 -59, PLACE 分支 0 次) → 超时拉黑 → 上层挑回同目标 churn。
-        if (headroomBlockedForPillar(mod)) {
-            endPillar(mod);
-            return false;
+        // (2026-09-14 v2 判据滞后) 用户现场"(bot) 一跳起来任务立马就跳了, 反复横跳"。
+        // 旧实现【每 tick 重算】下面四个前置, 而垫塔本身靠 hold(JUMP) 起跳 —— 起跳
+        // 那一瞬间玩家的 BlockPos y 会 +1, 判据随之自激翻转 (证据与完整机理见
+        // _pillarBaseFeet 字段注释)。新语义分两段:
+        //   · 未垫塔 (_pillarActive=false): 照旧用【即时】位置准入;
+        //   · 垫塔中: 前置判据不再重算, 只在"已经垫到目标所在层及以上"时收工,
+        //     其余一切失败由各自的超时闸门处理 (无进展 4s / 总时长 20s / 没料)。
+        if (_pillarActive) {
+            // ①' 垫到目标层及以上 → 目标已在脚边或以下, 垫塔使命完成, 交回常规挖掘。
+            if (mod.getPlayer().getBlockPos().getY() >= _pos.getY()) {
+                endPillar(mod);
+                return false;
+            }
+        } else {
+            // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
+            //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
+            if (!targetAboveEye(mod)) {
+                endPillar(mod);
+                return false;
+            }
+            // ② 水平已在身边 (<=2 格) 才垫 —— 与 closeEnoughToJudge 的 horizontallyInPlace
+            //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发垫塔。
+            if (horizontalDistanceSqToPlayer(mod) > 4.0) {
+                endPillar(mod);
+                return false;
+            }
+            // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
+            //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
+            //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
+            if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
+                endPillar(mod);
+                return false;
+            }
+            // ③b (2026-09-14 低净空闸门, 2026-09-14 v2 基准改为垫塔基准脚块)
+            //    即时位置版本见 headroomBlockedForPillar(mod, feet) 的注释。
+            //    首次准入仍用即时位置: 开跑前玩家应站稳在地面, 不存在"跳到一半"。
+            if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())) {
+                endPillar(mod);
+                return false;
+            }
         }
         if (!_pillarActive) {
             _pillarActive = true;
             _pillarLastY = Integer.MIN_VALUE;
+            _pillarBaseFeet = mod.getPlayer().getBlockPos();
             _pillarNoProgressTimer.reset();
             _pillarTotalTimer.reset();
             Debug.logToFile("altoclef_diag.log", "[PillarApproach] start target="
                     + _pos.toShortString()
                     + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
-                    + " player=" + mod.getPlayer().getBlockPos().toShortString());
+                    + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " headroom=" + (_pillarBaseFeet.up(2).toShortString() + " solid="
+                    + WorldHelper.isSolid(mod, _pillarBaseFeet.up(2))));
         }
         // ④ 只在【落地时】采样高度: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1,
         //    拿它当"上升了"会让无进展计时被反复重置 → 原地跳永不超时。
@@ -491,7 +526,21 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             if (y > _pillarLastY) {
                 _pillarLastY = y;
                 _pillarNoProgressTimer.reset();
+                // (2026-09-14 v2) 真的站稳在更高一层了 → 重锁净空基准。此时才允许
+                // 重新判定"还能不能再往上垫一格"。不这样做的话, 垫塔会把整座塔垫到
+                // 天花板里 (净空闸门被起始基准永久豁免)。
+                _pillarBaseFeet = mod.getPlayer().getBlockPos();
             }
+        }
+        // ④b 净空闸门 (垫塔中用锁定基准, 见 ③b / _pillarBaseFeet 注释): 垫到某一层
+        //     后发现净空已经不够再上一格, 而目标还在上面 ⇒ 垫不到了, 收工判不可达。
+        if (_pillarBaseFeet != null && headroomBlockedForPillar(mod, _pillarBaseFeet)) {
+            Debug.logToFile("altoclef_diag.log", "[PillarApproach] headroom blocked at "
+                    + _pillarBaseFeet.toShortString() + " (aboveHead="
+                    + _pillarBaseFeet.up(2).toShortString() + ") target=" + _pos.toShortString());
+            endPillar(mod);
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            return true;
         }
         if (_pillarNoProgressTimer.elapsed() || _pillarTotalTimer.elapsed()) {
             // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限) → 判不可达换目标。
@@ -534,7 +583,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (horizontalDistanceSqToPlayer(mod) > 4.0) return false;
         // (2026-09-14 低净空闸门) 净空被挡时垫塔不可能发生, 别去采垫块。
         // 与 tryPillarUpToReach 的 ③b 同源 —— "同一概念只留一个判据源"。
-        if (headroomBlockedForPillar(mod)) return false;
+        if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())) return false;
         return !PillarJumpHelper.hasMaterials(mod, _pillarMaterials);
     }
 
@@ -549,8 +598,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      * 在 -59, 常见"净空被挡"场景就是 -57 行天花板。区块未加载时不判负
      * (与本仓 isAir 同款语义, "读不到"不等于"被挡")。
      */
-    private boolean headroomBlockedForPillar(AltoClef mod) {
-        BlockPos aboveHead = mod.getPlayer().getBlockPos().up(2);
+    /**
+     * (2026-09-14 v2 落脚基准入参) 净空必须按【指定的落脚位置】算, 不能默认读即时
+     * BlockPos —— 起跳那一 tick 脚位会瞬时 +1, aboveHead 随之撞上目标方块本身,
+     * 判据自激翻转。垫塔中用 _pillarBaseFeet (见该字段注释), 首次准入/派采集前
+     * 用即时位置 (那时玩家应当站稳)。
+     */
+    private boolean headroomBlockedForPillar(AltoClef mod, BlockPos feet) {
+        BlockPos aboveHead = feet.up(2);
         if (!mod.getChunkTracker().isChunkLoaded(aboveHead)) return false;
         return WorldHelper.isSolid(mod, aboveHead);
     }
@@ -630,6 +685,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     /** 收尾垫塔: 幂等松开跳跃/移动键 (所有退出路径必调, 见 PillarJumpHelper 设计约束)。 */
     private void endPillar(AltoClef mod) {
+        // (2026-09-14 v2) 基准伴生于"正在垫塔", 收工即清空 —— 残留会让下一次
+        // 垫塔准入错位到上一次的落脚层。
+        _pillarBaseFeet = null;
         if (!_pillarActive) return;
         _pillarActive = false;
         PillarJumpHelper.release(mod);

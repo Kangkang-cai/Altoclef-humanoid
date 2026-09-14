@@ -253,6 +253,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 走位、够不着重选路线、换工具的余量, 又不至于让一次误判吃掉半分钟。
     private static final long DIG_TARGET_STALL_TIMEOUT_MS = 10_000;
 
+    /**
+     * (2026-09-14 v2 目标跑到头顶 → 重锚) 队首目标比玩家【脚位】高出这么多格以上,
+     * 就不再派发 DestroyBlockTask, 先把挖掘锚点拉回玩家当前位置。
+     *
+     * 合法上限为什么是 2: 45° 上行时 ground(k) 是玩家要踩的下一格台阶 (= 脚位 +1),
+     * ground.up() 是它的净空 (= 脚位 +2) —— 两者都必须能派发。到 3 格就已经是"头顶
+     * 之上的方块", 人手 sanction 根本不会去挖它, bot 派出去只能触发垫塔。
+     * 现场 20260914-162715: 脚位 (-220,-60,230)、队首 (-220,-57,229) = 高出 3 格。
+     */
+    private static final int MAX_TARGET_ABOVE_FEET = 2;
+
     // How deep we're willing to dig for this run (differs by target ore).
     // (2026-09-05 目标带) 单点改带 [_targetYMin, _targetYMax]: onStart 随机取
     // 一点作本轮目标。_targetY 不再是 final (每实例 onStart 赋值一次)。
@@ -264,6 +275,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     private BlockPos _digStart;
     private int _step = 0;
+    // (2026-09-14 v2 目标跑到头顶 → 重锚) 上次重锚时刻, 用于 1 秒节流 (见重锚调用处)。
+    private long _lastReanchorMs = 0;
     // (2026-09-10 空跳修复) 本实例【真实挖掉】的方块数 = 本轮挖掘预算的消耗量。
     // 与几何路径索引 _step 严格分离: _step 会被 FAST-FORWARD 空跳刷高, 不代表
     // 任何真实挖掘; reachedBottom 的步数上限只看 _realDigs — 空跳不能再替
@@ -734,6 +747,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 : _tunnelMode ? "Digging a tunnel to find ores (dug "
                 : "Digging down to find ores (dug ") + _realDigs + "/" + budget + ")");
         BlockPos head = _digQueue.peek();
+        // (2026-09-14 v2 目标跑到头顶 → 重锚) 队首已经高出玩家 MAX_TARGET_ABOVE_FEET
+        // 格以上 ⇒ 它是旧锚点推出的"空气几何", 派下去 bot 只会垫塔横跳 (洗点见
+        // MAX_TARGET_ABOVE_FEET 注释)。先把锚点拉回玩家当前位置, 下一 tick 从新
+        // 队列派发。1 秒节流: 万一玩家脚下整段都是旧隧道空气 (advanceToSolid 会连续
+        // 快进), 也不至于每 tick 重锚。
+        if (head != null
+                && head.getY() - mod.getPlayer().getBlockPos().getY() > MAX_TARGET_ABOVE_FEET
+                && System.currentTimeMillis() - _lastReanchorMs > 1000) {
+            reanchorToPlayer(mod);
+            return null;
+        }
         // (2026-09-14 挖掘停滞放弃) 队首没换 = 上一格还没挖掉。超时 ⇒ 它有某种我们
         // 不知道的障碍, 继续派发 DestroyBlockTask 只会让它左右键到天荒地老。
         // 与"水/门体/不可破坏"同款处置: 从队列弹掉, 几何路径继续往前。[MineDown-DigStuck]
@@ -918,8 +942,47 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         } else {
             ground = _digStart.add(k * _dirX, -k, k * _dirZ);
         }
-        _digQueue.add(ground.up());
-        _digQueue.add(ground);
+        // (2026-09-14 v2 上行顺序修正) 旧实现三种模式统一"先头行后脚行" (up 先入队
+        // = FIFO 先挖)。下行/平挖没问题 —— up 是前进方向的墙, 挖开才走得过去; 但
+        // 【上行】反了: ground 是玩家要踩上去的那一格台阶, 它还实心时玩家永远留在
+        // 下一层的坑里, 队首的 up 却已经抬到头顶 ⇒ 只能靠垫塔去够。现场 20260914-
+        // 162715: 玩家 (-220,-60,230), 队首却是 (-220,-57,229) —— 头顶 3 格。
+        // 上行必须先挖要踩的那一格, 再挖它的净空。
+        if (_ascendMode) {
+            _digQueue.add(ground);
+            _digQueue.add(ground.up());
+        } else {
+            _digQueue.add(ground.up());
+            _digQueue.add(ground);
+        }
+    }
+
+    /**
+     * (2026-09-14 v2 目标跑到头顶 → 重锚) _digStart 只在开工时锚定【一次】, 之后
+     * 玩家移动了它不跟着走 —— 45° 上行的 ground(k) = digStart + k*(dir, +1, dir)
+     * 是纯几何递推, k 每 +1 目标就抬升 1 格。旧通道里的空气还会被 advanceToSolid
+     * 快速跳过, 进一步拉大 k ⇒ 目标一路飞到玩家头顶 3 格以上, 而 DestroyBlockTask
+     * 拿到这种目标只能垫塔去够 → 横跳 (见 DestroyBlockTask._pillarBaseFeet 注释)。
+     *
+     * 人类做法是不存在的 —— 人不会对着自己头顶 3 格的方块开挖。正解: 把自己当前
+     * 位置重新当作锚点, 从脚下重新铺第一段台阶。
+     */
+    private void reanchorToPlayer(AltoClef mod) {
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        _lastReanchorMs = System.currentTimeMillis();
+        // 上行: 锚点取【脚所在的空气格】, 下一轮 ground(k=1) 才是"前进一步 + 上一格";
+        // 取 .down() (实心地板) 会先把脚下的支撑挖掉, 玩家反而掉下去。
+        // 下行/平挖: 保持原意 —— 锚点是脚下的地板, 挖开它就是"往下挖"。
+        _digStart = _ascendMode ? feet : feet.down();
+        _step = 0;
+        _digQueue.clear();
+        enqueueNextStep();
+        String m = "[MineDown-Reanchor] 队首高于玩家 " + MAX_TARGET_ABOVE_FEET
+                + " 格以上, 以当前位置重锚 -> " + _digStart.toShortString()
+                + " mode=" + (_tunnelMode ? "tunnel" : _ascendMode ? "ascend" : "staircase")
+                + " player=" + feet.toShortString();
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
     }
 
     private boolean isWater(AltoClef mod, BlockPos pos) {
