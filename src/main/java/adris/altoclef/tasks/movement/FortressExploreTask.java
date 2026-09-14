@@ -112,11 +112,18 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     //   触发 = 停滞 STALL_TICKS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_TICKS
     //   且失败 ≥1); 升级 = 同侧加档 +60 → +75 → +90, 同侧到顶才换边; 试探方向
     //   步长 ×2 (沿崖要走长步); 转正 = 半径破纪录 或 距试探起点净位移 > EXPLORE_STEP
-    //   (绕崖横向走出一个整步程 = 真的绕出去了)。偏置封顶 ±90° —— 禁止反向。
+    //   (绕崖横向走出一个整步程 = 真的绕出去了)。
+    // (2026-09-14 大转弯修订, 用户"策略太严, 大范围内可以允许大转弯"): 大片岩浆
+    // 悬崖/岩浆海 (20260914-183710: radius 卡 406 两分多钟, probe 在 ±90° 两侧
+    // 乒乓, moved 全程 0~1.5) 前 ±90° 封顶太严 —— 大岩浆海的绕行方向往往在
+    // 90°~150° 之间, 90° 封顶等于逼 bot 沿崖根平推撞死。封顶放宽到 ±150°
+    // (大转弯, 允许接近侧向), 同侧加档步距 15° → 25° (60/85/110/135/150 共
+    // 五档, 一侧约 1 分钟见分晓再换边)。
     private static final int PROBE_AFTER_FAILS = 2;
     private static final long STALL_TICKS = 100; // 5s 无新最远点 = 停滞 (21:53 用户"15s 观感不好太长")
     private static final double PROBE_STEP_DEG = 60;
-    private static final double MAX_PROBE_DEG = 90;
+    private static final double PROBE_INCREMENT_DEG = 25;
+    private static final double MAX_PROBE_DEG = 150;
     // (2026-09-13 远征取证) 诊断周期 200 tick = 10s; 距锚点半径每增长 128 格
     // 额外打一行 —— 此前日志里没有任何坐标/群系遥测, 无法证明"是否真在远征"。
     private static final int EXPEDITION_DIAG_INTERVAL_TICKS = 200;
@@ -657,6 +664,17 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (!_progress.check(mod)) {
+            // (2026-09-14 规划豁免) 难地形 (岩浆悬崖/岩浆海) 一次全量规划 ~4s
+            // (baritone primaryTimeoutMS) 且规划期 bot 0 位移, 6s 距离超时会在
+            // 规划算完前就判失败 → 反复打断重启, moved=0 死循环 (20260914-183710
+            // 实锤: 73s 内 12+ 次重选方向, 每轮 10M movements considered 白算,
+            // 仅 19:10:02 一轮赶上窗口算完, 走了 1.5 格)。
+            // 寻路器还在算 (getInProgress 非空) 时不算失败, 给规划留完整窗口;
+            // 本轮算完 (超时返回部分路径/无路径) 仍不动才判失败换目标。
+            if (mod.getClientBaritone().getPathingBehavior().getInProgress().isPresent()) {
+                setDebugState("Waiting for pathfinder (planning in progress)");
+                return null;
+            }
             _failCounter++;
             // (2026-09-13) 寻路失败同样记"查讫" —— 走不到的地方不该反复试。
             if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
@@ -781,9 +799,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * (2026-09-13 P2 遇障换向) 外围步失败时调用: 停滞够久 (无新最远点) → 升级
      * 试探偏置, 绕障试探。探测方向走到更远 (radius 破纪录) 或 距试探起点净位移
      * 超过一个步程 (绕崖走通) → 转正为新锁定方向 (转正逻辑在 maybeLogExpedition);
-     * 否则【同侧加档】+60° → +75° → +90° 沿崖根走到底, 同侧到顶仍卡死才换边。
+     * 否则【同侧加档】+60° → +85° → +110° → +135° → +150° 沿崖根走到底,
+     * 同侧到顶仍卡死才换边。
      * (P2.1: 旧版换边乒乓 + radius 判据, 大悬崖前左右横跳永远绕不出去 —— 用户
-     * "总可以绕一绕, 太不智能没有大局观"。) 偏置封顶 ±90°, 禁止反向。
+     * "总可以绕一绕, 太不智能没有大局观"。)
+     * (2026-09-14 大转弯, 用户"策略太严, 大范围内可以允许大转弯"): 封顶
+     * ±90° → ±150°, 加档步距 15° → 25° —— 大岩浆海的绕行方向常在 90°~150°。
      */
     private void maybeEscalateProbe(AltoClef mod) {
         String key = expeditionKey();
@@ -803,10 +824,10 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             next = Math.toRadians(PROBE_STEP_DEG); // 先认准一侧, 之后同侧加档
         } else if (Math.abs(Math.toDegrees(cur)) < MAX_PROBE_DEG) {
             // 同侧加一档: 大障碍要沿崖根走到底, 不换边乒乓。
-            double mag = Math.min(Math.abs(cur) + Math.toRadians(15), Math.toRadians(MAX_PROBE_DEG));
+            double mag = Math.min(Math.abs(cur) + Math.toRadians(PROBE_INCREMENT_DEG), Math.toRadians(MAX_PROBE_DEG));
             next = cur > 0 ? mag : -mag;
         } else {
-            // 同侧 90° 仍卡死 → 换另一侧从 60° 重新爬档。
+            // 同侧 150° 仍卡死 → 换另一侧从 60° 重新爬档。
             next = cur > 0 ? -Math.toRadians(PROBE_STEP_DEG) : Math.toRadians(PROBE_STEP_DEG);
         }
         _probeOffsetByKey.put(key, next);
