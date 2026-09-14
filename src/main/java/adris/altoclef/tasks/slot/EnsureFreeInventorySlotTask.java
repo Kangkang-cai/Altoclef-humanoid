@@ -11,6 +11,7 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.ArmorItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.PlayerScreenHandler;
 
@@ -20,6 +21,15 @@ public class EnsureFreeInventorySlotTask extends Task {
 
     // (2026-08-27 合并诊断日志) 每 2 秒一条写独立文件, 便于检索合并为何不触发。
     private static long _lastConsolidateDiag = 0;
+
+    // (2026-09-14 穿甲两拍搬运粘滞) 持有本任务派发的穿甲搬运子任务与目标物品:
+    // 两拍中转的第一拍 PICKUP 把靴子拿上光标后, 下一 tick 重入时 cursorBusy=true
+    // 会跳过穿甲分支落进丢弃级联, 自己把中间态拆了 (20260914-221044 实锤:
+    // fix_diag cursor air<->iron_boots 每 2s 交替, TaskPingPong 20x/5s, 穿甲
+    // 永远走不到第二步)。搬运未完成且光标上正是目标物(或光标空=第一拍未发)
+    // 时保持返回同一实例, 让两拍走完。
+    private MoveItemToSlotFromInventoryTask _armorMoveTask = null;
+    private Item _armorMoveItem = null;
 
     // (2026-09-07 容器腾位) 站在箱子前时优先把垃圾存进容器。跨 tick 持有该子任务
     // 实例以便查询它是否已判定"容器存不下"; 判定失败后本轮不再重试, 直接走丢弃
@@ -31,6 +41,8 @@ public class EnsureFreeInventorySlotTask extends Task {
     protected void onStart(AltoClef mod) {
         _storeTask = null;
         _containerStoreBlocked = false;
+        _armorMoveTask = null;
+        _armorMoveItem = null;
     }
 
     @Override
@@ -51,6 +63,23 @@ public class EnsureFreeInventorySlotTask extends Task {
                 setDebugState("Inventory already has free space");
                 CursorArbiter.release(CursorArbiter.INTENT_RELOCATE);
                 return null;
+            }
+        }
+        // (2026-09-14 穿甲两拍搬运粘滞) 见字段注释。必须在 cursorBusy 判定之前:
+        // 中间态(物品已上光标)恰好会让 cursorBusy=true 而跳过穿甲分支。
+        if (_armorMoveTask != null) {
+            if (_armorMoveTask.isFinished(mod)) {
+                _armorMoveTask = null;
+                _armorMoveItem = null;
+            } else {
+                ItemStack cursorHeld = StorageHelper.getItemStackInCursorSlot();
+                if (cursorHeld.isEmpty() || cursorHeld.getItem() == _armorMoveItem) {
+                    setDebugState("Armor move in flight, holding move task...");
+                    return _armorMoveTask;
+                }
+                // 光标被别的意图占用(非本搬运物): 放弃粘滞, 走常规级联。
+                _armorMoveTask = null;
+                _armorMoveItem = null;
             }
         }
         // (2026-08-27 诊断) 满包腾位入口: 记录鼠标/可合并对/空位/垃圾判定, 写到
@@ -122,9 +151,14 @@ public class EnsureFreeInventorySlotTask extends Task {
                         + " from backpack to free a slot");
                 Debug.logMessage("(EnsureFreeInventorySlotTask) Equipping backpack armor "
                         + armorStack.getItem().getTranslationKey() + " to free a slot instead of discarding.");
-                return new MoveItemToSlotFromInventoryTask(
-                        new ItemTarget(armorStack.getItem(), 1),
-                        PlayerSlot.getEquipSlot(armor.getSlotType()));
+                // (2026-09-14 穿甲两拍搬运粘滞) 同一搬运复用实例, 供上方粘滞块认领。
+                if (_armorMoveTask == null || _armorMoveItem != armorStack.getItem()) {
+                    _armorMoveItem = armorStack.getItem();
+                    _armorMoveTask = new MoveItemToSlotFromInventoryTask(
+                            new ItemTarget(armorStack.getItem(), 1),
+                            PlayerSlot.getEquipSlot(armor.getSlotType()));
+                }
+                return _armorMoveTask;
             }
         }
         // 我们为腾位主动拿起的 bulk 建材（可能在 throwaway 列表之外，

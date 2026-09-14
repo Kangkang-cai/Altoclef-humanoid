@@ -9,6 +9,7 @@ import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
@@ -42,6 +43,19 @@ public abstract class DoStuffInContainerTask extends Task {
     private BlockPos _cachedContainerPosition = null;
     private Task _openTableTask;
 
+    // (2026-09-14 腾位闸门实例缓存) 两处"满包腾位"闸门此前每 tick new
+    // EnsureFreeInventorySlotTask, 违反铁律 #3(侧线/清障子任务必须实例缓存
+    // keep-alive): 内部状态(穿甲搬运中间态等)随实例丢弃, 上层任何 STOP 都让
+    // 两拍搬运从头再来 → cursor air<->boots 每 2s 死循环 (20260914-221044 实锤)。
+    private EnsureFreeInventorySlotTask _freeTask = null;
+
+    private EnsureFreeInventorySlotTask acquireFreeTask() {
+        if (_freeTask == null) {
+            _freeTask = new EnsureFreeInventorySlotTask();
+        }
+        return _freeTask;
+    }
+
     public DoStuffInContainerTask(Block[] containerBlocks, ItemTarget containerTarget) {
         _containerBlocks = containerBlocks;
         _containerTarget = containerTarget;
@@ -55,6 +69,7 @@ public abstract class DoStuffInContainerTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
+        _freeTask = null;
         if (_openTableTask == null) {
             // (2026-09-11 开容器目标错位修复) 交互目标优先用父层本 tick 选出的
             // _cachedContainerPosition (canReach 过滤+实时有效), 而不是 tracker 的
@@ -107,7 +122,7 @@ public abstract class DoStuffInContainerTask extends Task {
                 // 背包空出一个格, 再回来 open 收产物。等价于"关界面→腾位→重开"。
                 StorageHelper.closeScreen();
                 setDebugState("Freeing inventory before receiving output");
-                return new EnsureFreeInventorySlotTask();
+                return acquireFreeTask();
             }
             return containerSubTask(mod);
         }
@@ -281,7 +296,7 @@ public abstract class DoStuffInContainerTask extends Task {
         // 满包收物时光标常为空, 会误判放得下而跳过腾位)。
         if (mod.getPlayer() != null && mod.getPlayer().getInventory().getEmptySlot() < 0) {
             setDebugState("Freeing inventory before opening container");
-            return new EnsureFreeInventorySlotTask();
+            return acquireFreeTask();
         }
 
         // Walk to it and open it
@@ -294,6 +309,16 @@ public abstract class DoStuffInContainerTask extends Task {
         setDebugState("Walking to container... " + nearest.get().toShortString());
 
         if (!StorageHelper.getItemStackInCursorSlot().isEmpty()) {
+            // (2026-09-14 CursorArbiter 接线) 光标被腾位链租用 = 下级正在做
+            // "拿起→放进盔甲槽"的两拍中转, 不是外来滞留残留。此处点回背包会把
+            // 刚腾出的空位又填上, 与腾位链互相拆台 (20260914-221044 实锤: 拿起
+            // iron_boots → 本守卫 getSlotThatCanFit 命中新空位 → ClickSlot 点回
+            // → 每 2s 一轮)。与 CraftInTableTask 收产物分支同款豁免: 维持腾位
+            // 子树, 让两拍走完。
+            if (CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
+                setDebugState("Cursor leased by free-space chain, holding free task");
+                return acquireFreeTask();
+            }
             setDebugState("Clearing cursor slot (otherwise this causes BIG problems)");
             // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)` —
             // 背包满时点垃圾槽只交换不扔, 光标杂物永远腾不掉 → 走 EnsureFree 真正扔出。
