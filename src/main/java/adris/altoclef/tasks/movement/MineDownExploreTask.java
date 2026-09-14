@@ -212,6 +212,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (上行触发缓冲) 下界任务开始时, 玩家低于 目标高度-16 才进入上行模式:
     // 避免 y=69 这种贴着目标高度的位置反复触发"上爬1格"的抖动。
     private static final int NETHER_ASCEND_BUFFER = 16;
+    // (2026-09-14 深带上行缓冲) 主世界【负矿带】(钻石 [-57,-53]、金 [-24,0] 等)
+    // 的上行触发线 = 允许行事线 floorY 再低 2 格。旧实现对这些带返回 MIN_VALUE
+    // (永不上行), 而 enqueueNextStep 的 drop 公式 (#footnote1) 在起点已低于 floorY
+    // 时恒为 0 ⇒ bot 永远平挖在起点那一层, 回不到目标带。
+    //   20260914-152654 实锤: 玩家开局就在 y=-61(上一局遗产隧道), 目标 -57,
+    //   chat.log 打 "Already at depth -60 (target -57), digging a slowly-descending
+    //   tunnel instead." 但整局 y 分布 = -60(170)/-59(73)/-61(14), 一次没到 -57~-53;
+    //   -61 那一行是基岩带, [MineDown-Unbreakable] 累计 10+ 次。
+    //   取 2 格缓冲: 玩家脚位 -57 (行车线内) 不触发, -58 及以下才爬, 避免贴线抖动。
+    //   footnote1: drop = max(0, min(digStart.y - floorY, k/2)) —— floorY 只拦"继续下降",
+    //   没有任何上升分量, 起点在 floor 之下时 min() 取负值 → max(0,负) = 0 → 平挖。
+    private static final int DEEP_ASCEND_BUFFER = 2;
     // =========================================================================
     // (2026-09-05 下界目标带, 用户"高度无法确定, 只要在一个合适范围内, 适用于
     //  不同下界任务") 单点目标高度 (70) 改为【生成带】: 调用方给 [min,max], 每个
@@ -231,6 +243,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 掐断一次探索。提到 90s; 且挖到矿会重置计时 (markOreMined), 有产出的
     // 探索不会被超时打断, 只有"长时间没挖到矿的干逛"才会被限时。
     private static final double CAVE_EXPLORE_TIMEOUT = 90;
+    // (2026-09-14 挖掘停滞放弃) 队首同一格派发 DestroyBlockTask 超过这么久仍是实体
+    // ⇒ 放弃它, 队列往前走。实锤 20260914-152654: <Destroy block at -237,-60,233>
+    // 从 15:28:16 卡到 15:28:45 —— 29 秒里 12 次 "unreachable after 42 ticks"
+    // (Blacklist Try 1/4 一路报到 10/4, 上限形同虚设)、1 次
+    // "INVALID SET: Block{minecraft:gravel}" (重力方块让 baritone builder 反复重启),
+    // 期间 bot 完全静止, 最后靠用户手动挖开幕才脱离 —— 挖开幕的是用户, 不是 bot。
+    // 正常一格深板岩/矿石用铁镐 <1 秒 (该场次 39 次派发里 36 次 ≤2 秒), 10 秒留足
+    // 走位、够不着重选路线、换工具的余量, 又不至于让一次误判吃掉半分钟。
+    private static final long DIG_TARGET_STALL_TIMEOUT_MS = 10_000;
 
     // How deep we're willing to dig for this run (differs by target ore).
     // (2026-09-05 目标带) 单点改带 [_targetYMin, _targetYMax]: onStart 随机取
@@ -251,6 +272,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 上一 tick 派发 DestroyBlockTask 的目标格。下个 tick 确认它已变空气
     // ⇒ 真的被挖掉了, 记 1 格预算 (判定必须先于 skipAirAndWater 弹队首)。
     private BlockPos _miningTarget = null;
+    // (2026-09-14 挖掘停滞放弃) 当前队首目标格 + 它第一次被派发的时刻。
+    // 同一格挖超过 DIG_TARGET_STALL_TIMEOUT_MS 还是实体 ⇒ 有东西挡着 (重力方块、
+    // 边缘悬挂、目标被后来的方块替换), 而不是"再等等就能挖掉"。
+    private BlockPos _stallTarget = null;
+    private long _stallTargetSinceMs = 0;
     // 连续空跳步数计数 (跨 tick 累计, 找到实体方块后清零), 用于诊断日志与
     // 单 tick 空跳上限。
     private int _skipStreak = 0;
@@ -408,13 +434,28 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     /**
      * (2026-09-10 主世界浅带上行) 上行模式触发线:
      * - 下界: 玩家低于 本轮目标高度-16 (原语义不变);
-     * - 主世界: 仅当目标带下限为正 (铁 [5,30] 等浅带任务) 时, 玩家低于 带下限-16
-     *   触发上行爬回带内; 钻石 {-24,-24} 等负带任务返回 MIN_VALUE 永不触发,
-     *   保持原隧道平挖语义不变。
+     * - 主世界浅带 (带下限 > 0, 如铁 [5,30]): 玩家低于 带下限-16 触发上行爬回带内;
+     * - 主世界深带 (带下限 ≤ 0, 如钻石 [-57,-53]) (2026-09-14 新增): 以【允许行事线】
+     *   floorY=max(TUNNEL_MIN_Y, 带下限) 再低 DEEP_ASCEND_BUFFER 格为触发线。
+     *   旧实现这里返回 MIN_VALUE 永不触发 ⇒ 一旦起点已在行事线以下 (上一局遗产隧道 /
+     *   坠入深洞 / 探洞时沉下去), drop 公式退化成 0, bot 永久平挖在那一层 ——
+     *   20260914-152654 实锤: 目标 -57 却在 -60/-61 挖了 258 个 diag 采样, 还踩着
+     *   基岩带 (详见 DEEP_ASCEND_BUFFER 注释)。负带同样应该遵守这条行事线: floorY
+     *   是"允许的最低层", 低于它就是不该在那儿, 爬回带内才是正解 (人类发现自己
+     *   挖过头了会往回填/往上爬, 不会顺着基岩顶一路平推)。
      */
     private int ascendTriggerY() {
         if (_nether) return _targetY - NETHER_ASCEND_BUFFER;
-        return _targetYMin > 0 ? _targetYMin - NETHER_ASCEND_BUFFER : Integer.MIN_VALUE;
+        if (_targetYMin > 0) return _targetYMin - NETHER_ASCEND_BUFFER;
+        return tunnelFloorY() - DEEP_ASCEND_BUFFER;
+    }
+
+    /**
+     * (2026-09-14 深带上行) 隧道允许的最低行事线: 带下限, 但不深于 TUNNEL_MIN_Y。
+     * 与 enqueueNextStep 里的 floorY 严格同一表达式 —— 两处分头写死过一次就够呛了。
+     */
+    private int tunnelFloorY() {
+        return Math.max(TUNNEL_MIN_Y, _targetYMin);
     }
 
     @Override
@@ -435,6 +476,28 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + mod.getPlayer().getBlockPos().getY() + "), switching to ascending staircase back to y=" + _targetY + ".");
             Debug.logToFile("altoclef_diag.log", "[MineDown] nether bedrock escape: ascending from "
                     + mod.getPlayer().getBlockPos().toShortString() + " to target y=" + _targetY + ".");
+        }
+
+        // (2026-09-14 主世界深陷兜底) 上一处只管下界。主世界 bot 在挖掘【过程中】也会
+        // 掉出行事线: 探洞时顺着洞往下走、坠入岩浆湖底、 Tunnel 缓降踩空。旧实现里一旦
+        // 到了行事线以下就再也回不去 (drop 公式退化为 0, 见 DEEP_ASCEND_BUFFER 注释),
+        // 整轮任务就耗在基岩层周边 —— 20260914-152654 就是这么耗掉 2 分钟的。
+        // 与下界同款处置: 立刻切上行模式挖回目标带。用 tunnelFloorY() 而不是
+        // ascendTriggerY(): 开局判定需要缓冲防抖动, 这里是已经跑偏的事实纠正, 不必
+        // 再等 2 格 —— 玩家在 TUNNEL_MIN_Y 以下就该马上开始爬。
+        if (!_nether && !_ascendMode && mod.getPlayer().getBlockPos().getY() < tunnelFloorY()) {
+            _ascendMode = true;
+            _tunnelMode = false;
+            _inCave = false;
+            _subTask = null;
+            _caveExploreCooldownSteps = 0;
+            retreatAndRedig(mod);
+            Debug.logMessage("[MineDown] below mining floor (y="
+                    + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY()
+                    + "), climbing back to y=" + _targetY + ".");
+            Debug.logToFile("altoclef_diag.log", "[MineDown-FloorEscape] 低于行事线 "
+                    + tunnelFloorY() + " at " + mod.getPlayer().getBlockPos().toShortString()
+                    + " targetY=" + _targetY + " tunnelMode -> ascendMode.");
         }
 
         // (2026-09-12 冷却语义修正, 用户"同一段矿洞放弃后又重复去探索") 原实现在此
@@ -670,7 +733,35 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         setDebugState((_ascendMode ? "Climbing back up to target Y (dug "
                 : _tunnelMode ? "Digging a tunnel to find ores (dug "
                 : "Digging down to find ores (dug ") + _realDigs + "/" + budget + ")");
-        _miningTarget = _digQueue.peek();
+        BlockPos head = _digQueue.peek();
+        // (2026-09-14 挖掘停滞放弃) 队首没换 = 上一格还没挖掉。超时 ⇒ 它有某种我们
+        // 不知道的障碍, 继续派发 DestroyBlockTask 只会让它左右键到天荒地老。
+        // 与"水/门体/不可破坏"同款处置: 从队列弹掉, 几何路径继续往前。[MineDown-DigStuck]
+        // 会带上那个方块的 id, 便于事后分清是深板岩太硬还是重力方块在掉。
+        if (head != null) {
+            long now = System.currentTimeMillis();
+            if (head.equals(_stallTarget)) {
+                long elapsed = now - _stallTargetSinceMs;
+                if (elapsed > DIG_TARGET_STALL_TIMEOUT_MS) {
+                    _digQueue.poll();
+                    Debug.logMessage("[MineDown] giving up on stuck target " + head.toShortString()
+                            + " after " + elapsed + "ms, advancing past it.");
+                    Debug.logToFile("altoclef_diag.log", "[MineDown-DigStuck] 队首长时间挖不动 -> 放弃 "
+                            + head.toShortString() + " elapsed=" + elapsed + "ms player="
+                            + mod.getPlayer().getBlockPos().toShortString()
+                            + " mode=" + (_tunnelMode ? "tunnel" : _ascendMode ? "ascend" : "staircase")
+                            + " block=" + mod.getWorld().getBlockState(head).getBlock().getTranslationKey());
+                    _stallTarget = null;
+                    return null;
+                }
+            } else {
+                _stallTarget = head;
+                _stallTargetSinceMs = now;
+            }
+        } else {
+            _stallTarget = null;
+        }
+        _miningTarget = head;
         return new DestroyBlockTask(_miningTarget);
     }
 
@@ -821,7 +912,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // 沉到地板平挖; 钻石带 [-57,-53] → max(-58,-57)=-57 (带下限主导; 见
             // MineAndCollectTask.targetShaftBand 09-14 注释: 再往下就要挖到 -60 基岩行);
             // {50,50} 兜底带回到"平挖在 50"的原意 (旧实现会意外缓沉到 -24)。
-            int floorY = _nether ? _targetY : Math.max(TUNNEL_MIN_Y, _targetYMin);
+            int floorY = _nether ? _targetY : tunnelFloorY();
             int drop = Math.max(0, Math.min(_digStart.getY() - floorY, k / TUNNEL_DESCEND_EVERY));
             ground = _digStart.add(k * _dirX, -drop, k * _dirZ);
         } else {
