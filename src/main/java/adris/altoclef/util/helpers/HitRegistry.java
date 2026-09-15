@@ -19,9 +19,16 @@ import java.util.UUID;
  *  - PiglinEntity 的 brain ANGRY_AT 记忆客户端不同步 (angryAtMem 恒 false);
  *  - ZombifiedPiglinEntity 的 Angerable API 客户端恒 false (hasAngerTime);
  *  → 客户端只能靠本地事件记忆推断激怒状态: 谁被我们打过, 谁就在记仇。
+ *  (20260915 更正: ANGRY_AT 客户端同步实测成立, 20260915-123005 场次
+ *   angryAtMem=true 实锤 —— Phase 0 的"恒 false"是当时的测量场景没有猪灵
+ *   处于激怒态所致。现在 ANGRY_AT 与事件记忆双保险并用, 见 EntityHelper
+ *   isGenerallyHostileToPlayer / onPlayerDamagedBy。)
  *
- * 写入点: AttackEntityMixin (ClientPlayerInteractionManager#attackEntity HEAD),
- * 同时覆盖 bot 的攻击与玩家手动攻击。只读方: EntityHelper.isGenerallyHostileToPlayer。
+ * 写入点 1: AttackEntityMixin (ClientPlayerInteractionManager#attackEntity HEAD),
+ * 覆盖 bot 的攻击与玩家手动攻击;
+ * 写入点 2 (20260915 反向记忆): PlayerDamageMixin (PlayerEntity#damage HEAD),
+ * bot 被猪灵系实体打到 → 该实体记敌对, 覆盖"挖金/开箱激怒、bot 没打过它"的场景。
+ * 只读方: EntityHelper.isGenerallyHostileToPlayer。
  *
  * 规则 (保守取值, 宁可多防不漏防):
  *  - 成年猪灵: 被打过 → 记仇 30s; 攻击会向 16 格内同伴传播仇恨 (vanilla 群体激怒);
@@ -65,16 +72,7 @@ public final class HitRegistry {
         }
 
         if (isPiglin) {
-            long until = now + PIGLIN_ANGER_MS;
-            _piglinAngeredUntil.put(target.getUuid(), until);
-            // 群体传播: 16 格内的同伴一起记仇 (vanilla 猪灵会喊帮手)。
-            List<PiglinEntity> nearby = target.getWorld().getEntitiesByClass(
-                    PiglinEntity.class,
-                    target.getBoundingBox().expand(PIGLIN_GROUP_RADIUS),
-                    e -> e != null && e.isAlive());
-            for (PiglinEntity pig : nearby) {
-                _piglinAngeredUntil.put(pig.getUuid(), until);
-            }
+            recordPiglinAnger((PiglinEntity) target, now);
         } else {
             // 僵尸猪灵: 群体仇恨窗口, 记住命中点 (32 格内全体激怒)。
             _zombifiedHordeUntil = now + ZOMBIFIED_HORDE_MS;
@@ -83,6 +81,53 @@ public final class HitRegistry {
             _zombifiedHordeZ = target.getZ();
         }
         pruneExpired(now);
+    }
+
+    /**
+     * (20260915 挖金激怒盲区修复) 反向事件记忆: bot 被某只猪灵系实体打到 → 该实体
+     * (含 16 格内同伴, 猪灵激怒是群体行为) 记敌对, 窗口与正向记忆一致。
+     * 覆盖"bot 没打过猪灵、猪灵因挖金/开箱激怒正在打 bot"的场景 —— 该场景下
+     * ANGRY_AT 与"金甲兜底"之外曾无任何信号 (20260915-123005 场次实锤:
+     * 穿金甲 + hitReg=false + 贴脸输出, 4 秒掉 16 血全程不还手)。
+     * 调用方: PlayerDamageMixin (PlayerEntity#damage HEAD, 体内置服务端与客户端同 JVM)。
+     */
+    public static void onPlayerDamagedBy(Entity attacker) {
+        if (attacker == null || !attacker.isAlive()) return;
+        boolean isPiglin = attacker instanceof PiglinEntity;
+        boolean isZombified = attacker instanceof ZombifiedPiglinEntity;
+        if (!isPiglin && !isZombified) return;
+
+        long now = System.currentTimeMillis();
+        RegistryKey<World> dim = attacker.getWorld().getRegistryKey();
+        if (!dim.equals(_dimension)) {
+            reset();
+            _dimension = dim;
+        }
+
+        if (isPiglin) {
+            recordPiglinAnger((PiglinEntity) attacker, now);
+        } else {
+            // 被僵尸猪灵打到: 直接刷新群体仇恨窗口, 圆心=攻击者位置。
+            _zombifiedHordeUntil = now + ZOMBIFIED_HORDE_MS;
+            _zombifiedHordeX = attacker.getX();
+            _zombifiedHordeY = attacker.getY();
+            _zombifiedHordeZ = attacker.getZ();
+        }
+        pruneExpired(now);
+    }
+
+    /** 记仇写入 (正向攻击/反向被打共用): 目标本体 + 16 格内同伴。 */
+    private static void recordPiglinAnger(PiglinEntity pig, long now) {
+        long until = now + PIGLIN_ANGER_MS;
+        _piglinAngeredUntil.put(pig.getUuid(), until);
+        // 群体传播: 16 格内的同伴一起记仇 (vanilla 猪灵会喊帮手)。
+        List<PiglinEntity> nearby = pig.getWorld().getEntitiesByClass(
+                PiglinEntity.class,
+                pig.getBoundingBox().expand(PIGLIN_GROUP_RADIUS),
+                e -> e != null && e.isAlive());
+        for (PiglinEntity other : nearby) {
+            _piglinAngeredUntil.put(other.getUuid(), until);
+        }
     }
 
     /** 成年猪灵是否处于"被我们打过、正在记仇"状态。 */

@@ -49,12 +49,22 @@ public class EntityHelper {
             // (2026-09-06 Phase 1) 事件记忆判激怒: 被打过(或 16 格内同伴被打过)的猪灵
             // 记仇 30s, 穿金甲也照样算敌对 —— 修复"金甲=免疫激怒"的方向性错误
             // (11:56 实测: 玩家手动打的激怒猪灵贴脸输出, 防御链因金甲全程失明)。
-            // 客户端 ANGRY_AT brain 记忆不同步 (Phase 0 实测 angryAtMem 恒 false),
-            // 只能走本地事件记忆, 不能读 API。
             if (HitRegistry.isPiglinAngered(pig)) {
                 return true;
             }
-            // Angry if we're not wearing gold
+            // (20260915 挖金激怒盲区修复) 客户端 ANGRY_AT 记忆同步实测成立
+            // (20260915-123005 场次 angryAtMem=true 实锤, 推翻 Phase 0 "恒 false"
+            // 结论 —— 当时测量场景没有猪灵处于激怒态): 挖金块/开金箱激怒与穿
+            // 金甲无关, 必须读 brain 记忆。限定激怒目标=bot 本人, 防误伤。
+            ClientPlayerEntity clientPlayer = MinecraftClient.getInstance().player;
+            if (clientPlayer != null
+                    && pig.getBrain().getOptionalMemory(MemoryModuleType.ANGRY_AT)
+                            .map(uuid -> uuid.equals(clientPlayer.getUuid())).orElse(false)) {
+                return true;
+            }
+            // (20260915) 金甲兜底收窄: 只覆盖"靠近/开箱/无甲"类激怒; "挖金激怒"
+            // 与"被打记忆"已由上面两路覆盖。保留原兜底 (没穿金甲的猪灵本来就
+            // 会因"未装备金甲"敌对)。
             return !StorageHelper.isArmorEquipped(mod, ItemHelper.GOLDEN_ARMORS);
         }
         if (hostile instanceof ZombifiedPiglinEntity zombie) {

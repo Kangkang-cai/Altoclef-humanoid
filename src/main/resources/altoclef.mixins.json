@@ -28,7 +28,8 @@
     "ClientTickMixin",
     "EntryMixin",
     "LoadChunkMixin",
-    "PlayerCollidesWithEntityMixin"
+    "PlayerCollidesWithEntityMixin",
+    "PlayerDamageMixin"
   ],
   "injectors": {
     "defaultRequire": 1
