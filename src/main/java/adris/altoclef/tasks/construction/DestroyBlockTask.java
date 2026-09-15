@@ -169,6 +169,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      * 会被框架的 isEqual/防横跳逻辑挡下或反复重启 (本仓"侧线子任务必须实例缓存"铁律)。
      */
     private Task _acquireMaterialsTask = null;
+
+    // (2026-09-15 口径改"够爬") 本次采集要凑的垫块量 = 保底 3 / 目标层差(封顶 10)。
+    private int _acquireWant = ACQUIRE_MATERIALS_COUNT;
     /** 每个 DestroyBlockTask 实例只采一次; 采完仍不够就落回原有放弃路径, 不无限循环。 */
     private boolean _acquireStarted = false;
     /** 单次采集总时长上限。超了收工, 交回原有放弃路径换目标。 */
@@ -599,11 +602,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (horizontalDistanceSqToPlayer(mod) > 4.0) {
             return false;
         }
-        // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
+        // ③ 垫块不够爬到目标层 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
         //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
         //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
-        //    (baritone 垫脚下同样要消耗背包方块, 没料时它只会空跳。)
-        if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
+        //    (2026-09-15 口径改"够爬": baritone 一次爬 N 层, 只有零星几块会
+        //    跳-放-跳-放然后料尽纯跳, 见 blocksNeededToReach 注释。)
+        if (PillarJumpHelper.countMaterials(mod, _pillarMaterials) < blocksNeededToReach(mod)) {
             return false;
         }
         // ③b 头顶被【挖不动】的方块 (基岩类) 挡死 → baritone 爬不上去, 直接判不可达,
@@ -636,7 +640,20 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 依然需要垫块, 采集照旧。只有挖不动的挡头才真的不用采。
         if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())
                 && !isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) return false;
-        return !PillarJumpHelper.hasMaterials(mod, _pillarMaterials);
+        return PillarJumpHelper.countMaterials(mod, _pillarMaterials) < blocksNeededToReach(mod);
+    }
+
+    /**
+     * (2026-09-15 口径改"够爬", 用户现场"收集泥土没触发, bot 自己反复跳跃") 
+     * baritone 爬到目标层需要垫的方块数 = 目标层 - 当前脚层, 封顶 10 —— 
+     * 旧口径 hasMaterials(≥1) 是自写垫塔时代的遗产: 自写垫塔逐格垫逐格查,
+     * baritone 的 MovementPillar 一次爬 N 层, 只有 1 块就会跳-放-跳-放,
+     * 料尽后原地纯跳 (现场 20260915-182239: y=78 交 GoalYLevel(87) 需 9 块,
+     * 包里零星几块 → 采集不触发 → 反复跳跃)。
+     */
+    private int blocksNeededToReach(AltoClef mod) {
+        int need = _pos.getY() - mod.getPlayer().getBlockPos().getY();
+        return Math.max(ACQUIRE_MATERIALS_COUNT, Math.min(10, need));
     }
 
     /**
@@ -764,7 +781,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      * @return 子任务实例 (keep-alive); null = 建不出来 (目录里没有 / 已达尝试上限)。
      */
     private Task startAcquireMaterials(AltoClef mod) {
-        Task t = TaskCatalogue.getItemTask(Items.DIRT, ACQUIRE_MATERIALS_COUNT);
+        // (2026-09-15 口径改"够爬") 采够爬到目标层的量, 保底 3 块。
+        _acquireWant = blocksNeededToReach(mod);
+        Task t = TaskCatalogue.getItemTask(Items.DIRT, _acquireWant);
         _acquireStarted = true;
         _acquireDoneLogged = false;
         if (t == null) {
@@ -777,7 +796,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 采集期间不能留残余长按 (垫塔可能上一 tick 还在 hold(JUMP))。
         endPillar(mod);
         Debug.logToFile("altoclef_diag.log", "[PillarAcquire] start target=" + _pos.toShortString()
-                + " want=" + ACQUIRE_MATERIALS_COUNT + " X " + Items.DIRT
+                + " want=" + _acquireWant + " X " + Items.DIRT
                 + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
                 + " have=" + PillarJumpHelper.countMaterials(mod, _pillarMaterials));
         return t;
@@ -796,9 +815,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // (20+ 方块), 最后靠 30s 硬超时掐掉(还被游戏 5.2s 卡顿吃掉 3.7s)。这里每
         // tick 直读【真实背包】(getItemCountReal, 不走 500ms 缓存层 —— 判"够没够"
         // 属于判定关键资源, 按本仓"背包权威计数"惯例一律走 Real)。
-        int haveDirt = mod.getItemStorage().getItemCountReal(Items.DIRT);
-        if (haveDirt >= ACQUIRE_MATERIALS_COUNT) {
-            logAcquireDone(mod, "enough(dirt=" + haveDirt + ")");
+        // (2026-09-15 口径改"够爬") 早停量 = _acquireWant (保底 3, 目标层差封顶 10);
+        // PillarJumpHelper.countMaterials 直读 inventory.main/offHand, 同为真实计数,
+        // 圆石等其他垫块也计入 (bot 有 5 块圆石时别再逼它挖第 6 块泥)。
+        int haveMaterials = PillarJumpHelper.countMaterials(mod, _pillarMaterials);
+        if (haveMaterials >= _acquireWant
+                || mod.getItemStorage().getItemCountReal(Items.DIRT) >= _acquireWant) {
+            logAcquireDone(mod, "enough(materials=" + haveMaterials + ")");
             _acquireMaterialsTask = null;
             return null;
         }
