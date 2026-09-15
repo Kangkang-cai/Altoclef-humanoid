@@ -282,6 +282,9 @@ public class SmeltInFurnaceTask extends ResourceTask {
 
         private final ItemTarget _allMaterials;
 
+        // (2026-09-15 在途炉账) 冷启动抵扣日志只记一次, 防每 tick 刷屏。
+        private boolean _debtLogged = false;
+
         // (2026-08-22 烧铁无煤横跳修复) 燃料收集"提交期"计时器。CollectFuelTask
         // 降级用 2x2 合成格做木板时, StorageHelper.calculateInventoryFuelCount
         // 会把合成格/光标里的木板也计为燃料 (1.5 单位/块) → 燃料计数瞬时虚高
@@ -452,13 +455,36 @@ public class SmeltInFurnaceTask extends ResourceTask {
             // Include both regular + optional items
             ItemTarget materialTarget = _allMaterials;
             ItemTarget outputTarget = _target.getItem();
+            // (2026-09-15 在途炉账) 冷启动(本实例从未见过炉)时缓存为空 — 炉里躺着
+            // 上一条链塞的料/正在烤的产物对本公式不可见 → materialsNeeded 高估 →
+            // "Getting Materials" 抢在"去炉边看一眼"之前 → 弃炉挖矿 (2147 场次)。
+            // 用在途账抵扣 (账=上一条链真实开屏观察登记, 非新扫描源)。记账生效仅限
+            // !_cacheKnown — 缓存一旦绑定真实炉, 下方公式自带缓存口径, 不双计。
+            int inflightMat = 0;
+            int inflightOut = 0;
+            if (!_cacheKnown) {
+                InflightSmelt debt = findInflight(mod, _target);
+                if (debt != null) {
+                    inflightMat = debt.matCount;
+                    inflightOut = debt.outCount;
+                    if (!_debtLogged) {
+                        _debtLogged = true;
+                        String msg = "[SmeltDebt]\t冷启动抵扣 @" + debt.pos.toShortString()
+                                + " 在途生料 x" + inflightMat + " 在途产物 x" + inflightOut
+                                + " (target=" + _target.getMaterial() + ")";
+                        Debug.logMessage(msg);
+                        Debug.logToFile("altoclef_diag.log", msg);
+                    }
+                }
+            }
             // Materials needed = (mat_target (- 0*mat_in_inventory) - out_in_inventory - mat_in_furnace - out_in_furnace)
             // ^ 0 * mat_in_inventory because we always care aobut the TARGET materials, not how many LEFT there are.
             int materialsNeeded = materialTarget.getTargetCount()
                     /*- mod.getItemStorage().getItemCountInventoryOnly(materialTarget.getMatches())*/ // See comment above
                     - StorageHelper.countItemsInInventoryReal(mod, outputTarget.getMatches())
                     - (materialTarget.matches(_furnaceCache.materialSlot.getItem()) ? _furnaceCache.materialSlot.getCount() : 0)
-                    - (outputTarget.matches(_furnaceCache.outputSlot.getItem()) ? _furnaceCache.outputSlot.getCount() : 0);
+                    - (outputTarget.matches(_furnaceCache.outputSlot.getItem()) ? _furnaceCache.outputSlot.getCount() : 0)
+                    - inflightMat - inflightOut;
             double totalFuelInFurnace = ItemHelper.getFuelAmount(_furnaceCache.fuelSlot) + _furnaceCache.burningFuelCount + _furnaceCache.burnPercentage;
             // Fuel needed = (mat_target - out_in_inventory - out_in_furnace - totalFuelInFurnace)
             double fuelNeeded = _ignoreMaterials
@@ -467,7 +493,11 @@ public class SmeltInFurnaceTask extends ResourceTask {
                     /* - mod.getItemStorage().getItemCountInventoryOnly(materialTarget.getMatches()) */
                     - StorageHelper.countItemsInInventoryReal(mod, outputTarget.getMatches())
                     - (outputTarget.matches(_furnaceCache.outputSlot.getItem()) ? _furnaceCache.outputSlot.getCount() : 0)
-                    - totalFuelInFurnace;
+                    - totalFuelInFurnace
+                    // (2026-09-15 在途炉账) 在途生料的燃料已被上一条链塞进炉, 在途
+                    // 产物已烧完不再需要燃料 — 冷启动口径同步抵扣, 防"误去补燃料"
+                    // 推迟开炉收货。
+                    - inflightMat - inflightOut;
             // 一次烧满：炉里已塞入的材料要全部烧完——燃料需求至少覆盖炉内
             // 材料量，否则燃料烧尽后剩余材料会滞留在炉中。
             if (materialTarget.matches(_furnaceCache.materialSlot.getItem())) {
@@ -829,6 +859,9 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
                 _furnaceCache.materialSlot = newMaterial;
                 _furnaceCache.outputSlot = newOutput;
+                // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
+                // 的下一个实例认账。
+                recordInflight(_cachePos, _target, _furnaceCache.materialSlot, _furnaceCache.outputSlot);
                 _cacheKnown = true;
             }
         }
@@ -850,6 +883,8 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 int count = _furnaceCache.materialSlot.getCount();
                 Debug.logToFile("altoclef_diag.log", "[SmeltFurnaceGone]\t" + _cachePos + " vanished with mat="
                         + _furnaceCache.materialSlot.getItem() + " x" + count + " -> recovering drops");
+                // (2026-09-15 在途炉账) 炉没了 → 账销掉 (内容已变掉落, 由本实例捡回)。
+                dropInflight(_cachePos);
                 // 缓存作废: 炉子没了, 内容已掉落。置 unknown 防"伪排空"弃缓存。
                 _cacheKnown = false;
                 _cachePos = null;
@@ -878,6 +913,93 @@ public class SmeltInFurnaceTask extends ResourceTask {
     // ==================== (2026-09-08 记得管理) 孤儿炉账本 ====================
 
     /** 转投他炉时旧炉残留的一条账 (静态跨任务实例, 会话级)。 */
+    // ==================== (2026-09-15 在途炉账) ====================
+
+    /**
+     * (2026-09-15 在途炉账) 一条"某炉里还躺着本链的生料/产物"的账。数据来源是
+     * 【真实开屏观察】(tryUpdateOpenFurnace 刷缓存时顺带登记), 不是扫描式新计数源
+     * — 不踩"缓存 vs 直读不一致"铁律。
+     *
+     * 存在意义: 烧炼链被任何原因打断 (盾牌生存链/食物/怪物/用户按键) 后, 主链
+     * 重算会派发【全新】SmeltInFurnaceTask 实例, 其 _furnaceCache 为空 → 炉内在
+     * 途生铁对本实例不可见 → materialsNeeded 高估 → "Getting Materials" 抢在
+     * "去炉边看一眼"之前 → 弃炉挖矿 (2147 场次 21:47:42 实锤: 盾牌链打断守炉 →
+     * 重算 iron_ingot x8 → 炉内 6 生铁不可见 → 挖隧道, 守炉弃坑)。新实例冷启动
+     * 时先认账抵扣, 没看过炉之前不报缺料。
+     */
+    private static class InflightSmelt {
+        final BlockPos pos;
+        final Item raw;
+        final Item cooked;
+        int matCount;
+        int outCount;
+        InflightSmelt(BlockPos pos, Item raw, Item cooked) {
+            this.pos = pos;
+            this.raw = raw;
+            this.cooked = cooked;
+        }
+    }
+
+    private static final List<InflightSmelt> INFLIGHT_SMELTS = new ArrayList<>();
+    private static final int INFLIGHT_LEDGER_CAP = 8;
+
+    /** 开屏观察到炉内容后登记/更新在途账 (生料+产物都算)。双零即销账。 */
+    private static void recordInflight(BlockPos pos, SmeltTarget target, ItemStack mat, ItemStack out) {
+        Item raw = target.getMaterial().getMatches()[0];
+        Item cooked = target.getItem().getMatches()[0];
+        int matCount = target.getMaterial().matches(mat.getItem()) ? mat.getCount() : 0;
+        int outCount = target.getItem().matches(out.getItem()) ? out.getCount() : 0;
+        InflightSmelt entry = null;
+        for (InflightSmelt e : INFLIGHT_SMELTS) {
+            if (e.pos.equals(pos) && e.raw == raw && e.cooked == cooked) {
+                entry = e;
+                break;
+            }
+        }
+        if (entry == null) {
+            if (matCount == 0 && outCount == 0) return;
+            if (INFLIGHT_SMELTS.size() >= INFLIGHT_LEDGER_CAP) {
+                // 账本满: 挤掉最旧。后果=退回旧行为 (少记账多挖矿), 不会丢物品。
+                INFLIGHT_SMELTS.remove(0);
+            }
+            entry = new InflightSmelt(pos, raw, cooked);
+            INFLIGHT_SMELTS.add(entry);
+            Debug.logToFile("altoclef_diag.log", "[SmeltDebt]\t记录 " + pos.toShortString()
+                    + " " + raw + " x" + matCount + " / " + cooked + " x" + outCount);
+        } else if (entry.matCount != matCount || entry.outCount != outCount) {
+            Debug.logToFile("altoclef_diag.log", "[SmeltDebt]\t更新 " + pos.toShortString()
+                    + " " + raw + " x" + entry.matCount + "->" + matCount
+                    + " / " + cooked + " x" + entry.outCount + "->" + outCount);
+        } else {
+            return;
+        }
+        entry.matCount = matCount;
+        entry.outCount = outCount;
+        if (matCount == 0 && outCount == 0) {
+            INFLIGHT_SMELTS.remove(entry);
+        }
+    }
+
+    /** 炉方块没了/被回收任务收走 → 销账 (账面上的东西已不在这个炉里)。 */
+    private static void dropInflight(BlockPos pos) {
+        INFLIGHT_SMELTS.removeIf(e -> e.pos.equals(pos));
+    }
+
+    /** 查本目标的在途账 (炉方块还在且不太远才认账, 防陈旧账)。 */
+    private static InflightSmelt findInflight(AltoClef mod, SmeltTarget target) {
+        Item raw = target.getMaterial().getMatches()[0];
+        Item cooked = target.getItem().getMatches()[0];
+        for (InflightSmelt e : INFLIGHT_SMELTS) {
+            if (e.raw != raw || e.cooked != cooked) continue;
+            if (e.matCount == 0 && e.outCount == 0) continue;
+            if (mod.getPlayer() == null
+                    || !mod.getPlayer().getBlockPos().isWithinDistance(e.pos, 64)) continue;
+            if (mod.getWorld().getBlockState(e.pos).getBlock() != Blocks.FURNACE) continue;
+            return e;
+        }
+        return null;
+    }
+
     private static class OrphanFurnace {
         final BlockPos pos;
         final Item raw;
@@ -913,6 +1035,8 @@ public class SmeltInFurnaceTask extends ResourceTask {
             if (!furnaceThere) {
                 if (_pickupTried) {
                     _done = true;
+                    // (2026-09-15 在途炉账) 回收终局销账。
+                    dropInflight(_pos);
                     return null;
                 }
                 _pickupTried = true;
@@ -939,6 +1063,8 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 return new ClickSlotTask(slot, SlotActionType.QUICK_MOVE);
             }
             _done = true;
+            // (2026-09-15 在途炉账) 回收完成销账。
+            dropInflight(_pos);
             return null;
         }
 
