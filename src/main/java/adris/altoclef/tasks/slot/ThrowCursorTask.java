@@ -103,6 +103,19 @@ public class ThrowCursorTask extends Task {
         return t != null && (t._tunnelNear != null || t._digFloor != null || t._pitHole != null);
     }
 
+    /**
+     * (2026-09-15) 丢弃流程是否正持有光标 (从垃圾上光标到丢出完成的全程)。
+     * 其它链在"把光标内容放回背包/洗槽"之前必须先查这个 —— 现场实锤
+     * (20260915-091355 gridwar.log 09:25:31-09:25:51): CraftGenericWithRecipeBooksTask
+     * drain 分支每 2s 把腾位链刚拿上光标、正瞄准坑准备丢出的花岗岩 x14 放回 17 号槽,
+     * ThrowCursorTask 八轮全部死在瞄准阶段, 一次都没丢出去。丢弃有界 (2s 瞄准 +
+     * 25s/30s 挖掘超时兜底照丢), 等待方 return null 等它丢完即可。
+     * (命名避开基类 Task.isActive() 实例方法。)
+     */
+    public static boolean isDiscardInProgress() {
+        return _activeInstance != null;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _turnTask = new TurnToOpenAreaTask();

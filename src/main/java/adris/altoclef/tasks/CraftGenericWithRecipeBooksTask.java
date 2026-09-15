@@ -184,6 +184,15 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
             setDebugState("Draining leftover output + grid (not ours): " + output.getItem().getTranslationKey());
             ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
             if (!cursorNow.isEmpty()) {
+                // (2026-09-15) 丢弃流程持有光标时禁止放回: 腾位链刚把垃圾拿上光标、
+                // ThrowCursorTask 正瞄准坑准备丢出, 这里把它"存回背包"会把丢弃流程
+                // 整个拆掉 (20260915-091355 gridwar.log 实锤: 花岗岩 x14 上光标 →
+                // 瞄准坑 → 每 2s 被本分支放回 17 号槽 → 重拿 → 八轮循环零丢出)。
+                // 丢弃有界 (2s 瞄准 + 25s/30s 挖掘超时兜底照丢), 等它丢完光标自空。
+                if (ThrowCursorTask.isDiscardInProgress()) {
+                    setDebugState("Cursor under discard, waiting for throw to finish");
+                    return null;
+                }
                 Optional<Slot> fitCursor = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursorNow, false);
                 if (fitCursor.isPresent()) {
                     return new ClickSlotTask(fitCursor.get());

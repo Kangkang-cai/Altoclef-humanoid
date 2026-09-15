@@ -205,7 +205,10 @@ public class PlayerInteractionFixChain extends TaskChain {
             // [2026-08-22] 屏幕开着(容器/合成操作进行中)时禁止全背包双击刷新:
             // refreshInventory 对每个槽 PICKUP 两次, 会打乱刚放进 3x3 合成格的
             // 配方和光标上的物品, 与合成任务的点击序列互相打架 (合成卡死诱因)。
-            if (!mod.getControllerExtras().isBreakingBlock() && MinecraftClient.getInstance().currentScreen == null) {
+            // [2026-09-15] 丢弃流程(ThrowCursorTask)持有光标期间同样禁止: 双击刷新
+            // 会把瞄准坑准备丢出的垃圾洗回背包槽 (09:25:36/:47 实锤), 丢弃永完不成。
+            if (!mod.getControllerExtras().isBreakingBlock() && MinecraftClient.getInstance().currentScreen == null
+                    && !ThrowCursorTask.isDiscardInProgress()) {
                 Debug.logMessage("Refreshed inventory...");
                 mod.getSlotHandler().refreshInventory();
                 _generalDuctTapeSwapTimeout.reset();
