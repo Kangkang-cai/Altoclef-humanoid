@@ -822,6 +822,14 @@ public class MineAndCollectTask extends ResourceTask {
             for (Block b : _blocks) {
                 if (WOOD_LOG_BLOCKS.contains(b)) return true;
                 if (b instanceof BedBlock) return true;
+                // (2026-09-15 泥土立刻捡, 用户"挖泥土没完了") 现场 20260915-165523:
+                // 垫塔缺料挖 3 块泥土, 泥土不在立即捡列表 → 掉落优先级低于链挖续挖
+                // → bot 站在自己挖的坑里, 泥墙永远供得出下一块链挖目标 → 永不进入
+                // 拾取阶段; 而 pumpAcquireMaterials 早停只数背包(have=0 恒成立)。
+                // 两半相乘 = 无限挖坑, 24s 切 20+ 目标, [Anomaly:duration] 30s 超限。
+                // 矿石链挖不受影响(矿脉有限, 挖完自然转拾取); 泥土是无限介质,
+                // 必须"挖一块捡一块"才收敛。
+                if (b == Blocks.DIRT) return true;
             }
             return false;
         }
