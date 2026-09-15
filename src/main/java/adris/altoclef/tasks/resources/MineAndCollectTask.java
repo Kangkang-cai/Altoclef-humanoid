@@ -350,7 +350,17 @@ public class MineAndCollectTask extends ResourceTask {
         // 给矿石的 (矿脉连片, 挖一块还有下一块)。木头只缺 N 根时一旦也扫尾,
         // 会把整棵树甚至旁边树全砍掉 — 即使背包已够也是 (用户实测: 背包明明
         // 有木头还去砍一整批)。木头数量到了就停。
-        if (_subtask.isTargetingWood()) return true;
+        // (2026-09-15 批采扫堆, 用户定案) 数量达标但脚边 ≤4 格还有本目标掉落物
+        // → 不结束, 顺手把这一堆捡完再走。只捡不砍: 背包达标后 getClosestTo 的
+        // 批采/链挖分支全部关闭, 不会多砍一棵树, 不违背"不过度砍伐"。
+        // 卡死风险: 掉落物捡不走时由 PickupDroppedItemTask 的 15s 被困拉黑/
+        // despawn 兜底, 扫堆窗口自然收敛。
+        if (_subtask.isTargetingWood()) {
+            if (_subtask.hasNearbyWoodDropsToSweep(mod)) {
+                return false;
+            }
+            return true;
+        }
         // (2026-09-10 贪婪掉落宽限, 用户"挖掉一个还没拾取就被钻石任务抢去") POSSESS
         // 已达标(背包已有同类)时, 本任务能挂住全靠扫尾语义 hasNearbyMineableTarget;
         // 方块刚破坏的 1-2 tick 内掉落物未落地/未过 EntityTracker 感知过滤 →
@@ -659,6 +669,20 @@ public class MineAndCollectTask extends ResourceTask {
         // 掉落物被扔在地上 (tasks.log 20:14:57 实锤: raw_iron have=3 超目标 x1, 破坏
         // 后 50ms 整链退出)。记录破坏时刻供外层挂住等掉落物落地回册。
         private long _miningTargetBrokenMs = 0;
+        // (2026-09-15 批采+扫堆, 用户定案"每挖3个拾取一次; 挖了第1个扫它 3 格内
+        // 还有别的原木就继续砍, 没有就直接触发拾取") 木头批采状态:
+        //   _woodBatchBroken  本批已砍根数 (批 = 从第一根到切拾取为止)
+        //   _woodBatchAnchor  批锚点 = 最后一根被砍原木的位置 (邻位扫描中心)
+        // 规则: 背包未达标且未砍满 WOOD_BATCH_MAX 时, 锚点 WOOD_BATCH_RADIUS 格内
+        // 还有可挖原木 → 继续砍 (掉落物先放着, 跑不掉); 砍满或无邻位 → 切拾取。
+        // 数量达标后脚边 ≤4 格还有掉落物 → 扫堆捡完再走 (只捡不砍, 不违背
+        // "木头不过度砍伐"—— 那条卡的是"继续砍新树", 这里只捡已砍出来的)。
+        private int _woodBatchBroken = 0;
+        private BlockPos _woodBatchAnchor = null;
+        private BlockPos _woodBatchLastDiagPos = null;
+        private static final int WOOD_BATCH_MAX = 3;
+        private static final int WOOD_BATCH_RADIUS = 3;
+        private static final double WOOD_SWEEP_RANGE_SQ = 4 * 4;
         private AltoClef _mod;
         // (2026-09-04 用户"卡住时左键挥几tick清草, 会被草卡住") 挖不动(ProgressChecker
         // 失败)先长按左键 SWING_TICKS 清掉挡路小草/藤蔓, 挥完仍失败才 blacklist 换目标。
@@ -834,11 +858,42 @@ public class MineAndCollectTask extends ResourceTask {
             if (mod.getEntityTracker().itemDropped(_targets)) {
                 closestDrop = mod.getEntityTracker().getClosestItemDrop(pos, _targets);
             }
+            // (2026-09-15 批采记账前置) 本任务正在挖的目标已变空气 → 先记账再选目标。
+            // 必须放在一切 return 之前: 旧实现这笔账记在下面粘性块里, 木头目标的
+            // "掉落最优先"分支会抢先返回, 破坏计数永远漏记。
+            if (_miningPos != null && !_blacklist.contains(_miningPos)
+                    && mod.getChunkTracker().isChunkLoaded(_miningPos)
+                    && mod.getWorld().getBlockState(_miningPos).isAir()) {
+                // (2026-09-10 贪婪掉落宽限) 方块刚被挖掉 → 记录时刻, 供外层
+                // isFinished 在贪婪模式下挂住等掉落物落地回册。
+                _miningTargetBrokenMs = System.currentTimeMillis();
+                // (2026-09-11 自挖因果记忆) 记住破坏位置 — "我自己挖掉的矿,
+                // 我知道掉落物在哪"属结构推断线索, 供宽限窗口内 scoop 拾取。
+                _lastSelfBrokenPos = _miningPos;
+                onWoodBatchBroken(_miningPos);
+                _miningPos = null;
+            }
+            // (2026-09-15 批采状态) woodBatchActive = 本批未砍满且背包未达标。
+            // 砍满且场上已无本目标掉落物 → 计数清零, 下一批从头计 (掉落物还剩时
+            // 不清零, 防掉落物登记 1-2 tick 空窗把计数误清)。
+            boolean woodTargetMet = isTargetingWood()
+                    && StorageHelper.itemTargetsMetInventoryNoCursor(mod, _targets);
+            if (isTargetingWood() && _woodBatchBroken >= WOOD_BATCH_MAX && closestDrop.isEmpty()) {
+                _woodBatchBroken = 0;
+            }
+            boolean woodBatchActive = isTargetingWood() && !woodTargetMet && _woodBatchBroken < WOOD_BATCH_MAX;
+            // 批采续砍目标: 围绕批锚点(刚砍的原木)扫 ±3 格 (用户:"扫一下这个原木的
+            // 位置的 3 格范围内还有别的原木吗")。首根未砍(_woodBatchBroken==0)时
+            // 不用这口径, 走正常最近目标选择。
+            Optional<BlockPos> woodBatchNext = (woodBatchActive && _woodBatchBroken > 0)
+                    ? getNearFieldOreAt(mod, getChainAnchor(), WOOD_BATCH_RADIUS)
+                    : Optional.empty();
             // (2026-08-30 木头立即拾取强制, 用户) 木头/床挖完必须立刻捡掉落, 不能
             // 等整片挖完再统一捡。原逻辑掉落优先级排在 _miningPos 粘性之后 → 挖完
             // 一根原木, getClosestTo 被"下一个还没挖完的原木"粘住, 这根越滚越不捡。
             // 木头/床: 掉落最优先, 脚下掉了马上捡再继续挖。
-            if (isCollectDropsImmediately() && closestDrop.isPresent()) {
+            // (2026-09-15 批采) 批采续砍期间掉落物让位: 砍满或 3 格内无下一根才轮到捡。
+            if (isCollectDropsImmediately() && closestDrop.isPresent() && woodBatchNext.isEmpty()) {
                 return closestDrop.map(Object.class::cast);
             }
             // [2026-08-22 挖矿目标粘性] 正在挖的方块还没挖完时绝不换目标:
@@ -847,23 +902,11 @@ public class MineAndCollectTask extends ResourceTask {
             // "挖了几个还没挖完又转头" (tasks.log 11:36:57 t=16304-16748
             // "Trying out NEW pursuit"/"Retrying old heuristic" 交替 7 个
             // 不同目标)。粘住 _miningPos 直到它失效(挖掉/不可挖/黑名单)。
-            if (_miningPos != null && !_blacklist.contains(_miningPos)) {
-                // (2026-09-03 兜底刷新, 用户"挖掉一个矿以为还在, 站原地傻等") 目标方块已
-                // 消失(世界验证为空气)时立即清空 _miningPos 刷新任务 — 不粘已挖掉的位置,
-                // 让后续逻辑重新锁最近目标/掉落物/探索。仅对已加载 chunk 判消失(未加载
-                // 的 getBlockState 恒 air, 直接判会误清远处合法目标)。
-                if (mod.getChunkTracker().isChunkLoaded(_miningPos)
-                        && mod.getWorld().getBlockState(_miningPos).isAir()) {
-                    // (2026-09-10 贪婪掉落宽限) 方块刚被挖掉 → 记录时刻, 供外层
-                    // isFinished 在贪婪模式下挂住等掉落物落地回册。
-                    _miningTargetBrokenMs = System.currentTimeMillis();
-                    // (2026-09-11 自挖因果记忆) 记住破坏位置 — "我自己挖掉的矿,
-                    // 我知道掉落物在哪"属结构推断线索, 供宽限窗口内 scoop 拾取。
-                    _lastSelfBrokenPos = _miningPos;
-                    _miningPos = null;
-                } else if (isValid(mod, _miningPos)) {
-                    return Optional.of(_miningPos);
-                }
+            // (2026-09-15 批采) "已变空气就清 _miningPos + 记破坏时刻/自挖记忆"的
+            // 记账已前置到本方法开头 (先于掉落优先返回, 否则批采计数漏记),
+            // 这里只保留粘性返回; 空气/黑名单/不可挖都由 isValid 兜底放行。
+            if (_miningPos != null && !_blacklist.contains(_miningPos) && isValid(mod, _miningPos)) {
+                return Optional.of(_miningPos);
             }
             // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它周围的 3x3x3:
             // 紧贴刚挖穿的连位矿下一 tick 就被看到并续挖 — 完全不需要缓存/节流,
@@ -873,7 +916,11 @@ public class MineAndCollectTask extends ResourceTask {
             int nearR = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
             // (2026-09-15 链挖锚点修复) 原: getNearFieldOreAt(mod, _miningPos, nearR)
             // —— _miningPos 刚被清空恒为 null, 链挖断链。改用 getChainAnchor()。
-            Optional<BlockPos> nearField = getNearFieldOreAt(mod, getChainAnchor(), nearR);
+            // (2026-09-15 批采) 木头批采转入拾取阶段 (砍满/背包达标) 时跳过链挖,
+            // 防止掉落物登记 1-2 tick 空窗内链挖续砍第 4 根 (违背"每挖3个拾取一次")。
+            Optional<BlockPos> nearField = (isTargetingWood() && _woodBatchBroken > 0 && !woodBatchActive)
+                    ? Optional.empty()
+                    : getNearFieldOreAt(mod, getChainAnchor(), nearR);
             if (nearField.isPresent()) {
                 return nearField.map(Object.class::cast);
             }
@@ -971,9 +1018,23 @@ public class MineAndCollectTask extends ResourceTask {
             // 被抢)。与链挖同口径兜底: 围绕链挖锚点 5x5x5 世界直扫 (125 块, 便宜)。
             // 扫完真没矿才算"本处挖完", 才轮到掉落物。
             if (nearbyMine.isEmpty()) {
-                nearbyMine = getNearFieldOreAt(mod, getChainAnchor(), 2);
+                // (2026-09-15 批采) 拾取阶段同样跳过锚点兜底扫, 理由同上。
+                if (!(isTargetingWood() && _woodBatchBroken > 0 && !woodBatchActive)) {
+                    nearbyMine = getNearFieldOreAt(mod, getChainAnchor(), 2);
+                }
             }
             if (isCollectDropsImmediately()) {
+                // (2026-09-15 批采续砍优先) 批采进行中先砍完邻位再捡 (与开头 early
+                // gate 同源的 woodBatchNext; 走到这里说明半径 1 的链挖没接上,
+                // 由批采口径 ±3 格补位 — 用户"3 格范围内还有别的原木就继续砍")。
+                if (woodBatchNext.isPresent()) {
+                    if (!woodBatchNext.get().equals(_woodBatchLastDiagPos)) {
+                        _woodBatchLastDiagPos = woodBatchNext.get();
+                        Debug.logMessage("[WOOD-BATCH] mine-first #" + (_woodBatchBroken + 1)
+                                + "/" + WOOD_BATCH_MAX + " -> " + _woodBatchLastDiagPos.toShortString());
+                    }
+                    return woodBatchNext.map(Object.class::cast);
+                }
                 // (2026-08-27 床边挖边捡, 用户) 上面"挖完本处再统一捡"的
                 // 优先级是给挖矿的 (矿脉落地物先放着, 挖完一块还有下一块)。
                 // 木头/床不一样: 木树高, 一次砍倒掉落物散一地; 床拆一张只掉
@@ -1384,6 +1445,47 @@ public class MineAndCollectTask extends ResourceTask {
             if (_lastSelfBrokenPos == null || _miningTargetBrokenMs == 0) return null;
             if (System.currentTimeMillis() - _miningTargetBrokenMs >= CHAIN_ANCHOR_MS) return null;
             return _lastSelfBrokenPos;
+        }
+
+        /**
+         * (2026-09-15 批采记账, 用户"每挖3个拾取一次") 木头目标: 本任务砍掉一根
+         * 原木时更新批计数与批锚点。新砍位置仍在上一根 ±{@link #WOOD_BATCH_RADIUS}
+         * 格内且未砍满 → 计数 +1 (同一批); 否则开新批 (计数 =1)。
+         * 只统计任务显式砍掉的 (DestroyBlockTask 流程); baritone 寻路顺刀砍的不计,
+         * 那是白捡的额外掉落, 由扫堆兜住。
+         */
+        private void onWoodBatchBroken(BlockPos broken) {
+            if (!isTargetingWood()) return;
+            boolean adjacentToBatch = _woodBatchAnchor != null
+                    && _woodBatchBroken > 0
+                    && _woodBatchBroken < WOOD_BATCH_MAX
+                    && Math.max(Math.max(
+                            Math.abs(broken.getX() - _woodBatchAnchor.getX()),
+                            Math.abs(broken.getY() - _woodBatchAnchor.getY())),
+                            Math.abs(broken.getZ() - _woodBatchAnchor.getZ())) <= WOOD_BATCH_RADIUS;
+            if (adjacentToBatch) {
+                _woodBatchBroken++;
+            } else {
+                _woodBatchBroken = 1;
+                Debug.logMessage("[WOOD-BATCH] new batch at " + broken.toShortString());
+            }
+            _woodBatchAnchor = broken;
+            _woodBatchLastDiagPos = null;
+            Debug.logMessage("[WOOD-BATCH] broken #" + _woodBatchBroken + "/" + WOOD_BATCH_MAX
+                    + " at " + broken.toShortString());
+        }
+
+        /**
+         * (2026-09-15 扫堆 gate, 用户"捡完这一堆再走") 脚边 ≤{@code 4} 格内是否还有
+         * 本目标掉落物没捡。供外层 isFinished 在木头数量达标后挂住任务继续捡,
+         * 把批采砍出来的一堆一次收齐, 不再"捡 1 根→回合成→再跑一趟"。
+         */
+        boolean hasNearbyWoodDropsToSweep(AltoClef mod) {
+            if (!isTargetingWood()) return false;
+            if (!mod.getEntityTracker().itemDropped(_targets)) return false;
+            Vec3d me = mod.getPlayer().getPos();
+            Optional<ItemEntity> closest = mod.getEntityTracker().getClosestItemDrop(me, _targets);
+            return closest.isPresent() && closest.get().squaredDistanceTo(me) <= WOOD_SWEEP_RANGE_SQ;
         }
 
         /**
