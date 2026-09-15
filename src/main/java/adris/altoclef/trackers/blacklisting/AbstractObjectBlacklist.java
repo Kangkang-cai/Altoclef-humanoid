@@ -44,22 +44,38 @@ public abstract class AbstractObjectBlacklist<T> {
         }
         BlacklistEntry entry = _entries.get(item);
         entry.totalFailures++;
-        entry.numberOfFailuresAllowed = numberOfFailuresAllowed;
         double newDistance = getPos(item).squaredDistanceTo(mod.getPlayer().getPos());
         MiningRequirement newTool = StorageHelper.getCurrentMiningRequirement(mod);
-        // For distance, add a slight threshold so it doesn't reset EVERY time we move a tiny bit closer.
-        boolean allowReset = entry.totalFailures < TOTAL_FAILURE_CAP;
-        // (2026-09-13) 距离改善路径加 5s 冷却: 失败比靠近更快时 RESET 会变成死循环。
-        int nowTick = WorldHelper.getTicks();
-        boolean toolUpgraded = newTool.ordinal() > entry.bestTool.ordinal();
-        boolean closer = newDistance < entry.bestDistanceSq - 1
-                && nowTick - entry.lastResetTick >= RESET_COOLDOWN_TICKS;
-        if (allowReset && (toolUpgraded || closer)) {
-            if (toolUpgraded) entry.bestTool = newTool;
-            if (newDistance < entry.bestDistanceSq) entry.bestDistanceSq = newDistance;
-            entry.numberOfFailures = 0;
-            entry.lastResetTick = nowTick;
-            Debug.logMessage("Blacklist RESET: " + item.toString());
+        // (2026-09-15 最严阈值粘滞) 旧实现无条件 entry.allowed = 本次调用值 ——
+        // "最后写入者赢", 任何一次宽松调用都会抹掉此前更严的判断。现场
+        // 20260915-160447: MineAndCollectTask 挖不动挥手失败 requestBlockUnreachable(pos, 2)
+        // → Try 1/2; 2s 后 DestroyBlockTask unreachable 路径默认阈值 4 把 allowed
+        // 覆盖成 4 → failures(2) > 4 恒 false → 永远拉不黑 → 上层立刻重选同格
+        // → 垫塔 handoff 死循环继续 20s (黑名单形同虚设)。
+        // 改: allowed 只取历史最严 (min)。全仓核对过没有调用方靠"再调一次传更大值"
+        // 放宽 —— MineAndCollect(2)/StoreInAnyContainer(2) 显式, 其余默认 4。
+        if (entry.totalFailures == 1) {
+            // 首次登记: 直接记基准。旧代码走下面的 RESET 分支, bestDistanceSq=∞
+            // 必然判"更近了" → 每个新目标第一次失败都打一行无意义的 "Blacklist RESET"。
+            entry.numberOfFailuresAllowed = numberOfFailuresAllowed;
+            entry.bestDistanceSq = newDistance;
+            entry.bestTool = newTool;
+        } else {
+            entry.numberOfFailuresAllowed = Math.min(entry.numberOfFailuresAllowed, numberOfFailuresAllowed);
+            // For distance, add a slight threshold so it doesn't reset EVERY time we move a tiny bit closer.
+            boolean allowReset = entry.totalFailures < TOTAL_FAILURE_CAP;
+            // (2026-09-13) 距离改善路径加 5s 冷却: 失败比靠近更快时 RESET 会变成死循环。
+            int nowTick = WorldHelper.getTicks();
+            boolean toolUpgraded = newTool.ordinal() > entry.bestTool.ordinal();
+            boolean closer = newDistance < entry.bestDistanceSq - 1
+                    && nowTick - entry.lastResetTick >= RESET_COOLDOWN_TICKS;
+            if (allowReset && (toolUpgraded || closer)) {
+                if (toolUpgraded) entry.bestTool = newTool;
+                if (newDistance < entry.bestDistanceSq) entry.bestDistanceSq = newDistance;
+                entry.numberOfFailures = 0;
+                entry.lastResetTick = nowTick;
+                Debug.logMessage("Blacklist RESET: " + item.toString());
+            }
         }
         entry.numberOfFailures++;
         Debug.logMessage("Blacklist: " + item.toString() + ": Try " + entry.numberOfFailures + " / " + entry.numberOfFailuresAllowed
