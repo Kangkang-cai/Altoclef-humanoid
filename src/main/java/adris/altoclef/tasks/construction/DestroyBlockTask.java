@@ -26,7 +26,11 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.Optional;
 
@@ -367,6 +371,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (!_tryToMineTimer.elapsed()) {
             if (_miningTotalTimer.elapsed()) {
                 // 持续可达 45s 仍没挖穿 (空手最慢石头 ~7.5s×富余) → 挖掘无效, 放弃。
+                adris.altoclef.util.helpers.TimeoutLog.hit("DestroyBlockTask.miningTotal", "45s reachable but never broke " + _pos.toShortString());
                 setDebugState("Mining stalled, giving up");
                 mod.getBlockTracker().requestBlockUnreachable(_pos);
                 return null;
@@ -394,6 +399,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         } else {
             setDebugState("Getting to block...");
+
+            // (2026-09-15 叶包裹不垫塔) 目标本体已在挖掘距离内、只是视线被中间方块
+            // (树叶等可挖方块)挡住 → 先挖掉挡块, 不进垫塔。现场 20260915-174702:
+            // 原木 (9,79,183) 被橡树叶包裹, bot 站 2 格外 eyeY=79.74, targetAboveEye
+            // (80>=79.74) 以 0.26 的边距成立 → 每 0.6s 重进 PillarApproach 原地跳
+            // 18s 一格不升 (起跳瞬间 eyeY 越过 80 → reach 短暂出现 → endPillar →
+            // 落地重入)。人对"手边被树叶包住的原木"不会先垫塔, 会先把叶子撸掉。
+            // 只有目标超出挖掘距离 (真够不着) 或挡块挖不动时才落回垫塔/放弃路径。
+            if (tryClearOccluder(mod)) {
+                _gettingToBlockTick = 0;
+                return null;
+            }
 
             // (2026-09-14 缺垫块 → 先去挖几格) 用户: "没方块为什么不触发挖几个方块"。
             // 目标在头顶 + 水平已在身边 + 完全没有可用垫块 (原木不算, 见 _pillarMaterials)
@@ -483,6 +500,48 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      * @return true = 本 tick 已由垫塔接管 (含"垫不动 → 判不可达"); false = 垫塔
      *         不适用 (目标不在上方 / 水平还没到位 / 没材料), 交回原导航+放弃逻辑。
      */
+    // (2026-09-15 叶包裹不垫塔) 挡块日志节流: 同一块只打一次, 避免每 tick 刷屏。
+    private BlockPos _lastOccluderLogged;
+
+    /**
+     * (2026-09-15 叶包裹不垫塔) 目标在挖掘距离内但视线被可挖方块挡住 → 挖掉挡块。
+     *
+     * @return true = 本 tick 已转为挖挡块; false = 目标真够不着 / 挡块挖不动 /
+     *         挡块自己也够不着, 交回垫塔与放弃路径。
+     */
+    private boolean tryClearOccluder(AltoClef mod) {
+        Vec3d eye = mod.getPlayer().getEyePos();
+        Vec3d center = Vec3d.ofCenter(_pos);
+        // 只处理"目标本体已在挖掘距离内"的情形 —— 超出 reach 的目标是导航/垫塔问题,
+        // 隔空够不着的挡块挖了也是白挖 (射线终点到不了目标附近)。
+        if (eye.distanceTo(center) > 4.5) return false;
+        BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(eye, center,
+                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+        if (hit.getType() != HitResult.Type.BLOCK) return false;
+        BlockPos occ = hit.getBlockPos();
+        if (occ.equals(_pos)) return false;
+        BlockState state = mod.getWorld().getBlockState(occ);
+        if (state.isAir() || state.getHardness(mod.getWorld(), occ) < 0) return false;
+        Optional<Rotation> occReach = LookHelper.getReach(occ);
+        if (occReach.isEmpty()) return false; // 挡块自己也够不着 → 交回原路径
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        mod.getClientBaritone().getBuilderProcess().onLostControl();
+        if (!LookHelper.isLookingAt(mod, occ)) {
+            LookHelper.lookAt(mod, occReach.get());
+        }
+        if (LookHelper.isLookingAt(mod, occ)) {
+            // 与常规挖掘分支同款: 左键由 PlayerInteractionFixChain 配工具。
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+        }
+        if (!occ.equals(_lastOccluderLogged)) {
+            _lastOccluderLogged = occ;
+            Debug.logToFile("altoclef_diag.log", "[OccluderClear] clearing " + occ.toShortString()
+                    + " (" + state.getBlock().toString() + ") blocking target=" + _pos.toShortString());
+        }
+        setDebugState("Clearing occluder " + occ.toShortString() + " in front of " + _pos.toShortString());
+        return true;
+    }
+
     private boolean tryPillarUpToReach(AltoClef mod) {
         // (2026-09-14 交还 baritone) 已经让位给 baritone 的垂直搭高: 期间不要抢
         // 输入通道, 只盯着"够到了没 / 超时没"。抢回去 = 把它的 pillar 腰斩。
@@ -588,6 +647,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限)。
             //    (2026-09-14 v4) 自写垫塔垫不动 ≠ 目标不可达 —— baritone 的
             //    MovementPillar 是另一套实现, 它会挖。先让位一次, 再失败才拉黑。
+            adris.altoclef.util.helpers.TimeoutLog.hit("DestroyBlockTask.pillarStall",
+                    "noProgress=" + _pillarNoProgressTimer.elapsed() + " total=" + _pillarTotalTimer.elapsed()
+                            + " target=" + _pos.toShortString());
             Debug.logToFile("altoclef_diag.log", "[PillarApproach] give up target="
                     + _pos.toShortString()
                     + " y=" + mod.getPlayer().getBlockPos().getY()
