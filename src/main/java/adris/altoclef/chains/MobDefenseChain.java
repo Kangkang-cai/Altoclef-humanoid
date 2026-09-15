@@ -10,6 +10,7 @@ import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.PathReachabilityHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.baritone.CachedProjectile;
 import adris.altoclef.util.time.TimerGame;
@@ -476,17 +477,27 @@ public class MobDefenseChain extends SingleTaskChain {
     private boolean shouldRetreatMelee(AltoClef mod, List<Entity> hostiles) {
         boolean anyRanged = false, anyCreeper = false;
         int meleeCount = 0;
+        // (2026-09-15 用户) 激怒猪灵围殴实测打不过 3 只(持剑): 感知到的猪灵系
+        // 超过 2 只直接跑, 不进 melee-few 判定硬打。只数"看得见"的 (模仿人类,
+        // 墙后/没看见的不算, 与 GOLD-GATE 挖金闸同口径)。激怒猪灵已在敌对
+        // 名单里 (ANGRY_AT/被打记忆), 走到这里的本身就是"激怒了"。
+        int piglinSwarm = 0;
         for (Entity h : hostiles) {
             if (h == null || !h.isAlive()) continue;
             if (h instanceof CreeperEntity) { anyCreeper = true; continue; }
             if (isRangedThreat(h)) { anyRanged = true; continue; }
+            if ((h instanceof PiglinEntity || h instanceof PiglinBruteEntity)
+                    && VisibilityHelper.isEntityVisible(mod, h)) {
+                piglinSwarm++;
+            }
             meleeCount++;
         }
-        boolean retreat = anyRanged || anyCreeper || meleeCount >= RETREAT_MELEE_THRESHOLD;
+        boolean retreat = piglinSwarm > 2 || anyRanged || anyCreeper || meleeCount >= RETREAT_MELEE_THRESHOLD;
         long nowMs = System.currentTimeMillis();
         if (nowMs - _lastRetreatDecLogMs > 500) {
             _lastRetreatDecLogMs = nowMs;
             String m = "[RETREAT-DEC] meleeCount=" + meleeCount
+                    + " piglinSwarm=" + piglinSwarm
                     + " isRanged=" + anyRanged
                     + " isCreeper=" + anyCreeper
                     + " decide=" + (retreat ? "retreat" : "fight");

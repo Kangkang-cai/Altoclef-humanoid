@@ -1117,8 +1117,8 @@ public class MineAndCollectTask extends ResourceTask {
         // (尤其持剑) 是必输局 (20260915-123005 实锤: 3 只围殴 4 秒掉 16 血)。闸门:
         // 目标金块 16 格内猪灵(成年, 含【未被感知/藏在墙后】的) > 1 只 → 该块本轮
         // 不可选。全部候选被闸 → getClosestTo 落空 → 框架自然走 wander 探索 →
-        // bot 离开猪灵密集区。计数不看 LOS: 客户端对跟踪距离内实体全知 (墙后也算),
-        // 恰好覆盖"感知不到但存在"的危险源。
+        // bot 离开猪灵密集区。计数只看"感知到"的 (2026-09-15 用户: 模仿人类,
+        // bot 不知道墙后没看见的猪灵存在, 不能拿上帝视角全知计数)。
         private static final double PIGLIN_ANGER_RADIUS = 16.0;
         private static final int PIGLIN_MINE_MAX_COUNT = 1;
         private static final Set<Block> PIGLIN_ANGERING_BLOCKS = Set.of(
@@ -1128,9 +1128,10 @@ public class MineAndCollectTask extends ResourceTask {
 
         /**
          * 挖金猪灵闸: 该方块是挖了会激怒猪灵的金矿, 且其 {@link #PIGLIN_ANGER_RADIUS}
-         * (原版挖金激怒半径) 内成年猪灵+猪灵蛮兵 (含未被感知的) 数量 >
+         * (原版挖金激怒半径) 内【被 bot 感知到 (可见)】的成年猪灵+猪灵蛮兵数量 >
          * {@link #PIGLIN_MINE_MAX_COUNT} → 返回 true (本轮不可挖)。僵尸猪灵不激怒
-         * 于挖金, 不计。开销: 仅对通过既有过滤的候选矿块执行, 一次实体表遍历。
+         * 于挖金, 不计。开销: 仅对通过既有过滤的候选矿块执行, 一次实体表遍历
+         * (仅对近距候选跑 LOS 射线)。
          */
         private boolean piglinDensityGated(AltoClef mod, BlockPos p) {
             Block block = mod.getWorld().getBlockState(p).getBlock();
@@ -1139,12 +1140,14 @@ public class MineAndCollectTask extends ResourceTask {
             double radiusSq = PIGLIN_ANGER_RADIUS * PIGLIN_ANGER_RADIUS;
             Vec3d center = Vec3d.ofCenter(p);
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
-                for (PiglinEntity pig : mod.getEntityTracker().getTrackedEntities(PiglinEntity.class)) {
-                    if (pig.isAlive() && !pig.isBaby() && pig.squaredDistanceTo(center) <= radiusSq) count++;
-                }
-                for (PiglinBruteEntity brute : mod.getEntityTracker().getTrackedEntities(PiglinBruteEntity.class)) {
-                    if (brute.isAlive() && brute.squaredDistanceTo(center) <= radiusSq) count++;
-                }
+            for (PiglinEntity pig : mod.getEntityTracker().getTrackedEntities(PiglinEntity.class)) {
+                if (pig.isAlive() && !pig.isBaby() && pig.squaredDistanceTo(center) <= radiusSq
+                        && VisibilityHelper.isEntityVisible(mod, pig)) count++;
+            }
+            for (PiglinBruteEntity brute : mod.getEntityTracker().getTrackedEntities(PiglinBruteEntity.class)) {
+                if (brute.isAlive() && brute.squaredDistanceTo(center) <= radiusSq
+                        && VisibilityHelper.isEntityVisible(mod, brute)) count++;
+            }
             }
             if (count <= PIGLIN_MINE_MAX_COUNT) return false;
             long now = System.currentTimeMillis();

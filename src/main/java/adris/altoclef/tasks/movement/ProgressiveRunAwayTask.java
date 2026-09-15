@@ -66,6 +66,21 @@ public class ProgressiveRunAwayTask extends CustomBaritoneGoalTask {
     }
 
     @Override
+    protected void onStart(AltoClef mod) {
+        super.onStart(mod);
+        // (2026-09-15 用户) 逃跑禁止挖墙: 上局被激怒猪灵追击时 baritone 边跑边
+        // 挖墙, 挖出的洞被猪灵跟进 → 围殴致死。跑路只走现成通道 (allowBreak=false),
+        // allowPlace 保持放开 (跳格垫块属防守性动作)。onStop 恢复, 不影响挖掘类任务。
+        mod.getClientBaritoneSettings().allowBreak.value = false;
+    }
+
+    @Override
+    protected void onStop(AltoClef mod, Task interruptTask) {
+        mod.getClientBaritoneSettings().allowBreak.value = true;
+        super.onStop(mod, interruptTask);
+    }
+
+    @Override
     protected Goal newGoal(AltoClef mod) {
         // (2026-09-01 用户) 新触发的逃跑统一复位起点 = 当前离最近威胁怪的实际距离,
         // 而不是沿用上次 ratchet 的残余 _currentDistance。仅"新实例"生效一次(pendingReset),
