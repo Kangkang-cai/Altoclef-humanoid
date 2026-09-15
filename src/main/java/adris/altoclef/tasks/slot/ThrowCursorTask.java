@@ -66,6 +66,16 @@ import net.minecraft.util.math.Vec3d;
  *   - 坑选择: 3 格内是上次落点 → 跳过 (不丢回原地); 有离开方向时只收前向半球
  *     (dot ≥ 0.2), 全无才退回全向; 同级 (深/浅) 内偏好更远 (≥5 格封顶, 太远丢不进);
  *   - 现挖一格: 方向优先级 离开方向 > 当前朝向 > 四向兜底。
+ *
+ * (2026-09-15 丢弃会话 static 继承, 用户"又是我介入才进行下去", 095835 会话实锤:
+ *   ThrowCursor 平均每 2s 被抢断/整树重建一次, 09:58:59-10:00:05 几十轮零丢出。
+ *   三类抢断者: ① EnsureFreeCursorSlotTask 放置↔抛丢自我翻面 ② 容器链
+ *   freeing↔walk 翻面 ③ 上层任务目标变化整树重建 (isEqual 不匹配)。共同要害 =
+ *   任务实例一换, 瞄准/挖掘进度清零, 永远走不到丢出。修法: 阶段状态 (坑/挖格/
+ *   隧道/强制朝向 + 各自起始 tick) 全部改 static —— 进度跟着光标走, 实例怎么
+ *   重建都继承; 会话边界 = 光标非空且距上次活动 <2.5s, 丢完/换垃圾/长时间中断
+ *   才重开新会话。继承时瞄准起点只留 5 tick 余量, 既不"继承即丢看都不看",
+ *   也不给抢断任何拖延收益。)
  */
 public class ThrowCursorTask extends Task {
 
@@ -74,14 +84,15 @@ public class ThrowCursorTask extends Task {
     private TurnToOpenAreaTask _turnTask;
     // 主动挖通关卡的任务 (封闭时清理该方向前方实心块)。
     private DestroyBlockTask _digTask;
-    // (2026-09-11 弹回熔断) 弹回后先离开上次落点再丢。
-    private RunAwayFromPositionTask _runAwayTask;
+    // (_runAwayTask/_runAwayStartTick 已改 static, 见下方丢弃会话块。)
     // (2026-09-11) 挖开处计数, 上限防无限挖。 → (2026-09-12 废弃: 改用户钦定隧道流程)
-    // (2026-09-12 用户钦定隧道流程) 隧道目标: 近格(d=1 头高)/远格(d=2 头高)。
-    private BlockPos _tunnelNear;
-    private BlockPos _aimFar;
-    private int _tunnelStartTick = -1;
-    private int _aimStartTick = -1;
+    // (2026-09-15 丢弃会话 static 继承) 以下阶段状态全部 static: 实例被抢断/重建
+    // 时进度跟着光标走, 不再清零 (现场与机制见类注释)。同一时间只有一个
+    // ThrowCursorTask 活动 (_activeInstance), static 无并发问题。
+    private static BlockPos _tunnelNear;
+    private static BlockPos _aimFar;
+    private static int _tunnelStartTick = -1;
+    private static int _aimStartTick = -1;
     // 空手 ~7.5s/格 × 2 格 + 富余; 超时照丢 (光标必须清空)。
     private static final int TUNNEL_TIMEOUT_TICKS = 20 * 25;
     // 瞄准就位等待上限 (lookAt 是平滑转头)。
@@ -90,17 +101,18 @@ public class ThrowCursorTask extends Task {
     // RunAwayFromPositionTask 永不 finished → ThrowCursor 卡死在走开这步。
     // 走不动就放弃走开, 照常丢 (死点兜底)。
     private static final int RUNAWAY_TIMEOUT_TICKS = 20 * 5;
-    private int _runAwayStartTick = -1;
     // (2026-09-11) 丢出记录只做一次 (转向/挖格期间会多次走到 _throwTask 分支)。
-    private boolean _throwRecorded = false;
+    // static: 被抢断重建后不重复记录 (recordCursorThrown 时间戳必须是真实丢出)。
+    // 会话按物品划分 (_sessionItem), 新物品 onStart 自然重置 _throwRecorded。
+    private static boolean _throwRecorded = false;
     // (2026-09-15 丢坑优先) 现成坑/现挖洞的瞄准目标。
-    private BlockPos _pitHole;
-    private int _pitAimStartTick = -1;
-    // 现成坑每实例只扫一次 (扫描是全半径方块循环, 不每 tick 做)。
-    private boolean _pitScanned = false;
+    private static BlockPos _pitHole;
+    private static int _pitAimStartTick = -1;
+    // 现成坑每会话只扫一次 (扫描是全半径方块循环, 不每 tick 做)。
+    private static boolean _pitScanned = false;
     // (2026-09-15 现挖一格) 封闭且无现成坑 → 挖脚前一格地板成洞。
-    private BlockPos _digFloor;
-    private int _digFloorStartTick = -1;
+    private static BlockPos _digFloor;
+    private static int _digFloorStartTick = -1;
     // 现挖一格超时: 有 8s 豁免后空手一格 7.5s 足够, 30s 已是极端冗余 → 兜底照丢。
     private static final int DIG_FLOOR_TIMEOUT_TICKS = 20 * 30;
     // 现成坑扫描半径 / 最小水平距离 (太近丢进去也可能被拾取半径够到)。
@@ -109,18 +121,31 @@ public class ThrowCursorTask extends Task {
     // (2026-09-15) 豁免标记: 挖坑/隧道进行中, PlayerInteractionFixChain 不收回光标。
     private static ThrowCursorTask _activeInstance;
     // (2026-09-15 方向纪律) 弹回场景: 离开方向 (落点→当前位置, 水平单位向量)、
-    // 上次落点、强制朝向 (背对落点, pitch -15° 略仰增程)。
-    private Vec3d _preferredDir = null;
-    private BlockPos _lastDropPos = null;
-    private Rotation _forcedYaw = null;
-    private int _forceYawStartTick = -1;
+    // 上次落点、强制朝向 (背对落点, pitch -15° 略仰增程)。static 同上 (会话继承)。
+    private static Vec3d _preferredDir = null;
+    private static BlockPos _lastDropPos = null;
+    private static Rotation _forcedYaw = null;
+    private static int _forceYawStartTick = -1;
     // 面朝离开方向的转向兜底 (平滑转头 1s 足够, 超时照丢, 光标必须清空)。
     private static final int FORCE_YAW_TIMEOUT_TICKS = 20;
+    // (2026-09-15 丢弃会话 static 继承) 弹回走开子任务也 static (走开中途被抢断
+    // 不重走)。RunAwayFromPositionTask 实例无实例态依赖, 可跨实例复用。
+    private static RunAwayFromPositionTask _runAwayTask;
+    private static int _runAwayStartTick = -1;
+    // 会话活性: 每 tick 刷新; onStart 以 "同物品 + 距上次活动 <2.5s" 判定继承。
+    // (按物品而非纯时间: 连续丢多件时间隔 <2.5s, 新物品必须重开新会话重扫坑,
+    //  不能继承上一件的 _pitScanned=true 直接裸丢。)
+    private static Item _sessionItem = null;
+    private static long _lastActiveMs = 0;
+    private static final long SESSION_GAP_MS = 2500;
+    // 继承时瞄准起点留的余量 (tick): 既不"继承即丢", 也不给抢断拖延收益。
+    private static final int INHERIT_AIM_GRACE_TICKS = 5;
 
-    /** 挖坑/隧道进行中 → 8s 光标滞留超时豁免 (7.5s/格 vs 8s 超时死循环, 见类注释)。 */
+    /** 挖坑/隧道进行中 → 8s 光标滞留超时豁免 (7.5s/格 vs 8s 超时死循环, 见类注释)。
+     *  (2026-09-15) 阶段状态已 static 化, 不依赖实例存活 —— 实例被抢断重建的
+     *  间隙里豁免同样成立 (否则 8s 超时会在间隙误触)。 */
     public static boolean isDiggingForThrow() {
-        ThrowCursorTask t = _activeInstance;
-        return t != null && (t._tunnelNear != null || t._digFloor != null || t._pitHole != null);
+        return _tunnelNear != null || _digFloor != null || _pitHole != null;
     }
 
     /**
@@ -138,60 +163,84 @@ public class ThrowCursorTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
-        _turnTask = new TurnToOpenAreaTask();
-        _digTask = null;
-        _runAwayTask = null;
-        _throwRecorded = false;
-        _runAwayStartTick = -1;
-        _tunnelNear = null;
-        _aimFar = null;
-        _tunnelStartTick = -1;
-        _aimStartTick = -1;
-        _pitHole = null;
-        _pitAimStartTick = -1;
-        _pitScanned = false;
-        _digFloor = null;
-        _digFloorStartTick = -1;
-        _preferredDir = null;
-        _lastDropPos = null;
-        _forcedYaw = null;
-        _forceYawStartTick = -1;
         _activeInstance = this;
-        // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
-        if (!cursor.isEmpty() && mod.getPlayer() != null) {
-            Item item = cursor.getItem();
-            long lastThrow = ItemHelper.getLastCursorThrowMs(item);
-            long now = System.currentTimeMillis();
-            if (lastThrow > 0 && now - lastThrow <= ItemHelper.getThrowBounceWindowMs()) {
-                ItemHelper.notifyGarbageReturned(item);
-                BlockPos lastDrop = ItemHelper.getLastThrowDropPos(item);
-                if (lastDrop != null
-                        && lastDrop.isWithinDistance(mod.getPlayer().getBlockPos(), 6)) {
-                    // 先离开上次落点 ≥4 格, 再丢弃。
-                    _runAwayTask = new RunAwayFromPositionTask(4, lastDrop);
-                    _lastDropPos = lastDrop.toImmutable();
-                    // (2026-09-15 方向纪律) 记录离开方向 (落点→当前位置), 走开后
-                    // 强制面朝这个方向丢, 不交给 TurnToOpenAreaTask 乱挑方向。
-                    double dx = mod.getPlayer().getX() - (lastDrop.getX() + 0.5);
-                    double dz = mod.getPlayer().getZ() - (lastDrop.getZ() + 0.5);
-                    double len = Math.sqrt(dx * dx + dz * dz);
-                    if (len > 0.5) {
-                        _preferredDir = new Vec3d(dx / len, 0, dz / len);
-                        float yaw = (float) Math.toDegrees(
-                                Math.atan2(-_preferredDir.x, _preferredDir.z));
-                        _forcedYaw = new Rotation(yaw, -15f);
-                        _turnTask = null; // 方向已定, 不再挑"最开阔"。
+        // (2026-09-15 丢弃会话 static 继承) 同一件垃圾的丢弃流程被抢断/重建 →
+        // 继承 static 阶段状态, 进度不清零。不同物品 = 新会话 (重扫坑)。
+        boolean inherit = !cursor.isEmpty() && cursor.getItem() == _sessionItem
+                && _lastActiveMs > 0
+                && System.currentTimeMillis() - _lastActiveMs < SESSION_GAP_MS;
+        if (!inherit) {
+            // 新会话: 清阶段状态 + 弹回检测。
+            _sessionItem = cursor.isEmpty() ? null : cursor.getItem();
+            _turnTask = new TurnToOpenAreaTask();
+            _digTask = null;
+            _runAwayTask = null;
+            _runAwayStartTick = -1;
+            _throwRecorded = false;
+            _tunnelNear = null;
+            _aimFar = null;
+            _tunnelStartTick = -1;
+            _aimStartTick = -1;
+            _pitHole = null;
+            _pitAimStartTick = -1;
+            _pitScanned = false;
+            _digFloor = null;
+            _digFloorStartTick = -1;
+            _preferredDir = null;
+            _lastDropPos = null;
+            _forcedYaw = null;
+            _forceYawStartTick = -1;
+            // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
+            if (!cursor.isEmpty() && mod.getPlayer() != null) {
+                Item item = cursor.getItem();
+                long lastThrow = ItemHelper.getLastCursorThrowMs(item);
+                long now = System.currentTimeMillis();
+                if (lastThrow > 0 && now - lastThrow <= ItemHelper.getThrowBounceWindowMs()) {
+                    ItemHelper.notifyGarbageReturned(item);
+                    BlockPos lastDrop = ItemHelper.getLastThrowDropPos(item);
+                    if (lastDrop != null
+                            && lastDrop.isWithinDistance(mod.getPlayer().getBlockPos(), 6)) {
+                        // 先离开上次落点 ≥4 格, 再丢弃。
+                        _runAwayTask = new RunAwayFromPositionTask(4, lastDrop);
+                        _lastDropPos = lastDrop.toImmutable();
+                        // (2026-09-15 方向纪律) 记录离开方向 (落点→当前位置), 走开后
+                        // 强制面朝这个方向丢, 不交给 TurnToOpenAreaTask 乱挑方向。
+                        double dx = mod.getPlayer().getX() - (lastDrop.getX() + 0.5);
+                        double dz = mod.getPlayer().getZ() - (lastDrop.getZ() + 0.5);
+                        double len = Math.sqrt(dx * dx + dz * dz);
+                        if (len > 0.5) {
+                            _preferredDir = new Vec3d(dx / len, 0, dz / len);
+                            float yaw = (float) Math.toDegrees(
+                                    Math.atan2(-_preferredDir.x, _preferredDir.z));
+                            _forcedYaw = new Rotation(yaw, -15f);
+                            _turnTask = null; // 方向已定, 不再挑"最开阔"。
+                        }
+                        Debug.logMessage("(ThrowCursorTask) [ThrowBreaker] " + item
+                                + " bounced back within " + (now - lastThrow) / 1000 + "s — walking away from last drop pos before rethrow");
                     }
-                    Debug.logMessage("(ThrowCursorTask) [ThrowBreaker] " + item
-                            + " bounced back within " + (now - lastThrow) / 1000 + "s — walking away from last drop pos before rethrow");
                 }
+            }
+        } else {
+            // 继承: 瞄准起点若已在计时, 只留 5 tick 余量 (不"继承即丢", 也不给
+            // 抢断拖延收益); 挖掘/走开进度原样保留。
+            _digTask = null;
+            if (_pitAimStartTick >= 0) {
+                _pitAimStartTick = WorldHelper.getTicks() - AIM_TIMEOUT_TICKS + INHERIT_AIM_GRACE_TICKS;
+            }
+            if (_aimStartTick >= 0) {
+                _aimStartTick = WorldHelper.getTicks() - AIM_TIMEOUT_TICKS + INHERIT_AIM_GRACE_TICKS;
+            }
+            if (_forceYawStartTick >= 0) {
+                _forceYawStartTick = WorldHelper.getTicks() - FORCE_YAW_TIMEOUT_TICKS + INHERIT_AIM_GRACE_TICKS;
             }
         }
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-15 会话活性) 每 tick 刷新, 供下个实例的 onStart 判定继承。
+        _lastActiveMs = System.currentTimeMillis();
         // 0) (2026-09-11) 弹回后先离开上次落点, 走开后再转向丢弃。
         //    (2026-09-12 v10) 封闭空间兜底: baritone 无路时 RunAway 永不完成 →
         //    卡死死点。5s 走不动就放弃, 直接进入转向+丢弃流程。

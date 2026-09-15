@@ -56,6 +56,17 @@ public abstract class DoStuffInContainerTask extends Task {
         return _freeTask;
     }
 
+    /**
+     * (2026-09-15) 腾位是否正在进行中: 光标非空且被腾位链租用 (垃圾已上光标,
+     * 正由 ThrowCursorTask 瞄准/挖掘/丢出)。此刻背包里"多出来的空位"是垃圾刚
+     * 被拿起的槽, 不代表腾位完成 —— 用它判定会翻面走路/收产物, 把丢弃掐断
+     * (095835 会话 10:00 实锤, ThrowCursor aim 每 2s 被打断, 进度清零)。
+     */
+    private boolean isFreeingInFlight() {
+        return !StorageHelper.getItemStackInCursorSlot().isEmpty()
+                && CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE);
+    }
+
     public DoStuffInContainerTask(Block[] containerBlocks, ItemTarget containerTarget) {
         _containerBlocks = containerBlocks;
         _containerTarget = containerTarget;
@@ -114,7 +125,13 @@ public abstract class DoStuffInContainerTask extends Task {
             // 直接丢 → 撞面前方块弹回背包 → 无限循环。此刻界面开着, 由 EnsureFree
             // 负责真正腾出空格; EnsureFree 内部能合并/丢垃圾/挖面前方块, 腾完再收。
             // 判定用【背包真实空槽数==0】(getSlotThatCanFit 依赖光标物品会误判)。
-            if (mod.getPlayer() != null && mod.getPlayer().getInventory().getEmptySlot() < 0) {
+            // (2026-09-15 freeingInFlight) 垃圾刚从槽里拿上光标 (腾位进行中, 待
+            // ThrowCursor 丢出) 的瞬间背包就"多了一个空位", 仅凭 getEmptySlot()<0
+            // 判定会在这里翻面收产物/走路, 把瞄准中的丢弃掐断 (095835 会话 10:00
+            // 实锤: ThrowCursor aim 每 2s 被 walk/收产物打断, 进度清零)。光标被
+            // 腾位链租用 = 腾位仍在进行, 继续维持腾位子树。
+            if (mod.getPlayer() != null
+                    && (mod.getPlayer().getInventory().getEmptySlot() < 0 || isFreeingInFlight())) {
                 // 关键: 必须先关掉容器界面, 否则 EnsureFree→ThrowCursorTask→DestroyBlockTask
                 // 挖面前方块时 closeScreen 关界面, 下一 tick 父链又把它切回 walk&open,
                 // 挖方块永远被掐断(根因就是这里)。主动关界面后, 父链 isContainerOpen=false
@@ -294,7 +311,9 @@ public abstract class DoStuffInContainerTask extends Task {
         // 腾出空格后父链才真正走去打开容器, 不再死锁。
         // 判定用【背包真实空槽数==0】(而非 getSlotThatCanFit, 后者依赖光标物品 —
         // 满包收物时光标常为空, 会误判放得下而跳过腾位)。
-        if (mod.getPlayer() != null && mod.getPlayer().getInventory().getEmptySlot() < 0) {
+        // (2026-09-15 freeingInFlight) 同上: 垃圾上光标腾位进行中别翻去走路。
+        if (mod.getPlayer() != null
+                && (mod.getPlayer().getInventory().getEmptySlot() < 0 || isFreeingInFlight())) {
             setDebugState("Freeing inventory before opening container");
             return acquireFreeTask();
         }

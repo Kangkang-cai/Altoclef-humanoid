@@ -36,12 +36,23 @@ public class EnsureFreeCursorSlotTask extends Task {
     private static final long CURSOR_FREE_LIMIT_TICKS = 40; // ~2s, 超过则强制抛丢
     private long _startTick = -1;
 
+    // (2026-09-15 放置点击落地 latch, 用户"又是我介入才进行下去", 095835 会话
+    //  09:58:59-10:00:05 实锤) 槽位点击生效有 1-2 tick 客户端同步延迟。放置点击
+    // 刚发出就重判, 光标仍显示非空 → _placeAttempts 3 次烧完进抛丢级联派
+    // ThrowCursor → 下一 tick 又回到放置 → 每 0.3s 一轮自我翻面, ThrowCursor
+    // 瞄准反复清零, 几十轮零丢出。修法: 放置点击发出后挂起 2 tick 等同步落地
+    // (返回同一实例, 任务树不换), 期间不烧尝试次数; 光标空了自然走收尾分支。
+    private Task _pendingPlaceTask = null;
+    private int _placeWaitTicks = 0;
+
     @Override
     protected void onStart(AltoClef mod) {
          // YEET
          _placeAttempts = 0;
          _lockTargetSlot = null;
          _startTick = WorldHelper.getTicks();
+         _pendingPlaceTask = null;
+         _placeWaitTicks = 0;
     }
 
     @Override
@@ -50,6 +61,13 @@ public class EnsureFreeCursorSlotTask extends Task {
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
 
         if (!cursor.isEmpty()) {
+            // (2026-09-15 放置点击落地 latch) 刚发出的放置点击等 2 tick 再判。
+            if (_pendingPlaceTask != null && _placeWaitTicks > 0) {
+                _placeWaitTicks--;
+                setDebugState("Waiting for place click to land...");
+                return _pendingPlaceTask;
+            }
+            _pendingPlaceTask = null;
             // (2026-09-02 硬时间兜底) 光标长期放不下 → 直接强制抛丢级联, 不让
             // 交换死锁无限拖 (详见字段注释)。
             if (_startTick >= 0 && WorldHelper.getTicks() - _startTick > CURSOR_FREE_LIMIT_TICKS) {
@@ -62,7 +80,9 @@ public class EnsureFreeCursorSlotTask extends Task {
                 // 优先复用已锁定的目标槽 (锁定的槽若仍能放同物就不换)。
                 if (_lockTargetSlot != null && canPlaceCursorIntoSlot(cursor, _lockTargetSlot)) {
                     setDebugState("Moving cursor stack back");
-                    return new ClickSlotTask(_lockTargetSlot);
+                    _pendingPlaceTask = new ClickSlotTask(_lockTargetSlot);
+                    _placeWaitTicks = 2;
+                    return _pendingPlaceTask;
                 }
                 // (2026-09-01 根因修复: "光标 44 木棍放不回, 背包空位很多") 旧真实扫描
                 // 遍历 getCurrentScreenSlots() = 当前屏幕【全部】窗口槽, 在 2x2 背包
@@ -85,7 +105,9 @@ public class EnsureFreeCursorSlotTask extends Task {
                     // altoclef_cursor.log, 便于以后日志核对达成情况。
                     Debug.logToFile("altoclef_cursor.log", "[CursorRealScan] placing cursor into real empty/mergeable slot " + realFit);
                     setDebugState("Moving cursor stack back (real empty/mergeable slot)");
-                    return new ClickSlotTask(realFit);
+                    _pendingPlaceTask = new ClickSlotTask(realFit);
+                    _placeWaitTicks = 2;
+                    return _pendingPlaceTask;
                 }
                 // 真实扫描无果 (真背包无空槽且无可合并堆) → 缓存兜底。
                 Optional<Slot> moveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
@@ -95,7 +117,9 @@ public class EnsureFreeCursorSlotTask extends Task {
                 // 点击前按真实屏幕栈复核, 过期答案作废 → 落回下方丢弃级联。
                 if (moveTo.isPresent() && canPlaceCursorIntoSlot(cursor, moveTo.get())) {
                     setDebugState("Moving cursor stack back");
-                    return new ClickSlotTask(moveTo.get());
+                    _pendingPlaceTask = new ClickSlotTask(moveTo.get());
+                    _placeWaitTicks = 2;
+                    return _pendingPlaceTask;
                 }
             }
             // 放不回去 (或多次放置仍腾不光标) → 丢弃级联, 与 EnsureFreeInventorySlotTask 一致。
@@ -131,6 +155,8 @@ public class EnsureFreeCursorSlotTask extends Task {
         }
         _placeAttempts = 0;
         _lockTargetSlot = null;
+        _pendingPlaceTask = null;
+        _placeWaitTicks = 0;
         return null;
     }
 
