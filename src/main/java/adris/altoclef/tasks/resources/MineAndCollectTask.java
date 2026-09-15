@@ -29,6 +29,7 @@ import baritone.api.utils.input.Input;
 import java.util.*;
 import java.util.function.Supplier;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.PiglinBruteEntity;
 import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.item.MiningToolItem;
@@ -1126,6 +1127,21 @@ public class MineAndCollectTask extends ResourceTask {
         // [GOLD-GATE] 诊断节流。
         private long _lastPiglinGateLogMs = 0;
 
+        // 感知判定按 tick 缓存: isEntityVisible 只依赖玩家视角与猪灵自身位置,
+        // 与"哪块矿"无关 —— 同一 tick 内对同一只猪灵结果恒定。不缓存的话
+        // "每候选矿块 × 每猪灵"重复射线, 密集金矿+多猪灵时最坏上百条/tick。
+        private long _piglinVisCacheTick = -1;
+        private final Map<UUID, Boolean> _piglinVisCache = new HashMap<>();
+
+        private boolean isPiglinPerceived(AltoClef mod, LivingEntity pig) {
+            long tick = WorldHelper.getTicks();
+            if (tick != _piglinVisCacheTick) {
+                _piglinVisCacheTick = tick;
+                _piglinVisCache.clear();
+            }
+            return _piglinVisCache.computeIfAbsent(pig.getUuid(), u -> VisibilityHelper.isEntityVisible(mod, pig));
+        }
+
         /**
          * 挖金猪灵闸: 该方块是挖了会激怒猪灵的金矿, 且其 {@link #PIGLIN_ANGER_RADIUS}
          * (原版挖金激怒半径) 内【被 bot 感知到 (可见)】的成年猪灵+猪灵蛮兵数量 >
@@ -1142,11 +1158,11 @@ public class MineAndCollectTask extends ResourceTask {
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
             for (PiglinEntity pig : mod.getEntityTracker().getTrackedEntities(PiglinEntity.class)) {
                 if (pig.isAlive() && !pig.isBaby() && pig.squaredDistanceTo(center) <= radiusSq
-                        && VisibilityHelper.isEntityVisible(mod, pig)) count++;
+                        && isPiglinPerceived(mod, pig)) count++;
             }
             for (PiglinBruteEntity brute : mod.getEntityTracker().getTrackedEntities(PiglinBruteEntity.class)) {
                 if (brute.isAlive() && brute.squaredDistanceTo(center) <= radiusSq
-                        && VisibilityHelper.isEntityVisible(mod, brute)) count++;
+                        && isPiglinPerceived(mod, brute)) count++;
             }
             }
             if (count <= PIGLIN_MINE_MAX_COUNT) return false;
