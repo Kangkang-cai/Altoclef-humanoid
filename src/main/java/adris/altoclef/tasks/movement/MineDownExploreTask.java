@@ -277,6 +277,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private final int _targetYMax;
     private int _targetY;
 
+    // (2026-09-15 实例重建继承 targetY, 104100 场次实锤) 探索实例因 handoff/
+    // AIRBORNE 频繁重建, 每次重建 onStart 重掷带内随机 targetY → 爬升线
+    // (targetY-16) 跟着跳 → 挖到一半被 "Going to y=NN" 反复抢走 (diag:
+    // 55→75→87→89→84→73 连续跳变)。带内继承上一轮值; 竖井正常收工
+    // ("Shaft done") 时清空重掷, 下一口井换高度。不同矿种带不重叠, 越界自动重掷。
+    private static int _lastRolledTargetY = Integer.MIN_VALUE;
+
     private final Deque<BlockPos> _digQueue = new ArrayDeque<>();
 
     private BlockPos _digStart;
@@ -443,7 +450,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
         _startedOnce = true;
         // (2026-09-05 目标带) 本轮目标高度: 生成带内随机取一点 (含两端)。
-        _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
+        // (2026-09-15 继承) 见 _lastRolledTargetY 注释: 重建继承, 收工重掷。
+        if (_lastRolledTargetY >= _targetYMin && _lastRolledTargetY <= _targetYMax) {
+            _targetY = _lastRolledTargetY;
+        } else {
+            _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
+        }
+        _lastRolledTargetY = _targetY;
         _digStart = mod.getPlayer().getBlockPos().down();
         _step = 0;
         _realDigs = 0;
@@ -823,6 +836,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 }
             }
             setDebugState("Shaft done, no ores found.");
+            // (2026-09-15) 竖井正常收工 → 清 targetY 继承, 下一口井重新随机换高度。
+            _lastRolledTargetY = Integer.MIN_VALUE;
             // FIX (stuck bug): if a cave exploration interrupted the FINAL step,
             // the queue may still hold undug blocks. isFinished used to require an
             // empty queue, so the task could never finish while onTick returned

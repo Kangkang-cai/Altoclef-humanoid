@@ -867,7 +867,9 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-09-13) 半径统一由 nearR 决定 (贪婪 5x5x5 / 非贪婪 3x3x3),
             // 与 hasNearFieldTarget 必须同口径, 见 GREEDY_NEAR_FIELD_RADIUS。
             int nearR = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
-            Optional<BlockPos> nearField = getNearFieldOreAt(mod, _miningPos, nearR);
+            // (2026-09-15 链挖锚点修复) 原: getNearFieldOreAt(mod, _miningPos, nearR)
+            // —— _miningPos 刚被清空恒为 null, 链挖断链。改用 getChainAnchor()。
+            Optional<BlockPos> nearField = getNearFieldOreAt(mod, getChainAnchor(), nearR);
             if (nearField.isPresent()) {
                 return nearField.map(Object.class::cast);
             }
@@ -959,6 +961,14 @@ public class MineAndCollectTask extends ResourceTask {
             //   ② 短范围内矿挖完了 → 捡掉落物;
             //   ③ 掉落也捡完 → 才去下一处(更远)矿。
             Optional<BlockPos> nearbyMine = pickNearestCacheOre(mod, pos, MINE_EVERYTHING_RANGE, false, true);
+            // (2026-09-15 判据统一, 104100 实锤) 16 格 gate 走 BlockTracker 感知缓存:
+            // 下界隧道壁里的连位矿从未 LOS 入册 → 缓存恒空 → "还有矿"误判 false →
+            // 矿脉挖到一半被 Pickup 抢占弃坑 (矿脉 35,80/-79/-78,-36/-37 挖到第二格
+            // 被抢)。与链挖同口径兜底: 围绕链挖锚点 5x5x5 世界直扫 (125 块, 便宜)。
+            // 扫完真没矿才算"本处挖完", 才轮到掉落物。
+            if (nearbyMine.isEmpty()) {
+                nearbyMine = getNearFieldOreAt(mod, getChainAnchor(), 2);
+            }
             if (isCollectDropsImmediately()) {
                 // (2026-08-27 床边挖边捡, 用户) 上面"挖完本处再统一捡"的
                 // 优先级是给挖矿的 (矿脉落地物先放着, 挖完一块还有下一块)。
@@ -1283,6 +1293,23 @@ public class MineAndCollectTask extends ResourceTask {
             return Optional.ofNullable(best);
         }
 
+        // (2026-09-15 链挖锚点修复, 104100 场次实锤) 挖掉一块矿后 _miningPos 立即
+        // 清空 (:859), 而链挖 getNearFieldOreAt 的锚点正是 _miningPos —— 锚点恰在
+        // "刚挖完"这一刻丢失, 3x3x3 链挖实际从未接续过。主世界靠 BlockTracker
+        // 缓存碰巧兜住 (矿暴露在隧道面能被 LOS 感知入册); 下界岩浆岩致密, 矿脉
+        // 嵌在壁里永远 occluded, 缓存 perceivable=0 → 链断 → "挖完本处再捡" gate
+        // 误判"没矿了" → 拾取抢占, 矿脉弃坑。修复: 挖掉方块时 _lastSelfBrokenPos
+        // 已记录破坏位置 (2026-09-11 scoop 复用), 宽限窗口内把它当链挖锚点回退。
+        private static final long CHAIN_ANCHOR_MS = 4000;
+
+        /** 链挖/收尾 gate 共用的锚点: 正在挖的块; 刚挖完 4s 内用破坏位置兜底。 */
+        private BlockPos getChainAnchor() {
+            if (_miningPos != null) return _miningPos;
+            if (_lastSelfBrokenPos == null || _miningTargetBrokenMs == 0) return null;
+            if (System.currentTimeMillis() - _miningTargetBrokenMs >= CHAIN_ANCHOR_MS) return null;
+            return _lastSelfBrokenPos;
+        }
+
         /**
          * (2026-09-01 贪心起始目标, 用户"贪心挖目标矿的3x3x3") 找玩家
          * GREEDY_TARGET_RANGE 内最近的可感知目标矿 (FOV+LOS, 不透视), 作为贪心的
@@ -1370,8 +1397,10 @@ public class MineAndCollectTask extends ResourceTask {
         boolean hasNearFieldTarget(AltoClef mod) {
             // (2026-09-13) 与非贪婪/贪婪各自的 getClosestTo 同口径, 见
             // GREEDY_NEAR_FIELD_RADIUS: 半径不一致会"判还有活但找不到目标"空转。
+            // (2026-09-15) 锚点同样与 getClosestTo 同口径 (getChainAnchor 含刚挖
+            // 完 4s 内的破坏位置兜底), 否则"判没活但链挖有目标"反向不一致。
             int r = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
-            Optional<BlockPos> m = getNearFieldOreAt(mod, _miningPos, r);
+            Optional<BlockPos> m = getNearFieldOreAt(mod, getChainAnchor(), r);
             if (m.isPresent()) return true;
             // 贪心: 玩家近身也有紧贴矿也算"还有活", 任务不结束 (等 getClosestTo 派发)。
             return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos(), r).isPresent();
