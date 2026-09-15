@@ -224,6 +224,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     //   footnote1: drop = max(0, min(digStart.y - floorY, k/2)) —— floorY 只拦"继续下降",
     //   没有任何上升分量, 起点在 floor 之下时 min() 取负值 → max(0,负) = 0 → 平挖。
     private static final int DEEP_ASCEND_BUFFER = 2;
+    // (2026-09-15 baritone-first 上行) 触发上行后先让位 baritone GoalYLevel 爬回目标
+    // 高度 (baritone 的 A* 可能借现成矿洞/地形省时间, 用户拍板), 自写 45° 楼梯降级为
+    // 看门狗兜底。看门狗: 脚下最高 Y 连续这么久没有净涨 ≥ MIN_GAIN → 判 baritone 爬
+    // 不动 (典型: 水淹岩层, baritone 垂直爬升在水体无解, 09-14 取证) → 回退楼梯。
+    private static final int BARITONE_ASCENT_STALL_SECONDS = 20;
+    private static final int BARITONE_ASCENT_STALL_MIN_GAIN = 2;
     // =========================================================================
     // (2026-09-05 下界目标带, 用户"高度无法确定, 只要在一个合适范围内, 适用于
     //  不同下界任务") 单点目标高度 (70) 改为【生成带】: 调用方给 [min,max], 每个
@@ -309,6 +315,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private boolean _nether = false;
     // (2026-09-05 下界基岩层逃生) true = 45° 楼梯【向上】挖回目标高度。
     private boolean _ascendMode = false;
+    // (2026-09-15 baritone-first 上行) true = 上行交给 baritone GoalYLevel 爬,
+    // 楼梯 (_ascendMode) 只在看门狗超时 / 水中场景启用。
+    private boolean _baritoneAscent = false;
+    private GetToYTask _baritoneAscentTask = null;
+    private int _baritoneAscentBestY = Integer.MIN_VALUE;
+    private final TimerGame _baritoneAscentStall = new TimerGame(BARITONE_ASCENT_STALL_SECONDS);
     private int _dirX = STAIR_DIR_X;
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
@@ -458,17 +470,25 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-10 主世界浅带上行, 用户"挖铁不应始终呆在 y=负值, 应往回 y=5~30")
         // 目标带下限为正 (铁 [5,30] 等浅带) 且玩家深陷带下 → 同样上行爬回带内;
         // 钻石 {-24,-24} 等负带任务不触发, 保持原隧道平挖语义不变。
-        _ascendMode = _digStart.getY() <= ascendTriggerY();
+        // (2026-09-15 baritone-first 上行) 干地触发 → 先 baritone 爬升 (可能借矿洞
+        // 省时间, 用户拍板); 只有水中 (baritone 垂直爬升在水体无解, 09-14 取证) 或
+        // baritone 看门狗超时才走自写楼梯。
+        boolean ascendTriggered = _digStart.getY() <= ascendTriggerY();
+        if (ascendTriggered && !mod.getPlayer().isTouchingWater()) {
+            enterBaritoneAscent(mod, "start below ascend line (y=" + _digStart.getY() + ")");
+        } else {
+            _ascendMode = ascendTriggered;
+        }
         // Already at mining depth? Don't dig a pointless 1-block "shaft" that
         // finishes instantly and leaves the bot wandering — dig a tunnel instead.
-        _tunnelMode = !_ascendMode && _digStart.getY() <= _targetY;
+        _tunnelMode = !_ascendMode && !_baritoneAscent && _digStart.getY() <= _targetY;
         if (_ascendMode) {
             int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
             _dirX = dir[0];
             _dirZ = dir[1];
-            Debug.logMessage("[MineDown] nether: below target depth (y=" + _digStart.getY()
-                    + ", target " + _targetY + "), climbing back up with an ascending staircase.");
-            Debug.logToFile("altoclef_diag.log", "[MineDown] nether ascend mode engaged at "
+            Debug.logMessage("[MineDown] below target depth (y=" + _digStart.getY()
+                    + ", target " + _targetY + ") in water, climbing back up with an ascending staircase.");
+            Debug.logToFile("altoclef_diag.log", "[MineDown] ascend (staircase, water) engaged at "
                     + _digStart.toShortString() + " (target y=" + _targetY + ").");
         } else if (_tunnelMode) {
             // Pick a random cardinal direction so consecutive tunnels don't
@@ -511,6 +531,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         return Math.max(TUNNEL_MIN_Y, _targetYMin);
     }
 
+    /**
+     * (2026-09-15 baritone-first 上行) 进入"baritone 爬升"阶段: 交给 GetToYTask
+     * (GoalYLevel) 往上爬, 本任务的楼梯队列停用。楼梯只在两种情况启用: ① 触发时
+     * 玩家在水里 (baritone 垂直爬升在水体无解, 09-14 取证); ② 看门狗超时
+     * (BARITONE_ASCENT_STALL_SECONDS 内最高 Y 净涨不足 BARITONE_ASCENT_STALL_MIN_GAIN)。
+     */
+    private void enterBaritoneAscent(AltoClef mod, String reason) {
+        _baritoneAscent = true;
+        _ascendMode = false;
+        _tunnelMode = false;
+        _inCave = false;
+        _subTask = null;
+        _miningTarget = null;
+        _digQueue.clear();
+        _baritoneAscentTask = new GetToYTask(_targetY);
+        _baritoneAscentBestY = mod.getPlayer().getBlockPos().getY();
+        _baritoneAscentStall.reset();
+        Debug.logMessage("[MineDown] " + reason + ": climbing back to y=" + _targetY
+                + " via baritone first (staircase = watchdog fallback).");
+        Debug.logToFile("altoclef_diag.log", "[MineDown-BaritoneAscent] engage (" + reason + ") at "
+                + mod.getPlayer().getBlockPos().toShortString() + " targetY=" + _targetY + ".");
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
 
@@ -518,17 +561,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 进行中若玩家已压到基岩层附近 (下界基岩顶面 y=4), 立即切上行模式: 清空当前
         // 向下队列, 换随机水平方向, 45° 楼梯向上挖回目标高度, 然后任务自然结束,
         // 由父任务以隧道平挖模式继续在目标高度探索。
-        if (_nether && !_ascendMode && mod.getPlayer().getBlockPos().getY() <= NETHER_ESCAPE_Y) {
-            _ascendMode = true;
+        if (_nether && !_ascendMode && !_baritoneAscent
+                && mod.getPlayer().getBlockPos().getY() <= NETHER_ESCAPE_Y) {
             _tunnelMode = false;
             _inCave = false;
             _subTask = null;
             _caveExploreCooldownSteps = 0;
-            retreatAndRedig(mod);
-            Debug.logMessage("[MineDown] nether: hit bedrock floor zone (y="
-                    + mod.getPlayer().getBlockPos().getY() + "), switching to ascending staircase back to y=" + _targetY + ".");
-            Debug.logToFile("altoclef_diag.log", "[MineDown] nether bedrock escape: ascending from "
-                    + mod.getPlayer().getBlockPos().toShortString() + " to target y=" + _targetY + ".");
+            if (mod.getPlayer().isTouchingWater()) {
+                // (2026-09-15 baritone-first) 水中 baritone 垂直爬升无解 → 直接楼梯。
+                _ascendMode = true;
+                retreatAndRedig(mod);
+                Debug.logMessage("[MineDown] nether: hit bedrock floor zone (y="
+                        + mod.getPlayer().getBlockPos().getY() + ") in water, ascending staircase to y=" + _targetY + ".");
+                Debug.logToFile("altoclef_diag.log", "[MineDown] nether bedrock escape (water): ascending from "
+                        + mod.getPlayer().getBlockPos().toShortString() + " to target y=" + _targetY + ".");
+            } else {
+                enterBaritoneAscent(mod, "nether bedrock escape (y="
+                        + mod.getPlayer().getBlockPos().getY() + ")");
+            }
         }
 
         // (2026-09-14 主世界深陷兜底) 上一处只管下界。主世界 bot 在挖掘【过程中】也会
@@ -538,19 +588,57 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 与下界同款处置: 立刻切上行模式挖回目标带。用 tunnelFloorY() 而不是
         // ascendTriggerY(): 开局判定需要缓冲防抖动, 这里是已经跑偏的事实纠正, 不必
         // 再等 2 格 —— 玩家在 TUNNEL_MIN_Y 以下就该马上开始爬。
-        if (!_nether && !_ascendMode && mod.getPlayer().getBlockPos().getY() < tunnelFloorY()) {
-            _ascendMode = true;
+        if (!_nether && !_ascendMode && !_baritoneAscent
+                && mod.getPlayer().getBlockPos().getY() < tunnelFloorY()) {
             _tunnelMode = false;
             _inCave = false;
             _subTask = null;
             _caveExploreCooldownSteps = 0;
-            retreatAndRedig(mod);
-            Debug.logMessage("[MineDown] below mining floor (y="
-                    + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY()
-                    + "), climbing back to y=" + _targetY + ".");
-            Debug.logToFile("altoclef_diag.log", "[MineDown-FloorEscape] 低于行事线 "
-                    + tunnelFloorY() + " at " + mod.getPlayer().getBlockPos().toShortString()
-                    + " targetY=" + _targetY + " tunnelMode -> ascendMode.");
+            if (mod.getPlayer().isTouchingWater()) {
+                // (2026-09-15 baritone-first) 水中 baritone 垂直爬升无解 → 直接楼梯。
+                _ascendMode = true;
+                retreatAndRedig(mod);
+                Debug.logMessage("[MineDown] below mining floor (y="
+                        + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY()
+                        + ") in water, climbing back to y=" + _targetY + " with a staircase.");
+                Debug.logToFile("altoclef_diag.log", "[MineDown-FloorEscape] 低于行事线 "
+                        + tunnelFloorY() + " at " + mod.getPlayer().getBlockPos().toShortString()
+                        + " targetY=" + _targetY + " (water) -> ascendMode (staircase).");
+            } else {
+                enterBaritoneAscent(mod, "below mining floor (y="
+                        + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY() + ")");
+            }
+        }
+
+        // (2026-09-15 baritone-first 上行) 爬升阶段: 交给 baritone, 本任务只做看门狗。
+        if (_baritoneAscent) {
+            int y = mod.getPlayer().getBlockPos().getY();
+            if (y < _targetY) {
+                if (y > _baritoneAscentBestY) {
+                    if (y - _baritoneAscentBestY >= BARITONE_ASCENT_STALL_MIN_GAIN) {
+                        _baritoneAscentStall.reset();
+                    }
+                    _baritoneAscentBestY = y;
+                }
+                if (_baritoneAscentStall.elapsed()) {
+                    String m = "[MineDown-AscentFallback] baritone 爬升 " + BARITONE_ASCENT_STALL_SECONDS
+                            + "s 净进展不足 " + BARITONE_ASCENT_STALL_MIN_GAIN + " 格 (bestY=" + _baritoneAscentBestY
+                            + ") at " + mod.getPlayer().getBlockPos().toShortString() + " -> 回退自写 45° 楼梯";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    _baritoneAscent = false;
+                    _baritoneAscentTask = null;
+                    _ascendMode = true;
+                    retreatAndRedig(mod);
+                } else {
+                    setDebugState("Climbing back to y=" + _targetY + " via baritone (stall watchdog "
+                            + BARITONE_ASCENT_STALL_SECONDS + "s)");
+                    return _baritoneAscentTask;
+                }
+            }
+            // y >= _targetY: 到顶, 不再派子任务; _baritoneAscent 保持 true,
+            // reachedBottom (同语义 y >= _targetY) 判完工 → "Shaft done" 收工,
+            // 父任务切回隧道平挖。
         }
 
         // (2026-09-12 冷却语义修正, 用户"同一段矿洞放弃后又重复去探索") 原实现在此
@@ -1256,6 +1344,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (_realDigs >= (_ascendMode ? MAX_ASCEND_DIG_STEPS : MAX_DIG_STEPS) * BLOCKS_PER_STEP) return true;
         // Tunnel mode: only the step limit applies (we're already at depth).
         if (_tunnelMode) return false;
+        // (2026-09-15 baritone-first 上行) baritone 爬升: 回到目标高度即完成
+        // (与 ascend 楼梯同语义; bot 可能超过目标高度一点, 一样算回带内)。
+        if (_baritoneAscent) return mod.getPlayer().getBlockPos().getY() >= _targetY;
         // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成。
         if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _targetY;
         // FIX (task ping-pong): use the player's ACTUAL Y, not the old
@@ -1946,7 +2037,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected String toDebugString() {
-        return _ascendMode ? "Climbing back up (staircase up)"
+        return _baritoneAscent ? "Climbing back up (via baritone)"
+                : _ascendMode ? "Climbing back up (staircase up)"
                 : _tunnelMode ? "Digging a tunnel to find ores" : "Digging down to find ores";
     }
 }

@@ -42,6 +42,17 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     // should switch to sheltering instead.
     private int _failCount = 0;
 
+    // ===== (2026-09-15 垂直爬升不被 wander 腰斩) =====
+    // 目标 Y 高于玩家 > 1 格且 checker 失败时, 多半是 baritone 正在垂直垫柱
+    // (XZ 位移恒 0, 2026-09-14 GoToSurfaceTask.sampleMovement 同款教训)。
+    // 此刻 wander 会把 bot 从 1 格宽柱井里拽下去再重爬 (20260915-0807 会话实锤:
+    // y=19 段垫到 y=3 → wander 接管 → 掉回 -6 → 再垫, 反复横跳到用户退出)。
+    // 处置: 爬升场景 checker 失败只重置检查器让 baritone 继续; 真卡死 (距上次
+    // 最高脚下 Y 刷新超 20s 仍无 +1) 才退回 wander 兜底。非爬升 goal (goalY()
+    // 返回 -1 或目标在下/平) 行为完全不变。
+    private int _climbWatchBestY = Integer.MIN_VALUE;
+    private final TimerGame _climbStallTimer = new TimerGame(20);
+
     // ===== 水中直游 (2026-08-25) =====
     // baritone 在水里贴墙/近岸时寻路会反复重算 (转头前后摆动, 用户实测 7~15 次
     // 才游走): 根源是 DistanceProgressChecker 判"无进展"→ 触发 wander → 回
@@ -136,6 +147,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         _checker.reset();
         _failCount = 0;
+        _climbWatchBestY = Integer.MIN_VALUE;
         _directSwimControl = false;
         _directSwimUpMode = false;
         _wasInWater = mod.getPlayer().isTouchingWater();
@@ -260,6 +272,25 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         holdDirectSwim(mod, target);
                         setDebugState("Swimming directly to goal");
                         return null;
+                    }
+                    // (2026-09-15 垂直爬升不被 wander 腰斩, 见字段注释)
+                    int climbGoalY = goalY();
+                    int climbPlayerY = mod.getPlayer().getBlockPos().getY();
+                    if (climbGoalY - climbPlayerY > 1) {
+                        if (climbPlayerY > _climbWatchBestY) {
+                            // 脚下 Y 创新高 = baritone 在真推进, 续命看门狗。
+                            _climbWatchBestY = climbPlayerY;
+                            _climbStallTimer.reset();
+                        }
+                        if (!_climbStallTimer.elapsed()) {
+                            _checker.reset();
+                            setDebugState("Completing goal (climbing, holding baritone)");
+                            return null;
+                        }
+                        // 真卡死: 20s 无新最高 Y。退回原 wander 兜底, 并复位看门狗
+                        // 供下一轮爬升重新武装。
+                        _climbWatchBestY = Integer.MIN_VALUE;
+                        Debug.logMessage("Climb stalled (no Y gain in 20s), wandering to unstick.");
                     }
                     _failCount++;
                     Debug.logMessage("Failed to make progress on goal, wandering.");
