@@ -617,7 +617,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] skip: headroom UNBREAKABLE at "
                     + mod.getPlayer().getBlockPos().up(2).toShortString()
                     + " target=" + _pos.toShortString() + " -> unreachable");
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            // (2026-09-15 立即拉黑) baritone 爬不上去是判死刑的强信号, 默认阈值 4
+            // 要 5 轮才拉黑, 每轮 10-15s 纯浪费 (现场 224849 同目标重试 4 轮)。
+            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
             return true;
         }
         startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(), "target above eye, out of reach");
@@ -755,7 +757,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     + " target=" + _pos.toShortString() + " -> unreachable");
             _pillarHandoff = false;
             endPillar(mod);
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            // (2026-09-15 立即拉黑) 同上: baritone 爬不上去一次即判死刑, 不给
+            // 默认阈值 4 留 4 轮每轮 10-15s 的重试浪费。
+            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
             return true;
         }
         if (_pillarHandoffTimer.elapsed()) {
@@ -764,7 +768,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     + " target=" + _pos.toShortString() + " -> unreachable");
             _pillarHandoff = false;
             endPillar(mod);
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
             return true;
         }
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
@@ -857,6 +861,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     /** 收尾垫塔: 幂等松开跳跃/移动键 (所有退出路径必调, 见 PillarJumpHelper 设计约束)。 */
     private void endPillar(AltoClef mod) {
+        // (2026-09-15 handoff 残留目标) handoff 退出(done/超时/give up)必须连
+        // baritone 的 customGoal 一起放掉。现场 20260915-224849 末尾: give up 后
+        // 只清了 _pillarHandoff 标志, GoalYLevel(79) 还挂在 customGoalProcess 上
+        // → baritone 原地跳 19s (bIn jump=true); 更糟的是导航分支见 "isActive()"
+        // 就不设新目标, bot 永远走不到目标正下方 → 水平 8 格不满足"到位"前提 →
+        // 2s 放弃计数每 tick 清零, 闸门永不触发, 死锁闭环。
+        // startBaritoneHandoff 首行也调本方法, 但其后紧跟 setGoalAndPath, 无空窗。
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // (2026-09-14 v2) 基准伴生于"正在垫塔", 收工即清空 —— 残留会让下一次
         // 垫塔准入错位到上一次的落脚层。
         _pillarBaseFeet = null;
