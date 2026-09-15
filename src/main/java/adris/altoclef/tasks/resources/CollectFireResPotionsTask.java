@@ -116,6 +116,8 @@ public class CollectFireResPotionsTask extends Task {
         // ② 超时兜底: 放弃本阶段 (不阻塞主线, 打烈焰人回到原流程)
         if (_phaseTimeout.elapsed() && !_gaveUp) {
             _gaveUp = true;
+            adris.altoclef.util.helpers.TimeoutLog.hit("CollectFireResPotionsTask.phaseTimeout",
+                    "phase timeout " + (int) PHASE_TIMEOUT_SECONDS + "s, giving up this phase");
             Debug.logMessage("(FireRes) Phase timed out after " + (int) PHASE_TIMEOUT_SECONDS + "s with "
                     + ItemHelper.countFireResPotions(mod) + "/" + _targetCount
                     + " potions. Giving up, continuing without full supply.");

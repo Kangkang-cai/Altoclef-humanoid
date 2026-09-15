@@ -147,7 +147,10 @@ public class DigOutEscapeTask extends Task implements ITaskRequiresGrounded {
         if (_blocked) return true;
         if (_startTick < 0) return false;
         long nowTick = WorldHelper.getTicks();
-        if (nowTick - _startTick > TIMEOUT_TICKS) return true;
+        if (nowTick - _startTick > TIMEOUT_TICKS) {
+            adris.altoclef.util.helpers.TimeoutLog.hit("DigOutEscapeTask.timeout", "120s digging without escape, giving up");
+            return true;
+        }
         BlockPos player = mod.getPlayer().getBlockPos();
         // Horizontal distance from the digging origin is what matters underground.
         double dx = player.getX() - _origin.getX();

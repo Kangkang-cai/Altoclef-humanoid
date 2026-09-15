@@ -37,6 +37,15 @@ public abstract class Task {
     private static final int MAX_TICK_DEPTH = 128;
     private static int _tickDepth = 0;
 
+    // (2026-09-15 统一超时标签) 当前正在 onTick 的任务, 供 TimeoutLog 在
+    // 进度检查器/任务超时分支里归属"是哪个任务被超时逼跳"。tick() 进出时
+    // 保存/恢复, 子任务 tick 期间自然指向子任务, 零行为影响。
+    private static final ThreadLocal<Task> _currentTicking = new ThreadLocal<>();
+
+    public static Task getCurrentTickingTask() {
+        return _currentTicking.get();
+    }
+
     public void tick(AltoClef mod, TaskChain parentChain) {
         if (_tickDepth >= MAX_TICK_DEPTH) {
             Debug.logInternal("(task) TASK CHAIN RECURSION OVERFLOW (depth " + _tickDepth
@@ -45,9 +54,12 @@ public abstract class Task {
             return;
         }
         _tickDepth++;
+        Task prevTicking = _currentTicking.get();
+        _currentTicking.set(this);
         try {
             tickInternal(mod, parentChain);
         } finally {
+            _currentTicking.set(prevTicking);
             _tickDepth--;
         }
     }

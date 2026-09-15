@@ -99,6 +99,7 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
                 // 界面开着、或还没走到炉边 → 不算卡住, 计时重置。
                 _stuckOpenTimer.reset();
             } else if (_stuckOpenTimer.elapsed()) {
+                adris.altoclef.util.helpers.TimeoutLog.hit("EmptyFurnaceTask.stuckOpen", "8s next to furnace without opening, mining it away");
                 Debug.logToFile("altoclef_diag.log",
                         "[MAIN-FIX]\t[EmptyFurnace]\tstuck next to furnace @" + near.toShortString()
                                 + " for 8s without opening it -> mining it away");

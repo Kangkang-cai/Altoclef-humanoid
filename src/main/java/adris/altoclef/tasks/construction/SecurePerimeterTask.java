@@ -73,6 +73,7 @@ public class SecurePerimeterTask extends Task {
             if (!WorldHelper.isAir(mod, _activePos)) {
                 _activePos = null; // 放好了, 下一个
             } else if (System.currentTimeMillis() - _activeSinceMs > PLACE_TIMEOUT_MS) {
+                adris.altoclef.util.helpers.TimeoutLog.hit("SecurePerimeterTask.placeTimeout", "8s place timeout at " + _activePos.toShortString());
                 _failed.add(_activePos); // 8 秒没放好, 放弃该位置
                 _activePos = null;
             } else {

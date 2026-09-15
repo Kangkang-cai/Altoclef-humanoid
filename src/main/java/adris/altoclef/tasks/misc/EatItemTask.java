@@ -155,6 +155,7 @@ public class EatItemTask extends Task {
             return false;
         }
         if (_timeout.elapsed()) {
+            adris.altoclef.util.helpers.TimeoutLog.hit("EatItemTask.timeout", "eating did not complete in time, force-finished");
             finishUp(mod);
             return true;
         }

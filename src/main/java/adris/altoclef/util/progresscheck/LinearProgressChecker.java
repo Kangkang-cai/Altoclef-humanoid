@@ -1,5 +1,6 @@
 package adris.altoclef.util.progresscheck;
 
+import adris.altoclef.util.helpers.TimeoutLog;
 import adris.altoclef.util.time.TimerGame;
 
 /**
@@ -17,8 +18,12 @@ public class LinearProgressChecker implements IProgressChecker<Double> {
 
     private boolean _failed;
 
+    // (2026-09-15 统一超时标签) 记录构造时的阈值, 判负边沿打 [TIMEOUT] 用。
+    private final double _timeout;
+
     public LinearProgressChecker(double timeout, double minProgress) {
         _minProgress = minProgress;
+        _timeout = timeout;
         _timer = new TimerGame(timeout);
         reset();
     }
@@ -33,6 +38,11 @@ public class LinearProgressChecker implements IProgressChecker<Double> {
         if (_timer.elapsed()) {
             double improvement = progress - _lastProgress;
             if (improvement < _minProgress) {
+                if (!_failed) {
+                    // (2026-09-15) 判负边沿: "timeout 秒内进展 < minProgress" 被判超时。
+                    TimeoutLog.hit("LinearProgressChecker", "timeout=" + _timeout
+                            + "s minProgress=" + _minProgress + " actual=" + improvement);
+                }
                 _failed = true;
             }
             _first = false;

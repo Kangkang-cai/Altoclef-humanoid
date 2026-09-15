@@ -64,6 +64,7 @@ public class EnterNetherPortalTask extends Task {
         if (mod.getWorld().getBlockState(mod.getPlayer().getBlockPos()).getBlock() == Blocks.NETHER_PORTAL) {
 
             if (_portalTimeout.elapsed() && !_leftPortal) {
+                adris.altoclef.util.helpers.TimeoutLog.hit("EnterNetherPortalTask.portalTimeout", "10s inside portal without dimension change, wandering");
                 return _wanderTask;
             }
             setDebugState("Waiting inside portal");

@@ -199,6 +199,8 @@ public class DeathRecoveryTask extends Task {
 
         // Overall timeout safety net.
         if (_overallTimer.elapsed()) {
+            adris.altoclef.util.helpers.TimeoutLog.hit("DeathRecoveryTask.overallTimeout",
+                    "timeout=" + _timeoutSeconds + "s grave=" + _gravePos.toShortString() + " dim=" + _graveDim);
             Debug.logWarning(String.format(
                     "Death recovery timed out after %ds: giving up on grave (%d,%d,%d) dim=%s",
                     _timeoutSeconds, _gravePos.getX(), _gravePos.getY(), _gravePos.getZ(),

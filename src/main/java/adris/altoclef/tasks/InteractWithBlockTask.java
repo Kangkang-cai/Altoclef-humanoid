@@ -70,6 +70,8 @@ public class InteractWithBlockTask extends Task {
     private final boolean _wanderOnFailure;
     // 上述 false 模式下的总兜底: 自上次真实进展起 15s 仍失败, 回落原路径。
     private final TimerGame _giveUpTimer = new TimerGame(15);
+    // (2026-09-15 统一超时标签) 15s 兜底放弃的边沿标记, 防多条放弃路径重复刷 [TIMEOUT]。
+    private boolean _giveUpLogged = false;
 
     private ClickResponse _cachedClickStatus = ClickResponse.CANT_REACH;
 
@@ -207,6 +209,7 @@ public class InteractWithBlockTask extends Task {
         _forceClickTimer.reset();
         // (2026-09-11) 无游荡模式的 15s 总兜底计时。
         _giveUpTimer.reset();
+        _giveUpLogged = false;
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -363,6 +366,10 @@ public class InteractWithBlockTask extends Task {
                     // (2026-09-11) 无游荡模式: 15s 兜底未到前不拉黑不游荡。
                     if (!_wanderOnFailure && !_giveUpTimer.elapsed()) {
                         break;
+                    }
+                    if (!_wanderOnFailure && _giveUpTimer.elapsed() && !_giveUpLogged) {
+                        _giveUpLogged = true;
+                        adris.altoclef.util.helpers.TimeoutLog.hit("InteractWithBlockTask.giveUpTimer", "15s click attempted without success, blacklisting target");
                     }
                     mod.getBlockTracker().requestBlockUnreachable(_target);
                     return _wanderTask;

@@ -31,11 +31,14 @@ public class DrinkFireResPotionTask extends Task {
 
     private final TimerGame _timeout = new TimerGame(5);
     private boolean _started = false;
+    // (2026-09-15 统一超时标签) elapsed() 不自动复位, 放弃后打一次 [TIMEOUT] 即闩住。
+    private boolean _giveUpLogged = false;
 
     @Override
     protected void onStart(AltoClef mod) {
         _timeout.reset();
         _started = false;
+        _giveUpLogged = false;
         // 停掉寻路: 原地喝药, 防止 baritone 移动打断使用动作
         mod.getClientBaritone().getPathingBehavior().cancelEverything();
         mod.getExtraBaritoneSettings().setInteractionPaused(true);
@@ -48,6 +51,10 @@ public class DrinkFireResPotionTask extends Task {
             return null;
         }
         if (_timeout.elapsed()) {
+            if (!_giveUpLogged) {
+                _giveUpLogged = true;
+                adris.altoclef.util.helpers.TimeoutLog.hit("DrinkFireResPotionTask.timeout", "5s without fire resistance, giving up this bottle");
+            }
             Debug.logMessage("(DrinkFireResPotion) Timed out without getting fire resistance, giving up this bottle.");
             return null;
         }

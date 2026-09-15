@@ -85,6 +85,8 @@ public class CollectObsidianByBarterTask extends Task {
         // ① 超时兜底 (不卡死主线)
         if (_phaseTimeout.elapsed() && !_gaveUp) {
             _gaveUp = true;
+            adris.altoclef.util.helpers.TimeoutLog.hit("CollectObsidianByBarterTask.phaseTimeout",
+                    "phase timeout, giving up this phase");
             Debug.logMessage("(ObsidianBarter) Phase timed out with "
                     + mod.getItemStorage().getItemCount(Items.OBSIDIAN) + "/" + _count
                     + " obsidian. Giving up this round.");

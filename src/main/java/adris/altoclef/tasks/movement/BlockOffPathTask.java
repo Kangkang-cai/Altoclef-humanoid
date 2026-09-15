@@ -99,7 +99,10 @@ public class BlockOffPathTask extends Task implements ITaskRequiresGrounded {
         if (!isActive()) return false;
         if (_done) return true;
         if (_chokePoint == null) return true;
-        if (WorldHelper.getTicks() - _startTick > TIMEOUT_TICKS) return true;
+        if (WorldHelper.getTicks() - _startTick > TIMEOUT_TICKS) {
+            adris.altoclef.util.helpers.TimeoutLog.hit("BlockOffPathTask.timeout", "30s blocking without success, giving up");
+            return true;
+        }
         return !mod.getWorld().getBlockState(_chokePoint).isAir();
     }
 

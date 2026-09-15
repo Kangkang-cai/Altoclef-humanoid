@@ -250,6 +250,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
                 _gaveUp = true;
                 _lastHitTick = now; // 防冷却期内每 tick 刷日志
                 setDebugState("Kill timeout: target unreachable, giving up");
+                adris.altoclef.util.helpers.TimeoutLog.hit("AbstractKillEntityTask.killGiveUp",
+                        "no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s");
                 Debug.logMessage("[KillTimeout] giving up on " + target.get().getType().getTranslationKey()
                         + " (no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s)");
                 return null;

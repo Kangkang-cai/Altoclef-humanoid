@@ -339,6 +339,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
             if (timedOut || _blockerClearTask.isFinished(mod)) {
                 // 任务结束: 方块还在(拆不动/超时)计一次失败, 连续 2 次后不再重试
                 if (timedOut) {
+                    adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.blockerClear", "8s clearing blocker without success");
                     _blockerClearFails = 2;
                 } else if (_blockerClearPos != null && !WorldHelper.isAir(mod, _blockerClearPos)) {
                     _blockerClearFails++;
@@ -797,6 +798,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 if (System.currentTimeMillis() - s_midRangeSleepNavStartMs > MID_RANGE_SLEEP_NAV_TIMEOUT_MS) {
                     s_midRangeSleepGiveUpUntilMs = System.currentTimeMillis() + MID_RANGE_SLEEP_GIVEUP_COOLDOWN_MS;
                     s_midRangeSleepTarget = null;
+                    adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.midRangeSleepNav", "60s sleep nav without arrival, cooling down");
                     String m = "[Diag-bed] mid-range sleep nav timeout " + (MID_RANGE_SLEEP_NAV_TIMEOUT_MS / 1000)
                             + "s, cooldown " + (MID_RANGE_SLEEP_GIVEUP_COOLDOWN_MS / 1000)
                             + "s -> getting a bed instead (mine/craft)";
@@ -1025,6 +1027,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 }
                 String m = "[Diag-bed] PLACE BED TIMEOUT after 3s at region " + (_currentBedRegion == null ? "null" : _currentBedRegion.toShortString())
                         + ", rescanning new region (old goal unreachable / blocked).";
+                adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.placeBed", "3s place timeout, rescanning region");
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
                 _currentBedRegion = null;

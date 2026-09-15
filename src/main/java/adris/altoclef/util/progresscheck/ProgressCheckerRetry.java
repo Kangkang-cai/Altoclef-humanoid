@@ -22,6 +22,11 @@ public class ProgressCheckerRetry<T> implements IProgressChecker<T> {
         // If our subchecker fails, retry with an updated fail counter.
         if (_subChecker.failed()) {
             _failCount++;
+            // (2026-09-15 统一超时标签) 重试额度用尽的边沿 = 真正的"无进展判负"。
+            if (_failCount >= _allowedAttempts) {
+                adris.altoclef.util.helpers.TimeoutLog.hit("ProgressCheckerRetry",
+                        "attempts=" + _allowedAttempts + " exhausted");
+            }
             _subChecker.reset();
         }
     }
