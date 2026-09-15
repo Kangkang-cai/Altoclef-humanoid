@@ -14,6 +14,7 @@ import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
+import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.slots.PlayerSlot;
@@ -28,6 +29,8 @@ import baritone.api.utils.input.Input;
 import java.util.*;
 import java.util.function.Supplier;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.mob.PiglinBruteEntity;
+import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.item.MiningToolItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -1109,6 +1112,52 @@ public class MineAndCollectTask extends ResourceTask {
         private static final int LOS_FAIL_CACHE_MAX_SIZE = 256;
         private final java.util.Map<BlockPos, Long> _losFailCache = new java.util.HashMap<>();
 
+        // ---- (20260915 挖金猪灵闸, 用户"挖金附近猪灵超过1只就不挖, 3个拿剑的打不过") ----
+        // 挖下界金矿/镶金黑石会激怒 16 格内猪灵 (vanilla 挖金激怒半径)。激怒 2+ 只
+        // (尤其持剑) 是必输局 (20260915-123005 实锤: 3 只围殴 4 秒掉 16 血)。闸门:
+        // 目标金块 16 格内猪灵(成年, 含【未被感知/藏在墙后】的) > 1 只 → 该块本轮
+        // 不可选。全部候选被闸 → getClosestTo 落空 → 框架自然走 wander 探索 →
+        // bot 离开猪灵密集区。计数不看 LOS: 客户端对跟踪距离内实体全知 (墙后也算),
+        // 恰好覆盖"感知不到但存在"的危险源。
+        private static final double PIGLIN_ANGER_RADIUS = 16.0;
+        private static final int PIGLIN_MINE_MAX_COUNT = 1;
+        private static final Set<Block> PIGLIN_ANGERING_BLOCKS = Set.of(
+                Blocks.NETHER_GOLD_ORE, Blocks.GILDED_BLACKSTONE);
+        // [GOLD-GATE] 诊断节流。
+        private long _lastPiglinGateLogMs = 0;
+
+        /**
+         * 挖金猪灵闸: 该方块是挖了会激怒猪灵的金矿, 且其 {@link #PIGLIN_ANGER_RADIUS}
+         * (原版挖金激怒半径) 内成年猪灵+猪灵蛮兵 (含未被感知的) 数量 >
+         * {@link #PIGLIN_MINE_MAX_COUNT} → 返回 true (本轮不可挖)。僵尸猪灵不激怒
+         * 于挖金, 不计。开销: 仅对通过既有过滤的候选矿块执行, 一次实体表遍历。
+         */
+        private boolean piglinDensityGated(AltoClef mod, BlockPos p) {
+            Block block = mod.getWorld().getBlockState(p).getBlock();
+            if (!PIGLIN_ANGERING_BLOCKS.contains(block)) return false;
+            int count = 0;
+            double radiusSq = PIGLIN_ANGER_RADIUS * PIGLIN_ANGER_RADIUS;
+            Vec3d center = Vec3d.ofCenter(p);
+            synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+                for (PiglinEntity pig : mod.getEntityTracker().getTrackedEntities(PiglinEntity.class)) {
+                    if (pig.isAlive() && !pig.isBaby() && pig.squaredDistanceTo(center) <= radiusSq) count++;
+                }
+                for (PiglinBruteEntity brute : mod.getEntityTracker().getTrackedEntities(PiglinBruteEntity.class)) {
+                    if (brute.isAlive() && brute.squaredDistanceTo(center) <= radiusSq) count++;
+                }
+            }
+            if (count <= PIGLIN_MINE_MAX_COUNT) return false;
+            long now = System.currentTimeMillis();
+            if (now - _lastPiglinGateLogMs > 1000) {
+                _lastPiglinGateLogMs = now;
+                Debug.logMessage("[GOLD-GATE] skip mining " + block.getName().getString()
+                        + " at " + p.toShortString() + ": " + count + " piglins within 16 (max " + PIGLIN_MINE_MAX_COUNT + ")");
+                Debug.logToFile("altoclef_diag.log", "[GOLD-GATE] skip " + p.toShortString() + " piglins=" + count);
+            }
+            return true;
+        }
+
+
         private Optional<BlockPos> pickNearestCacheOre(AltoClef mod, Vec3d fromPos, double maxRange, boolean requireFov, boolean useMemory) {
             List<BlockPos> known = mod.getBlockTracker().getKnownLocations(_blocks);
             if (known.isEmpty()) return Optional.empty();
@@ -1135,6 +1184,8 @@ public class MineAndCollectTask extends ResourceTask {
                     if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                     if (!WorldHelper.canBreak(mod, p)) continue;
                     if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                    // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                    if (piglinDensityGated(mod, p)) continue;
                     // (2026-09-05 真因②) 方块状态重校验不再 500ms 节流: 原节流让
                     // "缓存里已挖掉(空气)的矿位"在节流窗口内绕过真实世界校验被选中
                     // → 上层派 DestroyBlockTask 对着空气卡几秒。getBlockState 是
@@ -1167,6 +1218,8 @@ public class MineAndCollectTask extends ResourceTask {
                 if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                 if (!WorldHelper.canBreak(mod, p)) continue;
                 if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                if (piglinDensityGated(mod, p)) continue;
                 // (2026-09-05 真因②) 同上: 方块状态每 tick 必校验, 不再 500ms 节流,
                 // 已挖掉的空气位当场淘汰, 不再派 DestroyBlockTask 对着空气卡秒。
                 if (mod.getChunkTracker().isChunkLoaded(p)) {
@@ -1234,6 +1287,8 @@ public class MineAndCollectTask extends ResourceTask {
                         if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue;
                         if (requireFov && !VisibilityHelper.isBlockInView(mod, p)) continue;
                         if (!WorldHelper.canBreak(mod, p)) continue;
+                        // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                        if (piglinDensityGated(mod, p)) continue;
                         double dSq = p.getSquaredDistance(fromPos);
                         if (dSq < bestSq) {
                             bestSq = dSq;
@@ -1282,6 +1337,8 @@ public class MineAndCollectTask extends ResourceTask {
                         if (!matches) continue;
                         if (!WorldHelper.canBreak(mod, p)) continue;
                         if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                        // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                        if (piglinDensityGated(mod, p)) continue;
                         double dSq = mod.getPlayer().getBlockPos().getSquaredDistance(p);
                         if (dSq < bestSq) {
                             bestSq = dSq;
@@ -1340,6 +1397,8 @@ public class MineAndCollectTask extends ResourceTask {
                         if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue;
                         if (!WorldHelper.canBreak(mod, p)) continue;
                         if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                        // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                        if (piglinDensityGated(mod, p)) continue;
                         double dSq = player.getSquaredDistance(p);
                         if (dSq < bestSq) {
                             bestSq = dSq;
@@ -1972,7 +2031,11 @@ public class MineAndCollectTask extends ResourceTask {
                 }
                 Block actual = mod.getWorld().getBlockState(b).getBlock();
                 for (Block target : _blocks) {
-                    if (actual == target) return true;
+                    if (actual == target) {
+                        // (20260915 挖金猪灵闸) 正在挖/赶路途中猪灵聚到 16 格内
+                        // (>1) → 当前目标立即失效, 上层重选 (全被闸 → wander 离开)。
+                        return !piglinDensityGated(mod, b);
+                    }
                 }
                 return false;
             }
