@@ -338,7 +338,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 只在"最近 5s reach 都缺失"(真走不到) 时 moveChecker 失败才拉黑。
         // (2026-09-14 垫塔接近) 垫塔期间同样豁免: 竖直垫塔 XZ 天然零位移, 不豁免
         // 就会 6s 一到被 moveChecker 判"卡住" → 强制 Wander 把垫塔打断。
-        if (!_pillarActive && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
+        // (2026-09-15 删自写垫塔) handoff 期间同样豁免: baritone 挖挡块/走位阶段
+        // 可能 >6s 零位移, 卡死由 handoff 自己的 20s 超时兜底, 不劳 moveChecker。
+        if (!_pillarActive && !_pillarHandoff && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
             _moveChecker.reset();
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             _wanderTask.resetWander();
@@ -503,27 +505,59 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-15 叶包裹不垫塔) 挡块日志节流: 同一块只打一次, 避免每 tick 刷屏。
     private BlockPos _lastOccluderLogged;
 
+    // (2026-09-15 撸叶 latch) 锁定一片挡叶挖到变成空气才换下一片。现场
+    // 20260915-180535: 两片叶子 (-15,84,147 / -15,85,146) 每 tick 交替被选中,
+    // 每次切换挖掘进度清零, 3 秒换了 9 轮一片都没断。
+    private BlockPos _occluderTarget;
+
     /**
      * (2026-09-15 叶包裹不垫塔) 目标在挖掘距离内但视线被可挖方块挡住 → 挖掉挡块。
+     * baritone 的爬升只挖挡它【路】的方块, 包住目标的叶子不在它的导航目标里,
+     * 这一步是它不覆盖的唯一缺口 —— 分工: 靠近/爬升交 baritone, 目标周边叶子我们撸。
      *
      * @return true = 本 tick 已转为挖挡块; false = 目标真够不着 / 挡块挖不动 /
-     *         挡块自己也够不着, 交回垫塔与放弃路径。
+     *         挡块自己也够不着, 交回 handoff 与放弃路径。
      */
     private boolean tryClearOccluder(AltoClef mod) {
         Vec3d eye = mod.getPlayer().getEyePos();
         Vec3d center = Vec3d.ofCenter(_pos);
-        // 只处理"目标本体已在挖掘距离内"的情形 —— 超出 reach 的目标是导航/垫塔问题,
+        // 只处理"目标本体已在挖掘距离内"的情形 —— 超出 reach 的目标是导航/爬升问题,
         // 隔空够不着的挡块挖了也是白挖 (射线终点到不了目标附近)。
-        if (eye.distanceTo(center) > 4.5) return false;
-        BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(eye, center,
-                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
-        if (hit.getType() != HitResult.Type.BLOCK) return false;
-        BlockPos occ = hit.getBlockPos();
-        if (occ.equals(_pos)) return false;
-        BlockState state = mod.getWorld().getBlockState(occ);
-        if (state.isAir() || state.getHardness(mod.getWorld(), occ) < 0) return false;
+        if (eye.distanceTo(center) > 4.5) {
+            _occluderTarget = null;
+            return false;
+        }
+        // latch: 锁定的挡块仍实心可挖 → 继续挖它, 不重选; 变空气/挖不动才重新找。
+        BlockPos occ = _occluderTarget;
+        if (occ != null) {
+            BlockState latched = mod.getWorld().getBlockState(occ);
+            if (latched.isAir() || latched.getHardness(mod.getWorld(), occ) < 0) {
+                _occluderTarget = null;
+                occ = null;
+            }
+        }
+        if (occ == null) {
+            BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(eye, center,
+                    RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+            if (hit.getType() != HitResult.Type.BLOCK) return false;
+            BlockPos found = hit.getBlockPos();
+            if (found.equals(_pos)) return false;
+            BlockState state = mod.getWorld().getBlockState(found);
+            if (state.isAir() || state.getHardness(mod.getWorld(), found) < 0) return false;
+            occ = found;
+            _occluderTarget = occ;
+        }
         Optional<Rotation> occReach = LookHelper.getReach(occ);
-        if (occReach.isEmpty()) return false; // 挡块自己也够不着 → 交回原路径
+        if (occReach.isEmpty()) {
+            _occluderTarget = null;
+            return false; // 挡块自己也够不着 → 交回 handoff
+        }
+        // 撸叶与 handoff 互斥: 输入通道归撸叶, 收回 baritone 的爬升目标 (否则
+        // baritone 走位转身会把 lookAt/CLICK_LEFT 全部搅乱, 20260915-180535 实锤)。
+        if (_pillarHandoff) {
+            _pillarHandoff = false;
+            endPillar(mod);
+        }
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         if (!LookHelper.isLookingAt(mod, occ)) {
@@ -536,7 +570,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (!occ.equals(_lastOccluderLogged)) {
             _lastOccluderLogged = occ;
             Debug.logToFile("altoclef_diag.log", "[OccluderClear] clearing " + occ.toShortString()
-                    + " (" + state.getBlock().toString() + ") blocking target=" + _pos.toShortString());
+                    + " (" + mod.getWorld().getBlockState(occ).getBlock() + ") blocking target="
+                    + _pos.toShortString());
         }
         setDebugState("Clearing occluder " + occ.toShortString() + " in front of " + _pos.toShortString());
         return true;
@@ -548,138 +583,40 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (_pillarHandoff) {
             return tickBaritoneHandoff(mod);
         }
-        // (2026-09-14 v2 判据滞后) 用户现场"(bot) 一跳起来任务立马就跳了, 反复横跳"。
-        // 旧实现【每 tick 重算】下面四个前置, 而垫塔本身靠 hold(JUMP) 起跳 —— 起跳
-        // 那一瞬间玩家的 BlockPos y 会 +1, 判据随之自激翻转 (证据与完整机理见
-        // _pillarBaseFeet 字段注释)。新语义分两段:
-        //   · 未垫塔 (_pillarActive=false): 照旧用【即时】位置准入;
-        //   · 垫塔中: 前置判据不再重算, 只在"已经垫到目标所在层及以上"时收工,
-        //     其余一切失败由各自的超时闸门处理 (无进展 4s / 总时长 20s / 没料)。
-        if (_pillarActive) {
-            // ①' 垫到目标层及以上 → 目标已在脚边或以下, 垫塔使命完成, 交回常规挖掘。
-            if (mod.getPlayer().getBlockPos().getY() >= _pos.getY()) {
-                endPillar(mod);
-                return false;
-            }
-        } else {
-            // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
-            //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
-            if (!targetAboveEye(mod)) {
-                endPillar(mod);
-                return false;
-            }
-            // ② 水平已在身边 (<=2 格) 才垫 —— 与 closeEnoughToJudge 的 horizontallyInPlace
-            //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发垫塔。
-            if (horizontalDistanceSqToPlayer(mod) > 4.0) {
-                endPillar(mod);
-                return false;
-            }
-            // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
-            //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
-            //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
-            if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
-                endPillar(mod);
-                return false;
-            }
-            // ③b (2026-09-14 低净空闸门, 2026-09-14 v2 基准改为垫塔基准脚块)
-            //    即时位置版本见 headroomBlockedForPillar(mod, feet) 的注释。
-            //    首次准入仍用即时位置: 开跑前玩家应站稳在地面, 不存在"跳到一半"。
-            //    (2026-09-14 v4) 挡头【可挖】⇒ 不是"垫不到", 是 baritone 的活
-            //    (它会挖 up(2) + 放脚下) —— 让位, 别自写空跳也别拉黑目标。
-            if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())) {
-                if (isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) {
-                    startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(), "entry headroom diggable");
-                    return true;
-                }
-                endPillar(mod);
-                return false;
-            }
+        // (2026-09-15 删自写垫塔, 用户"baritone 设定挖的目标后应该自己会解决靠近;
+        // 垫塔当初是为头顶海洋写的, 为什么变成通用搭高") 自写 PillarJumpHelper 垫塔
+        // 09-14 (f697d790) 引入后连打 6+ 补丁仍与 baritone 打架 (现场 20260915-180535:
+        // 撸叶/自写垫塔/handoff 三套机制互相抢输入, 18s 零进展)。baritone 的
+        // MovementPillar 本来就会挖挡路块+放脚下爬升, 靠近与爬升全交它; PillarJumpHelper
+        // 只保留在 GoToSurfaceTask 的海洋逃生场景 (它的诞生地)。
+        // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
+        //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
+        if (!targetAboveEye(mod)) {
+            return false;
         }
-        if (!_pillarActive) {
-            _pillarActive = true;
-            _pillarLastY = Integer.MIN_VALUE;
-            _pillarBaseFeet = mod.getPlayer().getBlockPos();
-            _pillarNoProgressTimer.reset();
-            _pillarTotalTimer.reset();
-            Debug.logToFile("altoclef_diag.log", "[PillarApproach] start target="
-                    + _pos.toShortString()
-                    + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
-                    + " player=" + mod.getPlayer().getBlockPos().toShortString()
-                    + " headroom=" + (_pillarBaseFeet.up(2).toShortString() + " solid="
-                    + WorldHelper.isSolid(mod, _pillarBaseFeet.up(2))
-                    + " block=" + mod.getWorld().getBlockState(_pillarBaseFeet.up(2)).getBlock()
-                    + " blocked=" + headroomBlockedForPillar(mod, _pillarBaseFeet)));
+        // ② 水平已在身边 (<=2 格) 才交爬升 —— 与 closeEnoughToJudge 的 horizontallyInPlace
+        //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发。
+        if (horizontalDistanceSqToPlayer(mod) > 4.0) {
+            return false;
         }
-        // ④ 只在【落地时】采样高度: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1,
-        //    拿它当"上升了"会让无进展计时被反复重置 → 原地跳永不超时。
-        if (mod.getPlayer().isOnGround()) {
-            int y = mod.getPlayer().getBlockPos().getY();
-            if (y > _pillarLastY) {
-                _pillarLastY = y;
-                _pillarNoProgressTimer.reset();
-                // (2026-09-14 v2) 真的站稳在更高一层了 → 重锁净空基准。此时才允许
-                // 重新判定"还能不能再往上垫一格"。不这样做的话, 垫塔会把整座塔垫到
-                // 天花板里 (净空闸门被起始基准永久豁免)。
-                _pillarBaseFeet = mod.getPlayer().getBlockPos();
-            }
+        // ③ 没垫块 → 交回原逻辑。缺料采集由 needScaffoldMaterials /
+        //    startAcquireMaterials 在调用方(更早)处理, 走到这里通常意味着
+        //    "已经采过一轮还是不够" → 正常落回放弃闸门, 不永久冻结。
+        //    (baritone 垫脚下同样要消耗背包方块, 没料时它只会空跳。)
+        if (!PillarJumpHelper.hasMaterials(mod, _pillarMaterials)) {
+            return false;
         }
-        // ④b 净空闸门 (垫塔中用锁定基准, 见 ③b / _pillarBaseFeet 注释): 垫到某一层
-        //     后发现净空已经不够再上一格, 而目标还在上面 ⇒ 垫不到了, 收工判不可达。
-        //     (2026-09-14 v4) 但"挡头可挖"不等于垫不到 —— 树叶/半砖/木头/土,
-        //     baritone 的 MovementPillar 会挖掉它再放脚下。只有挖不动的 (基岩)
-        //     才是真·不可达。错判的代价: 囤木头时整棵树的原木被逐个拉黑。
-        if (_pillarBaseFeet != null && headroomBlockedForPillar(mod, _pillarBaseFeet)) {
-            BlockPos aboveHead = _pillarBaseFeet.up(2);
-            if (isBlockerDiggable(mod, aboveHead)) {
-                startBaritoneHandoff(mod, _pillarBaseFeet, "diggable blocker mid-pillar");
-                return true;
-            }
-            Debug.logToFile("altoclef_diag.log", "[PillarApproach] headroom UNBREAKABLE at "
-                    + _pillarBaseFeet.toShortString() + " (aboveHead="
-                    + aboveHead.toShortString() + " block="
-                    + mod.getWorld().getBlockState(aboveHead).getBlock()
-                    + ") target=" + _pos.toShortString() + " -> unreachable");
-            endPillar(mod);
+        // ③b 头顶被【挖不动】的方块 (基岩类) 挡死 → baritone 爬不上去, 直接判不可达,
+        //    省掉 20s handoff 超时。可挖挡头 (树叶/泥土) 不拦 —— baritone 自己会挖。
+        if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())
+                && !isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) {
+            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] skip: headroom UNBREAKABLE at "
+                    + mod.getPlayer().getBlockPos().up(2).toShortString()
+                    + " target=" + _pos.toShortString() + " -> unreachable");
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             return true;
         }
-        if (_pillarNoProgressTimer.elapsed() || _pillarTotalTimer.elapsed()) {
-            // ⑤ 垫不动 (原地跳 / 头顶被挡 / 总时长超限)。
-            //    (2026-09-14 v4) 自写垫塔垫不动 ≠ 目标不可达 —— baritone 的
-            //    MovementPillar 是另一套实现, 它会挖。先让位一次, 再失败才拉黑。
-            adris.altoclef.util.helpers.TimeoutLog.hit("DestroyBlockTask.pillarStall",
-                    "noProgress=" + _pillarNoProgressTimer.elapsed() + " total=" + _pillarTotalTimer.elapsed()
-                            + " target=" + _pos.toShortString());
-            Debug.logToFile("altoclef_diag.log", "[PillarApproach] give up target="
-                    + _pos.toShortString()
-                    + " y=" + mod.getPlayer().getBlockPos().getY()
-                    + " lastY=" + _pillarLastY
-                    + " noProgress=" + _pillarNoProgressTimer.elapsed()
-                    + " total=" + _pillarTotalTimer.elapsed()
-                    + " handoffTried=" + _pillarHandoffTried);
-            endPillar(mod);
-            if (!_pillarHandoffTried) {
-                startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(),
-                        "self-pillar no progress");
-                return true;
-            }
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
-            return true;
-        }
-        setDebugState("Pillaring up to reach " + _pos.toShortString());
-        // ⑥ 垫塔靠自己按输入 + interactBlock 放置, 必须让 baritone 松开自定义目标 ——
-        //    否则 GoalNear 会同时抢移动输入 (与挖掘分支同一处理)。
-        if (mod.getClientBaritone().getCustomGoalProcess().isActive()) {
-            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
-        }
-        // ⑦ (2026-09-14 实锤补漏) 只放 customGoal **不够** —— 上一轮 reach 短暂出现时
-        //    "Breaking the normal way." 分支已启动 baritone builder (见上 L312), 它不会
-        //    自己停: builder 持续占着输入通道, 垫塔的 hold(JUMP) / interactBlock 全被压掉。
-        //    现场 20260914-115322 的 [NAV-STUCK] 快照全是 builder=true + inputs 全 false,
-        //    bot 站在原地 7~18s 一格上不去 —— 这正是"材料在手上却垫不起来"的现场机制。
-        //    与挖掘分支 (L295-296) 同款处理: 两个进程都要放。
-        mod.getClientBaritone().getBuilderProcess().onLostControl();
-        PillarJumpHelper.step(mod, _pillarMaterials);
+        startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(), "target above eye, out of reach");
         return true;
     }
 
