@@ -22,6 +22,25 @@ public class SatisfyMiningRequirementTask extends Task {
     /** 谁派发了本任务 (诊断用, 见 onStart 注释)。 */
     private final String _src;
 
+    // (2026-09-15 承诺锁) 一旦本任务选中上档镐(钻石/铁), 存活期间锁定该选择,
+    // 不再每 tick 重估档位 — 修 21:30 场次: 选铁镐 → 生铁塞进熔炉+关炉门 →
+    // shouldPreferIronPickaxe 的"可达口径"计数骤降(<3) → 下一 tick 翻回石镐
+    // 分支, 石镐链抢断铁镐链, 熔炉里 3 个生铁无人认领 (skip stone tier 被自己
+    // 打脸)。故意不扩计数口径(炉内物品) — 项目铁律: 不新增计数源, 避开
+    // "缓存 vs 直读"不一致一族。逃生窗: 锁定超过 COMMIT_ESCAPE_TICKS 仍没拿到
+    // 镐 → 视为铁镐链死锁(炉不可达/没燃料等), 释放重估, 允许降级石镐;
+    // 材料若回到背包, shouldPrefer* 条件自然重新成立, 不依赖逃生窗。
+    private Item _committedPickaxe = null;
+    private int _commitTicks = 0;
+    private static final int COMMIT_ESCAPE_TICKS = 20 * 120; // 120s: 3 锭顺序烤 30s + 走位/收集/合成, 余量充足
+
+    /** 进入承诺锁 (commit)。只在 WOOD/STONE 档的上档分支调用。 */
+    private void commitPickaxe(Item pickaxe) {
+        _committedPickaxe = pickaxe;
+        _commitTicks = 0;
+        Debug.logMessage("(SatisfyMiningReq) 承诺锁: 已选定 " + pickaxe + ", 存活期间不再回退石/木镐档 (材料瞬时不可见不算数)");
+    }
+
     public SatisfyMiningRequirementTask(MiningRequirement requirement) {
         this(requirement, "unlabeled");
     }
@@ -125,10 +144,27 @@ public class SatisfyMiningRequirementTask extends Task {
                 break;
             case WOOD:
             case STONE:
+                // (2026-09-15 承诺锁) 已承诺上档镐 → 持续返回同一选择, 不重估。
+                if (_committedPickaxe != null) {
+                    if (++_commitTicks > COMMIT_ESCAPE_TICKS) {
+                        Debug.logMessage("(SatisfyMiningReq) 承诺锁超时 " + (COMMIT_ESCAPE_TICKS / 20) + "s 未见 "
+                                + _committedPickaxe + " → 上档镐链疑似死锁, 释放重估 (允许降级石镐)");
+                        _committedPickaxe = null;
+                        _commitTicks = 0;
+                    } else {
+                        setDebugState("Committed to " + _committedPickaxe + " (latch " + _commitTicks + "/" + COMMIT_ESCAPE_TICKS + ", ignore transient material moves)");
+                        Task committed = TaskCatalogue.getItemTask(_committedPickaxe, 1);
+                        if (committed != null) {
+                            return committed;
+                        }
+                        _committedPickaxe = null; // 理论不可达: 镐配方必注册
+                    }
+                }
                 // (2026-09-10 钻石镐优先, 用户"有钻石应做钻石镐而非石镐/铁镐")
                 // 钻石 ≥3 + 棒料够 → 直接钻石镐: 全档位天花板(耐久 1562), 且主线
                 // 后期挖黑曜石本就需要钻石镐, 早做不亏。
                 if (shouldPreferDiamondPickaxe(mod)) {
+                    commitPickaxe(Items.DIAMOND_PICKAXE);
                     setDebugState("Preferring DIAMOND pickaxe (diamonds+wood at hand, skip lower tiers)");
                     return TaskCatalogue.getItemTask(Items.DIAMOND_PICKAXE, 1);
                 }
@@ -139,6 +175,7 @@ public class SatisfyMiningRequirementTask extends Task {
                 // 木板/原木够做 2 根棒子时, 直接走铁镐任务链 — 铁镐同样满足
                 // WOOD/STONE 档位 (miningRequirementMetInner 认高阶镐)。
                 if (shouldPreferIronPickaxe(mod)) {
+                    commitPickaxe(Items.IRON_PICKAXE);
                     setDebugState("Preferring IRON pickaxe (iron+wood at hand, skip stone tier)");
                     return TaskCatalogue.getItemTask(Items.IRON_PICKAXE, 1);
                 }
@@ -234,7 +271,10 @@ public class SatisfyMiningRequirementTask extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
+        // 承诺锁随任务实例终结 (拿到镐=isFinished 自然结束, 或被更高优先级打断;
+        // 重启后按当时材料重新评估, 不跨任务实例继承旧选择)。
+        _committedPickaxe = null;
+        _commitTicks = 0;
     }
 
     @Override
