@@ -116,6 +116,21 @@ public class Settings implements IFailableConfigFile {
      */
     private int foodPeakUnits = 240;
 
+    /**
+     * (2026-09-15 觅食远征, 用户"连续长时间没找到食物就远走") 本轮觅食周期内
+     * 食物潜力【无任何增长】持续超过该秒数 → 触发食物远征 (锁定方位角一路向,
+     * 不回头、不下海), 且收集目标降为 foodExpeditionReducedUnits。
+     * <=0 时禁用远征逻辑。
+     */
+    private double foodSearchExpeditionTimeoutSeconds = 300;
+
+    /**
+     * (2026-09-15 觅食远征, 用户"食物要求量现在有点高, 若超时间应该降低")
+     * 觅食超时触发后, 本轮收集目标从峰值降为该值; 按该量收官后锁存"峰值已达"
+     * 语义 (之后只在真断粮才重新收集)。进下界前的硬性食物闸 (150) 不受此影响。
+     */
+    private int foodExpeditionReducedUnits = 120;
+
 
     /**
      * Chests are cached for their contents.
@@ -715,6 +730,14 @@ public class Settings implements IFailableConfigFile {
 
     public int getMinimumFoodAllowed() {
         return minimumFoodAllowed;
+    }
+
+    public double getFoodSearchExpeditionTimeoutSeconds() {
+        return foodSearchExpeditionTimeoutSeconds;
+    }
+
+    public int getFoodExpeditionReducedUnits() {
+        return foodExpeditionReducedUnits;
     }
 
     public boolean isMobDefense() {

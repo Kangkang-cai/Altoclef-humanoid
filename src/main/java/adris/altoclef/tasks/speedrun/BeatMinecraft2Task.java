@@ -1932,9 +1932,17 @@ public class BeatMinecraft2Task extends Task {
                 }
                 // 锁存前: 食物 < 峰值即收集 (地表强门槛改为贪婪冲峰); 锁存后: 只有
                 // 跌破危险线才再收集。地下分支保持原样: 未到危险线就地继续挖矿不回地表。
+                // (2026-09-15 觅食远征) 超时远征锁存期间, 本轮收集目标用降低值。
+                int collectTargetUnits = foodPeakUnits;
+                if (FoodChain.s_foodExpeditionActive) {
+                    int reduced = mod.getModSettings().getFoodExpeditionReducedUnits();
+                    if (reduced > 0 && reduced < collectTargetUnits) {
+                        collectTargetUnits = reduced;
+                    }
+                }
                 boolean foodGateNeedCollect = FoodChain.s_foodPeakReached
                         ? foodScore <= _config.minFoodUnits
-                        : foodScore < foodPeakUnits;
+                        : foodScore < collectTargetUnits;
                 if (foodGateNeedCollect) {
                     if (isUndergroundDebounced(mod) || isInPit(mod)) {
                         // (2026-09-01 用户"食物没到 10 units 不该回表面") 地下时只有
@@ -1947,10 +1955,12 @@ public class BeatMinecraft2Task extends Task {
                         // 食物尚可(>minFoodUnits): 跳过食物门, 继续下矿/熔炼等后续分支。
                     } else {
                         // 地表: 贪婪收集到达峰 (锁存后真断粮也冲峰值重建库存)。
-                        _foodTask = new CollectFoodTask(foodPeakUnits);
+                        // (2026-09-15 觅食远征) 远征锁存期间目标用降低值。
+                        _foodTask = new CollectFoodTask(collectTargetUnits);
                         diagIronPhase(mod, "collect food (greedy peak gate)",
                                 "foodScore=" + foodScore
-                                        + " peakUnits=" + foodPeakUnits
+                                        + " targetUnits=" + collectTargetUnits
+                                        + " expedition=" + FoodChain.s_foodExpeditionActive
                                         + " peakLatched=" + FoodChain.s_foodPeakReached
                                         + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
                         Debug.logToFile("altoclef_diag.log",
@@ -2032,6 +2042,11 @@ public class BeatMinecraft2Task extends Task {
                         Task preNetherShield = getPreNetherShieldTask(mod);
                         if (preNetherShield != null) {
                             return preNetherShield;
+                        }
+                        // (2026-09-15 进下界前食物硬闸 150)
+                        Task preNetherFood = getPreNetherFoodTask(mod);
+                        if (preNetherFood != null) {
+                            return preNetherFood;
                         }
                         setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
                         return _goToNetherTask;
@@ -2239,6 +2254,32 @@ public class BeatMinecraft2Task extends Task {
             }
         }
         return false;
+    }
+
+    /**
+     * (2026-09-15 进下界前食物硬闸, 用户"去地狱之前必须达到150units") 进下界
+     * (_goToNetherTask) 前的最后闸之一: 背包食物分 < preNetherFoodUnits → 返回
+     * CollectFoodTask 收满; 够了 → null 放行。ignoreExpeditionReduction=true:
+     * 硬闸不受觅食远征"超时降低"影响 (降低量只作用于日常囤粮, 地狱前必须 150)。
+     */
+    private Task getPreNetherFoodTask(AltoClef mod) {
+        int need = _config.preNetherFoodUnits;
+        if (need <= 0) return null;
+        double score = StorageHelper.calculateInventoryFoodScore(mod);
+        if (score >= need) return null;
+        CollectFoodTask wanted = new CollectFoodTask(need, true);
+        if (!(_foodTask instanceof CollectFoodTask)
+                || !_foodTask.equals(wanted)
+                || !_foodTask.isActive() || _foodTask.isFinished(mod)) {
+            Debug.logMessage("[PreNetherFood] food=" + (int) score + " < " + need
+                    + " — collecting food before entering Nether.");
+            Debug.logToFile("altoclef_diag.log",
+                    "[MAIN-FIX]\t[PreNetherFood]\tfood=" + (int) score + " < " + need
+                            + " -> CollectFoodTask(" + need + ", ignoreReduction) before Nether");
+            _foodTask = wanted;
+        }
+        setDebugState("Collecting food before Nether (" + (int) score + "/" + need + " units)");
+        return _foodTask;
     }
 
     /**

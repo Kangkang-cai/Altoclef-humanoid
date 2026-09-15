@@ -3,11 +3,13 @@ package adris.altoclef.tasks.resources;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.chains.FoodChain;
 import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.movement.OverworldExpeditionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasksystem.Task;
@@ -78,6 +80,13 @@ public class CollectFoodTask extends Task {
     };
 
     private final double _unitsNeeded;
+    // (2026-09-15 觅食远征) true = 本任务的达标线不受远征降低量影响
+    // (进下界前硬闸 CollectFoodTask(150) 用, 硬闸优先于"超时降低")。
+    private final boolean _ignoreExpeditionReduction;
+    // (2026-09-15 觅食远征) 觅食超时触发后的远征模式:
+    // 兜底探索从"小范围随机/平原偏置"切换为 OverworldExpeditionTask
+    // (锁定方位角一路向, 不回头、不下海), 发现食物仍照常捡/猎/收。
+    private boolean _expeditionMode = false;
     private final TimerGame _checkNewOptionsTimer = new TimerGame(10);
     private SmeltInFurnaceTask _smeltTask = null;
     // 终端资源任务槽 (到达型语义): 挖掘/采集/交互/合成/猎杀/拾取 —— 到达(或目的失效)
@@ -127,7 +136,30 @@ public class CollectFoodTask extends Task {
     private static final int STICKY_WANDER_GRACE_TICKS = 120;
 
     public CollectFoodTask(double unitsNeeded) {
+        this(unitsNeeded, false);
+    }
+
+    /**
+     * (2026-09-15 进下界前硬闸) ignoreExpeditionReduction=true 时达标线不受
+     * 觅食远征降低量影响 —— 硬性门槛 (如进地狱前 150 units) 必须收满。
+     */
+    public CollectFoodTask(double unitsNeeded, boolean ignoreExpeditionReduction) {
         _unitsNeeded = unitsNeeded;
+        _ignoreExpeditionReduction = ignoreExpeditionReduction;
+    }
+
+    /**
+     * (2026-09-15 觅食远征) 实际达标线: 远征模式生效时取
+     * min(_unitsNeeded, foodExpeditionReducedUnits) —— 覆盖两种创建路径:
+     * ① 锁存前创建的实例 (unitsNeeded=峰值), 锁存后自身降标;
+     * ② 锁存后上层按降低值新建的实例。
+     * 硬闸实例 (_ignoreExpeditionReduction) 恒用原值。
+     */
+    private double effectiveTarget(AltoClef mod) {
+        if (_ignoreExpeditionReduction || !_expeditionMode) return _unitsNeeded;
+        int reduced = mod.getModSettings().getFoodExpeditionReducedUnits();
+        if (reduced <= 0) return _unitsNeeded;
+        return Math.min(_unitsNeeded, reduced);
     }
 
     /**
@@ -246,6 +278,24 @@ public class CollectFoodTask extends Task {
             mod.getBlockTracker().trackBlock(crop.cropBlock);
         }
 
+        // (2026-09-15 觅食远征) 周期计时: 首次启动或食物大幅损失 (死亡掉落/被吃,
+        // 跌破高水位 15+) 时重开计时; 链被打断后恢复 (reset→onStart) 不清计时,
+        // "连续没找到"跨打断累计。
+        if (FoodChain.s_foodSearchStartMs < 0 || FoodChain.s_foodSearchBestPotential < 0) {
+            FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+            FoodChain.s_foodSearchBestPotential = calculateFoodPotential(mod);
+        } else {
+            double cur = calculateFoodPotential(mod);
+            if (cur + 15 < FoodChain.s_foodSearchBestPotential) {
+                FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+                FoodChain.s_foodSearchBestPotential = cur;
+            }
+        }
+        // 上轮已触发远征 (实例被上层重建): 新实例直接进远征模式。
+        if (FoodChain.s_foodExpeditionActive) {
+            _expeditionMode = true;
+        }
+
         // Allow us to consume food.
         /*
         for (CookableFoodTarget food : COOKABLE_FOODS)
@@ -267,7 +317,32 @@ public class CollectFoodTask extends Task {
         // 分支(捡掉落/猎杀动物/收作物/游荡找食), 直接进入"收尾制作/烤制"段(面包/烤
         // 薯/烧肉 → 全做完 isFinished=true → 任务结束)。
         double potentialFood = calculateFoodPotential(mod);
-        boolean foodMet = potentialFood >= _unitsNeeded;
+        boolean foodMet = potentialFood >= effectiveTarget(mod);
+
+        // (2026-09-15 觅食远征) 超时判定: 食物潜力高水位无增长 (或大幅损失后
+        // 重计) 持续超过 timeout → 触发远征并降低本轮达标线。有进展 (潜力新高)
+        // 即重置计时 —— "连续长时间没找到食物"才远走, 边走边捡不算。
+        if (!FoodChain.s_foodExpeditionActive) {
+            if (potentialFood > FoodChain.s_foodSearchBestPotential + 0.5
+                    || potentialFood + 15 < FoodChain.s_foodSearchBestPotential) {
+                FoodChain.s_foodSearchBestPotential = potentialFood;
+                FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+            }
+            double timeoutSeconds = mod.getModSettings().getFoodSearchExpeditionTimeoutSeconds();
+            if (timeoutSeconds > 0
+                    && System.currentTimeMillis() - FoodChain.s_foodSearchStartMs >= timeoutSeconds * 1000) {
+                FoodChain.s_foodExpeditionActive = true;
+                _expeditionMode = true;
+                int reduced = mod.getModSettings().getFoodExpeditionReducedUnits();
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-EXPEDITION]\tno food progress for " + (int) timeoutSeconds
+                                + "s (best potential " + (int) FoodChain.s_foodSearchBestPotential
+                                + ", need " + (int) _unitsNeeded + ") -> expedition mode, target reduced to "
+                                + Math.min(_unitsNeeded, reduced > 0 ? reduced : _unitsNeeded));
+            }
+        } else {
+            _expeditionMode = true;
+        }
 
         // If we were previously smelting, keep on smelting.
         if (_smeltTask != null && _smeltTask.isActive() && !_smeltTask.isFinished(mod)) {
@@ -520,8 +595,16 @@ public class CollectFoodTask extends Task {
         // 复用同一实例仍是硬要求(isEqual 是 identity): 每 tick new 会重启 onStart
         // 把 _heading 重置为随机 → 每走一格换方向。仅当上一实例已结束(失败 10 次)
         // 才换新实例 —— 换新会让框架真正重启它。
-        if (_exploreTask == null || _exploreTask.isFinished(mod)) {
+        // (2026-09-15 觅食远征) 远征模式下兜底探索从 BiasedExploreTask (平原偏置,
+        // 小范围) 换成 OverworldExpeditionTask (锁定方位角一路向, 不回头、不下海)。
+        // 发现食物的通道 (捡掉落/猎杀/收作物) 在上方每 tick 照常扫描, 找到即达标收队。
+        if (_expeditionMode && !(_exploreTask instanceof OverworldExpeditionTask)) {
+            _exploreTask = new OverworldExpeditionTask();
+        } else if (!_expeditionMode && (_exploreTask instanceof OverworldExpeditionTask)) {
             _exploreTask = new BiasedExploreTask(true);
+        }
+        if (_exploreTask == null || _exploreTask.isFinished(mod)) {
+            _exploreTask = _expeditionMode ? new OverworldExpeditionTask() : new BiasedExploreTask(true);
         }
         return _exploreTask;
     }
@@ -550,14 +633,16 @@ public class CollectFoodTask extends Task {
     @Override
     protected boolean isEqual(Task other) {
         if (other instanceof CollectFoodTask task) {
-            return task._unitsNeeded == _unitsNeeded;
+            return task._unitsNeeded == _unitsNeeded
+                    && task._ignoreExpeditionReduction == _ignoreExpeditionReduction;
         }
         return false;
     }
 
     @Override
     protected String toDebugString() {
-        return "Collect " + _unitsNeeded + " units of food.";
+        return "Collect " + _unitsNeeded + " units of food."
+                + (_expeditionMode ? " [EXPEDITION]" : "");
     }
 
     /**

@@ -12,6 +12,10 @@ public class BeatMinecraftConfig {
     public boolean searchDesertTemples = true;
     public int minFoodUnits = 20;
     public int foodUnits = 300;
+    // (2026-09-15 进下界前食物硬闸, 用户"去地狱之前必须达到150units") 进下界
+    // (_goToNetherTask) 前背包食物分低于该值 → 先 CollectFoodTask 收满。
+    // 不受觅食远征"超时降低"影响 (硬闸优先)。<=0 时禁用。
+    public int preNetherFoodUnits = 150;
     // 木头囤货：开局阶段至少囤的原木数（配合斧子收集）
     // (2026-08-25 64→48 足够整局; 2026-08-31 用户降 48→25: 25 根足够, 减少囤货时间/抢占)
     public int minWoodLogs = 25;

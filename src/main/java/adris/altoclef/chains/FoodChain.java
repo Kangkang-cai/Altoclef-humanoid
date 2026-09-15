@@ -43,6 +43,18 @@ public class FoodChain extends SingleTaskChain {
     // 收集。静态字段: BeatMinecraft2Task 每 tick 重建实例, 锁存必须跨实例存活。
     public static boolean s_foodPeakReached = false;
 
+    // ---- (2026-09-15 觅食远征, 用户"连续长时间没找到食物就远走, 不要走到海里") ----
+    // CollectFoodTask 每轮觅食周期维护 s_foodSearchStartMs / s_foodSearchBestPotential:
+    // 食物潜力高水位无增长持续超过 settings.foodSearchExpeditionTimeoutSeconds →
+    // 置 s_foodExpeditionActive=true (远征模式: 锁定方位角一路向, 不回头、不下海),
+    // 收集目标降为 settings.foodExpeditionReducedUnits。按降低量达标收官时一并置
+    // s_foodPeakReached=true (峰值语义锁存, 收完不再立刻冲峰值, 真断粮才重新收集)。
+    // static: FoodChain/BeatMinecraft2Task 每 tick 重建 CollectFoodTask 实例,
+    // 超时状态必须跨实例存活 (与 s_foodPeakReached 同理)。
+    public static boolean s_foodExpeditionActive = false;
+    public static long s_foodSearchStartMs = -1;
+    public static double s_foodSearchBestPotential = -1;
+
     private int _cachedFoodScore;
     private Optional<Item> _cachedPerfectFood = Optional.empty();
 
@@ -205,17 +217,26 @@ public class FoodChain extends SingleTaskChain {
         }
         // 锁存前: 沿用旧触发 (跌破 minimumFoodAllowed 锁定 _needsFood, 收集到达峰);
         // 锁存后: 只有跌破 minimumFoodAllowed 真断粮才重新收集, 目标直接冲峰值。
+        // (2026-09-15 觅食远征) 超时远征锁存期间, 本轮收集目标用降低值
+        // (foodExpeditionReducedUnits), 不再死磕峰值。
+        int collectTarget = peakUnits;
+        if (s_foodExpeditionActive) {
+            int reduced = settings.getFoodExpeditionReducedUnits();
+            if (reduced > 0 && reduced < collectTarget) {
+                collectTarget = reduced;
+            }
+        }
         boolean wantCollectFood = s_foodPeakReached
                 ? inventoryFoodScore < settings.getMinimumFoodAllowed()
                 : (_needsFood || _cachedFoodScore < settings.getMinimumFoodAllowed())
-                    && inventoryFoodScore < peakUnits;
+                    && inventoryFoodScore < collectTarget;
         if (wantCollectFood) {
             _needsFood = true;
 
             // Only collect if we don't have enough food.
             // If the user inputs invalid settings, the bot would get stuck here.
-            if (inventoryFoodScore < peakUnits) {
-                setTask(new CollectFoodTask(peakUnits));
+            if (inventoryFoodScore < collectTarget) {
+                setTask(new CollectFoodTask(collectTarget));
                 return 55f;
             }
         }
