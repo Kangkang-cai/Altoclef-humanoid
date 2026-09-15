@@ -87,7 +87,12 @@ public class BeatMinecraft2Task extends Task {
             Blocks.CHEST, // For ruined portals
             Blocks.SPAWNER, // For silverfish,
             Blocks.STONE_PRESSURE_PLATE // For desert temples
-    }, ItemHelper.itemsToBlocks(ItemHelper.BED));
+    }, concat(ItemHelper.itemsToBlocks(ItemHelper.BED),
+            // 羊毛也全程追踪 (2026-09-15 刷屏修复): nightBedOpportunityNearby 每 tick
+            // 查 WOOL, 但羊毛只有 CollectWoolTask 激活期间才被 track —— 平时
+            // getNearestTracking 每次查询都报 "Not tracking block white_wool" 刷屏,
+            // 且"顺路捡羊毛做床"判断恒 false 功能死掉。与床同等待遇全程追踪。
+            ItemHelper.itemsToBlocks(ItemHelper.WOOL)));
     private static Block[] concat(Block[] a, Block[] b) {
         Block[] result = new Block[a.length + b.length];
         System.arraycopy(a, 0, result, 0, a.length);

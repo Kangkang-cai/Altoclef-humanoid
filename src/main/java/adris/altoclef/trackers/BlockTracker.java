@@ -340,6 +340,23 @@ public class BlockTracker extends Tracker {
     }
 
     /**
+     * (2026-09-15 告警节流) 未追踪告警按方块名去重限频, 每 30s 至多一次:
+     * per-tick 查询 (如 nightBedOpportunityNearby 查 WOOL) 原来每次都
+     * logWarning, CHAT+STDOUT 每秒几十条刷屏。
+     */
+    private static final long UNTRACKED_WARN_INTERVAL_MS = 30_000;
+    private final Map<Block, Long> _untrackedWarnAt = new HashMap<>();
+
+    private void warnUntrackedThrottled(Block block) {
+        long now = System.currentTimeMillis();
+        Long last = _untrackedWarnAt.get(block);
+        if (last == null || now - last >= UNTRACKED_WARN_INTERVAL_MS) {
+            _untrackedWarnAt.put(block, now);
+            Debug.logWarning("BlockTracker: Not tracking block " + block + " right now.");
+        }
+    }
+
+    /**
      * Gets the nearest tracked block.
      * @param pos From what position? (defaults to the player's position)
      * @param isValidTest Filter predicate
@@ -350,7 +367,7 @@ public class BlockTracker extends Tracker {
         synchronized (_trackingBlocks) {
             for (Block block : blocks) {
                 if (!_trackingBlocks.containsKey(block)) {
-                    Debug.logWarning("BlockTracker: Not tracking block " + block + " right now.");
+                    warnUntrackedThrottled(block);
                     return Optional.empty();
                 }
             }
