@@ -441,6 +441,19 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
         @Override
         protected Optional<Entity> getEntityTarget(AltoClef mod) {
+            // (2026-09-15 111618 场次 approach 期误拉黑) "猪灵欣赏中重置
+            // barterTimeout"原先只写在 onEntityInteract 分支里 —— approach
+            // 模式不进交互分支, 期间零重置。实测: 猪灵漂到 3.2 格 (> 出 2.5
+            // 迟滞带) 逼进 approach, 随后在 2.1-2.2 悬停 6 秒 (进 2.0 门槛够
+            // 不着), 期间猪灵一直在欣赏金锭、欣赏结束还丢出了战利品 (被吸附
+            // 入包, 没产生 loot 边沿); 回到交互的首个 tick 超时已 6s > 2s、
+            // 距上次 loot 边沿 12.5s > 3s 宽限 → 刚完成交易的猪灵被拉黑。
+            // 上移到本方法 (每 tick 两分支都走) 后: 欣赏中 barterTimeout 恒
+            // 被重置, 只有"猪灵吃锭后连续 2 秒不欣赏也不出货"才拉黑。
+            if (_currentlyBartering != null && EntityHelper.isTradingPiglin(_currentlyBartering)) {
+                _barterTimeout.reset();
+            }
+
             // Ignore trading piglins
             Optional<Entity> found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
                     entity -> {
