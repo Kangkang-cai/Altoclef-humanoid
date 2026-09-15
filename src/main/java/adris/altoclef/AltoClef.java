@@ -221,6 +221,7 @@ public class AltoClef implements ModInitializer {
         // 谓词用。仅 inGame 时刷新; 玩家空手/复活 (HAND) 会让寻路避开硬岩。
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
+            tickInteractionPauseWatchdog();
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)
@@ -384,10 +385,22 @@ public class AltoClef implements ModInitializer {
         // Water bucket placement will be handled by us exclusively
         getExtraBaritoneSettings().configurePlaceBucketButDontFall(true);
 
-        // (2026-09-13 v30 灵魂沙 canWalkOn) —— 修 v29 没打中的真根因
-        //
-        // 现场: bot 两次进下界都卡死在同一个灵魂沙格 (10,88,-59) (11:28 与 17:00 两次会话),
-        // xyz 脚高恒 88.88 (灵魂沙顶面 88.875), vel=(0,-0.08,0) 恒定 (半格下沉),
+        // (2026-09-15 interaction pause 看门狗) `isInteractionPaused` 是 baritone
+        // patched 层的**全局单布尔位** (AltoClefSettings 在依赖 jar 里, 本仓改不了),
+        // 全仓 12 处 writer 成对 set(true)/set(false), 没有任何 RAII 保护 ——
+        // EatItemTask 源码注释自承 "SingleTaskChain 的 isFinished 路径不会调用 onStop";
+        // 而这个值直接参与 baritone 的放置总闸
+        //     hasThrowaway = !isInteractionPaused && allowPlace && hasGenericThrowaway()
+        // 一旦某处 true 之后没能复位, baritone 从此**完全不能放方块**, 症状与
+        // "背包里没方块" 完全无法区分: bot 对着该垫的位置只起跳、不放块。
+        // 合法占用者最长是进食 / 喝水 / MLG 落桶 / 单次挥击, 都在数秒内 ——
+        // 下面这条 >10s 才强制复位的兜底 (tickInteractionPauseWatchdog) 不会误伤任何
+        // 正常场景。
+        // (注册点在 onTick: tickInteractionPauseWatchdog(); 方法定义在本方法之后。)
+
+    // (2026-09-13 v30 灵魂沙 canWalkOn) —— 修 v29 没打中的真根因
+    //
+    // 现场: bot 两次进下界都卡死在同一个灵魂沙格 (10,88,-59) (11:28 与 17:00 两次会话),
         // hSpeed=0.000, bIn 全 false, baritone pathing=false pathPresent=false;
         // latest.log 里 `Open set size: 0` + `PathNode map size: 2` +
         // `nodes per second` 溢出 Integer.MAX_VALUE (A* 一步未展开) 共 4499 次,
@@ -438,6 +451,46 @@ public class AltoClef implements ModInitializer {
         getClientBaritoneSettings().planAheadFailureTimeoutMS.value = 10000L;
         // Was 100
         getClientBaritoneSettings().movementTimeoutTicks.value = 200;
+    }
+
+    // ==== (2026-09-15 interaction pause 看门狗) ====
+    // 看门狗状态: 上一次观察到的暂停值, 与本次暂停的起始时刻。
+    private static final long INTERACTION_PAUSE_STALE_MS = 10_000;
+    private boolean _lastInteractionPaused = false;
+    private long _interactionPausedSinceMs = 0;
+
+    /**
+     * (2026-09-15) interaction pause 泄漏兜底。详见 initializeBaritoneSettings 里的注释。
+     */
+    private void tickInteractionPauseWatchdog() {
+        boolean paused;
+        try {
+            paused = getExtraBaritoneSettings().isInteractionPaused();
+        } catch (Throwable ignored) {
+            return; // 世界/玩家尚未就绪, 不参与
+        }
+        long now = System.currentTimeMillis();
+        if (!paused) {
+            _lastInteractionPaused = false;
+            _interactionPausedSinceMs = 0;
+            return;
+        }
+        if (!_lastInteractionPaused || _interactionPausedSinceMs == 0) {
+            _lastInteractionPaused = true;
+            _interactionPausedSinceMs = now;
+            return;
+        }
+        long heldMs = now - _interactionPausedSinceMs;
+        if (heldMs > INTERACTION_PAUSE_STALE_MS) {
+            getExtraBaritoneSettings().setInteractionPaused(false);
+            _lastInteractionPaused = false;
+            _interactionPausedSinceMs = 0;
+            String m = "[InteractionPauseWatchdog] 自动复位泄漏的 interaction pause (已持续 "
+                    + heldMs + "ms > " + INTERACTION_PAUSE_STALE_MS
+                    + "ms) — 它掐着 baritone 的放置总闸 hasThrowaway, 泄漏期间 bot 只能跳不能放方块";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
     }
 
     // List all command sources here.
