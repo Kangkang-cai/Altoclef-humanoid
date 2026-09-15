@@ -19,7 +19,6 @@ import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalNear;
 import baritone.api.pathing.goals.GoalXZ;
-import baritone.api.pathing.goals.GoalYLevel;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.BlockState;
@@ -136,6 +135,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private final TimerGame _pillarHandoffTimer = new TimerGame(HANDOFF_TOTAL_SECONDS);
     private final TimerGame _pillarHandoffStallTimer = new TimerGame(HANDOFF_STALL_SECONDS);
     private int _pillarHandoffLastY = Integer.MIN_VALUE;
+    // (2026-09-15 GoalNear 进场) 上次 tick 的水平位置: handoff 目标改成
+    // GoalNear(目标, 2) 后 baritone 可能先【走】到目标附近再爬 —— 进场走路阶段
+    // y 不涨, 若 stall 只看 y 会把正常进场误判成"上不去"。XZ 位移也算进度;
+    // 原地跳(唯一要抓的死锁)XZ 不变、y 不创新高, 两条判据都抓得住它。
+    private int _pillarHandoffLastX = Integer.MIN_VALUE;
+    private int _pillarHandoffLastZ = Integer.MIN_VALUE;
     /** 本实例是否已交过一次 —— 交过还失败才拉黑, 避免"交还↔自写"来回抖。 */
     private boolean _pillarHandoffTried = false;
     /**
@@ -679,9 +684,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      * 遇到挡头只会空跳到超时; 而 baritone 会挖。让位: 挂 GoalYLevel(目标层),
      * 由它的 A* 自己选 MovementPillar (挖 up(2) + 放脚下) 爬上去。
      *
-     * 用 GoalYLevel 而不是 GoalNear/GoalBlock 的原因: 后者要求把【脚】放进
-     * 目标格, 对"站立面之上若干格"不可满足 —— baritone 全展开 700 万节点后
-     * 直接放弃 (现场 20260914-113531)。GoalYLevel 只约束高度, 可满足。
+     * (2026-09-15 GoalYLevel → GoalNear(pos,2), 用户"这不是回表面任务, GoalYLevel
+     * 纯 Y 目标也是错的") GoalYLevel 是 GoToSurfaceTask 的遗产 —— 那里只关心
+     * "到某一层", 在哪根柱子爬都行。挖目标的 handoff 关心的是爬到【目标旁边】。
+     * 现场 20260915-224849: baritone 挑了 8 格外的柱子爬 (树冠下净空差, 它选了
+     * 好爬的), 两次爬到 y=79 都是假 done —— 目标不在手边, 挖掘进度 -12, wander
+     * 挪走重来, 全场零产出。GoalNear(pos,2) 允许脚站在目标邻格/下一层 (含斜角),
+     * 对树干旁的可站立格可满足; 即便个别几何不可满足, 现在 stall 4s + 总窗口
+     * 12s + 立即拉黑已把最坏情况封顶, 不再是 09-14 那个 26s 冻结的无底洞。
      */
     private void startBaritoneHandoff(AltoClef mod, BlockPos feet, String reason) {
         endPillar(mod);
@@ -689,18 +699,20 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             _pillarHandoff = true;
             _pillarHandoffTried = true;
             _pillarHandoffLastY = mod.getPlayer().getBlockPos().getY();
+            _pillarHandoffLastX = mod.getPlayer().getBlockPos().getX();
+            _pillarHandoffLastZ = mod.getPlayer().getBlockPos().getZ();
             _pillarHandoffTimer.reset();
             _pillarHandoffStallTimer.reset();
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] start target="
                     + _pos.toShortString()
                     + " from y=" + _pillarHandoffLastY
                     + " blockedBy=" + mod.getWorld().getBlockState(feet.up(2)).getBlock()
-                    + " (" + reason + ") -> GoalYLevel(" + _pos.getY() + ")");
+                    + " (" + reason + ") -> GoalNear(" + _pos.toShortString() + ", 2)");
         }
         // 与自写垫塔同款: builder 不会自己停, 占着输入通道会让 baritone 的
         // pillar 动不了 (现场 20260914-115322)。
         mod.getClientBaritone().getBuilderProcess().onLostControl();
-        mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalYLevel(_pos.getY()));
+        mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_pos, 2));
     }
 
     /**
@@ -718,7 +730,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // targetAboveEye 瞬间翻 false → 这里误判 "done y=69" 腰斩它的起跳 →
         // 落地重入 → 1.4s 一轮 start/done 死循环 8 轮 (diag.log 16:06:31-52)。
         // 与垫塔 v2 "判据滞后"同病: 腾空期间的即时位置一律不可信, 视为"进行中"。
-        if (mod.getPlayer().isOnGround() && (!targetAboveEye(mod) || y >= _pos.getY())) {
+        // (2026-09-15 GoalNear) 爬到目标 2 格内可能还差半层 (y=78 贴着 79 的目标),
+        // 此时 y<目标层 但挖掘距离已到 —— reach 判定补上这个口, 否则 baritone 停在
+        // 已满足的 goal 上, y 不再涨 → 4s 后被 STALL 误杀拉黑。
+        if (mod.getPlayer().isOnGround()
+                && (!targetAboveEye(mod) || y >= _pos.getY() || withinMiningReach(mod))) {
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] done y=" + y
                     + " target=" + _pos.toShortString() + " -> back to normal mining");
             _pillarHandoff = false;
@@ -728,6 +744,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (y > _pillarHandoffLastY) {
             _pillarHandoffLastY = y;
             _pillarHandoffTimer.reset();
+            _pillarHandoffStallTimer.reset();
+        }
+        // (2026-09-15 GoalNear 进场) 走向目标的水平位移也算进度 (见字段注释);
+        // 原地跳 XZ 不变、y 不创新高, 两条都拦不住它 —— 该抓的照抓。
+        BlockPos _cur = mod.getPlayer().getBlockPos();
+        if (_cur.getX() != _pillarHandoffLastX || _cur.getZ() != _pillarHandoffLastZ) {
+            _pillarHandoffLastX = _cur.getX();
+            _pillarHandoffLastZ = _cur.getZ();
             _pillarHandoffStallTimer.reset();
         }
         // (2026-09-15 反应式补料 + 恢复 09-03 "放弃"地基)
@@ -752,6 +776,16 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     return true; // 下一 tick 由 pumpAcquireMaterials keep-alive
                 }
             }
+            // (2026-09-15 GoalNear) baritone 已把 bot 带进目标挖掘距离 (爬到邻格),
+            // 只是视线被树叶挡/差半格 —— 收工回常规路径 (撸叶/正常挖), 不拉黑。
+            // 拉黑了反而把一个本来够得着的目标判死。
+            if (withinMiningReach(mod)) {
+                Debug.logToFile("altoclef_diag.log", "[PillarHandoff] climb delivered reach, "
+                        + "back to normal mining target=" + _pos.toShortString());
+                _pillarHandoff = false;
+                endPillar(mod);
+                return true;
+            }
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] give up: "
                     + (_acquireStarted ? "already acquired once" : "has materials but cannot climb")
                     + " target=" + _pos.toShortString() + " -> unreachable");
@@ -763,6 +797,15 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             return true;
         }
         if (_pillarHandoffTimer.elapsed()) {
+            // (2026-09-15 GoalNear) 超时同理: 已进挖掘距离就不拉黑, 交回常规挖掘。
+            if (withinMiningReach(mod)) {
+                Debug.logToFile("altoclef_diag.log", "[PillarHandoff] timeout at y=" + y
+                        + " but within reach target=" + _pos.toShortString()
+                        + " -> back to normal mining");
+                _pillarHandoff = false;
+                endPillar(mod);
+                return true;
+            }
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] timeout 20s at y=" + y
                     + " lastY=" + _pillarHandoffLastY
                     + " target=" + _pos.toShortString() + " -> unreachable");
@@ -773,7 +816,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         }
         if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
             mod.getClientBaritone().getBuilderProcess().onLostControl();
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalYLevel(_pos.getY()));
+            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_pos, 2));
         }
         setDebugState("Baritone pillar to " + _pos.toShortString());
         return true;
@@ -878,6 +921,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     }
 
     /** 目标方块中心到玩家的水平 (XZ) 距离平方。 */
+    /** (2026-09-15 GoalNear 配套) 眼睛到目标中心是否已在挖掘距离内 (与
+     * tryClearOccluder 的 4.5 门控同源 —— 同一概念只留一个判据源)。 */
+    private boolean withinMiningReach(AltoClef mod) {
+        return mod.getPlayer().getEyePos().distanceTo(Vec3d.ofCenter(_pos)) <= 4.5;
+    }
+
     private double horizontalDistanceSqToPlayer(AltoClef mod) {
         double dx = (_pos.getX() + 0.5) - mod.getPlayer().getX();
         double dz = (_pos.getZ() + 0.5) - mod.getPlayer().getZ();
