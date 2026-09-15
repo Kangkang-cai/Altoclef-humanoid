@@ -84,7 +84,10 @@ public class MobDefenseChain extends SingleTaskChain {
     // 快死才 FIGHT)。
     private static final double MELEE_ATTACK_RANGE = 3.0;
     // Kind of a silly solution
-    public static Class[] HOSTILE_ANNOYING_CLASSES = new Class[]{SkeletonEntity.class, ZombieEntity.class, SpiderEntity.class, CaveSpiderEntity.class, WitchEntity.class, PiglinEntity.class, PiglinBruteEntity.class, HoglinEntity.class, ZoglinEntity.class, BlazeEntity.class, WitherSkeletonEntity.class, PillagerEntity.class, DrownedEntity.class};
+    // (20260915 加入 EndermanEntity) FIGHT 击杀任务按此类别过滤候选, 缺末影人时
+    // _fightTargets 非空但 KillEntitiesTask 候选集为空 → wander 空转 20s 挨打
+    // (日志实锤 20260915-115534 12:02:23~43, 血量 20→10.4)。
+    public static Class[] HOSTILE_ANNOYING_CLASSES = new Class[]{SkeletonEntity.class, ZombieEntity.class, SpiderEntity.class, CaveSpiderEntity.class, WitchEntity.class, PiglinEntity.class, PiglinBruteEntity.class, HoglinEntity.class, ZoglinEntity.class, BlazeEntity.class, WitherSkeletonEntity.class, PillagerEntity.class, DrownedEntity.class, EndermanEntity.class};
     private final KillAura _killAura = new KillAura();
     private final HashMap<Entity, TimerGame> _closeAnnoyingEntities = new HashMap<>();
     private Entity _targetEntity;
