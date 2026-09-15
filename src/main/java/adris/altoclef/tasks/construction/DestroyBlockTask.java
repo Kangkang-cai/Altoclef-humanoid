@@ -725,7 +725,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      */
     private boolean tickBaritoneHandoff(AltoClef mod) {
         int y = mod.getPlayer().getBlockPos().getY();
-        if (!targetAboveEye(mod) || y >= _pos.getY()) {
+        // (2026-09-15 落地门控) done 判定只在【落地时】做。现场 20260915-160447:
+        // bot 站 y=69 头顶橡树叶 → 交还 baritone GoalYLevel(70), baritone 起跳
+        // 那一瞬 blockPos 还是 69 但真实 Y 已过 69.38 → eyeY>71 →
+        // targetAboveEye 瞬间翻 false → 这里误判 "done y=69" 腰斩它的起跳 →
+        // 落地重入 → 1.4s 一轮 start/done 死循环 8 轮 (diag.log 16:06:31-52)。
+        // 与垫塔 v2 "判据滞后"同病: 腾空期间的即时位置一律不可信, 视为"进行中"。
+        if (mod.getPlayer().isOnGround() && (!targetAboveEye(mod) || y >= _pos.getY())) {
             Debug.logToFile("altoclef_diag.log", "[PillarHandoff] done y=" + y
                     + " target=" + _pos.toShortString() + " -> back to normal mining");
             _pillarHandoff = false;
