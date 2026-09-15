@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.tasks.slot.ThrowCursorTask;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.time.TimerGame;
@@ -228,6 +229,14 @@ public class PlayerInteractionFixChain extends TaskChain {
 
         // If we have something in our hand for a period of time...
         if (_lastHandStack != null && _stackHeldTimeout.elapsed()) {
+            // (2026-09-15) 丢垃圾挖坑/隧道期间豁免: 空手深板岩 ~7.5s/格 vs 8s 超时 →
+            // 挖到一半光标被收回 → 重捡 → 重挖进度清零, 每 8s 一轮死循环
+            // (2026-09-15 08:48-08:49 latest.log 实锤, 54s 循环到手动停)。
+            // 挖掘进行中只重置计时; ThrowCursorTask 自带 25s(隧道)/30s(挖一格)
+            // 超时兜底照丢, 不会因此永久占住光标。
+            if (ThrowCursorTask.isDiggingForThrow()) {
+                _stackHeldTimeout.reset();
+            } else {
             Debug.logMessage("Cursor stack is held for too long, will move back to inventory.");
             // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`: 背包满时
             // 点垃圾槽只交换不扔 → 光标杂物腾不掉 → 走下方"扔光标/保底随机丢"真正腾位。
@@ -255,6 +264,7 @@ public class PlayerInteractionFixChain extends TaskChain {
                 }
             }
             return Float.NEGATIVE_INFINITY;
+            } // (2026-09-15) else: 挖坑豁免分支只重置计时, 不收回光标。
         }
 
         if (shouldCloseOpenScreen(mod)) {
