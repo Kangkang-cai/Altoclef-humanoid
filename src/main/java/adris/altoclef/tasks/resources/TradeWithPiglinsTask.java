@@ -453,6 +453,18 @@ public class TradeWithPiglinsTask extends ResourceTask {
             if (_currentlyBartering != null && EntityHelper.isTradingPiglin(_currentlyBartering)) {
                 _barterTimeout.reset();
             }
+            // (2026-09-15 114524 场次 补口) 上一修只盖"欣赏中"。实测: 猪灵
+            // 边欣赏边爬坡跑远 (dist 7.7), 丢完战利品后不欣赏了, bot approach
+            // 3.7s 才贴回 —— 距上次重置 3.75s, 恰好超出 2s 超时+3s 宽限的
+            // 5s 覆盖 0.75s → 又拉黑刚完成交易的猪灵。补上语义正解: 猪灵不
+            // 在交互门槛 (进 2.0, 即交互分支真正能运行的范围) 内时
+            // barterTimeout 不计时 —— bot 在赶路, 不是在交易失败; 超时只在
+            // "贴脸 + 不欣赏 + 无战利品"时累计, 2s 即真实失败 (金锭没被吃/
+            // 欣赏被打断且不出货)。
+            else if (_currentlyBartering != null
+                    && !_currentlyBartering.isInRange(mod.getPlayer(), getInteractEnterDistance(mod))) {
+                _barterTimeout.reset();
+            }
 
             // Ignore trading piglins
             Optional<Entity> found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
