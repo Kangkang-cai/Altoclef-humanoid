@@ -2087,6 +2087,22 @@ public class MineAndCollectTask extends ResourceTask {
         protected Task onTick(AltoClef mod) {
             _mod = mod;
             if (_miningPos != null && !_progressChecker.check(mod)) {
+                // (2026-09-15 够得着才挥, 现场 20260915-172416) 挥击清草只对"已在
+                // 挖掘距离内但挖不动"有效。导航途中 baritone 绕坑寻路停顿 >1s 也会
+                // 让进度判负 —— 该场 bot 站坑边对 7 格外的原木连挥 33 次/7s, 判负
+                // 计数被微动不断重置, 永远到不了拉黑出口 (无 "Still failed to mine"),
+                // 纯空转+刷屏, 用户观感即"卡住"。够不着时: 不挥、不计负、进度判负
+                // 作废, 交给导航 (导航卡死由 DestroyBlockTask 的 _moveChecker/放弃
+                // 闸门兜底)。判据与 DestroyBlockTask 同源 (LookHelper.getReach =
+                // 真实 reach + LOS, 本仓"同一概念只留一个判据源")。
+                if (LookHelper.getReach(_miningPos).isEmpty()) {
+                    if (_swingTicksLeft > 0) {
+                        _swingTicksLeft = 0;
+                        mod.getInputControls().release(Input.CLICK_LEFT);
+                    }
+                    _progressChecker.reset();
+                    return trackSuperTick(super.onTick(mod));
+                }
                 // (2026-09-04 用户"卡住先左键挥几tick清草") 挖不动先挥击清草, 不
                 // 立即 blacklist: 草/藤蔓/草丛等小方块挡路时 bot 挖不动目标, 先
                 // 长按左键 SWING_TICKS 清掉, 挥完仍失败才 requestBlockUnreachable
