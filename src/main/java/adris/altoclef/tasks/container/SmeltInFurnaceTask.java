@@ -861,7 +861,13 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 _furnaceCache.outputSlot = newOutput;
                 // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
                 // 的下一个实例认账。
-                recordInflight(_cachePos, _target, _furnaceCache.materialSlot, _furnaceCache.outputSlot);
+                // (2026-09-16 崩溃修复) openPos 为 null 时 _cachePos 保持 null
+                // (界面开着但容器坐标解析不出, 如跨屏加载/坐标失配) → recordInflight
+                // 的 pos.toShortString() NPE 崩游戏 (09.32/09.34 两次 crash 实锤)。
+                // 坐标未知就没法记账, 跳过本次同步, 缓存照常更新。
+                if (_cachePos != null) {
+                    recordInflight(_cachePos, _target, _furnaceCache.materialSlot, _furnaceCache.outputSlot);
+                }
                 _cacheKnown = true;
             }
         }
