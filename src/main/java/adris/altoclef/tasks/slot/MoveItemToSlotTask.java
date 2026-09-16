@@ -46,6 +46,13 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
     private long _pendingPickupSinceMs = 0;
     private static final long PICKUP_SYNC_GRACE_MS = 500;
 
+    // (2026-09-16 冷却期防 churn) 最近一次派发的点击任务。冷却期 (canDoSlotAction
+    // =false) 返回它而不是 null —— null 会让框架停掉在跑的 ClickSlotTask, 冷却一过
+    // 又 new 一个, 每个点击节流周期 START/STOP 一轮 (230201 场 23:15:32-34 两秒
+    // 8 次、全场 82 次实锤, 用户观感"烧铁时任务变化不对")。ClickSlotTask.onTick
+    // 自带 canDoSlotAction 闸门, 冷却期 tick 它是安全 no-op。
+    private ClickSlotTask _lastClickTask = null;
+
     public MoveItemToSlotTask(ItemTarget toMove, Slot destination, Function<AltoClef, List<Slot>> getMovableSlots) {
         _toMove = toMove;
         _destination = destination;
@@ -85,70 +92,84 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
 
     @Override
     protected Task onTick(AltoClef mod) {
-        if (mod.getSlotHandler().canDoSlotAction()) {
-            // Rough plan
-            // - If empty slot or wrong item
-            //      Find best matching item (smallest count over target, or largest count if none over)
-            //      Click on it (one turn)
-            // - If held slot has < items than target count
-            //      Left click on destination slot (one turn)
-            // - If held slot has > items than target count
-            //      Right click on destination slot (one turn)
-            ItemStack currentHeld = StorageHelper.getItemStackInCursorSlot();
-            ItemStack atTarget = StorageHelper.getItemStackInSlot(_destination);
-
-            // Items that CAN be moved to that slot.
-            Item[] validItems = _toMove.getMatches();//Arrays.stream(_toMove.getMatches()).filter(item -> mod.getItemStorage().getItemCount(item) >= _toMove.getTargetCount()).toArray(Item[]::new);
-
-            // We need to deal with our cursor stack OR put an item there (to move).
-            boolean wrongItemHeld = !Arrays.asList(validItems).contains(currentHeld.getItem());
-
-            // (2026-08-24 拿起放下反复修复) 光标已拿到目标材料 → 放到目标槽,
-            // 并清空"待确认拿起"状态。
-            if (!currentHeld.isEmpty() && !wrongItemHeld) {
-                _pendingPickup = null;
-                int currentlyPlaced = Arrays.asList(validItems).contains(atTarget.getItem()) ? atTarget.getCount() : 0;
-                if (currentHeld.getCount() + currentlyPlaced <= _toMove.getTargetCount()) {
-                    // Just place all of 'em
-                    return new ClickSlotTask(_destination);
-                } else {
-                    // Place one at a time.
-                    return new ClickSlotTask(_destination, 1);
-                }
+        if (!mod.getSlotHandler().canDoSlotAction()) {
+            // (2026-09-16 冷却期防 churn) 旧实现冷却期直接 return null → 框架停掉
+            // 在跑的 ClickSlotTask, 冷却一过又 new 一个 → 每个冷却周期 START/STOP
+            // 一轮 (230201 场 23:15:32-34 两秒 8 次、全场 82 次实锤, 用户观感
+            // "烧铁时任务变化不对")。改为: 冷却期返回上一个【未完成】的点击任务
+            // —— ClickSlotTask.onTick 自带 canDoSlotAction 闸门, 冷却期 tick 它
+            // 是安全 no-op, 到点自动执行; 已完成/尚无则维持 null (真正无活可干)。
+            if (_lastClickTask != null && !_lastClickTask.isFinished(mod)) {
+                return _lastClickTask;
             }
+            return null;
+        }
+        // Rough plan
+        // - If empty slot or wrong item
+        //      Find best matching item (smallest count over target, or largest count if none over)
+        //      Click on it (one turn)
+        // - If held slot has < items than target count
+        //      Left click on destination slot (one turn)
+        // - If held slot has > items than target count
+        //      Right click on destination slot (one turn)
+        ItemStack currentHeld = StorageHelper.getItemStackInCursorSlot();
+        ItemStack atTarget = StorageHelper.getItemStackInSlot(_destination);
 
-            if (currentHeld.isEmpty()) {
-                // 需要拿起。若刚发起的 PICKUP 还在同步宽限期内 (光标应很快
-                // 出现材料), 直接推进到"放目标槽" — 既不重复点击源槽 (否则
-                // 拿起又放下反复), 也不返回 null (否则父任务 containerSubTask
-                // 的光标兜底抢跑, 把光标上的材料 Dumping 放回背包)。
-                if (_pendingPickup != null
-                        && System.currentTimeMillis() - _pendingPickupSinceMs < PICKUP_SYNC_GRACE_MS) {
-                    return new ClickSlotTask(_destination);
-                }
-                Optional<Slot> toPlace = getBestSlotToPickUp(mod, validItems);
-                if (toPlace.isEmpty()) {
-                    Debug.logError("Called MoveItemToSlotTask when item/not enough item is available! valid items: " + StlHelper.toString(validItems, Item::getTranslationKey));
-                    return null;
-                }
-                _pendingPickup = toPlace.get();
-                _pendingPickupSinceMs = System.currentTimeMillis();
-                return new ClickSlotTask(toPlace.get());
+        // Items that CAN be moved to that slot.
+        Item[] validItems = _toMove.getMatches();//Arrays.stream(_toMove.getMatches()).filter(item -> mod.getItemStorage().getItemCount(item) >= _toMove.getTargetCount()).toArray(Item[]::new);
+
+        // We need to deal with our cursor stack OR put an item there (to move).
+        boolean wrongItemHeld = !Arrays.asList(validItems).contains(currentHeld.getItem());
+
+        // (2026-08-24 拿起放下反复修复) 光标已拿到目标材料 → 放到目标槽,
+        // 并清空"待确认拿起"状态。
+        if (!currentHeld.isEmpty() && !wrongItemHeld) {
+            _pendingPickup = null;
+            int currentlyPlaced = Arrays.asList(validItems).contains(atTarget.getItem()) ? atTarget.getCount() : 0;
+            if (currentHeld.getCount() + currentlyPlaced <= _toMove.getTargetCount()) {
+                // Just place all of 'em
+                _lastClickTask = new ClickSlotTask(_destination);
+                return _lastClickTask;
             } else {
-                // 拿着错物品 → 先放回背包 (或直接换)。
-                Optional<Slot> toPlace = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(currentHeld, true);
-                if (toPlace.isEmpty()) {
-                    // If all else fails, just swap it.
-                    toPlace = getBestSlotToPickUp(mod, validItems);
-                }
-                if (toPlace.isEmpty()) {
-                    Debug.logError("Called MoveItemToSlotTask when item/not enough item is available! valid items: " + StlHelper.toString(validItems, Item::getTranslationKey));
-                    return null;
-                }
-                return new ClickSlotTask(toPlace.get());
+                // Place one at a time.
+                _lastClickTask = new ClickSlotTask(_destination, 1);
+                return _lastClickTask;
             }
         }
-        return null;
+
+        if (currentHeld.isEmpty()) {
+            // 需要拿起。若刚发起的 PICKUP 还在同步宽限期内 (光标应很快
+            // 出现材料), 直接推进到"放目标槽" — 既不重复点击源槽 (否则
+            // 拿起又放下反复), 也不返回 null (否则父任务 containerSubTask
+            // 的光标兜底抢跑, 把光标上的材料 Dumping 放回背包)。
+            if (_pendingPickup != null
+                    && System.currentTimeMillis() - _pendingPickupSinceMs < PICKUP_SYNC_GRACE_MS) {
+                _lastClickTask = new ClickSlotTask(_destination);
+                return _lastClickTask;
+            }
+            Optional<Slot> toPlace = getBestSlotToPickUp(mod, validItems);
+            if (toPlace.isEmpty()) {
+                Debug.logError("Called MoveItemToSlotTask when item/not enough item is available! valid items: " + StlHelper.toString(validItems, Item::getTranslationKey));
+                return null;
+            }
+            _pendingPickup = toPlace.get();
+            _pendingPickupSinceMs = System.currentTimeMillis();
+            _lastClickTask = new ClickSlotTask(toPlace.get());
+            return _lastClickTask;
+        } else {
+            // 拿着错物品 → 先放回背包 (或直接换)。
+            Optional<Slot> toPlace = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(currentHeld, true);
+            if (toPlace.isEmpty()) {
+                // If all else fails, just swap it.
+                toPlace = getBestSlotToPickUp(mod, validItems);
+            }
+            if (toPlace.isEmpty()) {
+                Debug.logError("Called MoveItemToSlotTask when item/not enough item is available! valid items: " + StlHelper.toString(validItems, Item::getTranslationKey));
+                return null;
+            }
+            _lastClickTask = new ClickSlotTask(toPlace.get());
+            return _lastClickTask;
+        }
     }
 
     @Override
