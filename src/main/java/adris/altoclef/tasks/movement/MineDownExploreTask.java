@@ -224,6 +224,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     //   footnote1: drop = max(0, min(digStart.y - floorY, k/2)) —— floorY 只拦"继续下降",
     //   没有任何上升分量, 起点在 floor 之下时 min() 取负值 → max(0,负) = 0 → 平挖。
     private static final int DEEP_ASCEND_BUFFER = 2;
+    // (2026-09-16 开阔豁免) 判"头顶空旷"的连续可通行格数: 从脚上方起向上扫这么
+    // 多格全是 air/cave_air → 站在开阔地表/大空腔, 不是被困在地下, 无需爬回目标高度。
+    // 10 格足够区分"洞里"(洞顶通常 1~6 格内封顶) 与"露天/大空腔"。
+    private static final int OPEN_CEILING_SCAN = 10;
     // (2026-09-15 baritone-first 上行) 触发上行后先让位 baritone GoalYLevel 爬回目标
     // 高度 (baritone 的 A* 可能借现成矿洞/地形省时间, 用户拍板), 自写 45° 楼梯降级为
     // 看门狗兜底。看门狗: 脚下最高 Y 连续这么久没有净涨 ≥ MIN_GAIN → 判 baritone 爬
@@ -487,6 +491,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 省时间, 用户拍板); 只有水中 (baritone 垂直爬升在水体无解, 09-14 取证) 或
         // baritone 看门狗超时才走自写楼梯。
         boolean ascendTriggered = _digStart.getY() <= ascendTriggerY();
+        // (2026-09-16 开阔豁免, 用户"高度上升只在有落脚点/被困前提下适用, 不是非要到
+        // 那个高度"): 干地 + 头顶连续 OPEN_CEILING_SCAN 格可通行 = 站在开阔地表或
+        // 大空腔, 没有被困, 强行爬回 targetY 没有意义。
+        // 20260916-114603 实锤: 灵魂沙谷地表 y=44~59 挖隧道找金, targetY 掷到 64 →
+        // 触发线=48, 每次实例 onStart 都 engage 爬升 → 爬上去 wander 又下来再 engage,
+        // 4 轮循环零产出。开阔时直接平挖 (隧道缓降语义不变)。
+        if (ascendTriggered && !mod.getPlayer().isTouchingWater() && isCeilingOpen(mod)) {
+            Debug.logToFile("altoclef_diag.log", "[MineDown-OpenSkySkip] below ascend line (y="
+                    + _digStart.getY() + ", line " + ascendTriggerY() + ") but ceiling open"
+                    + " -> no ascent, dig tunnel instead.");
+            ascendTriggered = false;
+        }
         if (ascendTriggered && !mod.getPlayer().isTouchingWater()) {
             enterBaritoneAscent(mod, "start below ascend line (y=" + _digStart.getY() + ")");
         } else {
@@ -515,6 +531,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _dirX = STAIR_DIR_X;
             _dirZ = STAIR_DIR_Z;
         }
+    }
+
+    /**
+     * (2026-09-16 开阔豁免) 头顶是否开阔: 从脚上方起向上连续 OPEN_CEILING_SCAN 格
+     * 可通行 (air/cave_air) → 不在被困的地下空间, 上行爬升不适用。实体方块即封顶。
+     */
+    private boolean isCeilingOpen(AltoClef mod) {
+        BlockPos p = mod.getPlayer().getBlockPos().up();
+        for (int i = 0; i < OPEN_CEILING_SCAN; i++) {
+            if (!mod.getWorld().getBlockState(p).isAir()) return false;
+            p = p.up();
+        }
+        return true;
     }
 
     /**

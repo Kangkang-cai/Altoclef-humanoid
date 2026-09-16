@@ -9,6 +9,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
+import adris.altoclef.tasks.movement.NetherExpeditionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
@@ -54,6 +55,11 @@ public class MineAndCollectTask extends ResourceTask {
     // 进行中的探索被换成全新实例, 探索进度作废、同洞反复吸引(16:0x 会话 11 次
     // FIRE/0 mark 的根因之一)。静态引用跨对象存活, createNextExplorationTask 认领。
     private static MineDownExploreTask _lastCaveExploration;
+
+    // (2026-09-16 灵魂沙谷远征) 谷内挖金时缓存的远征实例: isEqual 是 identity,
+    // 每 tick new 会无限拆树; static 跨链重建存活, isFinished(出谷) 后由下一轮
+    // createNextExplorationTask 新建 (正常挖矿探索)。
+    private static NetherExpeditionTask _soulSandExpedition;
 
     private final MiningRequirement _requirement;
 
@@ -1951,6 +1957,22 @@ public class MineAndCollectTask extends ResourceTask {
             // 移除原来的"矿洞内随机走"BiasedExplore 分支: 它只走不挖, 困在封闭
             // 空腔里永远走不出、只能原地反复寻路 → 站死 (用户实测站定不动)。
             // (2026-09-05 目标带) 传 [min, max] 生成带, 每实例带内随机取目标高度。
+            // (2026-09-16 灵魂沙谷远征, 用户"灵魂沙地貌金子少, 应该远征") 下界挖
+            // 金/石英/镶金黑石时若身处灵魂沙谷 → 定向远征走出山谷再继续挖。谷内
+            // 灵魂沙/灰烬覆盖, 金矿暴露少, 原地挖隧道零产出 (20260916-114603 实锤:
+            // 12:00~12:26 在谷内反复挖隧道+被爬升打断, 零金产出)。残骸目标不触发
+            // (残骸全下界均匀分布, 无需避谷)。实例缓存: isEqual 是 identity, 每 tick
+            // new 会无限拆树。
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER
+                    && targetsNetherSurfaceOres()
+                    && isInSoulSandValley(mod)) {
+                if (_soulSandExpedition == null || _soulSandExpedition.isFinished(mod)) {
+                    _soulSandExpedition = new NetherExpeditionTask();
+                    Debug.logMessage("[NETHER-EXPEDITION] soul sand valley detected while mining"
+                            + " nether ores -> expedition to leave the valley.");
+                }
+                return _soulSandExpedition;
+            }
             int[] band = targetShaftBand();
             // (2026-09-07 探索断点交接) 链重建后认领仍在探索中的上一个探索任务:
             // 同维度且玩家仍在最近 FIRE 锚点 64 格内 → 原样复用(MineDownExploreTask
@@ -1992,6 +2014,30 @@ public class MineAndCollectTask extends ResourceTask {
             MineDownExploreTask exploration = new MineDownExploreTask(band[0], band[1]);
             _lastCaveExploration = exploration;
             return exploration;
+        }
+
+        /**
+         * (2026-09-16 灵魂沙谷远征) 目标是否"表层下界矿" (金/石英/镶金黑石):
+         * 这三样全下界分布但灵魂沙谷暴露少, 值得为它们远征避谷。
+         */
+        private boolean targetsNetherSurfaceOres() {
+            for (Block block : _blocks) {
+                if (block == Blocks.NETHER_GOLD_ORE || block == Blocks.GILDED_BLACKSTONE
+                        || block == Blocks.NETHER_QUARTZ_ORE) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** (2026-09-16 灵魂沙谷远征) 当前是否身处灵魂沙谷。 */
+        private static boolean isInSoulSandValley(AltoClef mod) {
+            try {
+                return mod.getWorld().getBiome(mod.getPlayer().getBlockPos())
+                        .matchesKey(net.minecraft.world.biome.BiomeKeys.SOUL_SAND_VALLEY);
+            } catch (Exception e) {
+                return false;
+            }
         }
 
         /**
