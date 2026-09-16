@@ -34,10 +34,17 @@ public final class KnowledgeMemory {
 
     // How often we run a landmark scan (ticks).
     private static final int SCAN_INTERVAL_TICKS = 20;
-    // How far around the player we scan for landmark blocks (blocks).
-    private static final int SCAN_RADIUS = 24;
-    // Slice thickness for round-robin scanning (keeps per-tick cost low).
-    private static final int SLICE_WIDTH = 8;
+    // =========================================================================
+    // (2026-09-16 视力范围感知, 用户"24 格太小, 原本视力范围多远就用多远")
+    // 旧实现自己扫 24 格箱子当候选源 → 隔 30+ 格亲眼望见的堡垒根本记不住。
+    // 改为直接复用 BlockTracker 感知缓存当候选 (近区 5Hz 半径 16 + 远区 4s
+    // 半径 128, 即 bot 现成的"视力范围"), 候选按距离排序后每轮只对最近的
+    // MAX_LOS_CHECKS_PER_ROUND 个做 isBlockPerceivable 真视线判定 (防透视,
+    // 开销有界, 与 FortressExploreTask 找下界砖同款护栏)。扫描迭代按位置
+    // 遍历 + 集合判定, 多跟几种地标方块几乎不增加扫描成本; 缓存每类型
+    // 封顶 100 (保最近的)。
+    // =========================================================================
+    private static final int MAX_LOS_CHECKS_PER_ROUND = 12;
     // Merge centers that are closer than this (blocks).
     private static final double MERGE_DISTANCE = 8;
     // Max remembered centers per structure type.
@@ -77,40 +84,41 @@ public final class KnowledgeMemory {
         _mod = mod;
     }
 
+    // (2026-09-16) 地标方块首次进游戏时注册到 BlockTracker (引用计数 +1 且
+    // 不释放, 与 FortressExploreTask 等任务的 track/stopTracking 计数共存)。
+    private boolean _landmarksTracked = false;
+
     public void tick() {
         if (!AltoClef.inGame() || _mod.getPlayer() == null) return;
+        // 首个游戏 tick 注册地标方块 (运行时注册, 避开构造期 tracker 未就绪)。
+        if (!_landmarksTracked) {
+            _landmarksTracked = true;
+            for (StructureType type : StructureType.values()) {
+                _mod.getBlockTracker().trackBlock(type.landmarks);
+            }
+        }
         _scanCounter++;
         if (_scanCounter % SCAN_INTERVAL_TICKS != 0) return;
+        scanLandmarksByPerception();
+    }
 
+    /**
+     * (2026-09-16 视力范围感知) 从 BlockTracker 感知缓存取地标候选 (bot 视力
+     * 范围全量), 按距离排序, 每轮只对最近 MAX_LOS_CHECKS_PER_ROUND 个做真视线
+     * 判定 —— 只有"亲眼看见"的地标才 remember, 不透视。
+     */
+    private void scanLandmarksByPerception() {
         BlockPos player = _mod.getPlayer().getBlockPos();
-        // Round-robin a vertical slice of the scan box so each tick stays cheap.
-        int slices = (2 * SCAN_RADIUS) / SLICE_WIDTH;
-        int slice = (_scanCounter / SCAN_INTERVAL_TICKS) % slices;
-        int xMin = player.getX() - SCAN_RADIUS + slice * SLICE_WIDTH;
-
-        // (2026-08-23 卡顿修复) 原实现每 20 tick 对 ~5.7 万位置 (3 结构 ×
-        // 49y × 49z × 8x) 逐个做 LOS 射线 (isBlockVisible), 单次 100~670ms —
-        // jank/slowtick 日志实锤为"每 1 秒一次规律性卡顿"的根源。优化:
-        // ① 先跳过未加载区块 (看不见也扫不到, 省掉 getBlockState 的区块查找);
-        // ② 每位置只取一次方块类型, 先判断是否是地标方块 (廉价过滤,
-        //    地标在扫描体积里占比极小);
-        // ③ 只有真正的地标方块才做昂贵的 LOS 射线。射线数从 ~5.7 万次降到
-        //    每次扫描的实际地标数 (~几十次)。remember 有 8 格合并 + 每类型
-        //    20 中心上限, 多记不会无界增长。
-        for (int y = player.getY() - SCAN_RADIUS; y <= player.getY() + SCAN_RADIUS; y++) {
-            for (int z = player.getZ() - SCAN_RADIUS; z <= player.getZ() + SCAN_RADIUS; z++) {
-                for (int x = xMin; x < xMin + SLICE_WIDTH; x++) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    if (!_mod.getChunkTracker().isChunkLoaded(pos)) continue;
-                    Block block = _mod.getWorld().getBlockState(pos).getBlock();
-                    // 廉价过滤: 该方块是否属于某结构的地标方块 (无射线)。
-                    for (StructureType type : StructureType.values()) {
-                        if (!contains(type.landmarks, block)) continue;
-                        // Only "remember" structures we can actually see (LOS)。
-                        if (VisibilityHelper.isBlockVisible(_mod, pos)) {
-                            remember(type, pos);
-                        }
-                    }
+        for (StructureType type : StructureType.values()) {
+            List<BlockPos> candidates = _mod.getBlockTracker().getKnownLocations(type.landmarks);
+            if (candidates.isEmpty()) continue;
+            candidates.sort((a, b) -> Double.compare(a.getSquaredDistance(player), b.getSquaredDistance(player)));
+            int checks = 0;
+            for (BlockPos pos : candidates) {
+                // 只做有限次射线: 最近的几个都看不见 (背对/遮挡) 就等下一轮。
+                if (++checks > MAX_LOS_CHECKS_PER_ROUND) break;
+                if (VisibilityHelper.isBlockPerceivable(_mod, pos)) {
+                    remember(type, pos);
                 }
             }
         }
