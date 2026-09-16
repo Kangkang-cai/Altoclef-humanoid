@@ -1,6 +1,7 @@
 package adris.altoclef;
 
 import adris.altoclef.tasks.*;
+import adris.altoclef.tasksystem.Task;
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
@@ -958,9 +959,15 @@ public class TaskCatalogue {
             // 不影响正确性。stopped() 是 Task 已有 public 方法 (只读 _stopped 字段, 不改状态机)。
             AltoClef mod = AltoClef.getInstance();
             if (_liveInstance != null && mod != null
+                    && !Task.isInTickStack(_liveInstance)
                     && !_liveInstance.isFinished(mod) && !_liveInstance.stopped()) {
                 return _liveInstance;
             }
+            // (2026-09-16 防环守卫) isInTickStack = 缓存实例正在被 tick (是当前
+            // onTick 调用链的祖先) —— 复用它会让任务出现在自己的子树里成环
+            // (19:15:20 拾取原木时 Mine(logs)→斧链→getItemTask("log")→自身,
+            // depth-128 OVERFLOW 后渲染线程挂死实锤)。此时退回新建实例,
+            // 新实例同时接管 _liveInstance 槽, 原(栈上的)实例由其父任务继续持有。
             // (2026-09-16 验证日志) 只在"重建"时打点, 只落盘不进聊天, 2s 节流。
             // 验证判据 —— 生效: 同一资源 (按首物品名) 的 [CAT-CACHE] rebuild 低频
             // (仅在任务真完成后出现); 失败: 同一资源每秒多条 rebuild = 缓存失效,

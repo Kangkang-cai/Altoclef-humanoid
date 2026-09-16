@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 
+import java.util.ArrayDeque;
 import java.util.function.Predicate;
 
 public abstract class Task {
@@ -46,6 +47,21 @@ public abstract class Task {
         return _currentTicking.get();
     }
 
+    // (2026-09-16 防环守卫) 当前线程的 tick 祖先栈。背景: TaskCatalogue 活实例
+    // 合并后, "同需求复用同一实例"与"任务不能成为自己的祖先"冲突 —— bot 拾取
+    // 原木时 Mine(logs) 的斧子 COMMIT 链要合成台/木板 → 链内 getItemTask("log")
+    // 命中同一个活实例 → M 出现在自己的子树里 (19:15:20 实锤: depth-128
+    // OVERFLOW 后渲染线程挂死 —— 环一旦成形, thisOrChildSatisfies/stop 等
+    // 无深度保护的链遍历直接死循环, 保险丝只能防崩溃防不了挂死)。
+    // tick() 进出维护祖先栈, 供 TaskCatalogue 复用前判定"缓存实例是否在栈上":
+    // 在栈上 = 复用会成环 → 退回新建实例。
+    private static final ThreadLocal<ArrayDeque<Task>> _tickStack = ThreadLocal.withInitial(ArrayDeque::new);
+
+    /** 当前线程 tick 祖先栈上是否已有 t (即再复用 t 会构成任务环)。 */
+    public static boolean isInTickStack(Task t) {
+        return t != null && _tickStack.get().contains(t);
+    }
+
     // (2026-09-16 泡水挖矿判定) 最近一次开始 tick 的任务。链仲裁发生在任务 tick
     // 之外（此时 ThreadLocal 已恢复为 null，拿不到叶子），但仲裁紧跟在叶子 tick
     // 之后 —— 嵌套 tick 时子任务后进先覆盖，tick 结束后这里留下的正是真叶子
@@ -66,10 +82,13 @@ public abstract class Task {
         _tickDepth++;
         Task prevTicking = _currentTicking.get();
         _currentTicking.set(this);
+        ArrayDeque<Task> tickStack = _tickStack.get();
+        tickStack.push(this);
         _lastTicked = this; // 嵌套时子任务随后覆盖 → tick 完留下的就是真叶子
         try {
             tickInternal(mod, parentChain);
         } finally {
+            tickStack.pop();
             _currentTicking.set(prevTicking);
             _tickDepth--;
         }
