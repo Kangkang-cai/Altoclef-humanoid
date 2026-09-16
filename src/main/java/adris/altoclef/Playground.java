@@ -47,6 +47,7 @@ import net.minecraft.util.registry.Registry;
 import net.minecraft.world.chunk.EmptyChunk;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Scanner;
 
@@ -277,7 +278,9 @@ public class Playground {
                     int unobtainable = 0;
                     int total = 0;
                     File f = new File(fname);
-                    FileWriter fw = new FileWriter(f);
+                    // (2026-09-16 中文乱码对齐) 旧 new FileWriter(f) 默认平台字符集, Windows=GBK,
+                    // 写出清单里若含中文会乱码。显式 UTF-8 与 Debug 落盘口径一致。
+                    OutputStreamWriter fw = new OutputStreamWriter(new FileOutputStream(f), StandardCharsets.UTF_8);
                     for (Identifier id : Registry.ITEM.getIds()) {
                         Item item = Registry.ITEM.get(id);
                         if (!TaskCatalogue.isObtainable(item)) {

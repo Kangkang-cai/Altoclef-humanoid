@@ -111,6 +111,9 @@ public class MobDefenseChain extends SingleTaskChain {
     private static long _lastNearbyHostileDiagMs = 0;
     // (2026-09-01) [RETREAT-DEC] 逃/打判决 节流时间戳 (0.5s)。
     private long _lastRetreatDecLogMs = 0;
+    // (2026-09-16) [Diag-creeper] 苦力怕 fuse 诊断节流时间戳 (0.5s, 复用 MOB_DIAG_INTERVAL_MS)。
+    // fusing 苦力怕存在时 stateEvaluate 每 tick 都到这, 不节流会每 tick 刷屏聊天+日志。
+    private long _lastCreeperDiagMs = 0;
 
     // ---- Defense state machine ----
     // The defense chain is now a small state machine so that repeated fights /
@@ -581,11 +584,19 @@ public class MobDefenseChain extends SingleTaskChain {
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
-            // (2026-08-23) 诊断日志：每次检测到苦力怕fuse时都打印，看fuse值和条件
-            Debug.logMessage("[Diag-creeper] fuse=%.2f, health=%.1f/%.1f, hasShield=%s, nearbyHostiles=%d, distance=%.1f",
-                    fuse, mod.getPlayer().getHealth(), mod.getPlayer().getMaxHealth(),
-                    ThreatEvaluator.hasShield(mod), getNearbyHostiles(mod).size(),
-                    Math.sqrt(blowingUp.squaredDistanceTo(mod.getPlayer())));
+            // (2026-09-16) [Diag-creeper] 原每 tick 都 Debug.logMessage 刷聊天, 苦力怕引信期间
+            // 每秒 20 条刷屏。改为只落盘 altoclef_diag.log (不进聊天), 并加 500ms 节流,
+            // 与同文件 [RETREAT-DEC]/[MOB-DIAG] 诊断日志节流写法一致。注意: 只动这一处,
+            // 不动 [Diag-flow]/[Diag-chain]/[Diag-blind]/[Diag-bed] 等其他 tag。
+            long creeperDiagNow = System.currentTimeMillis();
+            if (creeperDiagNow - _lastCreeperDiagMs > MOB_DIAG_INTERVAL_MS) {
+                _lastCreeperDiagMs = creeperDiagNow;
+                Debug.logToFile("altoclef_diag.log", String.format(
+                        "[Diag-creeper] fuse=%.2f, health=%.1f/%.1f, hasShield=%s, nearbyHostiles=%d, distance=%.1f",
+                        fuse, mod.getPlayer().getHealth(), mod.getPlayer().getMaxHealth(),
+                        ThreatEvaluator.hasShield(mod), getNearbyHostiles(mod).size(),
+                        Math.sqrt(blowingUp.squaredDistanceTo(mod.getPlayer()))));
+            }
             // (2026-08-30 有盾就立刻格挡, 用户"副手拿盾也跑") 去掉了 fuse>=0.3 门槛:
             // fuse 早期(<0.3) bot 之前也直接逃, 即使副手拿盾。改为: 有盾且苦力怕
             // 在 10 格内 → 任意 fuse 都原地举盾接爆, 不再逃。只有没盾/被围攻才

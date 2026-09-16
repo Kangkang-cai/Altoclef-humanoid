@@ -5,9 +5,11 @@ import net.minecraft.text.Text;
 
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
@@ -121,7 +123,11 @@ public class Debug {
                     if (parent != null && !parent.exists()) {
                         parent.mkdirs();
                     }
-                    writer = new PrintWriter(new BufferedWriter(new FileWriter(file, true), 8192), true);
+                    // (2026-09-16 中文乱码根因) 旧实现 new FileWriter(file, true) 不指定字符集,
+                    // Windows 平台默认 GBK, 导致会话日志里中文全是 GBK 字节 (iconv 才能读)。
+                    // 改用 OutputStreamWriter + StandardCharsets.UTF_8 显式 UTF-8 落盘, 与其他
+                    // 记忆文件 (PortalMemoryStore 等) 口径一致。缓冲/追加模式/autoFlush 语义不变。
+                    writer = new PrintWriter(new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8), 8192), true);
                     _writers.put(path, writer);
                     // 每会话每文件只写一次头行: 会话起点 + 构建标识。
                     if (_sessionHeaderWritten.add(path)) {
