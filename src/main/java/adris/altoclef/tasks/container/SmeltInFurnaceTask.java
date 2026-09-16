@@ -228,8 +228,30 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // 先进光标再落袋，若按 NoCursor 算则收铁后仍"未达标"，任务永不
         // 结束，反复收铁 + 光标滞留卡死（用户实测：烧完铁卡熔炉界面
         // 3 分 44 秒，介入才恢复）。光标里的铁已实际拿到，应计入达标。
-        return (StorageHelper.itemTargetsMetInventory(mod, _itemTargets) || _doTask.isFinished(mod)) && _doTask.isFurnaceDrained();
+        // (2026-09-16 守炉死循环诊断) 144318 场次实锤: 铁锭 9 个已达标、真实
+        // tick 实例缓存已排空 (fuel=coal x8 known=true), 但 isFinished 轮询命中的
+        // 实例缓存是冷缓存 (fuel=air known=false) → drained 永假 → 守炉循环无出口。
+        // 疑点: 同目标 [[iron_ingot] x 9] 疑似存在两个实例 ([SmeltCache] 自
+        // 15:05:01 起成对出现 = 双观察者)。本日志零行为, 打实例身份+各分量,
+        // 下一场归因 (详见 2026-09-16 记忆 144318 节)。
+        boolean targetsMet = StorageHelper.itemTargetsMetInventory(mod, _itemTargets);
+        boolean subFinished = _doTask.isFinished(mod);
+        boolean drained = _doTask.isFurnaceDrained();
+        if (!(targetsMet || subFinished) || !drained) {
+            long now = System.currentTimeMillis();
+            if (now - _lastGateLogMs > 2000) {
+                _lastGateLogMs = now;
+                Debug.logToFile("altoclef_diag.log", "[SmeltGate]\twrapper#" + System.identityHashCode(this)
+                        + " doTask#" + System.identityHashCode(_doTask)
+                        + " targetsMet=" + targetsMet + " subFinished=" + subFinished + " drained=" + drained
+                        + " " + _doTask.describeFurnaceCache());
+            }
+        }
+        return (targetsMet || subFinished) && drained;
     }
+
+    // (2026-09-16 守炉死循环诊断) [SmeltGate] 节流戳。
+    private long _lastGateLogMs = 0;
 
     /**
      * (2026-09-08 烧肉 ping-pong 修复) 对外暴露"炉已排空"查询: 供上层
@@ -348,7 +370,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
             if (drained != _lastDrainedValue) {
                 boolean screenOpen = net.minecraft.client.MinecraftClient.getInstance().player != null
                         && net.minecraft.client.MinecraftClient.getInstance().player.currentScreenHandler instanceof FurnaceScreenHandler;
-                Debug.logToFile("altoclef_diag.log", "[SmeltDrained]\t" + _lastDrainedValue + "->" + drained
+                Debug.logToFile("altoclef_diag.log", "[SmeltDrained]\t#" + System.identityHashCode(this) + "\t" + _lastDrainedValue + "->" + drained
                         + " target=" + _target.getMaterial() + " cache=" + describeFurnaceCache()
                         + " known=" + _cacheKnown + " screenOpen=" + screenOpen);
                 _lastDrainedValue = drained;
@@ -851,7 +873,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
                         || newMaterial.getCount() != _furnaceCache.materialSlot.getCount()
                         || newOutput.getItem() != _furnaceCache.outputSlot.getItem()
                         || newOutput.getCount() != _furnaceCache.outputSlot.getCount()) {
-                    Debug.logToFile("altoclef_diag.log", "[SmeltCache]\tmat=" + newMaterial.getItem() + " x"
+                    Debug.logToFile("altoclef_diag.log", "[SmeltCache]\t#" + System.identityHashCode(this) + "\tmat=" + newMaterial.getItem() + " x"
                             + newMaterial.getCount() + " out=" + newOutput.getItem() + " x" + newOutput.getCount()
                             + " (was mat=" + _furnaceCache.materialSlot.getItem() + " x"
                             + _furnaceCache.materialSlot.getCount() + " out=" + _furnaceCache.outputSlot.getItem()
