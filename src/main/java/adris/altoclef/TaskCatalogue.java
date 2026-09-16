@@ -1,6 +1,7 @@
 package adris.altoclef;
 
 import adris.altoclef.tasks.*;
+import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.container.UpgradeInSmithingTableTask;
@@ -912,6 +913,22 @@ public class TaskCatalogue {
             _getResource = getResource;
         }
 
+        // (2026-09-16 守炉死循环修复) 每资源一个"活实例"槽: 缓存最近一次
+        // getResource(count) 产出的实例; 只要它仍活着 (未完成 且 未 stopped) 就复用
+        // 同一对象。根因 = 原实现每次调用都 _getResource.apply(count) 新建实例,
+        // 多个父任务 (并行链上的 CataloguedResourceTask / CollectRecipeCataloguedResourcesTask
+        // 等) 各自持有不同实例, 被轮询 isFinished 的那一个可能是从未被 tick 的"冷实例
+        // "(熔炉缓存 known=false) → drained 永假 → 守炉死循环 (144318 / 153652 实锤)。
+        // 合并后"被 tick 更新缓存的"与"被 isFinished 轮询的"是同一实例, 冷实例根除。
+        // 注意 count 不同时也复用 (合并正是目的): 缓存实例按 count=4 建立后, 另一处
+        // 请求 count=25 必须返回仍活跃的同一实例; 调用方自己的 isFinished / 缺口检查
+        // 会驱动后续; 只有当缓存实例 isFinished 后, 下一次调用才按新 count 重建。
+        // (该合并天然覆盖 SmeltInFurnaceTask / CraftInTableTask / MineAndCollectTask
+        // 家族, 此处为通用机制, 不写任何类型特判。)
+        private ResourceTask _liveInstance = null;
+        // (2026-09-16 验证日志) [CAT-CACHE] rebuild 打点节流时间戳。
+        private long _lastCacheLogMs = 0;
+
         public CataloguedResource mineIfPresent() {
             _mineIfPresent = true;
             return this;
@@ -934,6 +951,29 @@ public class TaskCatalogue {
         }
 
         public ResourceTask getResource(int count) {
+            // (2026-09-16 守炉死循环修复) 同需求合并复用同一活实例, 见 _liveInstance 字段注释。
+            // 校验顺序: 缓存为空 / 已 finished / 已 stopped → 重建; 否则直接复用旧实例。
+            // 活性判定需要 mod: 通过 AltoClef.getInstance() 静态引用获取 (getItemTask 入口
+            // 无 mod 形参)。mod 为 null (极早期、游戏未加载) 时退化为"每次新建"的旧行为,
+            // 不影响正确性。stopped() 是 Task 已有 public 方法 (只读 _stopped 字段, 不改状态机)。
+            AltoClef mod = AltoClef.getInstance();
+            if (_liveInstance != null && mod != null
+                    && !_liveInstance.isFinished(mod) && !_liveInstance.stopped()) {
+                return _liveInstance;
+            }
+            // (2026-09-16 验证日志) 只在"重建"时打点, 只落盘不进聊天, 2s 节流。
+            // 验证判据 —— 生效: 同一资源 (按首物品名) 的 [CAT-CACHE] rebuild 低频
+            // (仅在任务真完成后出现); 失败: 同一资源每秒多条 rebuild = 缓存失效,
+            // 冷实例死锁风险回归, 需回查校验顺序。
+            long nowMs = System.currentTimeMillis();
+            if (_liveInstance != null && nowMs - _lastCacheLogMs > 2000) {
+                _lastCacheLogMs = nowMs;
+                String reason = (mod == null) ? "no-mod"
+                        : (_liveInstance.stopped() ? "stopped" : "finished");
+                Debug.logToFile("altoclef_diag.log", String.format(
+                        "[CAT-CACHE] rebuild %s (prev %s)",
+                        (_targets.length > 0 ? _targets[0].toString() : "?"), reason));
+            }
             ResourceTask result = _getResource.apply(count);
             if (_mineIfPresent) {
                 result = result.mineIfPresent(ItemHelper.itemsToBlocks(_targets));
@@ -941,7 +981,8 @@ public class TaskCatalogue {
             if (_forceDimension) {
                 result = result.forceDimension(_targetDimension);
             }
-            return result;
+            _liveInstance = result;
+            return _liveInstance;
         }
     }
 }

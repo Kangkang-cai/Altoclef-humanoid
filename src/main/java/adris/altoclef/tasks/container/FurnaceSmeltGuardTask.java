@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.container;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasksystem.Task;
@@ -9,7 +10,11 @@ import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.Optional;
@@ -49,6 +54,8 @@ public class FurnaceSmeltGuardTask extends Task {
     private static final long COMMIT_LOST_TICKS = 60;
 
     private final BlockPos _furnacePos;
+    // (2026-09-16 验证日志) [FURNACE-GUARD] hold 打点节流时间戳。
+    private long _lastGuardHoldLogMs = 0;
 
     // (2026-09-11) 当前正在守卫的工作炉位置 — 静态跨层信号 (同 MineDownExploreTask
     // getLastFireAnchor 先例)。用途: BeatMinecraft2Task 进下界排空闸门豁免冶炼链
@@ -147,9 +154,58 @@ public class FurnaceSmeltGuardTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        // 驻留期满且当前没有在打怪 (打斗期 _dwellTimer 被持续重置) → 交给
-        // 父任务重开熔炉收货。
-        return _screenClosed && _dwellTimer.elapsed();
+        // 必须先关屏且驻留期满 (原逻辑) —— 这是"可以重开炉"的前提条件。
+        if (!_screenClosed || !_dwellTimer.elapsed()) {
+            return false;
+        }
+        // (2026-09-16 守炉重开环修复) 原逻辑 `_screenClosed && _dwellTimer.elapsed()`
+        // 只要驻留 6s 就结束并重开炉, 而单次烧炼约 10s > 6s 驻留, 重开后立刻被
+        // 父任务的守卫分支重新关屏 → ClickSlotTask↔GuardTask 6-7s 周期环
+        // (日志 16:32-16:48 六次)。收窄结束条件: 熔炉仍在工作 (正在燃烧 / 输入槽
+        // 还有料待烧) 时保持驻留, 等其真正空闲再放行重开 —— 一次性驻留到烧完,
+        // 不再反复开关炉。
+        // 注: 输出槽有产物"不"作为保持驻留的理由 —— 守卫期间界面是关着的、收不到
+        // 产出, 必须由父任务重开炉后 containerSubTask 的 "Receiving Output" 分支收取;
+        // 若把"有产出"也当保持驻留, 产出将永远收不到 (SmeltInFurnaceTask.isFinished
+        // 要求 drained) → 死锁。故只以"燃烧中 / 输入待烧"作保持驻留判据, 空闲即放行
+        // (父任务会收产出并判定 drained / 完成)。[SmeltGate]/[SmeltDrained]/[SmeltCache]
+        // 诊断日志一律不动。
+        if (furnaceStillWorking(mod)) {
+            // (2026-09-16 验证日志) 驻留延长打点, 只落盘不进聊天, 5s 节流。
+            // 验证判据 —— 生效: [FURNACE-GUARD] hold 期间不再伴随周期性的
+            // "Task START: <Doing stuff in [furnace]>"重开 (旧 6-7s 重开环消失);
+            // 失败: hold 日志缺位 + 重开环依旧 = LIT/输入槽判据失真, 需回查。
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastGuardHoldLogMs > 5000) {
+                _lastGuardHoldLogMs = nowMs;
+                Debug.logToFile("altoclef_diag.log", String.format(
+                        "[FURNACE-GUARD] hold dwell, furnace still working @ %s", _furnacePos));
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * (2026-09-16 守炉重开环修复) 熔炉是否仍在"主动烧制"中: 正在燃烧 (有剩余燃料
+     * 时间) 且 输入槽还有料待烧。用于收窄守卫结束条件, 避免炉子还在烧就反复重开。
+     * 两条要同时满足——只判"燃烧中"会在烧炼完成后 (输入已空、燃料仍有余量) 多等整段
+     * 燃料燃烧时间 (最长 ~80s); 只判"输入非空"会在"有料但燃料耗尽"时死锁 (守卫期间
+     * 界面关闭, 父任务无法补燃料)。两者皆真才是真正在干活, 才保持驻留。
+     * 守卫期间熔炉界面关闭, 故读取炉子 BlockEntity 而非 AbstractFurnaceScreenHandler
+     * 的实时读数。燃烧判定用方块状态 LIT 属性 —— 1.18.2 映射里
+     * AbstractFurnaceBlockEntity.isBurning() 是 private 不可调 (20260916 编译实锤),
+     * 而 LIT 与 isBurning 同源 (Block.appendProperties 由燃烧状态驱动); 炉子槽位
+     * 0=输入 / 1=燃料 / 2=产出 (Inventory.getStack)。
+     */
+    private boolean furnaceStillWorking(AltoClef mod) {
+        if (_furnacePos == null || mod.getWorld() == null) return false;
+        BlockEntity be = mod.getWorld().getBlockEntity(_furnacePos);
+        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return false;
+        // 正在燃烧 (LIT) 且 输入槽还有料 → 正在主动烧制, 保持驻留。
+        BlockState state = be.getCachedState();
+        boolean burning = state.contains(Properties.LIT) && state.get(Properties.LIT);
+        return burning && !furnace.getStack(0).isEmpty();
     }
 
     @Override

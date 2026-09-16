@@ -55,6 +55,16 @@ public class AltoClef implements ModInitializer {
     // Static access to altoclef
     private static final Queue<Consumer<AltoClef>> _postInitQueue = new ArrayDeque<>();
 
+    // (2026-09-16 守炉死循环修复) 静态实例访问器: TaskCatalogue 缓存"同资源活实例"
+    // 复用需在无 mod 形参处做活性判定 (_liveInstance.isFinished(mod)), 通过本引用
+    // 拿 AltoClef, 避免给 CataloguedResource 整条调用链加 mod 形参。在
+    // onInitializeLoad 处一次性赋值, 任务运行期恒非 null。
+    private static AltoClef _instance;
+
+    public static AltoClef getInstance() {
+        return _instance;
+    }
+
     // Central Managers
     private static CommandExecutor _commandExecutor;
     private TaskRunner _taskRunner;
@@ -114,6 +124,10 @@ public class AltoClef implements ModInitializer {
     public void onInitializeLoad() {
         // This code should be run after Minecraft loads everything else in.
         // This is the actual start point, controlled by a mixin.
+
+        // (2026-09-16 守炉死循环修复) 登记静态实例, 供 TaskCatalogue 缓存活实例
+        // 复用在无 mod 形参处做活性判定。
+        _instance = this;
 
         initializeBaritoneSettings();
 
