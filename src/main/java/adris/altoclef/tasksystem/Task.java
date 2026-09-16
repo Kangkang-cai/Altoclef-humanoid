@@ -46,6 +46,16 @@ public abstract class Task {
         return _currentTicking.get();
     }
 
+    // (2026-09-16 泡水挖矿判定) 最近一次开始 tick 的任务。链仲裁发生在任务 tick
+    // 之外（此时 ThreadLocal 已恢复为 null，拿不到叶子），但仲裁紧跟在叶子 tick
+    // 之后 —— 嵌套 tick 时子任务后进先覆盖，tick 结束后这里留下的正是真叶子
+    // （如 DestroyBlockTask）。供 SwimDiveChain 等仲裁期反应判定"实际在干什么"。
+    private static volatile Task _lastTicked;
+
+    public static Task getLastTickedTask() {
+        return _lastTicked;
+    }
+
     public void tick(AltoClef mod, TaskChain parentChain) {
         if (_tickDepth >= MAX_TICK_DEPTH) {
             Debug.logInternal("(task) TASK CHAIN RECURSION OVERFLOW (depth " + _tickDepth
@@ -56,6 +66,7 @@ public abstract class Task {
         _tickDepth++;
         Task prevTicking = _currentTicking.get();
         _currentTicking.set(this);
+        _lastTicked = this; // 嵌套时子任务随后覆盖 → tick 完留下的就是真叶子
         try {
             tickInternal(mod, parentChain);
         } finally {

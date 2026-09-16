@@ -3,6 +3,7 @@ package adris.altoclef.tasks.construction;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.tasks.movement.GetToLandTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -11,8 +12,10 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.PlaceBlockSchematic;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WaterExitHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.pathing.goals.Goal;
@@ -75,6 +78,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     // For vines and stuff
     private boolean _wasClose = false;
+
+    // (2026-09-16 泡水漂浮停挖离水) 上岸子任务实例缓存。GetToLandTask.isEqual 恒
+    // true —— 完成后必须 reset() 同一实例而非 new（新实例会被 isEqual 挡下不重跑
+    // onStart，见 PlaceBlockNearbyTask 同款处理）。
+    private GetToLandTask _toLand = null;
 
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
@@ -394,6 +402,34 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                 mod.getBlockTracker().requestBlockUnreachable(_pos);
                 return null;
             }
+
+            // (2026-09-16 泡水漂浮停挖离水) 现场 20260915-231536 23:22:41-23:23:23:
+            // bot 水面 water-bob 30s+ 照常挖石头 (本类旧判据把 isTouchingWater 与
+            // isOnGround 同权)。水中悬空挖掘 5x 水 × 5x 悬空 = 25x 惩罚。用户定规矩:
+            // 泡水漂浮挖掘时停止挖掘并离开水区; 例外 = 水洞 (附近没有直接连通且可达
+            // 的两格空气, WaterExitHelper.hasReachableAirExit=false) 时继续挖。
+            // 站浅水底 (脚下有实体) 不算泡水漂浮, 涉水过河不受影响。
+            // GetToLandTask 自带 3 分钟超时 + 放弃后 60s static 冷却 —— 冷却期内
+            // 直接恢复挖掘, 封顶"上岸-挖-又下水"的震荡。
+            if (reach.isPresent() && !GetToLandTask.isOnCooldown()
+                    && LandHelper.isFloatingInWater(mod)
+                    && WaterExitHelper.hasReachableAirExit(mod)) {
+                if (_toLand != null && _toLand.isFinished(mod)) {
+                    _toLand.reset();
+                    _toLand = null;
+                }
+                if (_toLand == null) {
+                    _toLand = new GetToLandTask();
+                    String m = "[WATER-EXIT] floating in water while mining -> pause & head to land"
+                            + " (2-high air exit found). target=" + _pos.toShortString()
+                            + " player=" + mod.getPlayer().getBlockPos().toShortString();
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+                setDebugState("Floating in water (mining 25x slow) -> heading to land first");
+                return _toLand;
+            }
+
             if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround())) {
                 setDebugState("Block in range, mining...");
                 // Break the block, force it.

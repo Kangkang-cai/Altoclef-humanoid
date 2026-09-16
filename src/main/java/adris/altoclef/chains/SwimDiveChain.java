@@ -79,6 +79,10 @@ public class SwimDiveChain extends TaskChain {
     private static final double MIN_AIR_FRACTION = 0.5;
     // 导航（movement）任务包名前缀。
     private static final String MOVEMENT_PACKAGE = "adris.altoclef.tasks.movement.";
+    // (2026-09-16 静默修复) 挖掘任务包名前缀。DestroyBlockTask 是挖掘本体，注释
+    // 一直宣称"导航/挖掘类主任务"，但旧实现只认 movement 包 → 挖矿泡水时恒被
+    // TASK_NOT_MOVEMENT 拦下（20260915-231536 场次整场 0 条 SWIM-DIVE 实锤）。
+    private static final String MINING_PACKAGE = "adris.altoclef.tasks.construction.";
 
     // 卡住检测窗口起点（游戏 tick + 起点位置）。
     private long _windowStartTick = -1;
@@ -452,15 +456,31 @@ public class SwimDiveChain extends TaskChain {
     }
 
     /**
-     * 当前主任务是否为导航类：沿当前执行链向上/下检查，命中 movement 包内任务
-     * 即视为处于导航场景（游泳/涉水多半伴随 GetToBlock/探索等 movement 任务）。
+     * 当前主任务是否为导航类：沿当前执行链向上/下检查，命中 movement/挖掘包内任务
+     * 即视为处于导航/挖掘场景（游泳/涉水多半伴随 GetToBlock/探索等 movement 任务，
+     * 挖矿伴随 DestroyBlockTask 等 construction 任务）。
+     *
+     * (2026-09-16 静默修复) 两处口径修正：
+     *  ① 判定源优先用 {@link Task#getLastTickedTask()} —— getPriority 在仲裁期被调,
+     *     当时 getUserTaskChain().getCurrentTask() 拿到的是链顶层任务（20260915-231536
+     *     现场：Destroy 在 tick，diag 里 task 却显示 "Smelting raw food: porkchop"），
+     *     而 _lastTicked 在 tick 结束后留下的正是真叶子。
+     *  ② 补 construction 包（DestroyBlockTask 所在），与注释"导航/挖掘类"对齐。
      */
     private boolean isNavigating(AltoClef mod) {
+        Task leaf = Task.getLastTickedTask();
+        if (leaf != null && leaf.thisOrChildSatisfies(SwimDiveChain::isNavOrMiningTask)) {
+            return true;
+        }
         if (!mod.getUserTaskChain().isActive()) return false;
         Task main = mod.getUserTaskChain().getCurrentTask();
         if (main == null) return false;
-        return main.thisOrChildSatisfies(t ->
-                t.getClass().getName().startsWith(MOVEMENT_PACKAGE));
+        return main.thisOrChildSatisfies(SwimDiveChain::isNavOrMiningTask);
+    }
+
+    private static boolean isNavOrMiningTask(Task t) {
+        String n = t.getClass().getName();
+        return n.startsWith(MOVEMENT_PACKAGE) || n.startsWith(MINING_PACKAGE);
     }
 
     private void resetWindow() {
