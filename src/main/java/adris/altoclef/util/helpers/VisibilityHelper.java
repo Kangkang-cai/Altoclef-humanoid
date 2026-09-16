@@ -67,6 +67,19 @@ public final class VisibilityHelper {
             Blocks.DIRT, Blocks.GRASS_BLOCK, Blocks.COARSE_DIRT, Blocks.SAND,
             Blocks.GRAVEL, Blocks.NETHERRACK
     );
+    // (2026-09-16 石头类放宽, 用户"站在树上感知不到地下的石头, 石头肯定在地下呀")
+    // 石头家族是【连续分布的地层介质】: 站在树上/地表, 脚下十几格内必然是石头,
+    // 这是人类常识级推断, 不需要亲眼看到那一格。原 4 格豁免太短 (用户实测站在
+    // 树上感知不到地下石头)。放宽到 16 格球形、不限方向 —— 与 MineAndCollectTask
+    // 的世界扫描半径 (16) 同口径, 主世界/洞穴四周也一并覆盖。
+    // 边界: 只放宽石头【介质】, 稀有矿/容器/流体/床仍走各自门控, 不给透视。
+    private static final Set<Block> STONE_MEDIUM_BLOCKS = Set.of(
+            Blocks.STONE, Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE,
+            Blocks.DEEPSLATE, Blocks.COBBLED_DEEPSLATE,
+            Blocks.ANDESITE, Blocks.DIORITE, Blocks.GRANITE, Blocks.TUFF,
+            Blocks.BLACKSTONE, Blocks.BASALT, Blocks.NETHERRACK
+    );
+    private static final double STONE_PERCEIVE_DISTANCE = 16.0;
     // How close a common block must be to be "known" without direct sight.
     private static final double EXPERIENCE_PERCEIVE_DISTANCE = 4.0;
     // Containers within this radius of a remembered structure center are
@@ -331,6 +344,13 @@ public final class VisibilityHelper {
             // 不受影响, 正常感知。挖隧道探索挖开岩层后矿自然暴露。
             if (isBuriedOre(mod, pos, block)) return false;
             return true;
+        }
+        // (2026-09-16 石头介质 16 格豁免) 石头家族优先走放宽口径: 只要不是
+        // EXPERIENCE_KNOWN_BLOCKS 成员 (如 MOSSY_COBBLESTONE/BLACKSTONE/BASALT)
+        // 也一并放行, 它们同属地层介质, 判定一致。
+        if (STONE_MEDIUM_BLOCKS.contains(block)) {
+            return mod.getPlayer() != null
+                    && mod.getPlayer().getBlockPos().isWithinDistance(pos, STONE_PERCEIVE_DISTANCE);
         }
         if (!EXPERIENCE_KNOWN_BLOCKS.contains(block)) return false;
         return mod.getPlayer() != null

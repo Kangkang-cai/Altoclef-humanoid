@@ -736,6 +736,9 @@ public class MineAndCollectTask extends ResourceTask {
         private static final int WOOD_BATCH_MAX = 3;
         private static final int WOOD_BATCH_RADIUS = 3;
         private static final double WOOD_SWEEP_RANGE_SQ = 4 * 4;
+        // (2026-09-16) 批满后等掉落物回册的宽限窗口 (ms)。EntityTracker 只在掉落物
+        // GROUNDED 后收录, 破块到入册有 1-2 tick 空窗; 窗口内挂起开挖, 超时放行。
+        private static final long BATCH_BROKEN_GRACE_MS = 1000;
         private AltoClef _mod;
         // (2026-09-04 用户"卡住时左键挥几tick清草, 会被草卡住") 挖不动(ProgressChecker
         // 失败)先长按左键 SWING_TICKS 清掉挡路小草/藤蔓, 挥完仍失败才 blacklist 换目标。
@@ -791,6 +794,20 @@ public class MineAndCollectTask extends ResourceTask {
         // 它邻位的连位矿下一 tick 就被看到并续挖，不依赖异步 BlockTracker 缓存。
         // 锚定挖矿位置而非玩家，这样即使挖的是远处的矿也不会扫错地方。
 
+        // (2026-09-16 无限介质批采推广, 用户定案"每挖3个拾取一次")
+        // 石头家族与木头同属【批采目标】: 介质连续分布, 挖穿一块邻位立刻补上,
+        // "挖完本处再统一捡"的 16 格 gate (MINE_EVERYTHING_RANGE) 对它们恒真 →
+        // 不切拾取就永远挖下去。20260916-192700 实锤: Collect Cobblestone x3 挖了
+        // 53 个不同坐标、0 次拾取、背包圆石恒 0, 直到上层横跳强拆整链。
+        // 与 2026-09-15 泥土无限挖坑同构 (当时只补了 DIRT, 石头类漏了)。
+        // 口径与 VisibilityHelper.STONE_MEDIUM_BLOCKS 一致 (本项目各处私有集合惯例)。
+        private static final Set<Block> STONE_MEDIUM_BLOCKS = Set.of(
+                Blocks.STONE, Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE,
+                Blocks.DEEPSLATE, Blocks.COBBLED_DEEPSLATE,
+                Blocks.ANDESITE, Blocks.DIORITE, Blocks.GRANITE, Blocks.TUFF,
+                Blocks.BLACKSTONE, Blocks.BASALT, Blocks.NETHERRACK
+        );
+
         // Log/stem/wood blocks only generate on the surface (or nether ceiling).
         // If we're hunting these, NEVER dig a shaft down — a human knows to climb
         // out of a cave first, then walk toward trees.
@@ -839,6 +856,29 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         /**
+         * (2026-09-16) 目标方块集是否全部由【石头类无限介质】组成: 地层里连续
+         * 分布、挖穿一块邻位立刻补上。判定取"全部"而非"任一" — 混了稀有矿的
+         * 目标集 (如 {STONE, DIAMOND_ORE}) 不该被当成无限介质走批采, 否则会
+         * 在钻石露头的矿脉上凑数挖石头。
+         */
+        private boolean isTargetingStoneMedium() {
+            if (_blocks.length == 0) return false;
+            for (Block b : _blocks) {
+                if (!STONE_MEDIUM_BLOCKS.contains(b)) return false;
+            }
+            return true;
+        }
+
+        /**
+         * (2026-09-16) 批采目标: 木头 (2026-09-15) + 石头类无限介质。这类目标
+         * 共用 WOOD_BATCH_* 状态机 (每挖 BATCH_MAX 个切一次拾取, 期间在锚点
+         * BATCH_RADIUS 格内续挖), 否则"还有矿就继续挖"的 gate 永不放行拾取。
+         */
+        private boolean isBatchTarget() {
+            return isTargetingWood() || isTargetingStoneMedium();
+        }
+
+        /**
          * (2026-08-30 找床/羊毛/熔炉不挖洞, 用户 "获取床子任务是挖通道"/"熔炉在眼前还挖洞")
          * 木头、床、羊毛、熔炉、工作台都是【非自然矿】的地表/人造资源。找它们时不该用
          * 挖洞找矿的 MineDownExplore (尤其熔炉: 多为人工放置, 用矿石探洞逻辑会因 FOV/LOS
@@ -883,6 +923,11 @@ public class MineAndCollectTask extends ResourceTask {
                 // 矿石链挖不受影响(矿脉有限, 挖完自然转拾取); 泥土是无限介质,
                 // 必须"挖一块捡一块"才收敛。
                 if (b == Blocks.DIRT) return true;
+                // (2026-09-16 石头类, 20260916-192700 实锤) 石头/圆石/深板岩/黑石
+                // 同属无限介质: 山体/地层里 16 格内永远有下一块 → 16 格 gate 恒真
+                // → 拾取分支永远排不到 (挖 53 块 0 拾取)。这里让它进入"掉落优先"
+                // 路径, 配合批采状态机 (挖满 BATCH_MAX 个才切拾取) 收敛。
+                if (STONE_MEDIUM_BLOCKS.contains(b)) return true;
             }
             return false;
         }
@@ -937,12 +982,17 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-09-15 批采状态) woodBatchActive = 本批未砍满且背包未达标。
             // 砍满且场上已无本目标掉落物 → 计数清零, 下一批从头计 (掉落物还剩时
             // 不清零, 防掉落物登记 1-2 tick 空窗把计数误清)。
-            boolean woodTargetMet = isTargetingWood()
+            boolean batchTargetMet = isBatchTarget()
                     && StorageHelper.itemTargetsMetInventoryNoCursor(mod, _targets);
-            if (isTargetingWood() && _woodBatchBroken >= WOOD_BATCH_MAX && closestDrop.isEmpty()) {
+            // (2026-09-16 石头类延迟清零) 原实现批满 + 场上无掉落就立刻清零。刚挖掉
+            // 第 BATCH_MAX 块时掉落物还没被 EntityTracker 登记 (1-2 tick 空窗), 立刻
+            // 清零 → 挂起判定失效 → 下一 tick 又开挖新一批。给 BATCH_BROKEN_GRACE_MS
+            // 等掉落物回册; 超时仍无掉落 (掉进岩浆/被吞) 才清零开新批, 不会卡死。
+            if (isBatchTarget() && _woodBatchBroken >= WOOD_BATCH_MAX && closestDrop.isEmpty()
+                    && System.currentTimeMillis() - _miningTargetBrokenMs > BATCH_BROKEN_GRACE_MS) {
                 _woodBatchBroken = 0;
             }
-            boolean woodBatchActive = isTargetingWood() && !woodTargetMet && _woodBatchBroken < WOOD_BATCH_MAX;
+            boolean woodBatchActive = isBatchTarget() && !batchTargetMet && _woodBatchBroken < WOOD_BATCH_MAX;
             // 批采续砍目标: 围绕批锚点(刚砍的原木)扫 ±3 格 (用户:"扫一下这个原木的
             // 位置的 3 格范围内还有别的原木吗")。首根未砍(_woodBatchBroken==0)时
             // 不用这口径, 走正常最近目标选择。
@@ -979,7 +1029,7 @@ public class MineAndCollectTask extends ResourceTask {
             // —— _miningPos 刚被清空恒为 null, 链挖断链。改用 getChainAnchor()。
             // (2026-09-15 批采) 木头批采转入拾取阶段 (砍满/背包达标) 时跳过链挖,
             // 防止掉落物登记 1-2 tick 空窗内链挖续砍第 4 根 (违背"每挖3个拾取一次")。
-            Optional<BlockPos> nearField = (isTargetingWood() && _woodBatchBroken > 0 && !woodBatchActive)
+            Optional<BlockPos> nearField = (isBatchTarget() && _woodBatchBroken > 0 && !woodBatchActive)
                     ? Optional.empty()
                     : getNearFieldOreAt(mod, getChainAnchor(), nearR);
             if (nearField.isPresent()) {
@@ -1080,7 +1130,7 @@ public class MineAndCollectTask extends ResourceTask {
             // 扫完真没矿才算"本处挖完", 才轮到掉落物。
             if (nearbyMine.isEmpty()) {
                 // (2026-09-15 批采) 拾取阶段同样跳过锚点兜底扫, 理由同上。
-                if (!(isTargetingWood() && _woodBatchBroken > 0 && !woodBatchActive)) {
+                if (!(isBatchTarget() && _woodBatchBroken > 0 && !woodBatchActive)) {
                     nearbyMine = getNearFieldOreAt(mod, getChainAnchor(), 2);
                 }
             }
@@ -1104,7 +1154,11 @@ public class MineAndCollectTask extends ResourceTask {
                 if (closestDrop.isPresent()) {
                     return closestDrop.map(Object.class::cast);
                 }
-                if (nearbyMine.isPresent()) {
+                // (2026-09-16 批满挂起) 批采目标挖满 BATCH_MAX 个、掉落物尚未回册的
+                // 空窗内, 16 格 gate (nearbyMine) 对无限介质恒真, 会立刻送上下一批
+                // 挖掘 → "挖满 3 个 → 掉落还没登记 → 还有矿 → 继续挖"死循环。这里
+                // 挂起该 gate, 让下一 tick 掉落物回册后由上面的 closestDrop 接手。
+                if (!batchFullPendingPickup() && nearbyMine.isPresent()) {
                     return nearbyMine.map(Object.class::cast);
                 }
                 return closestBlock.map(Object.class::cast);
@@ -1516,7 +1570,7 @@ public class MineAndCollectTask extends ResourceTask {
          * 那是白捡的额外掉落, 由扫堆兜住。
          */
         private void onWoodBatchBroken(BlockPos broken) {
-            if (!isTargetingWood()) return;
+            if (!isBatchTarget()) return;
             boolean adjacentToBatch = _woodBatchAnchor != null
                     && _woodBatchBroken > 0
                     && _woodBatchBroken < WOOD_BATCH_MAX
@@ -1534,6 +1588,18 @@ public class MineAndCollectTask extends ResourceTask {
             _woodBatchLastDiagPos = null;
             Debug.logMessage("[WOOD-BATCH] broken #" + _woodBatchBroken + "/" + WOOD_BATCH_MAX
                     + " at " + broken.toShortString());
+        }
+
+        /**
+         * (2026-09-16 批满挂起) 批采目标刚挖满 WOOD_BATCH_MAX 个、掉落物尚未回册的
+         * 短暂窗口 (BATCH_BROKEN_GRACE_MS)。窗口内在 getClosestTo 里挡住 16 格 gate
+         * (见 nearbyMine 处调用) —— 该 gate 对无限介质恒真, 不挡就是"挖满 3 个 →
+         * 掉落没登记 → 还有矿 → 继续挖"的死循环。窗口由墙钟封顶, 掉落物真没生成
+         * (掉进岩浆/被吞) 也会超时放行, 不会永久挂起。
+         */
+        private boolean batchFullPendingPickup() {
+            return isBatchTarget() && _woodBatchBroken >= WOOD_BATCH_MAX
+                    && System.currentTimeMillis() - _miningTargetBrokenMs < BATCH_BROKEN_GRACE_MS;
         }
 
         /**
