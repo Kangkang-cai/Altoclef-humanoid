@@ -373,6 +373,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
             _drownPathlessTimer.reset();
             String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
                     + " -> navigate to breathable " + air.toShortString()
+                    + " (targetY=" + air.getY() + " vs playerY=" + p.getBlockPos().getY() + ")"
                     + " player=" + p.getBlockPos();
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
@@ -402,11 +403,29 @@ public class WorldSurvivalChain extends SingleTaskChain {
         return null;
     }
 
-    /** 最近可呼吸方块: iterateOutwards 按距离递增遍历, 命中即返回 = 最近优先。 */
+    /**
+     * 最近可呼吸方块: iterateOutwards 按距离递增遍历, 命中即返回 = 最近优先。
+     * 改两遍扫描 (2026-09-16 死亡#7 实锤修复):
+     *  - 第一遍只在玩家脚部Y之上的候选里找最近呼吸点。原因: 水下洞穴气室往往比
+     *    水面更近(欧氏距离), 原逻辑按距离递增遍历会先命中脚下深处的气室, 把 bot
+     *    一路"往下游"导航直到淹死; 向上(水面/高处气室)优先才能避免越游越深。
+     *  - 第一遍无果(如玩家贴水底、唯一气室在脚下)才退回第二遍任意方向, 兜底旧场景。
+     * 返回值签名与调用方保持不变。
+     */
     private BlockPos findNearestBreathable(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
+        // 第一遍: 仅脚部Y之上的候选, 向上优先防"越游越深淹死"。
+        BlockPos up = scanBreathable(mod, center, center.getY() + 1);
+        if (up != null) return up;
+        // 第二遍: 任意方向, 兜底水下深处气室场景。
+        return scanBreathable(mod, center, Integer.MIN_VALUE);
+    }
+
+    /** 在 center 周围 DROWN_ESCAPE_SEARCH_RADIUS 内扫描可呼吸方块, 仅考虑 y >= minY 的候选。 */
+    private BlockPos scanBreathable(AltoClef mod, BlockPos center, int minY) {
         for (BlockPos pos : BlockPos.iterateOutwards(center,
                 DROWN_ESCAPE_SEARCH_RADIUS, DROWN_ESCAPE_SEARCH_RADIUS, DROWN_ESCAPE_SEARCH_RADIUS)) {
+            if (pos.getY() < minY) continue;
             if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
             if (!WorldHelper.isAir(mod, pos)) continue;
             boolean connected = false;
