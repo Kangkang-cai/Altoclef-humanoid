@@ -280,12 +280,23 @@ public abstract class Task {
      */
     private boolean canBeInterrupted(AltoClef mod, Task subTask, Task toInterruptWith) {
         if (subTask == null) return true;
-        // Our task can declare that is FORCES itself to be active NOW.
-        return (subTask.thisOrChildSatisfies(task -> {
-            if (task instanceof ITaskCanForce canForce) {
-                return !canForce.shouldForce(mod, toInterruptWith);
+        // (2026-09-16 语义修复) 旧实现走 thisOrChildSatisfies(anyMatch): 子链上
+        // 任何一个非-force 任务都让谓词命中返回 true → ITaskCanForce 的
+        // shouldForce=true 声明几乎永远被旁路, 只有 _sub 恰为叶子单任务时才
+        // 生效 (ITaskRequiresGrounded 的跳跃/放置保护、ResourceTask 的光标
+        // 保护实际上从未在深层链上生效过)。
+        // 改为沿子链扫描: 任一 ITaskCanForce 声明 force → 整棵子树本 tick
+        // 不可被父级翻面打断。
+        // (20260916-1104 场次实锤: 腾位穿铁靴 Moving 的 force 被链上 5 个
+        // 非-force 祖先旁路, 仍被 Collect Recipe Resources 每 8s 打断,
+        // 收输出腾位死循环未解。)
+        Task t = subTask;
+        while (t != null) {
+            if (t instanceof ITaskCanForce canForce && canForce.shouldForce(mod, toInterruptWith)) {
+                return false;
             }
-            return true;
-        }));
+            t = t._sub;
+        }
+        return true;
     }
 }
