@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
+import adris.altoclef.tasks.resources.MineAndCollectTask;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.time.TimerGame;
@@ -89,12 +90,23 @@ public class PlayerInteractionFixChain extends TaskChain {
         if (!AltoClef.inGame()) return Float.NEGATIVE_INFINITY;
 
         if (mod.getUserTaskChain().isActive() && _betterToolTimer.elapsed()) {
-            // Equip the right tool for the job if we're not using one.
             _betterToolTimer.reset();
-            if (mod.getControllerExtras().isBreakingBlock()) {
+            // (2026-09-16 工具打架修复, 082639 场次) 任务层 (MineAndCollectTask
+            // [ToolEquip]) 最近 2s 内做过装备决策时本分支让位: 两个 0.5s 装备源
+            // 按不同方块(实际在撸的工作台=木头 vs 任务 miningPos=石头)互相覆盖,
+            // 手在斧/镐间每 0.5s横跳、挖掘进度清零。任务层装备唯一说话。
+            boolean taskToolEquipDefers = MineAndCollectTask.taskToolEquipRecently();
+            if (!taskToolEquipDefers && mod.getControllerExtras().isBreakingBlock()) {
                 BlockState state = mod.getWorld().getBlockState(mod.getControllerExtras().getBreakingBlockPos());
                 Optional<Slot> bestToolSlot = StorageHelper.getBestToolSlot(mod, state);
                 Slot currentEquipped = PlayerSlot.getEquipSlot();
+
+                // (2026-09-16 同口径补充) 手上工具已适合当前方块就不换 — 与
+                // MineAndCollectTask L616 一致, 速度微优不值得付出换手代价。
+                if (bestToolSlot.isPresent()
+                        && StorageHelper.getItemStackInSlot(currentEquipped).getItem().isSuitableFor(state)) {
+                    bestToolSlot = Optional.empty();
+                }
 
                 // if baritone is running, only accept tools OUTSIDE OF HOTBAR!
                 // Baritone will take care of tools inside the hotbar.

@@ -69,6 +69,21 @@ public class MineAndCollectTask extends ResourceTask {
     // 岩石包住的远矿 (用户实测: 密不透风 7 格外的铁矿也能被锁定去挖)。
     private final boolean _greedy;
 
+    // (2026-09-16 工具打架修复, 082639 场次) 本类 [ToolEquip] 分支与
+    // PlayerInteractionFixChain 的 better-tool 分支是两个独立的 0.5s 装备源:
+    // 本分支按任务 miningPos(石头)换镐, chain 按"实际在撸的方块"(如卡住时
+    // 长按的工作台=木头)换斧 — 每 0.5s 互相覆盖对方的选择, 手在斧/镐间横跳,
+    // 挖掘进度反复清零 (diag.log: [ToolEquip] ok=true now=wooden_pickaxe,
+    // 0.55s 后又 had stone_axe, x50)。这里记录每次装备决策的时间戳,
+    // chain 在窗口内让位 → 任务层装备唯一说话。
+    private static volatile long _lastToolEquipDecisionMs = 0;
+    private static final long TOOL_EQUIP_DEFER_WINDOW_MS = 2000;
+
+    /** 任务层最近 2s 内做过工具装备决策 (chain 应让位)。 */
+    public static boolean taskToolEquipRecently() {
+        return System.currentTimeMillis() - _lastToolEquipDecisionMs < TOOL_EQUIP_DEFER_WINDOW_MS;
+    }
+
     // 砍树前做斧子的 COMMIT 状态：一旦决定做斧子就执行到底，不每 tick
     // 重估条件（修复 ping-pong，见 onResourceTick 注释）。
     private boolean _axeCommitted = false;
@@ -612,6 +627,9 @@ public class MineAndCollectTask extends ResourceTask {
             if (miningPos == null) return;
             BlockState state = mod.getWorld().getBlockState(miningPos);
             if (state.isAir()) return; // 位置陈旧/方块已挖掉, 不换工具
+            // (2026-09-16 工具打架修复) 决策生效点: miningPos 非空且非 air,
+            // 本分支 0.5s 一次在此表态 → 记时间戳, chain 2s 内让位。
+            _lastToolEquipDecisionMs = System.currentTimeMillis();
             Item equippedItem = StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem();
             if (equippedItem instanceof MiningToolItem mt && mt.isSuitableFor(state)) return;
             Optional<Slot> bestTool = StorageHelper.getBestToolSlot(mod, state);
