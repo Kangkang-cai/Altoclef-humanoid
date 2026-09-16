@@ -619,6 +619,17 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *         挡块自己也够不着, 交回 handoff 与放弃路径。
      */
     private boolean tryClearOccluder(AltoClef mod) {
+        // (20260916 1330 场次 死循环修复) handoff 期间【完全让位】: 台阶地形 bot 随
+        // baritone 起跳/落步上下漂移, 眼-目标瞬时距离会在腾空瞬间假达标 (≤4.5) ——
+        // 本分支随即拆 handoff 抢输入 (20260915 互斥方向 = 挡块优先); 下一 tick bot
+        // 落回低台阶, 4.5 门又关上, 本分支自己也退出 → "handoff 起跳 → 拆 → 退出 →
+        // 重挂" 1.1s 死循环 25+ 轮零产出 (diag.log [PillarHandoff] start x25, 无一
+        // done/give up/timeout/STALL)。互斥方向反转: handoff 优先。baritone 的
+        // MovementPillar 本来就挖一垫一, 路径挡块它自己处理; handoff 按自身体系退出
+        // (done/STALL 补料/12s 超时/立即拉黑) 后本分支自然恢复, 收尾半格撸叶不变。
+        if (_pillarHandoff) {
+            return false;
+        }
         Vec3d eye = mod.getPlayer().getEyePos();
         Vec3d center = Vec3d.ofCenter(_pos);
         // 只处理"目标本体已在挖掘距离内"的情形 —— 超出 reach 的目标是导航/爬升问题,
@@ -652,12 +663,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             _occluderTarget = null;
             return false; // 挡块自己也够不着 → 交回 handoff
         }
-        // 撸叶与 handoff 互斥: 输入通道归撸叶, 收回 baritone 的爬升目标 (否则
-        // baritone 走位转身会把 lookAt/CLICK_LEFT 全部搅乱, 20260915-180535 实锤)。
-        if (_pillarHandoff) {
-            _pillarHandoff = false;
-            endPillar(mod);
-        }
+        // (20260916) 撸叶与 handoff 的互斥已上移到方法开头: handoff 期间本分支整体
+        // 让位, 不再走到这里。原"挡块优先拆 handoff"方向在台阶地形产生 1.1s 死循环,
+        // 见方法开头注释。
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         if (!LookHelper.isLookingAt(mod, occ)) {
