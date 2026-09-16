@@ -567,6 +567,40 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 + mod.getPlayer().getBlockPos().toShortString() + " targetY=" + _targetY + ".");
     }
 
+    /**
+     * (2026-09-16 爬完续挖) baritone 爬升到顶后原地切回隧道模式, 不收工、不劳父层
+     * 重建。要点:
+     * - _realDigs【不清零】—— 预算是整轮探索的真实挖掘额度, 爬升只是中途状态;
+     * - 隧道几何是 _digStart + k*dir 的纯递推, 爬升后原锚点早已无意义 → 必须重锚
+     *   到当前位置 (同 reanchorToPlayer 的下行口径: 锚点 = 脚下地板);
+     * - 方向重掷: 爬升可能位移了十几格, 原方向继续大概率一头撞回刚爬出来的那片洞;
+     * - _tunnelMode = true 使 reachedBottom 走"只看步数上限"分支, isFinished 恒
+     *   false, 父层不再重建。
+     */
+    private void resumeTunnelAfterAscent(AltoClef mod) {
+        _baritoneAscent = false;
+        _baritoneAscentTask = null;
+        _ascendMode = false;
+        _tunnelMode = true;
+        _inCave = false;
+        _subTask = null;
+        _miningTarget = null;
+        _caveExploreCooldownSteps = 0;
+        int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        _dirX = dir[0];
+        _dirZ = dir[1];
+        _digStart = mod.getPlayer().getBlockPos().down();
+        _step = 0;
+        _skipStreak = 0;
+        _digQueue.clear();
+        enqueueNextStep();
+        String m = "[MineDown-AscentResume] 爬回到 y=" + _targetY
+                + ", 原地切回隧道续挖 (realDigs=" + _realDigs + ", dir=(" + _dirX + "," + _dirZ
+                + ")) at " + _digStart.toShortString() + ".";
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
 
@@ -649,9 +683,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     return _baritoneAscentTask;
                 }
             }
-            // y >= _targetY: 到顶, 不再派子任务; _baritoneAscent 保持 true,
-            // reachedBottom (同语义 y >= _targetY) 判完工 → "Shaft done" 收工,
-            // 父任务切回隧道平挖。
+            // (2026-09-16 爬完续挖) y >= _targetY: 到顶【不再收工】。原语义是保持
+            // _baritoneAscent 让 reachedBottom 判完工 → "Shaft done" → 父层重建全新
+            // 实例, _realDigs 进度/隧道方向全丢 → 隧道每次从 0/80 重来, 与"缓降触线
+            // → 逃生爬升"凑成横跳死循环 (20260916-094427 五轮实锤: dug 52/80 被扔,
+            // engage(y=4,floor=5) → 爬回 11 → 0/80 重挖, 3 分钟 5 轮)。改为原地切回
+            // 隧道模式续挖, 真实挖掘预算保留; 预算耗尽/岩浆弃道仍照常收工。
+            resumeTunnelAfterAscent(mod);
         }
 
         // (2026-09-12 冷却语义修正, 用户"同一段矿洞放弃后又重复去探索") 原实现在此
