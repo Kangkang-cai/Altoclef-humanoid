@@ -7,6 +7,7 @@ import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
+import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.CraftingGridArbiter;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
 import adris.altoclef.tasksystem.Task;
@@ -189,9 +190,19 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
                 // 整个拆掉 (20260915-091355 gridwar.log 实锤: 花岗岩 x14 上光标 →
                 // 瞄准坑 → 每 2s 被本分支放回 17 号槽 → 重拿 → 八轮循环零丢出)。
                 // 丢弃有界 (2s 瞄准 + 25s/30s 挖掘超时兜底照丢), 等它丢完光标自空。
-                if (ThrowCursorTask.isDiscardInProgress()) {
-                    setDebugState("Cursor under discard, waiting for throw to finish");
-                    return null;
+                // (2026-09-16 CRAFT/CLEAR 互等修复, 09:06:34-36 latest.log 实锤)
+                // 原来的 "waiting → return null" 在本框架里 = STOP 当前子树
+                // (Task.tickInternal: onTick 返回 null → _sub.stop(mod)) —— 恰好把
+                // 正在瞄准的 ThrowCursorTask 拆掉, _activeInstance 清空 → 下一 tick
+                // isDiscardInProgress=false → 走下方"放回背包" → 垃圾回包 → 重捡 →
+                // 重拆, 同一 slot 6 每 0.3s 拿起/放回永动, 一次都没丢出去。
+                // 修法: 丢弃在途 / 腾位租约在握 (拿垃圾→瞄准→丢出的两拍中转) 时,
+                // 重发同类型腾位任务 keep-alive —— isEqual 命中在途实例不拆树,
+                // 丢弃在自己子树里跑完; 光标空后本分支自然继续 drain。
+                if (ThrowCursorTask.isDiscardInProgress()
+                        || CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
+                    setDebugState("Cursor under discard/freeing, keeping cascade alive");
+                    return new EnsureFreeInventorySlotTask();
                 }
                 Optional<Slot> fitCursor = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursorNow, false);
                 if (fitCursor.isPresent()) {

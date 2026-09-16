@@ -167,6 +167,11 @@ public class EnsureFreeCursorSlotTask extends Task {
     private Slot findRealBackpackFit(ItemStack cursor) {
         for (int i = 0; i <= 35; i++) {
             Slot slot = Slot.getFromCurrentScreenInventory(i);
+            // (2026-09-16 防御, 09:06:35 latest.log 实锤) 槽位映射对未注册界面
+            // (Esc 菜单/聊天栏等 currentScreen 非空但不在 SlotScreenMapping 表里)
+            // 会兜底退化成 CursorSlot.SLOT — 真实扫描全部 i 都返回光标槽, 点它 =
+            // "Tried to click the cursor slot" 警告 + 永远放不回。跳过退化槽。
+            if (Slot.isCursor(slot) || slot.getInventorySlot() < 0) continue;
             ItemStack in = StorageHelper.getItemStackInSlot(slot);
             if (in.isEmpty() || (cursor.isItemEqual(in) && in.getCount() < in.getMaxCount())) {
                 return slot;
@@ -177,6 +182,10 @@ public class EnsureFreeCursorSlotTask extends Task {
 
     // 目标槽是否仍能容纳当前光标物品 (读真实屏幕栈; 锁定槽只会来自 findRealBackpackFit)。
     private boolean canPlaceCursorIntoSlot(ItemStack cursor, Slot slot) {
+        // (2026-09-16) 同上: 光标槽/无效槽永远不能作为放置目标 (点光标槽自己 =
+        // 空操作警告; 锁定槽若因界面切换退化为光标槽, 读到的"内容"就是光标自己,
+        // isItemEqual 恒真 → 会误判可放)。判不可放, 走重扫/丢弃级联。
+        if (slot == null || Slot.isCursor(slot) || slot.getInventorySlot() < 0) return false;
         ItemStack in = StorageHelper.getItemStackInSlot(slot);
         return in.isEmpty() || (cursor.isItemEqual(in) && in.getCount() < in.getMaxCount());
     }
