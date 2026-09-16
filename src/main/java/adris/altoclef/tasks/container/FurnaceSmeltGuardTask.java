@@ -187,25 +187,31 @@ public class FurnaceSmeltGuardTask extends Task {
     }
 
     /**
-     * (2026-09-16 守炉重开环修复) 熔炉是否仍在"主动烧制"中: 正在燃烧 (有剩余燃料
-     * 时间) 且 输入槽还有料待烧。用于收窄守卫结束条件, 避免炉子还在烧就反复重开。
-     * 两条要同时满足——只判"燃烧中"会在烧炼完成后 (输入已空、燃料仍有余量) 多等整段
-     * 燃料燃烧时间 (最长 ~80s); 只判"输入非空"会在"有料但燃料耗尽"时死锁 (守卫期间
-     * 界面关闭, 父任务无法补燃料)。两者皆真才是真正在干活, 才保持驻留。
+     * (2026-09-16 守炉重开环修复) 熔炉是否仍在"主动烧制"中。用于收窄守卫结束条件,
+     * 避免炉子还在烧就反复重开。
+     * 判据 (2026-09-16 195358 场相位差实锤后放宽): 炉内有输入料 且 (正在燃烧 或 还有燃料)。
+     * —— 旧判据 LIT&&输入 会被"6s 驻留到期 vs 10s 烧炼周期"的相位差漏过: 驻留到期
+     * 瞬间恰逢两批之间的短暂熄火 (LIT 闪 false) → 放行重开 → 4-5s 周期环 (本场
+     * 20:33-20:35 实锤, SmeltGate 显示 burn 一直在涨、mat 逐个减)。改为"有输入料
+     * 且有燃料就继续驻留", 熄火瞬间也压住; 燃料耗尽 (fuel 空) 才放行父任务去补。
+     * —— "输入已空"时立即放行 (纯等收货场景由父任务重开收取, 守卫不揽)。
      * 守卫期间熔炉界面关闭, 故读取炉子 BlockEntity 而非 AbstractFurnaceScreenHandler
      * 的实时读数。燃烧判定用方块状态 LIT 属性 —— 1.18.2 映射里
-     * AbstractFurnaceBlockEntity.isBurning() 是 private 不可调 (20260916 编译实锤),
-     * 而 LIT 与 isBurning 同源 (Block.appendProperties 由燃烧状态驱动); 炉子槽位
-     * 0=输入 / 1=燃料 / 2=产出 (Inventory.getStack)。
+     * AbstractFurnaceBlockEntity.isBurning() 是 private 不可调 (20260916 编译实锤);
+     * 炉子槽位 0=输入 / 1=燃料 / 2=产出 (Inventory.getStack)。
      */
     private boolean furnaceStillWorking(AltoClef mod) {
         if (_furnacePos == null || mod.getWorld() == null) return false;
         BlockEntity be = mod.getWorld().getBlockEntity(_furnacePos);
         if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return false;
-        // 正在燃烧 (LIT) 且 输入槽还有料 → 正在主动烧制, 保持驻留。
         BlockState state = be.getCachedState();
         boolean burning = state.contains(Properties.LIT) && state.get(Properties.LIT);
-        return burning && !furnace.getStack(0).isEmpty();
+        boolean inputLeft = !furnace.getStack(0).isEmpty();
+        boolean fuelLeft = !furnace.getStack(1).isEmpty();
+        boolean outputHasSpace = furnace.getStack(2).getCount() < furnace.getStack(2).getMaxCount();
+        // 有料且 (在烧 或 还能点着: 有燃料且产出槽有空间) → 继续驻留等它烧完收完;
+        // 燃料耗尽 / 产出满(点不着, 必须重开收取) 才放行父任务。
+        return inputLeft && (burning || (fuelLeft && outputHasSpace));
     }
 
     @Override

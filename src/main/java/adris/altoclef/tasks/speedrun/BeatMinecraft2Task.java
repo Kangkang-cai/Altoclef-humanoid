@@ -397,6 +397,14 @@ public class BeatMinecraft2Task extends Task {
     // "挖 1 根原木→被合成抢占→重来" 死循环 (Restocking wood 0/4 出现 4467 次实锤)。
     // 粘滞复用同一实例, 直到石斧到手 (isFinished) 才清缓存, 自然回落原木收集。
     private Task _stoneAxeTask = null;
+    // (2026-09-16 迟滞修横跳) "无斧"判定的迟滞起点: 0 = 上次判定有斧。
+    // 背景: isItemOwned(USE) 是真实背包直读, 开屏/光标移动/合成格收发窗口期
+    // 会瞬时数不到斧子 → 主分支 "Restocking wood (logs)" ↔ "crafting stone axe
+    // first" 每 ~3.4s 翻转 (20260916-195358 场 8 分钟各 70 次实锤), 每次翻转都
+    // 触发 baritone 重规划 = 原地反复跳。现有 2s 去抖只压子任务切换, 压不住主
+    // 分支横跳。修法: 无斧需连续持续 3s 才回切斧链, 期间维持补货分支; 真丢斧只损失 3s。
+    private long _axeAbsentSinceMs = 0L;
+    private static final long AXE_ABSENT_HYSTERESIS_MS = 3000L;
     // (2026-08-31 收熔炉取空) 收熔炉前的 EmptyFurnaceTask 粘性实例: 一旦派发就
     // 粘住直到完成(取尽炉内物品+拆炉带走), 防止每 tick 新建被其他分支切走,
     // 也确保 onTick 顶部延续块能持续返回同一实例。
@@ -2561,10 +2569,31 @@ public class BeatMinecraft2Task extends Task {
      * 合金斧则直接用原任务。不做木斧: 木斧提升有限, 要就石斧(用户预期)。
      */
     private Task prependAxeForWood(AltoClef mod, Task woodTask) {
+        boolean axeOwned = false;
         for (Item axe : new Item[]{Items.STONE_AXE, Items.IRON_AXE, Items.DIAMOND_AXE, Items.NETHERITE_AXE}) {
-            if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, axe)) return woodTask;
+            if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, axe)) {
+                axeOwned = true;
+                break;
+            }
+        }
+        if (axeOwned) {
+            _axeAbsentSinceMs = 0L;
+            return woodTask;
+        }
+        // (2026-09-16 迟滞修横跳) 无斧需连续持续 3s 才允许回切斧链。
+        long nowMs = System.currentTimeMillis();
+        if (_axeAbsentSinceMs == 0L) {
+            _axeAbsentSinceMs = nowMs;
+        }
+        if (nowMs - _axeAbsentSinceMs < AXE_ABSENT_HYSTERESIS_MS) {
+            return woodTask;
         }
         setDebugState("Stockpiling wood: crafting stone axe first (gather cobble/table/sticks)");
+        // (2026-09-16 验证日志) 迟滞放行后的真回切, 只落盘不进聊天。
+        // 验证判据 —— 生效: [AXE-HYST] 低频 (真丢斧才一条), Diag-flow 里
+        // "Restocking ↔ crafting axe" 翻转大幅减少; 失败: 翻转依旧且无此日志 =
+        // 翻转发生在本方法之外的其他分支, 需按 Diag-flow 时间戳回查。
+        Debug.logToFile("altoclef_diag.log", "[AXE-HYST] axe absent confirmed, switching to axe chain");
         // (2026-09-16 修复每 tick 重建) 见 _stoneAxeTask 字段注释。石斧到手后上方
         // isItemOwned 命中 → 直接返回 woodTask, 自然回落原木收集; 此间粘滞复用同一
         // 实例, 不再每 tick new 导致石斧链从头跑被自己打断。
