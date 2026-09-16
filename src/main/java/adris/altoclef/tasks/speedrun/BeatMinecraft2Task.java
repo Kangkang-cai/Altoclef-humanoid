@@ -411,6 +411,9 @@ public class BeatMinecraft2Task extends Task {
     private MineAndCollectTask _pickupCraftingTableTask = null;
     // (2026-09-08) 收工作台侧线整体冷却截止时间: 放弃后置 now+30s, 冷却期内分支让位。
     private long _craftingTableSidelineGiveUpUntilMs = 0;
+    // (2026-09-16 铁装"先做齐再穿") 铁装合成阶段进入时间: 缺件>0 时开始计时,
+    // 超 90s 材料断供则回退为"先穿已持有的"。缺件清零即复位。
+    private long _ironArmorCraftSinceMs = 0;
     // (2026-09-08) 当前收工作台粘性实例的启动时间, 用于 15s 外部超时判定。
     private long _pickupCraftingTableStartMs = 0;
     // (2026-08-27 床保险一次性完成) 地表白天"必须持床"只执行一轮: 拿到并持有
@@ -2007,14 +2010,32 @@ public class BeatMinecraft2Task extends Task {
                     Item[] ownedNotEquipped = Arrays.stream(ItemHelper.IRON_ARMORS)
                             .filter(a -> mod.getItemStorage().hasItem(a) && !StorageHelper.isArmorEquipped(mod, a))
                             .toArray(Item[]::new);
-                    if (ownedNotEquipped.length > 0) {
-                        setDebugState("Equipping owned iron armor");
-                        return new EquipArmorTask(ownedNotEquipped);
-                    }
                     ItemTarget[] missingIronArmor = Arrays.stream(ItemHelper.IRON_ARMORS)
                             .filter(a -> !mod.getItemStorage().hasItem(a) && !StorageHelper.isArmorEquipped(mod, a))
                             .map(a -> new ItemTarget(a, 1))
                             .toArray(ItemTarget[]::new);
+                    // (2026-09-16 用户"做一件穿一件, 还多次打掉工作台, 浪费时间")
+                    // 旧行为: ownedNotEquipped 优先 → 每做出一件, squash 合成链在收
+                    // 下一件产出时被 EquipArmorTask 拦腰打断 (tasks.log 09:57:04
+                    // "Get catalogued ... by <Equipping armor {iron_leggings}> took=850ms",
+                    // 正在 Receiving output), 穿完回来重建合成任务又要重新放台。
+                    // 改为: 还有缺件就继续做 (含补材料), 缺件清零后一次性穿齐。
+                    // 兜底: 合成阶段超 90s (材料断供卡住) 回退旧行为先穿已持有的,
+                    // 防止"包里躺着一件事不穿却永远在补缺件"。
+                    boolean craftStalledTooLong = _ironArmorCraftSinceMs != 0
+                            && System.currentTimeMillis() - _ironArmorCraftSinceMs > 90_000;
+                    if (missingIronArmor.length > 0 && !craftStalledTooLong) {
+                        if (_ironArmorCraftSinceMs == 0) {
+                            _ironArmorCraftSinceMs = System.currentTimeMillis();
+                        }
+                        setDebugState("Making iron armor set before mining");
+                        return TaskCatalogue.getSquashedItemTask(missingIronArmor);
+                    }
+                    _ironArmorCraftSinceMs = 0;
+                    if (ownedNotEquipped.length > 0) {
+                        setDebugState("Equipping owned iron armor");
+                        return new EquipArmorTask(ownedNotEquipped);
+                    }
                     setDebugState("Making iron armor set before mining");
                     return TaskCatalogue.getSquashedItemTask(missingIronArmor);
                 }
@@ -2219,6 +2240,12 @@ public class BeatMinecraft2Task extends Task {
                         // 铁齐全后直接用同一张台子把装备全部做完。台子不在近旁时
                         // findNearby=false 本就不触发, 故只抑制"正要接着用台"的场景。
                         || task instanceof CataloguedResourceTask
+                        // (2026-09-16 用户"做一件穿一件, 还多次打掉工作台") 穿甲窗口
+                        // 也要算忙: tasks.log 09:57:05 "Equipping armor {iron_leggings}"
+                        // 被 "Mine And Collect: [[crafting_table]]" 抢断 → 刚放好的台
+                        // 被挖走, 下一件又得重放。09-02 的 CataloguedResourceTask 白名单
+                        // 只盖住合成链, 盖不住件间穿插的 EquipArmorTask。
+                        || task instanceof EquipArmorTask
         );
     }
 
