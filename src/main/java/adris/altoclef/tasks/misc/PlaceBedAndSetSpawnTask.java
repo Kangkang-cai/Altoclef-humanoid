@@ -1282,7 +1282,18 @@ public class PlaceBedAndSetSpawnTask extends Task {
         return false;
     }
 
+    /**
+     * 严格轮: 只接受"床底 3 格本来就实心"的区域 (不需要搭平台)。
+     * 严格轮选不到才退回放宽轮 (允许搭平台, 评分加倍惩罚), 保留在原本地形无处
+     * 可放时"自己搭个平台"的老能力。
+     */
     private BlockPos locateBedRegion(AltoClef mod, BlockPos origin) {
+        BlockPos strict = locateBedRegion(mod, origin, true);
+        if (strict != null) return strict;
+        return locateBedRegion(mod, origin, false);
+    }
+
+    private BlockPos locateBedRegion(AltoClef mod, BlockPos origin, boolean requireSolidFoundation) {
         final int SCAN_RANGE = 10;
 
         // (2026-08-27 用户修正: 限制在脚部平面附近, 不往地下挖空位) 人两格高,
@@ -1371,6 +1382,12 @@ public class PlaceBedAndSetSpawnTask extends Task {
                         }
                     }
                     if (!foundationSolid) {
+                        // (2026-09-16 悬空选点死循环) 严格轮直接拒: 床底不实心就必须
+                        // 先搭平台, 而"搭平台"段排在清障/站位/放床之前, 平台一旦放不上
+                        // (悬空、baritone 找不到可依附面) 整个任务就卡死在那一步,
+                        // 后面的清理周围与站位一次都不会执行 (20260916-195358 实锤)。
+                        // 10 格内有真平地就绝不选悬空点。
+                        if (requireSolidFoundation) continue outer;
                         score *= 2.0;
                     }
                     // (2026-08-27 高度一致优先) 离脚部平面越远, 评分惩罚越重 —
@@ -1392,6 +1409,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     + " footY=" + footY
                     + " score=" + (closestDist==Double.POSITIVE_INFINITY ? "inf" : String.format("%.1f", closestDist))
                     + " standGroundSolid=" + (closestGood == null ? "n/a" : WorldHelper.isSolid(mod, closestGood.down()))
+                    + " strict=" + requireSolidFoundation
                     + " player=" + mod.getPlayer().getBlockPos().toShortString();
             Debug.logMessage(msg);
             Debug.logToFile("altoclef_diag.log", msg);
