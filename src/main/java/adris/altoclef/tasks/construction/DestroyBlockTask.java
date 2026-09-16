@@ -610,6 +610,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 每次切换挖掘进度清零, 3 秒换了 9 轮一片都没断。
     private BlockPos _occluderTarget;
 
+    // (2026-09-16 藤蔓裹木) 当前挡块是否为无碰撞方块 (藤蔓/花/雪片一类 climbable
+    // 或装饰块)。这类方块 COLLIDER 射线必穿透 → LookHelper.getReach (同样 COLLIDER
+    // 口径) 必 miss → 不能走常规 rotation 瞄准, 改瞄准星口径 (VISUAL) 命中点。
+    private boolean _occNoCollision = false;
+    /** 无碰撞挡块的本 tick 瞄准点 (VISUAL 射线命中位置), 每 tick 刷新。 */
+    private Vec3d _occAim = null;
+
     /**
      * (2026-09-15 叶包裹不垫塔) 目标在挖掘距离内但视线被可挖方块挡住 → 挖掉挡块。
      * baritone 的爬升只挖挡它【路】的方块, 包住目标的叶子不在它的导航目标里,
@@ -644,23 +651,67 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             BlockState latched = mod.getWorld().getBlockState(occ);
             if (latched.isAir() || latched.getHardness(mod.getWorld(), occ) < 0) {
                 _occluderTarget = null;
+                _occNoCollision = false;
+                _occAim = null;
                 occ = null;
             }
         }
         if (occ == null) {
             BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(eye, center,
                     RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
-            if (hit.getType() != HitResult.Type.BLOCK) return false;
-            BlockPos found = hit.getBlockPos();
-            if (found.equals(_pos)) return false;
-            BlockState state = mod.getWorld().getBlockState(found);
-            if (state.isAir() || state.getHardness(mod.getWorld(), found) < 0) return false;
-            occ = found;
-            _occluderTarget = occ;
+            if (hit.getType() == HitResult.Type.BLOCK) {
+                BlockPos found = hit.getBlockPos();
+                if (!found.equals(_pos)) {
+                    BlockState state = mod.getWorld().getBlockState(found);
+                    if (!state.isAir() && state.getHardness(mod.getWorld(), found) >= 0) {
+                        occ = found;
+                        _occluderTarget = occ;
+                        _occNoCollision = false;
+                        _occAim = null;
+                    }
+                }
+            }
+            // (2026-09-16 藤蔓裹木) COLLIDER 射线对藤蔓穿透 (藤蔓无碰撞箱) → 判
+            // "无遮挡", 撸藤分支永不触发。现场 20260916-140459: 目标 (-55,73,28)
+            // 被 vine 包裹, 整场零 [OccluderClear], 左键一次没按 (准星被藤挡,
+            // isLookingAt 恒 false), 1 分钟打不满黑名单 4 次。补一条准星口径
+            // (VISUAL=outline 形状, 与游戏准星同源) 的射线: COLLIDER 说"畅通"而
+            // 准星实际被挡的 climbable/装饰可挖方块 (藤/花/雪片) 按挡块处理。
+            // 严格增量: COLLIDER 已命中的实心挡块 (树叶等) 走原路径, 行为不变。
+            if (occ == null) {
+                BlockHitResult vhit = mod.getWorld().raycast(new RaycastContext(eye, center,
+                        RaycastContext.ShapeType.VISUAL, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+                if (vhit.getType() == HitResult.Type.BLOCK) {
+                    BlockPos vfound = vhit.getBlockPos();
+                    if (!vfound.equals(_pos)) {
+                        BlockState vstate = mod.getWorld().getBlockState(vfound);
+                        if (!vstate.isAir() && vstate.getHardness(mod.getWorld(), vfound) >= 0) {
+                            occ = vfound;
+                            _occluderTarget = occ;
+                            _occNoCollision = true;
+                            _occAim = vhit.getPos();
+                        }
+                    }
+                }
+            }
+            if (occ == null) return false;
+        }
+        // 无碰撞挡块 (藤蔓类): COLLIDER 口径的 getReach 必 miss (射线穿它而过),
+        // 不能因 rotation 缺失放弃; 瞄准点每 tick 用 VISUAL 射线刷新 (藤蔓断面
+        // 随附着面变化, 固定旧点可能脱靶)。VISUAL 现在命中的已不是 latched 挡块
+        // (挡块还在但被更近的东西挡住等罕见情形) → 退回挡块中心, latch 仍锁原块。
+        if (_occNoCollision) {
+            BlockHitResult vhit = mod.getWorld().raycast(new RaycastContext(eye, center,
+                    RaycastContext.ShapeType.VISUAL, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+            _occAim = (vhit.getType() == HitResult.Type.BLOCK && vhit.getBlockPos().equals(occ))
+                    ? vhit.getPos()
+                    : Vec3d.ofCenter(occ);
         }
         Optional<Rotation> occReach = LookHelper.getReach(occ);
-        if (occReach.isEmpty()) {
+        if (occReach.isEmpty() && !_occNoCollision) {
             _occluderTarget = null;
+            _occNoCollision = false;
+            _occAim = null;
             return false; // 挡块自己也够不着 → 交回 handoff
         }
         // (20260916) 撸叶与 handoff 的互斥已上移到方法开头: handoff 期间本分支整体
@@ -669,7 +720,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         if (!LookHelper.isLookingAt(mod, occ)) {
-            LookHelper.lookAt(mod, occReach.get());
+            if (occReach.isPresent()) {
+                LookHelper.lookAt(mod, occReach.get());
+            } else {
+                LookHelper.lookAt(mod, _occAim);
+            }
         }
         if (LookHelper.isLookingAt(mod, occ)) {
             // 与常规挖掘分支同款: 左键由 PlayerInteractionFixChain 配工具。
@@ -678,7 +733,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (!occ.equals(_lastOccluderLogged)) {
             _lastOccluderLogged = occ;
             Debug.logToFile("altoclef_diag.log", "[OccluderClear] clearing " + occ.toShortString()
-                    + " (" + mod.getWorld().getBlockState(occ).getBlock() + ") blocking target="
+                    + " (" + mod.getWorld().getBlockState(occ).getBlock()
+                    + (_occNoCollision ? ", visual/no-collision" : "") + ") blocking target="
                     + _pos.toShortString());
         }
         setDebugState("Clearing occluder " + occ.toShortString() + " in front of " + _pos.toShortString());
