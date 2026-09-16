@@ -391,6 +391,12 @@ public class BeatMinecraft2Task extends Task {
     // 挖木头被自动要求挖到48, 是旧逻辑每 tick new 48 原木任务抢占所致）。
     // 其他子任务需要少量木头时用各自独立的 target（几根/木板），不继承 48。
     private Task _woodStockpileTask = null;
+    // (2026-09-16 囤木前做石斧任务粘性缓存) 旧逻辑 prependAxeForWood 每 tick 都
+    // 新建 getItemTask(STONE_AXE,1) → TaskRunner 的 isEqual 判定为新实例 → 每 tick
+    // 停旧起新, 石斧链 (挖圆石→合台→合棍→合斧) 每次从头跑、被自己重建打断, 形成
+    // "挖 1 根原木→被合成抢占→重来" 死循环 (Restocking wood 0/4 出现 4467 次实锤)。
+    // 粘滞复用同一实例, 直到石斧到手 (isFinished) 才清缓存, 自然回落原木收集。
+    private Task _stoneAxeTask = null;
     // (2026-08-31 收熔炉取空) 收熔炉前的 EmptyFurnaceTask 粘性实例: 一旦派发就
     // 粘住直到完成(取尽炉内物品+拆炉带走), 防止每 tick 新建被其他分支切走,
     // 也确保 onTick 顶部延续块能持续返回同一实例。
@@ -636,27 +642,36 @@ public class BeatMinecraft2Task extends Task {
         super.setDebugState(state);
         if (state.equals(_lastDispatchedChildDesc)) return;
         String prev = (_lastDispatchedChildDesc == null ? "(start)" : "\"" + _lastDispatchedChildDesc + "\"");
-        _lastDispatchedChildDesc = state;
         long nowMs = System.currentTimeMillis();
-        if (nowMs - _lastFlowLogMs < 200) return; // 节流
-        _lastFlowLogMs = nowMs;
-        if (_modRef == null || !AltoClef.inGame()) return;
-        try {
-            net.minecraft.client.world.ClientWorld world = MinecraftClient.getInstance().world;
-            String snap = "[Diag-flow] branch: " + prev + " -> \"" + state + "\""
-                    + " | canSleep=" + WorldHelper.canSleep()
-                    + " time=" + (world != null ? (int) (world.getTimeOfDay() % 24000) : -1)
-                    + " thunder=" + (world != null && world.isThundering() && world.isRaining())
-                    + " hasBedItem=" + _modRef.getItemStorage().hasItem(ItemHelper.BED)
-                    + " bedNearby6=" + isPlacedBedNearby(_modRef)
-                    + " bedPerceived=" + isBedPerceived(_modRef)
-                    + " logs=" + _modRef.getItemStorage().getItemCount(ItemHelper.LOG)
-                    + " woodStockpiled=" + _woodStockpiled
-                    + " deep=" + WorldHelper.isDeepUnderground(_modRef);
-            Debug.logMessage(snap);
-            Debug.logToFile("altoclef_diag.log", snap);
-        } catch (Exception ignored) {
-            // 诊断日志绝不影响主逻辑
+        // (2026-09-16 日志卫生) 旧实现把 _lastDispatchedChildDesc 的更新放在 200ms 节流之前:
+        // 高频横跳时窗口内每次新状态都覆盖去重基准, 窗口一开立刻重发, 每 200ms 必刷一条
+        // 聊天 (实锤 5123 条占 16%)。现改为: ①聊天节流 200ms→1000ms; ②落盘渠道每次状态
+        // 变化都写 (文件不刷屏); ③仅当聊天真正发出才把去重基准推进到当前 state, 横跳回归
+        // 已发状态时被上方去重吞掉, 消除"窗口内新状态被吞、窗口一开立刻重发"。
+        if (_modRef != null && AltoClef.inGame()) {
+            try {
+                net.minecraft.client.world.ClientWorld world = MinecraftClient.getInstance().world;
+                String snap = "[Diag-flow] branch: " + prev + " -> \"" + state + "\""
+                        + " | canSleep=" + WorldHelper.canSleep()
+                        + " time=" + (world != null ? (int) (world.getTimeOfDay() % 24000) : -1)
+                        + " thunder=" + (world != null && world.isThundering() && world.isRaining())
+                        + " hasBedItem=" + _modRef.getItemStorage().hasItem(ItemHelper.BED)
+                        + " bedNearby6=" + isPlacedBedNearby(_modRef)
+                        + " bedPerceived=" + isBedPerceived(_modRef)
+                        + " logs=" + _modRef.getItemStorage().getItemCount(ItemHelper.LOG)
+                        + " woodStockpiled=" + _woodStockpiled
+                        + " deep=" + WorldHelper.isDeepUnderground(_modRef);
+                // 落盘: 每次状态变化都写, 不受聊天节流影响。
+                Debug.logToFile("altoclef_diag.log", snap);
+                // 聊天: 1s 节流, 仅真正发出才更新去重基准。
+                if (nowMs - _lastFlowLogMs >= 1000) {
+                    Debug.logMessage(snap);
+                    _lastFlowLogMs = nowMs;
+                    _lastDispatchedChildDesc = state;
+                }
+            } catch (Exception ignored) {
+                // 诊断日志绝不影响主逻辑
+            }
         }
     }
 
@@ -2508,6 +2523,7 @@ public class BeatMinecraft2Task extends Task {
             if (logCount >= _config.minWoodLogs) {
                 _woodStockpiled = true;
                 _woodStockpileTask = null;
+                _stoneAxeTask = null;
             } else {
                 setDebugState("Stockpiling wood (logs): " + logCount + "/" + _config.minWoodLogs);
                 diagIronPhase(mod, "stockpile wood",
@@ -2549,7 +2565,19 @@ public class BeatMinecraft2Task extends Task {
             if (StorageHelper.isItemOwned(mod, StorageHelper.Ownership.USE, axe)) return woodTask;
         }
         setDebugState("Stockpiling wood: crafting stone axe first (gather cobble/table/sticks)");
-        return TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
+        // (2026-09-16 修复每 tick 重建) 见 _stoneAxeTask 字段注释。石斧到手后上方
+        // isItemOwned 命中 → 直接返回 woodTask, 自然回落原木收集; 此间粘滞复用同一
+        // 实例, 不再每 tick new 导致石斧链从头跑被自己打断。
+        if (_stoneAxeTask == null || _stoneAxeTask.isFinished(mod)) {
+            // (2026-09-16 验证日志) 新建即打点, 只落盘不进聊天。石斧到手是低频事件,
+            // 无需节流。验证判据 —— 生效: [AXE-CACHE] new 低频 (每次真造斧才一条),
+            // 且相邻两条间隔内 WOOD-BATCH #1→#3 连续推进; 失败: 每秒多条 new =
+            // 粘滞失效, "挖一根→重来"死循环回归。
+            Debug.logToFile("altoclef_diag.log", "[AXE-CACHE] new stone-axe task (prev "
+                    + (_stoneAxeTask == null ? "none" : "finished") + ")");
+            _stoneAxeTask = TaskCatalogue.getItemTask(Items.STONE_AXE, 1);
+        }
+        return _stoneAxeTask;
     }
 
     /** (2026-09-14) 关闭收药阶段, 并起算"允许重开"的冷却。见 FIRE_RES_REOPEN_COOLDOWN_MS 注释。 */

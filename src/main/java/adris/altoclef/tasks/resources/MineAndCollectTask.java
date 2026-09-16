@@ -95,6 +95,12 @@ public class MineAndCollectTask extends ResourceTask {
     private boolean _axeCommitted = false;
     private Task _axeTask = null;
 
+    // (2026-09-16 满足采矿工具需求任务粘性缓存) 旧逻辑每 tick new
+    // SatisfyMiningRequirementTask → 与内部 getItemTask→CollectCobblestoneTask→
+    // new MineAndCollectTask 形成递归嵌套链 (日志实锤 stack 嵌套 3 层)。粘滞复用
+    // 同一实例, 直到任务完成/需求满足才释放, 避免每 tick 重建导致子任务反复 stop/restart。
+    private Task _satisfyTask = null;
+
     public MineAndCollectTask(ItemTarget[] itemTargets, Block[] blocksToMine, MiningRequirement requirement) {
         this(itemTargets, blocksToMine, requirement, false);
     }
@@ -151,6 +157,7 @@ public class MineAndCollectTask extends ResourceTask {
         _subtask.resetSearch();
         _axeCommitted = false;
         _axeTask = null;
+        _satisfyTask = null;
     }
 
     @Override
@@ -163,8 +170,30 @@ public class MineAndCollectTask extends ResourceTask {
     protected Task onResourceTick(AltoClef mod) {
 
         if (!StorageHelper.miningRequirementMet(mod, _requirement)) {
-            return new SatisfyMiningRequirementTask(_requirement, "mine-and-collect");
+            // (2026-09-16 修复递归嵌套/每tick重建) 旧代码每 tick new SatisfyMiningRequirementTask
+            // → 与内部 getItemTask→CollectCobblestoneTask→new MineAndCollectTask 形成
+            // 递归嵌套链 (日志实锤 stack 嵌套 3 层), 且每 tick 全新实例导致子链反复
+            // stop/restart。现在粘滞复用同一实例 (仿 _axeTask 写法), 直到任务完成或
+            // 需求满足才释放。
+            // 为什么不做"祖先链守卫": Task.thisOrChildSatisfies 只沿 _sub 向下遍历
+            // (this+子孙), 查不到重入场景里的 SMR 祖先; 而 onResourceTick 返回 null
+            // 的真实语义是"停掉当前子任务并置空"(Task.tickInternal else 分支), 会让
+            // CollectCobblestoneTask 派出的本任务空转 → 死锁。实际上嵌套深度有界:
+            // 内层 Mine 的 requirement 是 WOOD (徒手可满足) 正常即终止, 真正的病灶
+            // 是"每 tick 重建"而非深度本身, 粘滞缓存 + TaskCatalogue 同资源活实例
+            // 合并 (见 TaskCatalogue.CataloguedResource._liveInstance) 已根治。
+            if (_satisfyTask == null || _satisfyTask.isFinished(mod)) {
+                // (2026-09-16 验证日志) 新建即打点, 只落盘不进聊天。验证判据 ——
+                // 生效: [SMR-CACHE] new 低频且相邻间隔内子链 (CollectCobblestone→Craft)
+                // 能跑完; 失败: 每秒多条 new = 粘滞失效, 嵌套重建回归。
+                Debug.logToFile("altoclef_diag.log", "[SMR-CACHE] new SatisfyMiningRequirementTask ("
+                        + _requirement + ", prev " + (_satisfyTask == null ? "none" : "finished") + ")");
+                _satisfyTask = new SatisfyMiningRequirementTask(_requirement, "mine-and-collect");
+            }
+            return _satisfyTask;
         }
+        // 需求已满足 → 释放缓存, 下次若再不满足会重新派发 (不递归)。
+        _satisfyTask = null;
 
         // 砍树必须用斧子：没有斧子且【立即能做出斧子】（整条合成链不缺
         // 任何材料）时，先去合成石斧/木斧再继续收集。
