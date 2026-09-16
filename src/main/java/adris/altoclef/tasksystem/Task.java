@@ -278,6 +278,9 @@ public abstract class Task {
      * Sometimes a task just can NOT be bothered to be interrupted right now.
      * For instance, if we're in mid air and MUST complete the parkour movement.
      */
+    // [ForceProtect] 诊断日志节流（1s 一条，防空中连发刷屏）
+    private static long _lastForceLogTs = 0;
+
     private boolean canBeInterrupted(AltoClef mod, Task subTask, Task toInterruptWith) {
         if (subTask == null) return true;
         // (2026-09-16 语义修复) 旧实现走 thisOrChildSatisfies(anyMatch): 子链上
@@ -293,6 +296,11 @@ public abstract class Task {
         Task t = subTask;
         while (t != null) {
             if (t instanceof ITaskCanForce canForce && canForce.shouldForce(mod, toInterruptWith)) {
+                long now = System.currentTimeMillis();
+                if (now - _lastForceLogTs > 1000) {
+                    _lastForceLogTs = now;
+                    Debug.logMessage("[ForceProtect] " + t + " 抵挡打断 (来自 " + toInterruptWith + ")");
+                }
                 return false;
             }
             t = t._sub;
