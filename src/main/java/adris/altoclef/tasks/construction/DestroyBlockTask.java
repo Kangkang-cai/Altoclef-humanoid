@@ -84,6 +84,19 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // onStart，见 PlaceBlockNearbyTask 同款处理）。
     private GetToLandTask _toLand = null;
 
+    // (2026-09-16 v2 防横跳闩锁) 现场 20260916-101226 10:24:14-37: isFloatingInWater
+    // 是瞬时判据, 水面 bobbing 时 isTouchingWater 以 ~0.4s 周期翻转 (腾空相翻 false)
+    // → 闸门每 0.4s 松开一次, 父任务返回 null 把刚启动的 GetToLandTask 拆掉
+    // (STOP took=198ms) 再重建, 16 格外的岸永远走不到。
+    // 修: 触发即闩住 (_waterExitLatched), 中途不再重评瞬时判据, 直到子任务真正
+    // 结束 (上岸站住 0.5s / 放弃进 60s static 冷却) 才松闩。
+    private boolean _waterExitLatched = false;
+    // 收敛出口: 上岸成功后 30s 内同目标再次触发 = 这块只能泡水挖 (上岸也得再下水)
+    // → 拉黑换目标, 封顶"上岸-下水"的大周期震荡。
+    private int _waterExitGroundedTick = -1;
+    private BlockPos _waterExitGroundedPos = null;
+    private static final int WATER_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
+
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
     // 记录进 MineDownExploreTask 的持久化自挖记忆, 供矿洞检测区分天然空气。
@@ -409,25 +422,64 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // 泡水漂浮挖掘时停止挖掘并离开水区; 例外 = 水洞 (附近没有直接连通且可达
             // 的两格空气, WaterExitHelper.hasReachableAirExit=false) 时继续挖。
             // 站浅水底 (脚下有实体) 不算泡水漂浮, 涉水过河不受影响。
-            // GetToLandTask 自带 3 分钟超时 + 放弃后 60s static 冷却 —— 冷却期内
-            // 直接恢复挖掘, 封顶"上岸-挖-又下水"的震荡。
-            if (reach.isPresent() && !GetToLandTask.isOnCooldown()
-                    && LandHelper.isFloatingInWater(mod)
-                    && WaterExitHelper.hasReachableAirExit(mod)) {
-                if (_toLand != null && _toLand.isFinished(mod)) {
-                    _toLand.reset();
-                    _toLand = null;
+            //
+            // (2026-09-16 v2 防横跳) 触发后【闩住】, 不再逐 tick 重评瞬时判据 ——
+            // bob 腾空相 isTouchingWater 翻 false 曾把子任务 0.2s 一拆 (现场实锤)。
+            // 松闩只看 _toLand 真正结束; 结束后按情况记"上岸成功"锚点供重复触发拉黑。
+            if (reach.isPresent()) {
+                if (_waterExitLatched) {
+                    if (_toLand == null) {
+                        _waterExitLatched = false;
+                    } else if (_toLand.isFinished(mod)) {
+                        if (!_toLand.hasGivenUp()) {
+                            // 真上岸了 (脚下实体连续 0.5s), 记锚点。
+                            _waterExitGroundedTick = WorldHelper.getTicks();
+                            _waterExitGroundedPos = _pos;
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[WATER-EXIT] grounded next to target " + _pos.toShortString());
+                        }
+                        // 放弃时任务内部已写 60s static 冷却 (isOnCooldown 兜底)。
+                        _toLand.reset();
+                        _toLand = null;
+                        _waterExitLatched = false;
+                    }
                 }
-                if (_toLand == null) {
-                    _toLand = new GetToLandTask();
+                // 上岸后短时间内同目标又漂回来 = 只能泡水挖 → 拉黑换目标。
+                if (!_waterExitLatched
+                        && _waterExitGroundedTick >= 0
+                        && _pos.equals(_waterExitGroundedPos)
+                        && WorldHelper.getTicks() - _waterExitGroundedTick < WATER_EXIT_REPEAT_BLACKLIST_TICKS
+                        && LandHelper.isFloatingInWater(mod)
+                        && WaterExitHelper.hasReachableAirExit(mod)) {
+                    String m = "[WATER-EXIT] target " + _pos.toShortString()
+                            + " needs water approach again within 30s after landing -> blacklist (water-only block)";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    mod.getBlockTracker().requestBlockUnreachable(_pos);
+                    _waterExitGroundedTick = -1;
+                    _waterExitGroundedPos = null;
+                    return null;
+                }
+                if (!_waterExitLatched
+                        && !GetToLandTask.isOnCooldown()
+                        && LandHelper.isFloatingInWater(mod)
+                        && WaterExitHelper.hasReachableAirExit(mod)) {
+                    _waterExitLatched = true;
+                    if (_toLand != null) {
+                        _toLand.reset();
+                    } else {
+                        _toLand = new GetToLandTask();
+                    }
                     String m = "[WATER-EXIT] floating in water while mining -> pause & head to land"
-                            + " (2-high air exit found). target=" + _pos.toShortString()
+                            + " (latched until grounded/give-up). target=" + _pos.toShortString()
                             + " player=" + mod.getPlayer().getBlockPos().toShortString();
                     Debug.logMessage(m);
                     Debug.logToFile("altoclef_diag.log", m);
                 }
-                setDebugState("Floating in water (mining 25x slow) -> heading to land first");
-                return _toLand;
+                if (_waterExitLatched && _toLand != null) {
+                    setDebugState("Floating in water (mining 25x slow) -> heading to land first (latched)");
+                    return _toLand;
+                }
             }
 
             if (reach.isPresent() && (mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround())) {
