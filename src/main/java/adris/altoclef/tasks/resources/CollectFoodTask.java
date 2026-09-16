@@ -537,6 +537,15 @@ public class CollectFoodTask extends Task {
                 // 落水限制同一套判定(WorldHelper.isOcean, 海岸拒绝/河湖放行), 口径一致。
                 // 鱼本身已用 FISH_PENALTY=0 排除, 这里兜底拦住泡在海里的陆生动物。
                 if (WorldHelper.isOcean(mod.getWorld().getBiome(nearest.get().getBlockPos()))) continue;
+                // (2026-09-16 用户"收集食物时终点经常在水面上, bot 在水上不好获取食物")
+                // 站在水里(河/湖/海)的动物同样跳过: 追过去必然下水 —— 水里打不到动物、
+                // 击退把猎物推远、捡到的肉还顺着水漂走。等它上岸再说(探索落点同步拒绝水面)。
+                if (nearest.get().isTouchingWater()) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[FOOD-DRY]\tskip mob standing in water: " + nearest.get().getType()
+                                    + " at " + nearest.get().getBlockPos().toShortString());
+                    continue;
+                }
                 int hungerPerformance = cookable.getCookedUnits();
                 double sqDistance = nearest.get().squaredDistanceTo(mod.getPlayer());
                 double score = (double) 100 * hungerPerformance / (sqDistance);

@@ -52,6 +52,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double ARRIVED_DISTANCE = 3;
     // Attempts to pick a non-water, non-failed target before counting the step as failed.
     private static final int MAX_PICK_ATTEMPTS = 12;
+    // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取食物")
+    // 找食物探索 (foodExplore) 的落点必须是【干燥陆地】。落点在水面时沿同一方向按
+    // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。
+    // 全部落水才判该方向不可用, 换角度重试。
+    private static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
 
     // [PLAINS-BIAS] 找食物/找动物专用的平原偏置 (foodExplore=true 时才启用)。
     // 草原是动物/作物收获概率最高的地表 biome, 这是用户需求: 找食物/动物时
@@ -261,6 +266,28 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             BlockPos candidate = new BlockPos(candX, candY, candZ);
             // Avoid retrying the exact directions we already failed on.
             if (_failedTargets.contains(candidate)) continue;
+            // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取
+            // 食物") 找食物探索: 落点必须是干燥陆地。原逻辑对 biased (河/湖按"过河放行"
+            // 处理) 与 swimming 两种情况直接放行水面落点, 于是 bot 走到水面上再开始找
+            // 动物 —— 水里既没有动物/作物, 游动又慢又有溺水风险。落点是水时沿同一方向
+            // 重新采样 (更远=跨到对岸, 更近=退回本岸), 仍全是水才换方向。
+            // 非 foodExplore (村庄箱子等"过河取物") 保持原样放行, 不推翻既有
+            // "过河可以、下海不行"的定论。
+            if (_foodExplore && !isDryLanding(mod, candidate)) {
+                BlockPos dry = findDryLandingAlong(mod, pos, angle);
+                if (dry == null || _failedTargets.contains(dry)) {
+                    _failedTargets.add(candidate);
+                    Debug.logToFile("altoclef_diag.log",
+                            "[DRY-LANDING] food explore: no dry landing along "
+                                    + (int) Math.toDegrees(angle) + " deg from " + pos
+                                    + " (wet " + candidate.toShortString() + "), picking another direction");
+                    continue;
+                }
+                Debug.logToFile("altoclef_diag.log",
+                        "[DRY-LANDING] food explore: wet landing " + candidate.toShortString()
+                                + " -> dry landing " + dry.toShortString());
+                candidate = dry;
+            }
             // Don't explore into water: swimming is slow, drowning is a risk and
             // targets (mobs, ores, ...) are rarely found in the middle of a lake.
             // EXCEPTION (2026-08-21 过河探索): when we're steering towards a
@@ -317,6 +344,45 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             return state.getBlock() == Blocks.WATER;
         }
         return false;
+    }
+
+    /**
+     * (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上") 落点 (地表上方一格的
+     * 站立点) 是否干燥 —— 站立处与脚下方块都不含水。与水面的区别: 过河时【路径】经过
+     * 水没关系, 但【终点】不能是水面。区块未加载时无法判定, 沿用 isTargetInWater 的
+     * "未知即放行"口径返回 true。
+     */
+    private boolean isDryLanding(AltoClef mod, BlockPos landing) {
+        if (mod.getWorld() == null) return true;
+        BlockPos ground = landing.down();
+        if (!mod.getChunkTracker().isChunkLoaded(landing)
+                || !mod.getChunkTracker().isChunkLoaded(ground)) return true;
+        return !isWaterAt(mod, landing) && !isWaterAt(mod, ground);
+    }
+
+    /** 该位置是否是水 (含流动水/含水方块, 如海草、睡莲下的水)。 */
+    private boolean isWaterAt(AltoClef mod, BlockPos pos) {
+        BlockState state = mod.getWorld().getBlockState(pos);
+        // getFluidState 覆盖 WATER / 流动水以及含水方块 (海草等); 岩浆同样非空,
+        // 一并拒绝 (站在岩浆上不是落点)。
+        return !state.getFluidState().isEmpty() || state.getBlock() == Blocks.WATER;
+    }
+
+    /**
+     * (2026-09-16) 沿 {@code angle} 方向按 {@link #DRY_LANDING_DISTANCES} 重新采样,
+     * 返回第一个干燥落点; 全是水返回 null。y 取该列地表 (surfaceYAt), 与正常 step
+     * 落点同样的口径。
+     */
+    private BlockPos findDryLandingAlong(AltoClef mod, Vec3d pos, double angle) {
+        int fallbackY = (int) Math.floor(pos.y);
+        for (double dist : DRY_LANDING_DISTANCES) {
+            int x = (int) Math.floor(pos.x + Math.cos(angle) * dist);
+            int z = (int) Math.floor(pos.z + Math.sin(angle) * dist);
+            int y = surfaceYAt(mod, x, z, fallbackY);
+            BlockPos cand = new BlockPos(x, y, z);
+            if (isDryLanding(mod, cand)) return cand;
+        }
+        return null;
     }
 
     /**
@@ -460,7 +526,12 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                     int sy = WorldHelper.getGroundHeight(mod, check.getX(), check.getZ());
                     // 只取一个代表点: 每列地表; 附近 160 格最多约 (160*2/8)^2 个点,
                     // 足够导航又不至于塞爆 visited 集合。
-                    found.add(sy >= 0 ? new BlockPos(check.getX(), sy + 1, check.getZ()) : check);
+                    BlockPos landing = sy >= 0 ? new BlockPos(check.getX(), sy + 1, check.getZ()) : check;
+                    // (2026-09-16 用户"收集食物不要在水上") 平原 biome 也可能铺在水面
+                    // (河/湖上的 plains 列, 最高实心方块是水下沙/泥) → 落点在水里。
+                    // 这类点不作为导航目标: 直奔它会把 bot 带到水面。
+                    if (!isDryLanding(mod, landing)) continue;
+                    found.add(landing);
                 }
             }
         }
