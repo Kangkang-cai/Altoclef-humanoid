@@ -76,6 +76,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final TimerGame _inBedTimer = new TimerGame(1);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(4, true);
     private TimerGame _placeAttemptTimer; // (2026-09-01 放床 3s 超时换区域重扫, 见 Placing bed 段)
+    // (2026-09-16 铺地基死循环) 与 _placeAttemptTimer 同理, 但守护"先搭床底平台"段:
+    // 该段 return PlaceStructureBlockTask 后原本没有任何超时出口, 而它又排在
+    // 清理周围 / 站位 / 放床之前 → 一旦平台放不上去 (区域悬空、baritone 找不到
+    // 可依附面), 整个任务就卡在这一步, 后面的机制一次都不会执行
+    // (20260916-195358 实锤: 58s 内 debugstate 只有 place/wander)。
+    private TimerGame _structureTimer;
+    private static final int STRUCTURE_TIMEOUT_SECONDS = 8;
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2);
     private BlockPos _currentBedRegion;
     private BlockPos _currentStructure, _currentBreak;
@@ -234,6 +241,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _humanSleepSideLast = -1;
         _humanSleepTimer.reset();
         _interactClearedVeg = false;
+        _structureTimer = null;
         // (2026-09-08) 新一轮睡觉尝试: 重置拆障保活/尝试计数/放弃态
         _blockerClearTask = null;
         _blockerClearPos = null;
@@ -873,7 +881,33 @@ public class PlaceBedAndSetSpawnTask extends Task {
         if (_currentStructure != null) {
             if (WorldHelper.isSolid(mod, _currentStructure)) {
                 _currentStructure = null;
+                _structureTimer = null;
             } else {
+                // (2026-09-16 铺地基超时换区域) 见 _structureTimer 声明处注释。
+                // 悬空区域(区域下方不实心)的平台 baritone 经常算不出放置方案 →
+                // builder 空转、PlaceBlockTask 每 2s 超时一轮。这里独立计时:
+                // STRUCTURE_TIMEOUT_SECONDS 内平台没变成实心 → 抛弃当前区域重扫,
+                // 让清理/站位/放床有机会在别的位置执行。
+                if (_structureTimer == null) {
+                    _structureTimer = new TimerGame(STRUCTURE_TIMEOUT_SECONDS);
+                    _structureTimer.reset();
+                }
+                if (_structureTimer.elapsed()) {
+                    String m = "[Diag-bed] FOUNDATION TIMEOUT after " + STRUCTURE_TIMEOUT_SECONDS + "s building "
+                            + _currentStructure.toShortString() + " (region=" + _currentBedRegion.toShortString()
+                            + "), abandoning region and rescanning (platform unplaceable: floating / no attach face).";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.foundation",
+                            STRUCTURE_TIMEOUT_SECONDS + "s building bed foundation, rescanning region");
+                    _currentStructure = null;
+                    _structureTimer = null;
+                    _currentBedRegion = null;
+                    _regionScanTimer.reset();
+                    _placeAttemptTimer = null;
+                    _progressChecker.reset();
+                    return null;
+                }
                 setDebugState("Placing structure for bed");
                 _placeAttemptTimer = null;
                 return new PlaceStructureBlockTask(_currentStructure);
