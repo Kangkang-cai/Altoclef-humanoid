@@ -968,6 +968,19 @@ public class TaskCatalogue {
             // (19:15:20 拾取原木时 Mine(logs)→斧链→getItemTask("log")→自身,
             // depth-128 OVERFLOW 后渲染线程挂死实锤)。此时退回新建实例,
             // 新实例同时接管 _liveInstance 槽, 原(栈上的)实例由其父任务继续持有。
+            if (_liveInstance != null && Task.isInTickStack(_liveInstance)) {
+                // (2026-09-16 验证日志) 防环守卫触发即打点, 只落盘不进聊天, 2s 节流。
+                // 验证判据 —— 生效: [CAT-CACHE] cycle-guard 偶发且游戏不再挂死
+                // (旧现场必然伴随后续 RECURSION OVERFLOW); 失败: 挂死复现且无此日志
+                // = 有绕过 getResource 的其他成环路径, 需按 OVERFLOW 栈回查。
+                long cycleGuardMs = System.currentTimeMillis();
+                if (cycleGuardMs - _lastCacheLogMs > 2000) {
+                    _lastCacheLogMs = cycleGuardMs;
+                    Debug.logToFile("altoclef_diag.log", String.format(
+                            "[CAT-CACHE] cycle-guard fresh %s (instance on tick stack)",
+                            (_targets.length > 0 ? _targets[0].toString() : "?")));
+                }
+            }
             // (2026-09-16 验证日志) 只在"重建"时打点, 只落盘不进聊天, 2s 节流。
             // 验证判据 —— 生效: 同一资源 (按首物品名) 的 [CAT-CACHE] rebuild 低频
             // (仅在任务真完成后出现); 失败: 同一资源每秒多条 rebuild = 缓存失效,
