@@ -48,13 +48,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(15f);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
 
-    // (2026-09-03 用户: 找水/岩浆先回地表) 地下(y<58, 与 isDeepUnderground 同口径)
-    // 随机游荡找水几乎无果, 且持续探入未加载区块 → 地形生成 + 路径搜索把帧率拖到
-    // 100ms+ (altoclef_jank.log 实锤 "Wander for Infinity blocks" 期间 frameMs=102~146)。
-    // 地表河流/湖/海找水概率高, 地表也常有裸露岩浆池; 回地表路上 BlockTracker 近区
-    // 扫描会顺路发现液体源。到地表后用持久 heading 步进探索 (见 getSurfaceExploreTask,
-    // 2026-09-04 替代原无限/有界游荡, 坚持方向不原地打转)。
-    private static final int BELOW_SURFACE_Y = 58;
+    // (2026-09-03 用户: 找水/岩浆先回地表) 地下(旧口径 y<58, 20260916 改为"未见天",
+    // 见 isBelowSurface) 随机游荡找水几乎无果, 且持续探入未加载区块 → 地形生成 +
+    // 路径搜索把帧率拖到 100ms+ (altoclef_jank.log 实锤 "Wander for Infinity blocks"
+    // 期间 frameMs=102~146)。地表河流/湖/海找水概率高, 地表也常有裸露岩浆池; 回地表
+    // 路上 BlockTracker 近区扫描会顺路发现液体源。到地表后用持久 heading 步进探索
+    // (见 getSurfaceExploreTask, 2026-09-04 替代原无限/有界游荡, 坚持方向不原地打转)。
 
     // (2026-09-04 用户"找lava随机方向原地打转, 应坚持大致方向前进, 左右转不回头")
     // 地表探索不再用 TimeoutWanderTask (每段重估可能换方向 → 原地打转)。改用
@@ -133,6 +132,9 @@ public class CollectBucketLiquidTask extends ResourceTask {
         //_blacklist.clear();
 
         _wanderTask.resetWander();
+        // 静态模式锁存随任务实例重置 (水/岩浆子类共享 static)
+        _modeInit = false;
+        _flapRejected = 0;
 
         _progressChecker.reset();
     }
@@ -491,13 +493,22 @@ public class CollectBucketLiquidTask extends ResourceTask {
      * y58~真实地表之间 (矿洞里) 时: 本任务判"不深了, 去 explore 找水" ↔ 回地表
      * 任务判"还没见天, 继续爬" → 两任务 1-2s 互抢 (09:39:56/58/09:40:00 三秒内
      * 三次 SUB 交替, 用户"卡死在 y=58")。对齐为同口径: 未见天就当仍需回地表。
+     * <p>
+     * (2026-09-16 修翻面振荡) 废除 y<58 短路, 只以"未见天"为准 —— 露天山谷
+     * y=57 在地表却被 y<58 误判地下, 加上 1 格宽阈值 + 跳节点 y 震荡, 分支
+     * 1-10s/轮互翻 (20260916-1128 场次 11:27:59 单秒三翻面) → 原地不动。
      */
-    // [LiquidSearch] 翻面诊断: 仅在 belowSurface 结果变化时打一条 (20260916-1128 场次
-    // 实锤: 11:27:59 同一秒内 回地表→探索→回地表 三翻面, 1-10s/轮振荡, bot 原地不动;
-    // 探索腿 48 格目标每轮被重建, 实测相邻目标仅差 5-14 格)。打印 y 与 skyVisible
-    // 以区分翻面源: y<58 边界跳动 vs isSkyVisible 抖动 (树叶/悬空/水面)。
-    private static boolean _lastBelowSurface = false;
-    private static boolean _lastBelowSurfaceInit = false;
+    // (20260916 修翻面振荡) 判"地下"不再用 y<58 短路: 露天山谷 y=57 在地表却被误判
+    // 地下 → 反复爬向山顶; 且 1 格宽阈值 + baritone 跳节点 y 在 57↔58 震荡 → 分支
+    // 每 1-10s 互翻 (1128 场次 11:27:59 单秒三翻面), 每翻一次子树 STOP 重建、
+    // 48 格探索腿报废 (实测相邻目标仅差 5-14 格) → bot 原地不动。
+    // 改为: 见天(!isSkyVisible 的否)即算地表, 与"找地表型液体"目标语义一致;
+    // 另加 5s 最短驻留迟滞, 压制跳跃期 pos.up() 在树叶/洞口边缘的瞬时抖动。
+    private static final long MODE_MIN_DWELL_MS = 5000;
+    private static boolean _modeBelow = false;
+    private static long _modeSetAt = 0;
+    private static boolean _modeInit = false;
+    private static int _flapRejected = 0;
 
     private boolean isBelowSurface(AltoClef mod) {
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD
@@ -505,16 +516,29 @@ public class CollectBucketLiquidTask extends ResourceTask {
             return false;
         }
         BlockPos pos = mod.getPlayer().getBlockPos();
-        boolean skyVisible = mod.getWorld().isSkyVisible(pos.up());
-        boolean below = pos.getY() < BELOW_SURFACE_Y || !skyVisible;
-        if (!_lastBelowSurfaceInit || below != _lastBelowSurface) {
-            _lastBelowSurfaceInit = true;
-            _lastBelowSurface = below;
-            Debug.logMessage("[LiquidSearch] belowSurface -> " + below
-                    + " (y=" + pos.getY() + ", skyVisible=" + skyVisible
-                    + ", @" + pos.getX() + "," + pos.getZ() + ")");
+        // 与 GoToSurfaceTask.isDeepForEscape 同口径 (isSkyVisible 走 MOTION_BLOCKING
+        // 高度图, 水面也算盖 → 海里必须游到水面才算见天)。
+        boolean raw = !mod.getWorld().isSkyVisible(pos.up());
+        long now = System.currentTimeMillis();
+        if (!_modeInit) {
+            _modeInit = true;
+            _modeBelow = raw;
+            _modeSetAt = now;
+            return raw;
         }
-        return below;
+        if (raw != _modeBelow) {
+            if (now - _modeSetAt < MODE_MIN_DWELL_MS) {
+                _flapRejected++;
+                return _modeBelow;
+            }
+            Debug.logMessage("[LiquidSearch] mode -> " + (raw ? "below(return to surface)" : "surface(explore)")
+                    + " (y=" + pos.getY() + ", skyVisible=" + !raw
+                    + ", rejectedFlaps=" + _flapRejected + ")");
+            _flapRejected = 0;
+            _modeBelow = raw;
+            _modeSetAt = now;
+        }
+        return _modeBelow;
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {
