@@ -492,16 +492,29 @@ public class CollectBucketLiquidTask extends ResourceTask {
      * 任务判"还没见天, 继续爬" → 两任务 1-2s 互抢 (09:39:56/58/09:40:00 三秒内
      * 三次 SUB 交替, 用户"卡死在 y=58")。对齐为同口径: 未见天就当仍需回地表。
      */
+    // [LiquidSearch] 翻面诊断: 仅在 belowSurface 结果变化时打一条 (20260916-1128 场次
+    // 实锤: 11:27:59 同一秒内 回地表→探索→回地表 三翻面, 1-10s/轮振荡, bot 原地不动;
+    // 探索腿 48 格目标每轮被重建, 实测相邻目标仅差 5-14 格)。打印 y 与 skyVisible
+    // 以区分翻面源: y<58 边界跳动 vs isSkyVisible 抖动 (树叶/悬空/水面)。
+    private static boolean _lastBelowSurface = false;
+    private static boolean _lastBelowSurfaceInit = false;
+
     private boolean isBelowSurface(AltoClef mod) {
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD
                 || mod.getPlayer() == null || mod.getWorld() == null) {
             return false;
         }
         BlockPos pos = mod.getPlayer().getBlockPos();
-        if (pos.getY() < BELOW_SURFACE_Y) return true;
-        // 与 GoToSurfaceTask.isDeepForEscape 同口径 (isSkyVisible 走 MOTION_BLOCKING
-        // 高度图, 水面也算盖 → 海里必须游到水面才算见天)。
-        return !mod.getWorld().isSkyVisible(pos.up());
+        boolean skyVisible = mod.getWorld().isSkyVisible(pos.up());
+        boolean below = pos.getY() < BELOW_SURFACE_Y || !skyVisible;
+        if (!_lastBelowSurfaceInit || below != _lastBelowSurface) {
+            _lastBelowSurfaceInit = true;
+            _lastBelowSurface = below;
+            Debug.logMessage("[LiquidSearch] belowSurface -> " + below
+                    + " (y=" + pos.getY() + ", skyVisible=" + skyVisible
+                    + ", @" + pos.getX() + "," + pos.getZ() + ")");
+        }
+        return below;
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {
