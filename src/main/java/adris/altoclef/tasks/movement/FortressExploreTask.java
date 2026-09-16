@@ -197,6 +197,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, BlockPos> _probeStartPosByKey = new java.util.HashMap<>();
     private static final java.util.Map<String, Long> _lastProgressTickByKey = new java.util.HashMap<>();
 
+    // (2026-09-16 记忆中心直航) "亲眼看见过的要塞中心"直接导航的最大距离。
+    // 下界 8:1, 1024 下界格 ≈ 8192 主世界格, 覆盖一次远征的合理范围 ——
+    // 人类"记得那边有座堡垒"就该直接去, 不该被候选推断的 192 格限制挡掉。
+    private static final double REMEMBERED_CENTER_MAX_DISTANCE = 1024;
+
     // =========================================================================
     // (2026-09-13 记忆分支"查讫"机制) [Expedition] 日志实锤: clue 全是 memory,
     // radius 11~48 震荡、max 卡 49 —— bot 在记忆推断区之间往返, 走不到锁定
@@ -727,7 +732,31 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         //    黑曜石, 会把 bot 自建的下界门记成地标, 候选全锚在门附近导致绕门
         //    打转 (20260913-202230 [Expedition] clue=memory 实锤)。
         //    "查讫"过的区域 (32 格内已扑空过) 直接跳过, 全查讫 → 落到锁定方向。
+        //    (2026-09-16 记忆中心直航) 先取"亲眼见过的要塞中心"直接导航 ——
+        //    挖金/交易时路过看到的堡垒记在 KnowledgeMemory (跨会话落盘),
+        //    切回找堡垒任务要能想起来, 不再只靠中心周围随机撒点 + 192 格
+        //    距离过滤。查讫机制同样适用: 中心扑空过就跳过, 不死磕假地标。
         _currentMemoryTarget = null;
+        List<BlockPos> centers = mod.getKnowledgeMemory()
+                .getRememberedCenters(KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
+        centers.removeIf(this::isCheckedMemory);
+        if (!centers.isEmpty()) {
+            BlockPos best = null;
+            double bestSq = Double.POSITIVE_INFINITY;
+            for (BlockPos c : centers) {
+                double sq = c.getSquaredDistance(pos);
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    best = c;
+                }
+            }
+            if (best != null) {
+                _lastClue = "memory-center";
+                _currentMemoryTarget = best;
+                setDebugState("Heading towards remembered fortress location");
+                return stepTowards(pos, best.getX(), best.getZ(), best.getY());
+            }
+        }
         List<BlockPos> candidates = mod.getKnowledgeMemory()
                 .getCandidateAreas(pos, KnowledgeMemory.StructureType.NETHER_FORTRESS);
         candidates.removeIf(this::isCheckedMemory);

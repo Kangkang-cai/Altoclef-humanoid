@@ -1,16 +1,20 @@
 package adris.altoclef.trackers;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -167,6 +171,118 @@ public final class KnowledgeMemory {
         return false;
     }
 
+    // =========================================================================
+    // (2026-09-16 跨会话地标记忆, 用户"挖金时看到堡垒, 回头找堡垒任务要能想起
+    // 来") 旧记忆三个缺口: ① 纯内存, 游戏重开全丢; ② 只有"随机偏移候选",
+    // 找堡垒任务拿不到精确记忆点; ③ _knownStructures 不分维度, 换维度残留。
+    // 修法: 地标中心按 存档:维度 落盘 logs/altoclef/memory/knowledge.log
+    // (每行 "存档:维度 TYPE x y z", 与 fortress_visited.log 同款机制), 并新增
+    // getRememberedCenters 直读接口 (按维度隔离, 不再被 getCandidateAreas 的
+    // 192 格距离过滤挡掉)。
+    // =========================================================================
+    private static final String KNOWLEDGE_FILE = "altoclef_knowledge.log";
+    private static final Map<String, Map<StructureType, LinkedHashSet<BlockPos>>> _centersByKey = new HashMap<>();
+    private static boolean _centersLoaded = false;
+
+    private static java.nio.file.Path knowledgeFile() {
+        return adris.altoclef.Debug.memoryFile(KNOWLEDGE_FILE, "knowledge.log");
+    }
+
+    /** 当前 存档:维度 key (与 FortressExploreTask.fortressVisitedKey 同口径)。 */
+    private String worldKey() {
+        String levelName = "?";
+        try {
+            var server = MinecraftClient.getInstance().getServer();
+            if (server != null && server.getSaveProperties() != null
+                    && server.getSaveProperties().getLevelName() != null) {
+                levelName = server.getSaveProperties().getLevelName();
+            }
+        } catch (Exception ignored) {
+        }
+        String dim = "?";
+        try {
+            if (_mod.getWorld() != null) {
+                dim = _mod.getWorld().getRegistryKey().getValue().toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return levelName + ":" + dim;
+    }
+
+    private static void ensureCentersLoaded() {
+        if (_centersLoaded) return;
+        _centersLoaded = true;
+        try {
+            java.nio.file.Path f = knowledgeFile();
+            if (!java.nio.file.Files.exists(f)) return;
+            for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                String[] parts = line.trim().split(" ");
+                if (parts.length != 5) continue;
+                StructureType type = structureTypeByName(parts[1]);
+                if (type == null) continue;
+                try {
+                    BlockPos p = new BlockPos(Integer.parseInt(parts[2]),
+                            Integer.parseInt(parts[3]), Integer.parseInt(parts[4]));
+                    Map<StructureType, LinkedHashSet<BlockPos>> byType =
+                            _centersByKey.computeIfAbsent(parts[0], k -> new EnumMap<>(StructureType.class));
+                    LinkedHashSet<BlockPos> set = byType.computeIfAbsent(type, t -> new LinkedHashSet<>());
+                    if (set.size() < MAX_CENTERS_PER_TYPE) set.add(p);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            Debug.logMessage("[Knowledge] loaded "
+                    + _centersByKey.values().stream().mapToInt(m -> m.values().stream().mapToInt(Set::size).sum()).sum()
+                    + " remembered structure centers from " + KNOWLEDGE_FILE);
+        } catch (Exception e) {
+            Debug.logMessage("[Knowledge] failed to load " + KNOWLEDGE_FILE + ": " + e.getMessage());
+        }
+    }
+
+    private static StructureType structureTypeByName(String name) {
+        for (StructureType t : StructureType.values()) {
+            if (t.name().equals(name)) return t;
+        }
+        return null;
+    }
+
+    private void persistCenter(String key, StructureType type, BlockPos pos) {
+        ensureCentersLoaded();
+        Map<StructureType, LinkedHashSet<BlockPos>> byType =
+                _centersByKey.computeIfAbsent(key, k -> new EnumMap<>(StructureType.class));
+        LinkedHashSet<BlockPos> set = byType.computeIfAbsent(type, t -> new LinkedHashSet<>());
+        if (set.contains(pos)) return;
+        if (set.size() >= MAX_CENTERS_PER_TYPE) return;
+        set.add(pos);
+        try {
+            java.nio.file.Files.write(knowledgeFile(),
+                    (key + " " + type.name() + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception e) {
+            // 落盘失败不影响本会话内的记忆。
+        }
+    }
+
+    /**
+     * (2026-09-16) "亲眼看见过的地标中心"直读 (含跨会话持久化, 按 存档:维度
+     * 隔离)。与 getCandidateAreas 的随机推断候选不同, 这里返回的是真实记忆点 —
+     * FortressExploreTask 外围模式可直接导航过去, 不受 CANDIDATE_MAX_DISTANCE
+     * (192 格) 限制 —— 挖金路过看到堡垒后哪怕跑远了, 回头找堡垒任务仍能想起。
+     */
+    public List<BlockPos> getRememberedCenters(StructureType type, Vec3d fromPos, double maxDistance) {
+        List<BlockPos> out = new ArrayList<>();
+        ensureCentersLoaded();
+        Map<StructureType, LinkedHashSet<BlockPos>> byType = _centersByKey.get(worldKey());
+        if (byType == null) return out;
+        Set<BlockPos> set = byType.get(type);
+        if (set == null) return out;
+        double maxSq = maxDistance * maxDistance;
+        for (BlockPos p : set) {
+            if (p.getSquaredDistance(fromPos) <= maxSq) out.add(p);
+        }
+        return out;
+    }
+
     private void remember(StructureType type, BlockPos pos) {
         Set<BlockPos> centers = _knownStructures.computeIfAbsent(type, t -> new HashSet<>());
         // Merge with an existing nearby center if we have one.
@@ -178,7 +294,11 @@ public final class KnowledgeMemory {
         if (centers.size() >= MAX_CENTERS_PER_TYPE) {
             return;
         }
-        centers.add(pos);
+        BlockPos center = pos.toImmutable();
+        centers.add(center);
+        // (2026-09-16) 落盘 + 首记日志 (验证"挖金时看到堡垒被记住"用)。
+        persistCenter(worldKey(), type, center);
+        Debug.logMessage("[Knowledge] remembered " + type.name() + " center at " + center.toShortString());
     }
 
     private static boolean contains(Block[] arr, Block b) {
