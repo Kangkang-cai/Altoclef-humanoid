@@ -170,6 +170,15 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // Check if we're approaching our point. If we fail, wander for a bit.
         if (!_progressChecker.check(mod)) {
             _failCount++;
+            // (2026-09-16 放床铺平台死循环) 下方 L190 只在 `!BuilderProcess.isActive()`
+            // 时才 build(...)。builder 一旦被激活, 即使它算不出任何放置方案
+            // (builder=true pathing=false path[present=false], 玩家原地不动),
+            // 也会永远保持 isActive → 后续每 tick 都不再重新 build → 必然再次超时,
+            // 配合 TimeoutWanderTask 半径递增形成无限环。判负时强制释放 builder,
+            // 让下一 tick 重新 build 一次 (目标悬空/无依附面时至少会显式失败一次)。
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            Debug.logMessage("[PlaceStuck] placement progress failed at " + _target.toShortString()
+                    + " (failCount=" + _failCount + "), released baritone builder to force re-plan");
             if (!tryingAlternativeWay()) {
                 Debug.logMessage("Failed to place, wandering timeout.");
                 return _wanderTask;
