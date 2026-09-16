@@ -2,6 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.mixins.PlayerDamageMixin;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.Dimension;
@@ -88,11 +89,15 @@ public class DeathMenuChain extends TaskChain {
                         BlockPos deathPos = player.getBlockPos();
                         Dimension deathDim = WorldHelper.getCurrentDimension();
                         long deathTick = MinecraftClient.getInstance().world.getTime();
-                        mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick);
+                        // (2026-09-16) 死亡瞬间取样一次死因: 读 PlayerDamageMixin 最近一次
+                        // 伤害来源名(剥前缀后的 "drown"/"lava"/...), 传进 grave 记忆。
+                        // 读后该 holder 被清空, 保证每个墓只取样这一次。
+                        String deathCause = PlayerDamageMixin.consumeLastDeathCause();
+                        mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
                         String msg = String.format(
-                                "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d)",
+                                "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s",
                                 deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                deathTick, _deathCount + 1);
+                                deathTick, _deathCount + 1, deathCause);
                         Debug.logMessage(msg);
                         Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
                     } else {

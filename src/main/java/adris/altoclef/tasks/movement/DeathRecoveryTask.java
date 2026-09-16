@@ -46,6 +46,14 @@ import java.util.Optional;
 public class DeathRecoveryTask extends Task {
 
     private static final int PICKUP_RADIUS = 16;
+
+    /**
+     * (2026-09-16) 暴露拾取扫描半径, 供 DeathRecoveryChain 在"弃墓切主任务"时
+     * 复用同量级半径判断墓碑附近掉落物(避免两套魔数漂移)。
+     */
+    public static int getPickupRadius() {
+        return PICKUP_RADIUS;
+    }
     private static final int GRAVE_REACHED_HORIZONTAL = 3;
     private static final int GRAVE_REACHED_VERTICAL = 4;
     // (2026-09-09 10→5, 用户"捡完了任务还不更新") 最后一件捡完后的空窗等待,

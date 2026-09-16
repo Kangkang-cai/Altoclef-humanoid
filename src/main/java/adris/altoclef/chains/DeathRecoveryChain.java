@@ -3,18 +3,26 @@ package adris.altoclef.chains;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.Settings;
+import adris.altoclef.TaskCatalogue;
+import adris.altoclef.tasks.movement.DeathRecoveryTask;
+import adris.altoclef.tasks.resources.CollectFoodTask;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
+import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
-import adris.altoclef.tasks.movement.DeathRecoveryTask;
-import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.trackers.WorldMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.MiningRequirement;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -128,6 +136,67 @@ public class DeathRecoveryChain extends SingleTaskChain {
             worldMemory.clearDeathGrave(currentDim);
             if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
             return Float.NEGATIVE_INFINITY;
+        }
+
+        // ------------------------------------------------------------
+        // Guard (用户定案 2026-09-16): drown / lava 墓不拾取, 直接切主任务。
+        // 为什么只算 drown 与 lava(精确小写比较, 见 isAbandonCause): 用户拍板——
+        // 淹死、直接死在岩浆里才放弃掉落物拾取; 着火烧死(inFire/onFire)、被岩浆块
+        // 烫死(hotFloor)、爆炸/cactus 等掉落物没被销毁, 仍正常拾取。1.18.2 里
+        // DamageSource.getName() 形如 "death.attack.drown"/"death.attack.lava",
+        // PlayerDamageMixin 已剥前缀存成 "drown"/"lava"。注意: 岩浆块烫死是
+        // hotFloor 不是 lava, 故本 Guard 不命中, 符合用户"岩浆块烫死仍拾取"的意图。
+        // 本 Guard 紧跟 streak(Guard 0) 之后、其余 Guard 之前: streak 计数逻辑
+        // 完全不变; 只要 streak 未触发且死因为 drown/lava, 就不再走 too_old/too_far/
+        // pickaxe 那套"是否值得去捡"的判定, 直接弃墓切主任务(食物/原木)。
+        // ------------------------------------------------------------
+        if (isAbandonCause(grave.deathCause)) {
+            if (!grave.altTaskDispatched) {
+                // 玩家还躺在死亡界面(health<=0)时不派发, 等复活(health>0)后再切主任务,
+                // 避免在一个"死人"身上跑需要移动采集的觅食/囤木任务(且此时坐标仍是死亡点)。
+                if (mod.getPlayer() != null && mod.getPlayer().getHealth() > 0f) {
+                    // 扫描墓碑 PICKUP_RADIUS 内掉落物: 含食物 → 觅食任务; 否则 → 囤积原木 25。
+                    // 掉落物已消失 / 区块未加载时 getDroppedItems() 为空 → 默认派囤原木。
+                    boolean hasFood = hasFoodDropNearGrave(mod, grave.position, DeathRecoveryTask.getPickupRadius());
+                    Task alt = hasFood
+                            ? new CollectFoodTask((double) mod.getModSettings().getFoodUnitsToCollect())
+                            : TaskCatalogue.getItemTask("log", 25);
+                    if (alt == null) {
+                        // 兜底: 万一 "log" 任务构造失败(极端), 不卡死, 清 memory 让位。
+                        Debug.logWarning("Alternative dispatch for " + grave.deathCause
+                                + " grave failed (null task); clearing grave.");
+                        Debug.logToFile("death_recovery.log", String.format(
+                                "[ABANDON CAUSE] cause=%s grave=%s dim=%s altTask=NULL_FAIL",
+                                grave.deathCause, grave.position, currentDim));
+                        worldMemory.clearDeathGrave(currentDim);
+                        if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+                        return Float.NEGATIVE_INFINITY;
+                    }
+                    // 一次性派发: 标已派, 防每 tick 重派; 用本链 ACTIVE_PRIORITY 运行,
+                    // 复用 :211 已有的"主动派发"模式(不搞 UserTaskChain, 避免改动其它文件)。
+                    grave.altTaskDispatched = true;
+                    setTask(alt);
+                    Debug.logWarning(String.format(
+                            "Grave cause=%s at %s dim=%s: NOT picking up drops (drowned/lava); "
+                                    + "dispatching %s instead.",
+                            grave.deathCause, grave.position, currentDim,
+                            hasFood ? "CollectFoodTask" : "stockpile 25 logs"));
+                    Debug.logToFile("death_recovery.log", String.format(
+                            "[ABANDON CAUSE] cause=%s grave=%s dim=%s altTask=%s",
+                            grave.deathCause, grave.position, currentDim,
+                            hasFood ? "FOOD" : "LOG"));
+                }
+                // 尚未复活: 不派发, 整链让位; 复活后本 Guard 还会再被评估并派发。
+                return Float.NEGATIVE_INFINITY;
+            }
+            // 已派发过一次: 替代任务还在跑 → 继续以本链优先级运行; 任务已结束 → 清墓 memory 让位。
+            Task cur = getCurrentTask();
+            if (cur == null || cur.isFinished(mod) || cur.stopped()) {
+                worldMemory.clearDeathGrave(currentDim);
+                if (cur != null) setTask(null);
+                return Float.NEGATIVE_INFINITY;
+            }
+            return ACTIVE_PRIORITY;
         }
 
         BlockPos playerPos = mod.getPlayer().getBlockPos();
@@ -271,6 +340,16 @@ public class DeathRecoveryChain extends SingleTaskChain {
                 Debug.logToFile("death_recovery.log",
                         "[FINISH] task ended with no grave memory (already cleared).");
             }
+        } else {
+            // (2026-09-16) 替代派发(食物/原木)任务跑完 → 清墓 memory 让位。
+            // 主清理在 getPriority 的 altTaskDispatched 分支(更稳, 覆盖任务被其它链
+            // 打断后本链重新夺回的窗口); 这里兜底, 防止任务结束但 getPriority 尚未
+            // 轮到的瞬间残留墓 memory。
+            WorldMemory worldMemory = mod.getWorldMemory();
+            Dimension currentDim = WorldHelper.getCurrentDimension();
+            worldMemory.getDeathGrave(currentDim).ifPresent(g -> {
+                if (g.altTaskDispatched) worldMemory.clearDeathGrave(currentDim);
+            });
         }
         setTask(null);
     }
@@ -299,5 +378,50 @@ public class DeathRecoveryChain extends SingleTaskChain {
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    // ------------------------------------------------------------
+    // (2026-09-16) drown/lava 弃墓辅助方法
+    // ------------------------------------------------------------
+
+    /**
+     * 死因是否"放弃拾取"。只认精确小写 "drown" 与 "lava"。
+     * 用户拍板只算这两种; 其它(inFire/onFire/hotFloor/cactus/explosion/outOfWorld...)
+     * 都正常拾取。精确小写比较避免误命中(比如模组自定义 "mydrown" 来源名)。
+     */
+    private static boolean isAbandonCause(String cause) {
+        return cause != null && (cause.equals("drown") || cause.equals("lava"));
+    }
+
+    /**
+     * 墓碑 radius 范围内是否存在食物掉落物。复用 DeathRecoveryTask 的 PICKUP_RADIUS,
+     * 与正常拾取扫描同量级。掉落物已消失 / 区块未加载 → getDroppedItems() 为空
+     * → 返回 false → 上层默认派囤原木。
+     */
+    private static boolean hasFoodDropNearGrave(AltoClef mod, BlockPos grave, int radius) {
+        List<ItemEntity> drops = mod.getEntityTracker().getDroppedItems();
+        if (drops.isEmpty()) return false;
+        Vec3d centre = Vec3d.ofCenter(grave);
+        double radiusSq = (double) radius * radius;
+        for (ItemEntity drop : drops) {
+            if (drop == null || !drop.isAlive()) continue;
+            if (drop.squaredDistanceTo(centre) > radiusSq) continue;
+            if (isFoodItem(drop.getStack().getItem())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 是否食物: 任何可食用物都算(生/熟肉、面包、薯、浆果…)。
+     * 优先用 Minecraft 自带 Item.isFood() 兜底所有可食物品; 同时兼容
+     * ItemHelper.RAW_FOODS 常量的生食(用户定案引用的现成常量)。
+     */
+    private static boolean isFoodItem(Item item) {
+        if (item == null) return false;
+        if (item.isFood()) return true;
+        for (Item raw : ItemHelper.RAW_FOODS) {
+            if (raw == item) return true;
+        }
+        return false;
     }
 }

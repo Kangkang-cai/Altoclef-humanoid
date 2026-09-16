@@ -144,9 +144,16 @@ public final class WorldMemory {
     public static final class DeathGraveRecord {
         public final BlockPos position;
         public final long deathGameTick;
-        DeathGraveRecord(BlockPos position, long deathGameTick) {
+        // (2026-09-16) 死因来源名(已剥 "death.attack." 前缀), 如 "drown"/"lava";
+        // 非致命原因场景为 null 或其它名字。DeathRecoveryChain 据此决定是否弃墓。
+        public final String deathCause;
+        // (2026-09-16) 该墓是否已派发过"替代主任务"(食物/原木)。每个墓只派一次,
+        // 防止 DeathRecoveryChain 每 tick 重派(否则会反复抢占其它链)。
+        public boolean altTaskDispatched = false;
+        DeathGraveRecord(BlockPos position, long deathGameTick, String deathCause) {
             this.position = position;
             this.deathGameTick = deathGameTick;
+            this.deathCause = deathCause;
         }
     }
     private final Map<Dimension, DeathGraveRecord> _deathGraveMemory = new HashMap<>();
@@ -493,13 +500,18 @@ public final class WorldMemory {
      * Record that the player just died at {@code pos} in {@code dim}.
      * {@code deathGameTick} should be {@code World.getTime()} at the instant
      * before respawning, so we can honour the 5-minute item despawn window.
-     * Previous records for the same dimension are overwritten because the
-     * earlier drops will already have been picked up or have despawned.
+     * {@code deathCause} is the (prefix-stripped) DamageSource name sampled at
+     * the moment of death (e.g. "drown"/"lava"); may be null if no damage was
+     * captured. Previous records for the same dimension are overwritten because
+     * the earlier drops will already have been picked up or have despawned.
+     *
+     * 注意: 连续死亡 streak(_consecutiveDeaths) 的累加逻辑【不改】, 这里只是
+     * 顺带把死因一起记下来, 供 DeathRecoveryChain 判定是否弃墓。
      */
-    public void rememberDeathGrave(Dimension dim, BlockPos pos, long deathGameTick) {
+    public void rememberDeathGrave(Dimension dim, BlockPos pos, long deathGameTick, String deathCause) {
         _consecutiveDeaths++;
         _lastDeathGameTick = deathGameTick;
-        _deathGraveMemory.put(dim, new DeathGraveRecord(new BlockPos(pos), deathGameTick));
+        _deathGraveMemory.put(dim, new DeathGraveRecord(new BlockPos(pos), deathGameTick, deathCause));
     }
 
     /**
