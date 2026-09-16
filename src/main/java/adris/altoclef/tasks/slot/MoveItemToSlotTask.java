@@ -2,6 +2,7 @@ package adris.altoclef.tasks.slot;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasksystem.ITaskCanForce;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.StlHelper;
@@ -15,11 +16,26 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
 
-public class MoveItemToSlotTask extends Task {
+public class MoveItemToSlotTask extends Task implements ITaskCanForce {
 
     private final ItemTarget _toMove;
     private final Slot _destination;
     private final Function<AltoClef, List<Slot>> _getMovableSlots;
+
+    // (2026-09-16 两拍搬运防拆, 20260916-103703 场次实锤) 搬运中间态被父级
+    // 每 tick 重估翻面拆树的死循环: 内层 CraftInTableTask([diamond_pickaxe])
+    // 的 "Getting container item" 子树正在收 crafting_table 输出, 背包满 →
+    // EnsureFreeInventorySlotTask "穿背包铁靴腾格子" → Moving iron_boots
+    // (PICKUP 已上光标、PLACE 未落地); 下一 tick 父级 "Child slot-move in
+    // flight"/缺料判定 return _collectTask 翻面 → 本任务整棵 STOP, 靴子放回
+    // 背包 → 收输出每轮重启、腾位每轮被拆, 8s/轮永动到用户手动退出
+    // (10:39:15/23 两次 "Moving [iron_boots] interrupted by Collect Recipe
+    // Resources diamond_pickaxe" 实锤)。
+    // 修=ITaskCanForce: 中间态期间声明不可被父级翻面打断 (只挡 tickInternal
+    // 换子任务, 不挡整棵树被上层替换, 无死锁面), 并带 3s 保险丝防搬运异常
+    // 卡死时永久不可救。
+    private static final long MOVE_FORCE_FUSE_MS = 3000;
+    private long _startedMs = 0;
 
     // (2026-08-24 拿起放下反复修复) PICKUP 源槽后客户端光标状态有同步延迟
     // (约 4-5 tick), 旧逻辑下一 tick 若光标仍读到空就再次 PICKUP → 把光标
@@ -47,7 +63,24 @@ public class MoveItemToSlotTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
+        _startedMs = System.currentTimeMillis();
+    }
 
+    /**
+     * (2026-09-16 两拍搬运防拆) 搬运中间态 = 光标已持有目标物品待放, 或
+     * PICKUP 同步宽限期内 (光标即将出现材料)。此窗口内父级翻面会把搬运
+     * 整棵拆掉, 物品回背包、进度清零。带 3s 保险丝: 超时后不再 force,
+     * 让上层仲裁可以介入救卡死。
+     */
+    @Override
+    public boolean shouldForce(AltoClef mod, Task interruptingCandidate) {
+        if (System.currentTimeMillis() - _startedMs > MOVE_FORCE_FUSE_MS) return false;
+        ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+        boolean cursorHoldsTarget = !cursor.isEmpty()
+                && Arrays.asList(_toMove.getMatches()).contains(cursor.getItem());
+        boolean pickupInGrace = _pendingPickup != null
+                && System.currentTimeMillis() - _pendingPickupSinceMs < PICKUP_SYNC_GRACE_MS;
+        return cursorHoldsTarget || pickupInGrace;
     }
 
     @Override
