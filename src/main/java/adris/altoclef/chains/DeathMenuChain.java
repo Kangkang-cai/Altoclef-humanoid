@@ -2,7 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
-import adris.altoclef.mixins.PlayerDamageMixin;
+import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.Dimension;
@@ -89,10 +89,12 @@ public class DeathMenuChain extends TaskChain {
                         BlockPos deathPos = player.getBlockPos();
                         Dimension deathDim = WorldHelper.getCurrentDimension();
                         long deathTick = MinecraftClient.getInstance().world.getTime();
-                        // (2026-09-16) 死亡瞬间取样一次死因: 读 PlayerDamageMixin 最近一次
-                        // 伤害来源名(剥前缀后的 "drown"/"lava"/...), 传进 grave 记忆。
+                        // (2026-09-16) 死亡瞬间取样一次死因: 读 PlayerDamageCauseHolder
+                        // 最近一次伤害来源名(剥前缀后的 "drown"/"lava"/...), 传进 grave 记忆。
                         // 读后该 holder 被清空, 保证每个墓只取样这一次。
-                        String deathCause = PlayerDamageMixin.consumeLastDeathCause();
+                        // (holder 放普通类而非 Mixin 类: Mixin 会把非 private 方法合并进
+                        // 目标类, public static 辅助方法被拒应用 → 19:06 启动崩溃实锤。)
+                        String deathCause = PlayerDamageCauseHolder.consumeLastDeathCause();
                         mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
                         String msg = String.format(
                                 "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s",
