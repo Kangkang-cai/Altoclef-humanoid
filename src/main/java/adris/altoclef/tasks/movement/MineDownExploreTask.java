@@ -91,6 +91,28 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 向上段(玩家从 y-54 爬回 y-37)出现 +6/+9, 与 JumpStuck 触发点一一对应。
     static final int NAV_STEP_MAX_DY_UP = 4;
     static final int NAV_STEP_MAX_DY_DOWN = 8;
+    // =========================================================================
+    // (2026-09-16 下界探索差异化, 用户"下界探洞范围更大, 别把空旷地当矿洞")
+    // 下界的"洞"尺度与主世界完全不同: 巨型空腔/开阔荒地随处延伸到 16 格视野之外。
+    // 0916 131126 场次实锤三件事:
+    //   1) 巨腔里 10 格一小步 = 原地挪动 (CavePick 连续 navDist≈9.9, 每 5s 挪 10 格);
+    //   2) naturalMaxY=45 是主世界"防自挖楼梯连地表"的遗产, 下界矿带 [32,96] 大半
+    //      被它挡掉 (REJECT aboveMaxY=280);
+    //   3) 主世界的"深度闸门 y≤45"在下界只偶发放行, 且放行的多是空旷地 (coverR=16/16
+    //      CAP HIT = 空气延伸出视野, 是巨腔/荒地不是需要"探索"的洞)。
+    // 三个对应差异点 (主世界路径零改动):
+    //   视野/步长放大 16→32 / 10→24; 高度硬顶 45→120; 空旷地判据从"深度闸门"
+    //   换成"头顶 48 格内必须有岩顶"(开阔荒地/灵魂沙谷地表无顶 → 拒; 巨腔有腔顶 → 放行)。
+    // =========================================================================
+    static final int NETHER_EXPLORE_SCAN_RADIUS = 32;
+    static final int NETHER_NAV_STEP_MAX_DIST = 24;
+    // 下界空旷地判据: 玩家头顶该范围内无实心岩顶 → 不算矿洞(开阔地表)。
+    // 48 覆盖常见巨腔腔顶高度(腔顶多在玩家上方 10~40 格); 菌柄/菌伞不算顶(见 hasOverheadCover)。
+    private static final int NETHER_COVER_SCAN_UP = 48;
+    // 下界天然空气高度硬顶(主世界 CAVE_NATURAL_AIR_MAX_Y=45 的下界对应物;
+    // 基岩顶盖 y=127 之下留裕量)。下界无"自挖楼梯连地表"概念, 防连顶由
+    // 自挖记忆排除承担。
+    private static final int NETHER_NATURAL_AIR_MAX_Y = 120;
     // (2026-09-01 三维开阔度判定, 取代旧 CAVE_AREA_THRESHOLD=40 空气计数)
     // 天然洞在 X/Z/Y 三维都开阔, 自挖楼梯/隧道是 1-2 格宽、2 格高的细长通道。
     // 连通空气集合的 X/Z/Y 跨度分别达到下面阈值才算"开阔天然洞", 触发矿洞探索。
@@ -1568,6 +1590,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 仍受 CAVE_NATURAL_AIR_MAX_Y 全局硬顶约束 (防自挖楼梯连到地表)。
      */
     int caveWindowMaxY() {
+        // (2026-09-16 下界差异化) 主世界硬顶 45 在下界会把矿带 [32,96] 的上半截
+        // 全部拒掉(0916 实锤 aboveMaxY=280) — 下界用自己的硬顶, 矿带上沿 + 8 照常生效。
+        if (_nether) return Math.min(NETHER_NATURAL_AIR_MAX_Y, _targetYMax + CAVE_ABOVE_TARGET_BUFFER);
         return Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetYMax + CAVE_ABOVE_TARGET_BUFFER);
     }
 
@@ -1756,11 +1781,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 本次探索自己的目标会被剔空而立即结束。探索任务天然只由 FIRE 创建, 恒豁免。
      */
     static BlockPos pickFarthestNaturalCaveAir(AltoClef mod, BlockPos center, BlockPos fromRef, Set<BlockPos> exclude, int minY, int maxY, boolean ignoreExploredRegions) {
+        // (2026-09-16 下界差异化) 视野 16→32、单步导航 10→24、高度硬顶 45→120:
+        // 下界巨腔里 10 格碎步=原地挪动(0916 实锤 navDist 恒≈9.9), 高度硬顶 45
+        // 把矿带上半截的巨腔全拒掉。主世界参数不变。
+        boolean netherDim = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
+        int scanRadius = netherDim ? NETHER_EXPLORE_SCAN_RADIUS : EXPLORE_SCAN_RADIUS;
+        int navMaxDist = netherDim ? NETHER_NAV_STEP_MAX_DIST : NAV_STEP_MAX_DIST;
+        int hardCapY = netherDim ? NETHER_NATURAL_AIR_MAX_Y : CAVE_NATURAL_AIR_MAX_Y;
         // 探索目标选择用更远的 EXPLORE_SCAN_RADIUS, 探索段更长(用户"得调远一点")。
-        Set<BlockPos> reachable = collectConnectedAir(mod, center, EXPLORE_SCAN_RADIUS);
+        Set<BlockPos> reachable = collectConnectedAir(mod, center, scanRadius);
         // (2026-09-02 目标深度上界) 导航目标也只选目标深度附近的天然空气, 防止
         // 钻石任务在洞内向外推时把目标选到上方浅层, 离开钻石层。
-        int naturalMaxY = Math.min(CAVE_NATURAL_AIR_MAX_Y, maxY);
+        int naturalMaxY = Math.min(hardCapY, maxY);
         int naturalMinY = minY;
         BlockPos best = null;
         double bestDistSq = Double.NEGATIVE_INFINITY;
@@ -1771,7 +1803,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (p.getY() < naturalMinY) continue;
             // (2026-09-13 导航步长上限) 视野里看得见、但不作为本次导航目标 ——
             // 超出抢占窗口能走完的距离(见 NAV_STEP_MAX_DIST 注释)。
-            if (!p.isWithinDistance(center, NAV_STEP_MAX_DIST)) continue;
+            // (2026-09-16 下界差异化) 下界巨腔无障碍、baritone 直线可达, 步长放大
+            // 到 24(主世界仍 10, 见 NETHER_NAV_STEP_MAX_DIST 注释)。
+            if (!p.isWithinDistance(center, navMaxDist)) continue;
             // (2026-09-13 垂直可达性) 3D 距离不约束垂直分量 → 目标可能落在正上方
             // 9 格(纯空腔里无落脚点, 上不去 → JumpStuck 反复 forceCancel)。见常量注释。
             int dy = p.getY() - center.getY();
@@ -1850,6 +1884,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             BlockPos n = cur.add(dx, dy, dz);
                             if (Math.abs(n.getX() - start.getX()) > radius
                                     || Math.abs(n.getZ() - start.getZ()) > radius) continue;
+                            // (2026-09-16 下界视野 32) 半径 32 跨 2 个区块, 必须防未加载
+                            // 区块(未加载按空气算会污染连通集); 半径 8 时恒已加载, 无副作用。
+                            if (!mod.getChunkTracker().isChunkLoaded(n)) continue;
                             net.minecraft.block.Block nb = mod.getWorld().getBlockState(n).getBlock();
                             if (nb == Blocks.AIR || nb == Blocks.CAVE_AIR) {
                                 queue.add(n);
@@ -1907,12 +1944,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         private Optional<BlockPos> findNearbyCave(AltoClef mod) {
         BlockPos center = mod.getPlayer().getBlockPos();
         // (2026-09-01 矿洞深度感知, 用户"刚挖进去头上有方块就又检测到外面是矿洞")
-        // 露天闸门不够: 玩家刚往下挖几格头顶就有方块(不露天), 但玩家仍在浅层,
-        // 旁边/上方就是地表空气 → 仍误判"发现矿洞"。人类刚挖进地下时知道自己还
-        // 在浅层, 不会"发现矿洞" — 洞检测必须要求玩家已挖到真正的地下矿洞层:
-        // 玩家 y 低于 CAVE_EXPLORE_MIN_DEPTH_Y 才允许检测。地表/浅层(y 高)即使
-        // 头顶有方块(挖开的楼梯)也不检测。
-        if (center.getY() > CAVE_EXPLORE_MIN_DEPTH_Y) {
+        // 需求: 地表/浅层即使头顶有方块(挖开的楼梯)也不算"发现矿洞"。
+        // (2026-09-16 下界差异化) 主世界用"深度闸门 y≤45"承担这层防护(主世界
+        // 地表 y≥60, 深度即是否 underground)。下界没有这个概念 —— 矿带 [32,96]
+        // 大半在 45 之上, 深度闸门只会偶发放行(实锤 REJECT depth y=49>45),
+        // 且放行的恰是空旷地。下界改用"头顶 48 格内必须有岩顶": 开阔荒地/
+        // 灵魂沙谷地表无顶 → 拒; 巨腔有腔顶 → 放行。
+        if (_nether) {
+            if (!hasOverheadCover(mod, center, NETHER_COVER_SCAN_UP)) {
+                logCaveScanDiag(mod, center, "REJECT nether open-ground (头顶" + NETHER_COVER_SCAN_UP + "格内无岩顶)");
+                return Optional.empty();
+            }
+        } else if (center.getY() > CAVE_EXPLORE_MIN_DEPTH_Y) {
             logCaveScanDiag(mod, center, "REJECT depth y=" + center.getY() + ">" + CAVE_EXPLORE_MIN_DEPTH_Y);
             return Optional.empty();
         }
@@ -1921,10 +1964,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 罕见场景。树冠不算顶(树下仍算露天)。
         // (2026-09-07 高 cavern 修复, 用户"洞边缘不触发") 24 格仰扫在大奶酪洞里
         // 会全程空气 → 深地大洞被误判"露天"而整局关闸(10:24 复现实锤: REJECT
-        // no-cover c=251,-43,201)。主世界 y<0 物理上不可能露天(地表 y≥60), 下界
-        // 探测带 y≤45 也在顶盖(y=127)与大空腔(y≈90+)之下 → 这两种场景跳过本闸门,
-        // 地表误判防护仍由深度闸门(y≤45)承担。
-        boolean openSkyImpossible = _nether || center.getY() < 0;
+        // no-cover c=251,-43,201)。主世界 y<0 物理上不可能露天(地表 y≥60) →
+        // 跳过本闸门, 地表误判防护由深度闸门(y≤45)承担。
+        // (2026-09-16) 下界分支已上移为专属空旷地判据(48 格仰扫), 不再走这里。
+        boolean openSkyImpossible = center.getY() < 0;
         if (!openSkyImpossible && !hasOverheadCover(mod, center)) {
             logCaveScanDiag(mod, center, "REJECT no-cover (24格内无实心顶)");
             return Optional.empty();
@@ -2021,7 +2064,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _caveScanDiagLogged = true;
         _caveScanDiagMs = nowMs;
         Debug.logToFile("altoclef_diag.log", "[CaveScan] " + result
-                + " c=" + center.toShortString() + " step=" + _step + " tun=" + _tunnelMode);
+                + " c=" + center.toShortString() + " step=" + _step + " tun=" + _tunnelMode
+                + (_nether ? " nether=1" : ""));
     }
 
     // (2026-09-01 矿洞深度感知) 只有玩家 y 低于此值(已挖到地下矿洞层)才允许
@@ -2037,8 +2081,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int CAVE_COVER_SCAN_UP = 24;
 
     private boolean hasOverheadCover(AltoClef mod, BlockPos pos) {
+        return hasOverheadCover(mod, pos, CAVE_COVER_SCAN_UP);
+    }
+
+    /**
+     * (2026-09-16 仰扫范围参数化, 服务下界 48 格空旷地判据) 判定一块空气上方
+     * scanUp 格内是否有"岩顶"覆盖。下界巨腔腔顶普遍比主世界洞穴顶高, 24 格不够;
+     * 开阔荒地/灵魂沙谷地表到基岩顶盖(127)通常远超 48 → 正确判"露天"。
+     * 下界菌类(绯红/诡异森林): 菌柄(PillarBlock)本就不算顶; 菌伞(wart block)
+     * 是普通实心方块, 必须显式排除, 否则森林地表头顶有菌伞会被误判"有岩顶"。
+     */
+    private boolean hasOverheadCover(AltoClef mod, BlockPos pos, int scanUp) {
         BlockPos up = pos;
-        for (int i = 0; i < CAVE_COVER_SCAN_UP; i++) {
+        for (int i = 0; i < scanUp; i++) {
             up = up.up();
             if (!mod.getChunkTracker().isChunkLoaded(up)) return true;
             net.minecraft.block.Block b = mod.getWorld().getBlockState(up).getBlock();
@@ -2046,6 +2101,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             if (b instanceof net.minecraft.block.LeavesBlock
                     || b instanceof net.minecraft.block.PillarBlock
                     || b instanceof net.minecraft.block.AzaleaBlock) continue; // 树冠/树干不算岩顶
+            if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.WARPED_WART_BLOCK) continue; // 下界菌伞不算岩顶
             if (!b.getDefaultState().getFluidState().isEmpty()) continue; // 流体不算
             return true; // 实心覆盖
         }
