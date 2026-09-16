@@ -502,8 +502,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 地下 → 反复爬向山顶; 且 1 格宽阈值 + baritone 跳节点 y 在 57↔58 震荡 → 分支
     // 每 1-10s 互翻 (1128 场次 11:27:59 单秒三翻面), 每翻一次子树 STOP 重建、
     // 48 格探索腿报废 (实测相邻目标仅差 5-14 格) → bot 原地不动。
-    // 改为: 见天(!isSkyVisible 的否)即算地表, 与"找地表型液体"目标语义一致;
-    // 另加 5s 最短驻留迟滞, 压制跳跃期 pos.up() 在树叶/洞口边缘的瞬时抖动。
+    // (20260916 v2 空间多数投票, 1146 场次实锤) 5s 迟滞只把振荡压成 5s 节拍:
+    // rejectedFlaps 高达 90+/5s ≈ 单点 isSkyVisible(pos.up()) 每 tick 抖一次
+    // (水面漂浮 bobbing 时 pos.up() 交替水/空气, 高度图把水算遮挡)。
+    // 改: 脚上方 + 4 水平邻柱共 5 采样点, ≥3 未见天才算"地下" —— 单列抖动
+    // 被空间票数抹平; 5s 迟滞保留作兜底。
     private static final long MODE_MIN_DWELL_MS = 5000;
     private static boolean _modeBelow = false;
     private static long _modeSetAt = 0;
@@ -518,7 +521,16 @@ public class CollectBucketLiquidTask extends ResourceTask {
         BlockPos pos = mod.getPlayer().getBlockPos();
         // 与 GoToSurfaceTask.isDeepForEscape 同口径 (isSkyVisible 走 MOTION_BLOCKING
         // 高度图, 水面也算盖 → 海里必须游到水面才算见天)。
-        boolean raw = !mod.getWorld().isSkyVisible(pos.up());
+        // 5 点采样: 中心脚上方 + 四个水平邻柱同高 (岩浆/水收集时脚下常是液体面,
+        // 邻柱多为实 地, 票数稳定)。单列 bobbing 抖动 → 票数 2/5 左右摆动,
+        // 不会越过 ≥3 多数线; 真洞穴/树冠下 5 点全遮 → 稳定 below。
+        int notVisible = 0;
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int[] d : new int[][]{{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+            m.set(pos.getX() + d[0], pos.getY() + 1, pos.getZ() + d[1]);
+            if (!mod.getWorld().isSkyVisible(m.toImmutable())) notVisible++;
+        }
+        boolean raw = notVisible >= 3;
         long now = System.currentTimeMillis();
         if (!_modeInit) {
             _modeInit = true;
@@ -532,7 +544,7 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 return _modeBelow;
             }
             Debug.logMessage("[LiquidSearch] mode -> " + (raw ? "below(return to surface)" : "surface(explore)")
-                    + " (y=" + pos.getY() + ", skyVisible=" + !raw
+                    + " (y=" + pos.getY() + ", covered=" + notVisible + "/5"
                     + ", rejectedFlaps=" + _flapRejected + ")");
             _flapRejected = 0;
             _modeBelow = raw;
