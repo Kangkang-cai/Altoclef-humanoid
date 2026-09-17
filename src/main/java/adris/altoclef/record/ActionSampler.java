@@ -135,6 +135,30 @@ final class ActionSampler {
         sb.append(",\"screen\":");
         Json.str(sb, screenName(p));
         sb.append(",\"syncId\":").append(p == null ? -1 : p.currentScreenHandler.syncId);
+
+        // ---- (2026-09-17) 容器槽位快照: GUI 打开时逐帧导出整个 handler 的槽位内容 ----
+        // 玩家侧背包 self.inv 已有, 但容器侧 (熔炉燃料/输入/输出、箱子内容、合成格
+        // 里放了什么) 之前数据里没有 —— 那是训练熔炼/合成任务的直接输入。
+        // 只在容器类界面打开时导出, 空槽跳过; 槽位下标 i 就是 ClickSlot 协议的下标。
+        sb.append(",\"slots\":[");
+        if (p != null && p.currentScreenHandler != null
+                && !(p.currentScreenHandler instanceof PlayerScreenHandler)) {
+            boolean sFirst = true;
+            try {
+                for (net.minecraft.screen.slot.Slot slot : p.currentScreenHandler.slots) {
+                    net.minecraft.item.ItemStack stack = slot.getStack();
+                    if (stack == null || stack.isEmpty()) continue;
+                    if (!sFirst) sb.append(',');
+                    sFirst = false;
+                    sb.append("{\"i\":").append(slot.id);
+                    sb.append(",\"id\":");
+                    Json.str(sb, StateSampler.itemId(stack.getItem()));
+                    sb.append(",\"n\":").append(stack.getCount());
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        sb.append(']');
         // ---- 攻击冷却 (是否处于可出刀窗口, 近战节奏的关键信号) ----
         sb.append(",\"atkCd\":");
         sb.append(p == null ? "null" : Json.f(p.getAttackCooldownProgress(0f)));
