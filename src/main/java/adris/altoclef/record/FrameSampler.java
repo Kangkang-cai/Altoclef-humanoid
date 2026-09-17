@@ -83,7 +83,11 @@ final class FrameSampler {
                 } catch (Throwable ignored) {
                 }
                 if (id == null) {
-                    id = net.minecraft.util.registry.Registry.BIOME.getId(biome.value()).toString();
+                    // (2026-09-17 构建修复) 本仓是 MC 1.18.2 —— 没有 Registry.BIOME
+                    // (该名 1.19+ 才有), 原兜底写法编译不过 (47655702 引入)。
+                    // 1.18.2 的 RegistryEntry.getKey() 恒可用, 能走到这里只可能是动态
+                    // 群系没有静态 key; 不值得为此引入 registry 反查, 降级为对象标识。
+                    id = String.valueOf(biome.value());
                 }
                 sb.append(",\"biome\":");
                 Json.str(sb, id);
