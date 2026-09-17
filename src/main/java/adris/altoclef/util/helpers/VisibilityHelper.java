@@ -7,6 +7,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.util.math.BlockPos;
@@ -39,6 +40,12 @@ public final class VisibilityHelper {
     private static final Object _losCacheLock = new Object();
     private static final long LOS_CACHE_TTL_MS = 400;
     private static final int LOS_CACHE_MAX_ENTRIES = 4096;
+    // (2026-09-17 流体侧视 LOS 独立缓存) 与 _losCache 同策略 (400ms TTL + 玩家位移
+    // 失效), 但判定口径不同 (允许穿过流体的步进采样, 见 isFluidSideVisible) ——
+    // 两者结果会不一致, 不能共用同一张表。
+    private static final Map<BlockPos, long[]> _fluidLosCache = new HashMap<>();
+    // 流体侧视步进采样的步长 (格): 0.5 保证 1 格宽的目标方块内至少落一个采样点。
+    private static final double FLUID_RAY_STEP = 0.5;
     // (2026-09-04) LOS 缓存按玩家位置失效: 玩家位移超过该距离(平方)即重算。
     // 2 格 = 移动/挖洞后立即重新评估, 杜绝用旧位置的 LOS 结果造成短暂透视。
     private static final long LOS_CACHE_MOVE_DRIFT_SQ = 4;
@@ -352,11 +359,15 @@ public final class VisibilityHelper {
             if (!withinRayRange) return null; // 射程外: LOS 证据空洞, 防远距流体假阳性
             BlockPos above = pos.up();
             BlockState aboveState = mod.getWorld().getBlockState(above);
-            if (!aboveState.isAir() && aboveState.getBlock() != Blocks.CAVE_AIR) {
-                return null; // 表面未暴露 (被岩石封顶/被包裹) → 不感知, 防透视
-            }
-            if (isBlockVisible(mod, pos)) return "fluid_los";   // 侧视直见流体方块本身
-            return isFluidSurfaceVisible(mod, pos) ? "fluid_surface" : null;
+            boolean surfaceExposed = aboveState.isAir() || aboveState.getBlock() == Blocks.CAVE_AIR;
+            // (2026-09-17 回归修复) "上方必须空气"从硬前置降级为【或条件】之一。
+            // 09-04 的加固把"表面暴露"提成硬闸门后，洞穴侧视水/岩缝渗水（顶上是岩石、
+            // 侧面敞开）被整条砍掉——09-03 刚修的"侧视直见"分支永远执行不到。
+            // 现在: 表面暴露走原 surface 路径 (不变); 否则再试"侧视直见"
+            // (isFluidSideVisible 自带侧面敞开 + 路径无实心两条防线, 防透视不放松)。
+            if (surfaceExposed && isFluidSurfaceVisible(mod, pos)) return "fluid_surface";
+            if (isFluidSideVisible(mod, pos)) return "fluid_los";
+            return null;
         }
         // (2026-08-23 传送门持续可感知) 下界/主世界传送门无视 FOV/距离/LOS,
         // 持续可感知 (用户设计: "传送门的位置无视FOV, 持续可感知")。传送门是
@@ -455,6 +466,87 @@ public final class VisibilityHelper {
         }
         // 能看到流体上方的空气位置 (LOS 到空气方块)
         return isBlockVisible(mod, above);
+    }
+
+    /**
+     * (2026-09-17 洞穴侧视水 / 流水 回归修复)
+     *
+     * <p><b>为什么需要它</b>：{@code perceiveSourceInner} 的流体分支里，"正上方必须是
+     * 空气/洞穴空气"是 **2026-09-04 为防"隔岩壁透视岩浆"加的加固**，但它是**硬前置**，
+     * 排在所有 LOS 判定之前 → 顺带废掉了 2026-09-03 刚修的"洞穴侧视水"分支：
+     * 顶上是岩石（洞穴水洼 / 岩缝渗水）而侧面完全敞开的水，明明看得见却永远判不可感知。
+     * 现场 20260917-225345：最近的水只有 3.2 格，上方是岩石、侧面打开，100 个水坐标
+     * 全部 blind，bot 路过不认（用户："近距离路过好几处水"）。
+     *
+     * <p><b>为什么不能用现成的 {@link #isBlockVisible}</b>：它走原版 raycast，对流体用
+     * {@code FluidHandling.SOURCE_ONLY} → **流动水（非源）不被命中**，射线会穿透它去命中
+     * 背后的方块或直接 MISS，于是"清清楚楚看到的流水"判定不稳（现场用户："流水绝对
+     * 无遮挡看到"）。这里改成自己步进采样：允许穿过流体本身，只有实心方块构成遮挡。
+     *
+     * <p><b>防透视边界不放松</b>（对齐 09-04 的初衷）：要求 ①流体**侧面敞开**（任一水平
+     * 邻位是空气/洞穴空气）——被岩石完全包裹的流体直接否掉；②眼睛到流体的采样路径上
+     * **不存在实心方块** —— 隔岩壁、隔地层的流体照样看不见。两条都为真才算"侧视直见"。
+     */
+    public static boolean isFluidSideVisible(AltoClef mod, BlockPos pos) {
+        ClientPlayerEntity player = mod.getPlayer();
+        if (player == null || mod.getWorld() == null) return false;
+        long now = System.currentTimeMillis();
+        BlockPos pPos = player.getBlockPos();
+        synchronized (_losCacheLock) {
+            long[] cached = _fluidLosCache.get(pos);
+            if (cached != null && (now - cached[0]) < LOS_CACHE_TTL_MS) {
+                long dx = pPos.getX() - cached[2];
+                long dy = pPos.getY() - cached[3];
+                long dz = pPos.getZ() - cached[4];
+                if (dx * dx + dy * dy + dz * dz <= LOS_CACHE_MOVE_DRIFT_SQ) {
+                    return cached[1] == 1L;
+                }
+            }
+            if (_fluidLosCache.size() > LOS_CACHE_MAX_ENTRIES) {
+                _fluidLosCache.clear();
+            }
+        }
+        boolean visible = computeFluidSideVisible(mod, pos);
+        synchronized (_losCacheLock) {
+            _fluidLosCache.put(pos, new long[]{now, visible ? 1L : 0L, pPos.getX(), pPos.getY(), pPos.getZ()});
+        }
+        return visible;
+    }
+
+    private static boolean computeFluidSideVisible(AltoClef mod, BlockPos pos) {
+        ClientPlayerEntity player = mod.getPlayer();
+        ClientWorld world = mod.getWorld();
+        if (player == null || world == null) return false;
+        // ① 侧面敞开 (排除被岩石完全包裹 / 只从正上方暴露的池子走原 surface 分支)。
+        boolean openSide = false;
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockState nb = world.getBlockState(pos.offset(dir));
+            if (nb.isAir() || nb.getBlock() == Blocks.CAVE_AIR) {
+                openSide = true;
+                break;
+            }
+        }
+        if (!openSide) return false;
+        // ② 步进采样: 流体不挡 (水看水、水下看水都成立), 实心方块挡。
+        Vec3d eye = LookHelper.getCameraPos(player);
+        Vec3d center = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Vec3d delta = center.subtract(eye);
+        double dist = delta.length();
+        if (dist > BLOCK_RAY_MAX_DISTANCE) return false; // 射程外: 证据空洞, fail-closed
+        if (dist < 0.001) return true;                   // 眼睛就在这一格里
+        Vec3d dir = delta.multiply(1.0 / dist);
+        for (double t = FLUID_RAY_STEP; t < dist; t += FLUID_RAY_STEP) {
+            Vec3d p = eye.add(dir.multiply(t));
+            BlockPos bp = new BlockPos(p.x, p.y, p.z);
+            if (bp.equals(pos)) return true; // 已进入目标流体格
+            BlockState st = world.getBlockState(bp);
+            if (!st.getFluidState().isEmpty()) continue;  // 流体自身不构成遮挡
+            if (st.isAir() || st.getBlock() == Blocks.CAVE_AIR) continue;
+            if (st.isSolidBlock(world, bp)) return false; // 实心 → 遮挡 (岩壁/泥土/矿石)
+            // 非实心非流体 (草/花/藤蔓/铁轨/火把…) → 不挡, 与人眼一致
+        }
+        // 走完全程无实心遮挡 (最后一步落在目标格边缘内) → 可见
+        return true;
     }
 
     /**
