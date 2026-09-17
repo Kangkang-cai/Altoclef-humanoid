@@ -243,6 +243,10 @@ public final class KnowledgeMemory {
                     + " remembered structure centers from " + KNOWLEDGE_FILE);
         } catch (Exception e) {
             Debug.logMessage("[Knowledge] failed to load " + KNOWLEDGE_FILE + ": " + e.getMessage());
+        } finally {
+            // (2026-09-17 数据集录制) 跨会话回填改变了记忆内容, 必须推进版本号,
+            // 否则录制器会以为"记忆没变"而不写快照。
+            _revision++;
         }
     }
 
@@ -281,14 +285,27 @@ public final class KnowledgeMemory {
         List<BlockPos> out = new ArrayList<>();
         ensureCentersLoaded();
         Map<StructureType, LinkedHashSet<BlockPos>> byType = _centersByKey.get(worldKey());
-        if (byType == null) return out;
+        if (byType == null) {
+            logCenterRead(type, out);
+            return out;
+        }
         Set<BlockPos> set = byType.get(type);
-        if (set == null) return out;
+        if (set == null) {
+            logCenterRead(type, out);
+            return out;
+        }
         double maxSq = maxDistance * maxDistance;
         for (BlockPos p : set) {
             if (p.getSquaredDistance(fromPos) <= maxSq) out.add(p);
         }
+        logCenterRead(type, out);
         return out;
+    }
+
+    /** (2026-09-17 数据集录制) 记忆读事件 (决策入口, 同 tick 按类型去重)。 */
+    private static void logCenterRead(StructureType type, List<BlockPos> found) {
+        adris.altoclef.record.RecordManager.eventThrottled("memory_read", "centers:" + type.name(),
+                "{\"kind\":\"centers\",\"key\":\"" + type.name() + "\",\"n\":" + found.size() + "}");
     }
 
     private void remember(StructureType type, BlockPos pos) {
@@ -304,9 +321,51 @@ public final class KnowledgeMemory {
         }
         BlockPos center = pos.toImmutable();
         centers.add(center);
+        // (2026-09-17 数据集录制) 记忆写事件 + 版本号 (快照只在变化时写)。
+        _revision++;
+        adris.altoclef.record.RecordManager.event("memory_write",
+                "{\"kind\":\"structure\",\"key\":\"" + type.name() + "\",\"pos\":["
+                        + center.getX() + "," + center.getY() + "," + center.getZ() + "]}");
         // (2026-09-16) 落盘 + 首记日志 (验证"挖金时看到堡垒被记住"用)。
         persistCenter(worldKey(), type, center);
         Debug.logMessage("[Knowledge] remembered " + type.name() + " center at " + center.toShortString());
+    }
+
+    // ===== (2026-09-17 数据集录制) 记忆只读导出 =====
+
+    /** 记忆写版本号 (静态: 跨会话回填也走它, 见 ensureCentersLoaded)。 */
+    private static volatile long _revision = 0;
+
+    public static long getMemoryRevision() {
+        return _revision;
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 当前存档:维度全部地标记忆的只读快照
+     * (键形如 {@code center:FORTRESS})。合并"本会话看到过的"与"跨会话持久化的"
+     * 两个来源 —— 对 bot 而言两者都是它"记得"的东西, 不分家。
+     */
+    public Map<String, List<BlockPos>> dumpMemoryForRecord() {
+        Map<String, List<BlockPos>> out = new java.util.LinkedHashMap<>();
+        try {
+            for (Map.Entry<StructureType, Set<BlockPos>> e : _knownStructures.entrySet()) {
+                if (e.getValue().isEmpty()) continue;
+                out.computeIfAbsent("center:" + e.getKey().name(), k -> new ArrayList<>()).addAll(e.getValue());
+            }
+            ensureCentersLoaded();
+            Map<StructureType, LinkedHashSet<BlockPos>> persisted = _centersByKey.get(worldKey());
+            if (persisted != null) {
+                for (Map.Entry<StructureType, LinkedHashSet<BlockPos>> e : persisted.entrySet()) {
+                    if (e.getValue().isEmpty()) continue;
+                    List<BlockPos> list = out.computeIfAbsent("center:" + e.getKey().name(), k -> new ArrayList<>());
+                    for (BlockPos p : e.getValue()) {
+                        if (!list.contains(p)) list.add(p);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
     }
 
     private static boolean contains(Block[] arr, Block b) {

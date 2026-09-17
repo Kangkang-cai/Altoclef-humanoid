@@ -187,8 +187,12 @@ public final class VisibilityHelper {
             for (Set<BlockPos> s : byBlock.values()) total += s.size();
             if (total >= VALUABLE_MEMORY_CAP_PER_DIM) {
                 byBlock.clear(); // 粗暴截断: 最坏情况丢记忆重新学, 换内存有界
+                set = byBlock.computeIfAbsent(block, k -> new HashSet<>());
             }
-            set.add(pos.toImmutable());
+            // (2026-09-17 数据集录制) 真正新增才推进版本号 — 录制器据此只写变化。
+            if (set.add(pos.toImmutable())) {
+                _valuableRevision++;
+            }
         }
     }
 
@@ -222,6 +226,38 @@ public final class VisibilityHelper {
         }
     }
 
+    // (2026-09-17 数据集录制) 记忆写版本号: rememberValuable 真正【新增】一条时 +1。
+    // 录制器据此判断"记忆有没有变" — 变了才写记忆快照, 没变就不写 (计划里
+    // "记忆通道只写变化" 的实现方式)。volatile 保证录制线程/主线程可见。
+    private static volatile long _valuableRevision = 0;
+
+    public static long getValuableMemoryRevision() {
+        return _valuableRevision;
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 当前维度"见过即记忆"贵重方块的全量快照
+     * (方块注册名 → 坐标列表)。只读导出, 供记忆通道序列化。
+     */
+    public static java.util.Map<String, java.util.List<BlockPos>> dumpValuableMemory() {
+        java.util.Map<String, java.util.List<BlockPos>> out = new java.util.LinkedHashMap<>();
+        String dim = WorldHelper.getCurrentDimension().name();
+        synchronized (_valuableMemoryLock) {
+            Map<Block, Set<BlockPos>> byBlock = _valuableMemory.get(dim);
+            if (byBlock == null) return out;
+            for (Map.Entry<Block, Set<BlockPos>> e : byBlock.entrySet()) {
+                String id;
+                try {
+                    id = net.minecraft.util.registry.Registry.BLOCK.getId(e.getKey()).toString();
+                } catch (Throwable t) {
+                    id = String.valueOf(e.getKey());
+                }
+                out.put("valuable:" + id, new java.util.ArrayList<>(e.getValue()));
+            }
+        }
+        return out;
+    }
+
     /**
      * Whether a block is perceivable: visible (LOS), a bed (structure
      * insurance — through walls OK, "一墙之隔的床" 2026-08-21), a container
@@ -236,17 +272,37 @@ public final class VisibilityHelper {
      * 远古残骸) 自动记入长期记忆表 — 供后续"此刻看不见但见过"的场景使用。
      */
     public static boolean isBlockPerceivable(AltoClef mod, BlockPos pos) {
-        boolean ok = isBlockPerceivableInner(mod, pos);
-        if (ok) {
+        String source = perceiveSourceInner(mod, pos);
+        if (source != null) {
             Block seen = mod.getWorld().getBlockState(pos).getBlock();
             if (isValuableBlock(seen)) {
                 rememberValuable(mod, seen, pos);
             }
+            return true;
         }
-        return ok;
+        return false;
     }
 
-    private static boolean isBlockPerceivableInner(AltoClef mod, BlockPos pos) {
+    /**
+     * (2026-09-17 数据集录制) 该坐标【为什么】可感知 —— 返回感知来源标签, 不可感知
+     * 返回 null。这是 {@link #isBlockPerceivableInner} 的公开只读视图, 与判定逻辑
+     * 共用同一份分支实现 (单一事实来源, 不会出现"判定改了分类没改"的漂移)。
+     *
+     * <p>标签含义 (数据集用 "observed / inferred / remembered" 三级归纳):
+     * <ul>
+     *   <li>{@code los} / {@code fluid_los} / {@code fluid_surface} → observed (真视线)</li>
+     *   <li>{@code portal} / {@code bed} → observed (显式无视遮挡的结构保险, 人类知识)</li>
+     *   <li>{@code crafting_table_near} / {@code stone_medium} / {@code experience}
+     *       / {@code canopy_inference} / {@code structure_inference} → inferred (推断)</li>
+     * </ul>
+     *
+     * <p>纯只读: 不写 _valuableMemory (记忆写入由 isBlockPerceivable 负责)。
+     */
+    public static String perceiveSource(AltoClef mod, BlockPos pos) {
+        return perceiveSourceInner(mod, pos);
+    }
+
+    private static String perceiveSourceInner(AltoClef mod, BlockPos pos) {
         Block block = mod.getWorld().getBlockState(pos).getBlock();
         // (2026-09-14 远距 LOS 假阳性定案) 射线射程之外的目标,"LOS 通过"是空洞证据。
         // 根因: LookHelper.raycast 对 |end-start| > maxRange 的目标会把终点**截断**到
@@ -282,33 +338,34 @@ public final class VisibilityHelper {
         // 隔岩壁的岩浆, 其上方必然是岩石(表面被封) → 前置失败 → 绝不感知。洞穴里
         // 侧视可见的水池/岩浆 (上方是空气) 不受影响, 仍可感知收集。
         if (block == Blocks.WATER || block == Blocks.LAVA) {
-            if (!withinRayRange) return false; // 射程外: LOS 证据空洞, 防远距流体假阳性
+            if (!withinRayRange) return null; // 射程外: LOS 证据空洞, 防远距流体假阳性
             BlockPos above = pos.up();
             BlockState aboveState = mod.getWorld().getBlockState(above);
             if (!aboveState.isAir() && aboveState.getBlock() != Blocks.CAVE_AIR) {
-                return false; // 表面未暴露 (被岩石封顶/被包裹) → 不感知, 防透视
+                return null; // 表面未暴露 (被岩石封顶/被包裹) → 不感知, 防透视
             }
-            if (isBlockVisible(mod, pos)) return true;   // 侧视直见流体方块本身
-            return isFluidSurfaceVisible(mod, pos);       // 或看到暴露的表面
+            if (isBlockVisible(mod, pos)) return "fluid_los";   // 侧视直见流体方块本身
+            return isFluidSurfaceVisible(mod, pos) ? "fluid_surface" : null;
         }
         // (2026-08-23 传送门持续可感知) 下界/主世界传送门无视 FOV/距离/LOS,
         // 持续可感知 (用户设计: "传送门的位置无视FOV, 持续可感知")。传送门是
         // 维度切换的关键节点, 记忆坐标要一直能用; 且玩家通常记得自己建的
         // 传送门在哪, 不该因为背对/遮挡而"忘记"。
         if (block == Blocks.NETHER_PORTAL) {
-            return true;
+            return "portal";
         }
         // Beds: 16 color variants (WHITE_BED ... BLACK_BED) — instanceof
         // covers them all. Beds are "sleep insurance": awareness through
         // walls is the whole point (床保险/睡觉寻路, 2026-08-21).
         if (block instanceof BedBlock) {
-            return true;
+            return "bed";
         }
         // (2026-08-22) 工作台 16 格内必感知: 见 CRAFTING_TABLE_PERCEIVE_DISTANCE
         // 注释 (矿洞里 LOS 判定不稳 → 拾取与挖掘判定不一致 → 横跳)。
         if (block == Blocks.CRAFTING_TABLE) {
-            return mod.getPlayer() != null
-                    && mod.getPlayer().getBlockPos().isWithinDistance(pos, CRAFTING_TABLE_PERCEIVE_DISTANCE);
+            return (mod.getPlayer() != null
+                    && mod.getPlayer().getBlockPos().isWithinDistance(pos, CRAFTING_TABLE_PERCEIVE_DISTANCE))
+                    ? "crafting_table_near" : null;
         }
         // Containers near a structure we have SEEN (village / ruined portal /
         // fortress remembered by KnowledgeMemory): inferred to exist even
@@ -324,7 +381,7 @@ public final class VisibilityHelper {
         if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL) {
             if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.OVERWORLD
                     && mod.getKnowledgeMemory().isNearRememberedStructure(pos, STRUCTURE_INFERENCE_RADIUS)) {
-                return true;
+                return "structure_inference";
             }
         }
         // (2026-09-09 树木结构推断, 用户"我都看到树了它还没看到木头") 原木目标:
@@ -334,27 +391,29 @@ public final class VisibilityHelper {
         // 全部被树冠挡住 (perceivable=0, occluded ray to center) → bot 在林边
         // 瞎逛 4 分钟不砍树。
         if (isWoodBlock(block) && isWoodVisibleThroughLeaves(mod, pos)) {
-            return true;
+            return "canopy_inference";
         }
-        if (!withinRayRange) return false; // (2026-09-14) 射程外: 不让 isBlockVisible 的 MISS 兜底放行
+        if (!withinRayRange) return null; // (2026-09-14) 射程外: 不让 isBlockVisible 的 MISS 兜底放行
         if (isBlockVisible(mod, pos)) {
             // (2026-08-22 防透视) 普通矿石被岩石完全包围时, 即使 LOS 射线
             // 判定通过也视为不可感知 — 用户实测 19:19: 被岩石包住的铁矿
             // bot 却"透视"感知到并去挖。暴露在洞穴/通道壁的矿 (有空气面)
             // 不受影响, 正常感知。挖隧道探索挖开岩层后矿自然暴露。
-            if (isBuriedOre(mod, pos, block)) return false;
-            return true;
+            if (isBuriedOre(mod, pos, block)) return null;
+            return "los";
         }
         // (2026-09-16 石头介质 16 格豁免) 石头家族优先走放宽口径: 只要不是
         // EXPERIENCE_KNOWN_BLOCKS 成员 (如 MOSSY_COBBLESTONE/BLACKSTONE/BASALT)
         // 也一并放行, 它们同属地层介质, 判定一致。
         if (STONE_MEDIUM_BLOCKS.contains(block)) {
-            return mod.getPlayer() != null
-                    && mod.getPlayer().getBlockPos().isWithinDistance(pos, STONE_PERCEIVE_DISTANCE);
+            return (mod.getPlayer() != null
+                    && mod.getPlayer().getBlockPos().isWithinDistance(pos, STONE_PERCEIVE_DISTANCE))
+                    ? "stone_medium" : null;
         }
-        if (!EXPERIENCE_KNOWN_BLOCKS.contains(block)) return false;
-        return mod.getPlayer() != null
-                && mod.getPlayer().getBlockPos().isWithinDistance(pos, EXPERIENCE_PERCEIVE_DISTANCE);
+        if (!EXPERIENCE_KNOWN_BLOCKS.contains(block)) return null;
+        return (mod.getPlayer() != null
+                && mod.getPlayer().getBlockPos().isWithinDistance(pos, EXPERIENCE_PERCEIVE_DISTANCE))
+                ? "experience" : null;
     }
 
     /**

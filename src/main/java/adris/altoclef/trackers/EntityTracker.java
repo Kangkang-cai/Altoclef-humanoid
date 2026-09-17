@@ -243,6 +243,23 @@ public class EntityTracker extends Tracker {
     }
 
     /**
+     * (2026-09-17 数据集录制) 本 tick 全部【已感知】(看到/听到/记忆窗口内) 的实体
+     * 快照。- 内部已按拟人感知过滤过 (见 updateState 的 isEntityVisible /
+     * isEntityAudible / PERCEIVE_MEMORY_TICKS), 所以这里拿到的就是 bot "知道存在"
+     * 的实体集合, 与它做决策用的口径完全一致。
+     */
+    public List<Entity> getAllPerceivedEntities() {
+        ensureUpdated();
+        List<Entity> out = new ArrayList<>();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            for (List<Entity> list : _entityMap.values()) {
+                if (list != null) out.addAll(list);
+            }
+        }
+        return out;
+    }
+
+    /**
      * Gets all entities that are within our interact range
      */
     public List<Entity> getCloseEntities() {

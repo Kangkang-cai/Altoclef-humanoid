@@ -267,6 +267,22 @@ public abstract class Task {
         return null;
     }
 
+    /**
+     * (2026-09-17 数据集录制) 任务标签只读访问器 —— toDebugString()/toDebugState()
+     * 在框架里分别是 protected/private, 录制器需要把两者【分开】导出:
+     *  - debugString() = 任务类自描述的结构文案 (含参数, 如 "Collect 3 logs")
+     *  - debugState()  = setDebugState(...) 写入的当前语义状态 (如 "Collecting logs")
+     * 日后离线收割 L1/L2/L3 标签词表时, 两条来源口径不同, 不能混在一个字段里。
+     * 纯只读, 不改变任何状态 (toString() 原本就是二者拼接)。
+     */
+    public String debugString() {
+        return toDebugString();
+    }
+
+    public String debugState() {
+        return _debugState;
+    }
+
     @Override
     public String toString() {
         return "<" + toDebugString() + "> " + _debugState;

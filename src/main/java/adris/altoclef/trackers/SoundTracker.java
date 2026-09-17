@@ -78,10 +78,19 @@ public class SoundTracker {
         return Optional.ofNullable(best);
     }
 
-    private static class RecentSound {
-        final Vec3d pos;
-        final String soundIdPath;
-        final long timeMs;
+    /**
+     * (2026-09-17 数据集录制) 最近听到的声音快照 (只读副本)。听觉是独立于视觉的
+     * 感知通道 (循声找刷怪笼/听怪定位), 必须和"看到"分开录。
+     */
+    public synchronized List<RecentSound> dumpRecentSounds() {
+        prune();
+        return new ArrayList<>(_recentSounds);
+    }
+
+    public static class RecentSound {
+        public final Vec3d pos;
+        public final String soundIdPath;
+        public final long timeMs;
 
         RecentSound(double x, double y, double z, String soundIdPath, long timeMs) {
             this.pos = new Vec3d(x, y, z);

@@ -662,6 +662,48 @@ public class Settings implements IFailableConfigFile {
      */
     private boolean anomalyWatchdogEnabled = true;
 
+    //////////////////////////////////////////////////////////////////////////////////////////
+    ////////** 数据集录制 (2026-09-17) **//////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////////////////////////
+    // 为层次化 MBPN 训练做逐帧全量快照导出 (不录像素画面, 只录结构化世界 + 结构化记忆)。
+    // 决策频率 = 20Hz (taskTickInterval=1), 因此标签每 tick 都可能变化, 不做稀疏化假设。
+    //
+    // 录制器纪律: 严格只读、全包 try/catch、绝不影响 bot 行为; 关掉开关时零开销。
+    // 输出目录: <游戏运行目录>/record/<会话时间戳>/ —— 刻意【不】放在 logs/altoclef/ 下,
+    // 因为 Debug.pruneOldSessionsOnce (KEEP_SESSIONS=10) 会自动删旧会话目录。
+
+    /**
+     * (2026-09-17) 是否开启训练数据集录制 (逐帧全量快照, 约 20 行/秒 × 4 通道)。
+     * <p>
+     * 默认关闭 —— 开启后每局会产生可观的数据量 (gzip JSONL), 只在需要采集语料时打开。
+     * 关闭时录制器在 tick 里只做一次布尔判断, 无其它开销。
+     */
+    private boolean recordDatasetEnabled = false;
+
+    /**
+     * (2026-09-17) 每帧导出的可见方块上限 (按距离由近到远截断)。
+     * 防"海洋群系 24 万格水"这类极端场景撑爆单帧 (见 VisibilityHelper 的水体过滤约定)。
+     * 设为 0 表示完全不导出方块通道 (D)。
+     */
+    private int recordPerceptionMaxBlocks = 512;
+
+    /**
+     * (2026-09-17) 每帧导出的可见实体上限 (按距离截断)；0 表示不导出实体。
+     */
+    private int recordPerceptionMaxEntities = 64;
+
+    /**
+     * (2026-09-17) 感知导出的最大距离 (格)。超过该距离的方块/实体不进感知通道。
+     * 与拟人感知的视线判定叠加 (两者取交集), 纯粹是体积控制手段。
+     */
+    private double recordPerceptionRange = 48;
+
+    /**
+     * (2026-09-17) 是否每帧导出背包全量物品计数。
+     * 背包是 L2 操作层 ("检查背包是否有所需物品/拿出物品") 的直接输入, 逐帧全量最完整;
+     * 关掉可显著减小 frames.jsonl.gz (背包每帧重复度极高)。
+     */
+    private boolean recordInventoryPerTick = true;
 
     //////////////////////////////////////////////////////////////////////////////////////////
     ////////** END SETTINGS w/ COMMENTS **////////////////////////////////////////////////////
@@ -687,6 +729,28 @@ public class Settings implements IFailableConfigFile {
 
     public boolean isAnomalyWatchdogEnabled() {
         return anomalyWatchdogEnabled;
+    }
+
+    // ==== 数据集录制 (2026-09-17) ====
+
+    public boolean isRecordDatasetEnabled() {
+        return recordDatasetEnabled;
+    }
+
+    public int getRecordPerceptionMaxBlocks() {
+        return recordPerceptionMaxBlocks;
+    }
+
+    public int getRecordPerceptionMaxEntities() {
+        return recordPerceptionMaxEntities;
+    }
+
+    public double getRecordPerceptionRange() {
+        return recordPerceptionRange;
+    }
+
+    public boolean shouldRecordInventoryPerTick() {
+        return recordInventoryPerTick;
     }
 
     public String getCommandPrefix() {

@@ -29,6 +29,13 @@ public class TaskRunner {
     // 反射链如 MLG/岩浆逃生/怪物防御）始终保持 20Hz，安全不受影响。
     private int _tickCounter = 0;
 
+    // (2026-09-17 数据集录制) 本 tick 各链的仲裁优先级快照。
+    // 硬性约束: getPriority() 有副作用 (WorldSurvivalChain.getPriority 会 setTask),
+    // 绝不能被录制器重复调用 —— 否则会搞乱 bot 行为。因此由仲裁循环顺带把结果存下来,
+    // 录制器只读这份快照。未在表里的链 = 仲裁时 isActive()==false 被跳过, 没有优先级。
+    private final java.util.LinkedHashMap<TaskChain, Float> _cachedPriorities = new java.util.LinkedHashMap<>();
+    private float _cachedWinnerPriority = Float.NEGATIVE_INFINITY;
+
     public TaskRunner(AltoClef mod) {
         _mod = mod;
         _active = false;
@@ -49,6 +56,8 @@ public class TaskRunner {
         TaskChain maxChain = null;
         float maxPriority = Float.NEGATIVE_INFINITY;
         final long MS = 1000_000L;
+        // (2026-09-17 数据集录制) 顺带缓存本 tick 各链优先级, 供录制器只读取用。
+        _cachedPriorities.clear();
         // (2026-09-03 诊断) 每链 getPriority 耗时定位: JankDebug 显示 ~200ms 全在
         // TaskRunner.tick, 但不知道是哪条链的仲裁/任务树吃掉。单链>30ms 才记录,
         // 0.5s 节流防刷屏。
@@ -67,7 +76,9 @@ public class TaskRunner {
                 maxPriority = priority;
                 maxChain = chain;
             }
+            _cachedPriorities.put(chain, priority);
         }
+        _cachedWinnerPriority = maxPriority;
         if (_cachedCurrentTaskChain != null && maxChain != _cachedCurrentTaskChain) {
             // ==== [Diag-chain] ownership change — THE key log for "no task running" ====
             // Shows exactly when the bot switches masters (e.g. User Tasks ->
@@ -157,11 +168,37 @@ public class TaskRunner {
         } catch (Throwable ignored) {
         }
 
+        // (2026-09-17 数据集录制) 会话收尾: 停队列、刷盘、写 meta.json 的结束统计。
+        // 放在与 AnomalyWatchdog 同一收尾点 —— 这是"一次 bot 运行"的唯一明确终点。
+        try {
+            adris.altoclef.record.RecordManager.onSessionEnd();
+        } catch (Throwable ignored) {
+        }
+
         Debug.logMessage("Stopped");
     }
 
     public TaskChain getCurrentTaskChain() {
         return _cachedCurrentTaskChain;
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 本 tick 各链的仲裁优先级快照 (只读, 不要改动返回值)。
+     * 未在表里的链 = 仲裁时 isActive()==false, 没有优先级。仅在被 {@link #tick()}
+     * 完整跑过一次后有效。
+     */
+    public java.util.Map<TaskChain, Float> getCachedPriorities() {
+        return _cachedPriorities;
+    }
+
+    /** (2026-09-17 数据集录制) 本 tick 胜出链的优先级 (无链胜出时为 -inf)。 */
+    public float getCachedWinnerPriority() {
+        return _cachedWinnerPriority;
+    }
+
+    /** (2026-09-17 数据集录制) 全部已注册任务链 (只读视图, 含非活跃链)。 */
+    public java.util.List<TaskChain> getChains() {
+        return java.util.Collections.unmodifiableList(_chains);
     }
 
     // Kinda jank ngl

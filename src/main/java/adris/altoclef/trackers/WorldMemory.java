@@ -239,7 +239,9 @@ public final class WorldMemory {
     }
 
     public Optional<BlockPos> getNearestOre(Vec3d pos, Block... blocks) {
-        return nearest(getOreLocations(blocks), pos, ORE_MEMORY_RETRIEVE_RANGE);
+        Optional<BlockPos> r = nearest(getOreLocations(blocks), pos, ORE_MEMORY_RETRIEVE_RANGE);
+        logMemoryRead("nearest_ore", r);
+        return r;
     }
 
     public List<BlockPos> getAnimalLocations(Class<?>... types) {
@@ -247,7 +249,22 @@ public final class WorldMemory {
     }
 
     public Optional<BlockPos> getNearestAnimal(Vec3d pos, Class<?>... types) {
-        return nearest(getAnimalLocations(types), pos, ANIMAL_MEMORY_RETRIEVE_RANGE);
+        Optional<BlockPos> r = nearest(getAnimalLocations(types), pos, ANIMAL_MEMORY_RETRIEVE_RANGE);
+        logMemoryRead("nearest_animal", r);
+        return r;
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 记忆【读】事件: 只插在真正的决策入口 (getNearest*),
+     * 不在 getXxxLocations 这类内层循环被反复调用的地方 —— 后者每 tick 可能几十次,
+     * 会淹掉事件流。RecordManager.eventThrottled 再按 (类型,键) 做同 tick 去重,
+     * 保证事件量有界。未录制时是两次静态读的零成本早退。
+     */
+    private static void logMemoryRead(String kind, Optional<BlockPos> result) {
+        adris.altoclef.record.RecordManager.eventThrottled("memory_read", kind,
+                result.map(p -> "{\"kind\":" + "\"" + kind + "\",\"hit\":true,\"pos\":["
+                                + p.getX() + "," + p.getY() + "," + p.getZ() + "]}")
+                        .orElse("{\"kind\":\"" + kind + "\",\"hit\":false}"));
     }
 
     public List<BlockPos> getPortalLocations() {
@@ -292,7 +309,9 @@ public final class WorldMemory {
 
     public Optional<BlockPos> getNearestPortal(Vec3d pos) {
         // 传送门不加距离上限：稀有且关键（维度切换必需），远也值得走。
-        return nearest(getPortalLocations(), pos, Double.POSITIVE_INFINITY);
+        Optional<BlockPos> r = nearest(getPortalLocations(), pos, Double.POSITIVE_INFINITY);
+        logMemoryRead("nearest_portal", r);
+        return r;
     }
 
     /**
@@ -312,6 +331,8 @@ public final class WorldMemory {
     private void rememberLostPortal(Dimension dim, BlockPos p) {
         Set<BlockPos> set = _lostPortalMemory.computeIfAbsent(dim, d -> new HashSet<>());
         if (set.size() >= LOST_PORTAL_CAP || !set.add(p)) return;
+        _memoryRevision++;
+        adris.altoclef.record.RecordManager.event("memory_write", memoryWriteJson("portal_lost", null, p));
         String player = (_mod.getPlayer() != null)
                 ? _mod.getPlayer().getBlockPos().toShortString() : "?";
         String hostiles = describeNearbyExplosiveMobs(p);
@@ -381,18 +402,24 @@ public final class WorldMemory {
     }
 
     public Optional<BlockPos> getNearestBed(Vec3d pos) {
-        return nearest(getBedLocations(), pos, BED_MEMORY_RETRIEVE_RANGE);
+        Optional<BlockPos> r = nearest(getBedLocations(), pos, BED_MEMORY_RETRIEVE_RANGE);
+        logMemoryRead("nearest_bed", r);
+        return r;
     }
 
     private void rememberBed(Dimension dim, BlockPos pos) {
         Set<BlockPos> set = _bedMemory.computeIfAbsent(dim, d -> new HashSet<>());
-        if (set.size() < MAX_PER_CATEGORY) set.add(pos);
+        if (set.size() < MAX_PER_CATEGORY && set.add(pos)) {
+            bumpRevision("bed", null, pos);
+        }
     }
 
     private void rememberOre(Dimension dim, Block block, BlockPos pos) {
         Map<Block, Set<BlockPos>> byBlock = _oreMemory.computeIfAbsent(dim, d -> new HashMap<>());
         Set<BlockPos> set = byBlock.computeIfAbsent(block, b -> new HashSet<>());
-        if (set.size() < MAX_PER_CATEGORY) set.add(pos);
+        if (set.size() < MAX_PER_CATEGORY && set.add(pos)) {
+            bumpRevision("ore", blockId(block), pos);
+        }
     }
 
     private void rememberAnimal(Dimension dim, Class<?> type, BlockPos pos) {
@@ -402,16 +429,96 @@ public final class WorldMemory {
         for (BlockPos existing : set) {
             if (existing.isWithinDistance(pos, ANIMAL_DEDUP_RADIUS)) return;
         }
-        if (set.size() < MAX_PER_CATEGORY) set.add(pos);
+        if (set.size() < MAX_PER_CATEGORY && set.add(pos)) {
+            bumpRevision("animal", type.getSimpleName(), pos);
+        }
     }
 
     private void rememberPortal(Dimension dim, BlockPos pos) {
         Set<BlockPos> set = _portalMemory.computeIfAbsent(dim, d -> new HashSet<>());
         if (set.size() < MAX_PER_CATEGORY) {
-            set.add(pos);
+            if (set.add(pos)) {
+                bumpRevision("portal", null, pos);
+            }
             // (2026-09-05 传送门记忆跨会话持久化) 见过的门落盘, 重启游戏不丢。
             PortalMemoryStore.recordSeen(_mod, dim, pos);
         }
+    }
+
+    // ===== (2026-09-17 数据集录制) 记忆只读导出 + 写事件 =====
+
+    /** 记忆写版本号: 任一 remember* 真正新增一条时 +1。录制器据此只写"变化的"快照。 */
+    private volatile long _memoryRevision = 0;
+
+    public long getMemoryRevision() {
+        return _memoryRevision;
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 记忆写入的统一出口: 推进版本号 + 记一条
+     * memory_write 事件 (记忆"完整录快照 + 读写事件"双轨里的写事件轨)。
+     * 只在真的新增时调用, 重复写入不产生噪音。
+     */
+    private void bumpRevision(String kind, String key, BlockPos pos) {
+        _memoryRevision++;
+        adris.altoclef.record.RecordManager.event("memory_write", memoryWriteJson(kind, key, pos));
+    }
+
+    private static String memoryWriteJson(String kind, String key, BlockPos pos) {
+        StringBuilder sb = new StringBuilder(96);
+        sb.append("{\"kind\":");
+        adris.altoclef.record.RecordManager.quote(sb, kind);
+        sb.append(",\"key\":");
+        adris.altoclef.record.RecordManager.quote(sb, key);
+        sb.append(",\"pos\":[")
+                .append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ()).append("]}");
+        return sb.toString();
+    }
+
+    private static String blockId(Block block) {
+        try {
+            return net.minecraft.util.registry.Registry.BLOCK.getId(block).toString();
+        } catch (Throwable t) {
+            return String.valueOf(block);
+        }
+    }
+
+    /**
+     * (2026-09-17 数据集录制) 当前维度全部记忆的只读快照 (自描述键 → 坐标列表)。
+     * 键形如 {@code ore:minecraft:iron_ore} / {@code animal:SheepEntity} /
+     * {@code portal} / {@code portal_lost} / {@code bed} / {@code grave}。
+     * 内部结构 (哪些 Map、怎么去重) 留在本类内, 录制端不感知。
+     */
+    public Map<String, List<BlockPos>> dumpMemoryForRecord() {
+        Map<String, List<BlockPos>> out = new java.util.LinkedHashMap<>();
+        Dimension dim = WorldHelper.getCurrentDimension();
+        try {
+            Map<Block, Set<BlockPos>> ores = _oreMemory.get(dim);
+            if (ores != null) {
+                for (Map.Entry<Block, Set<BlockPos>> e : ores.entrySet()) {
+                    out.put("ore:" + blockId(e.getKey()), new ArrayList<>(e.getValue()));
+                }
+            }
+            Map<Class<?>, Set<BlockPos>> animals = _animalMemory.get(dim);
+            if (animals != null) {
+                for (Map.Entry<Class<?>, Set<BlockPos>> e : animals.entrySet()) {
+                    out.put("animal:" + e.getKey().getSimpleName(), new ArrayList<>(e.getValue()));
+                }
+            }
+            Set<BlockPos> portals = _portalMemory.get(dim);
+            if (portals != null && !portals.isEmpty()) out.put("portal", new ArrayList<>(portals));
+            Set<BlockPos> lost = _lostPortalMemory.get(dim);
+            if (lost != null && !lost.isEmpty()) out.put("portal_lost", new ArrayList<>(lost));
+            Set<BlockPos> beds = _bedMemory.get(dim);
+            if (beds != null && !beds.isEmpty()) out.put("bed", new ArrayList<>(beds));
+            DeathGraveRecord grave = _deathGraveMemory.get(dim);
+            if (grave != null) {
+                out.put("grave", new ArrayList<>(List.of(grave.position)));
+            }
+        } catch (Throwable ignored) {
+            // 导出失败就给个空快照, 绝不打断 tick
+        }
+        return out;
     }
 
     private List<BlockPos> getBlockLocations(Map<Dimension, Map<Block, Set<BlockPos>>> memory, Block... blocks) {
@@ -512,6 +619,8 @@ public final class WorldMemory {
         _consecutiveDeaths++;
         _lastDeathGameTick = deathGameTick;
         _deathGraveMemory.put(dim, new DeathGraveRecord(new BlockPos(pos), deathGameTick, deathCause));
+        // (2026-09-17 数据集录制) 墓碑是记忆的一条, 变化要进快照与事件轨。
+        bumpRevision("grave", deathCause, pos);
     }
 
     /**

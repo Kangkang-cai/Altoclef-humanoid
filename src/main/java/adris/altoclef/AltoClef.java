@@ -11,6 +11,7 @@ import adris.altoclef.eventbus.events.ClientRenderEvent;
 import adris.altoclef.eventbus.events.ClientTickEvent;
 import adris.altoclef.eventbus.events.SendChatEvent;
 import adris.altoclef.eventbus.events.TitleScreenEntryEvent;
+import adris.altoclef.record.RecordManager;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.trackers.*;
@@ -309,6 +310,12 @@ public class AltoClef implements ModInitializer {
         // tick 准心瞄谁: 脸上最近的攻击诉求拿到瞄准权, 避免"任务层瞄远目标 &
         // 力场瞄近怪"每 tick 互相抢 lookAt 覆盖, 准心永远停在远目标身上。
         getControllerExtras().applyCombatAim();
+
+        // (2026-09-17 数据集录制) 六通道快照的唯一采样点: 此时 tracker 已刷新、
+        // 任务树已定型 (TaskRunner.tick 内仲裁+任务树都跑完)、动作已下发
+        // (applyCombatAim 定了准心) —— 输入/决策/动作三态在本 tick 内一致。
+        // 录制器严格只读 + 全包 try/catch, 设置开关关闭时零开销。
+        RecordManager.tick(this);
 
         // [NAV-STUCK] 原地不动/水中浮动看门狗 (2026-09-09, 只读诊断):
         // "泡在水里/站原地不动但挂着导航任务" 此前无任何日志可证。250ms 采样,

@@ -238,6 +238,21 @@ public class BlockTracker extends Tracker {
     }
 
     /**
+     * (2026-09-17 数据集录制) 当前【正在被任务追踪】的方块类型快照 (只读副本)。
+     * 这是"bot 此刻在关注哪些方块类型"的准确口径 —— 也是录制感知通道的候选集合。
+     * 已停止追踪 (计数为 0) 的不算, 与 {@link #isTracking} 口径一致。
+     */
+    public Set<Block> getTrackedBlockTypes() {
+        synchronized (_trackingBlocks) {
+            Set<Block> out = new HashSet<>();
+            for (Map.Entry<Block, Integer> e : _trackingBlocks.entrySet()) {
+                if (e.getValue() != null && e.getValue() > 0) out.add(e.getKey());
+            }
+            return out;
+        }
+    }
+
+    /**
      * Starts tracking/pay attention to some blocks.
      * <b>IMPORTANT:</b> ALWAYS pair with {@link #stopTracking(Block...) stopTracking}! Otherwise this block type will be
      * tracked forever (not the end of the world, but other block types will be lost.
