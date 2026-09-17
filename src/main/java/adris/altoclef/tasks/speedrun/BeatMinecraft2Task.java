@@ -540,6 +540,9 @@ public class BeatMinecraft2Task extends Task {
     private boolean _nightBedFindInProgress = false;
     // (2026-08-31 夜间找床放弃一次就够, 用户) 本夜已放弃找床 → 直到白天不再重启。
     private boolean _nightBedGivenUp = false;
+    // (2026-09-17) "背包已有 ≥3 同色羊毛 → 不放弃找床"这一分支的边沿闩锁, 只用于
+    // 诊断打点去重 (长驻状态分支必须边沿触发, 见 TimeoutLog 口径)。白天重置时归零。
+    private boolean _bedWoolHoldLogged = false;
     private long _skipNightBedUntilMs = 0;
     private static final long SKIP_NIGHT_BED_FOR_MS = 45_000;
     private final TimerGame _notSleepableTimer = new TimerGame(30);
@@ -2506,6 +2509,10 @@ public class BeatMinecraft2Task extends Task {
         // 导致 Restocking 反复误触发。改用直接扫描玩家背包 (main+offhand)
         // 统计原木, 不依赖 tracker 缓存刷新时机。
         int logCount = countLogsInPlayerInventory(mod);
+        // (2026-09-17 "链上已有木任务"口径, 事故 20260917-143638) 见 woodMiningActiveInChain。
+        // 本方法全程复用同一判定, 诊断串也用它, 避免"门控用的口径"与"日志写的口径"分家。
+        boolean woodTaskActive = (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))
+                || woodMiningActiveInChain(mod);
         // (2026-09-01 用户"地下不触发收集木头, 除非原木<4") 地下时原木 ≥
         // woodRestockThreshold(4) 就地继续挖矿, 不回地表/不就地砍树 — 否则
         // minWoodLogs(25) 未攒够就让 bot 在原木还很多时频繁回地表打断下矿
@@ -2521,7 +2528,12 @@ public class BeatMinecraft2Task extends Task {
                 || (_woodStockpiled && logCount < _config.woodRestockThreshold)) {
             // (2026-08-27 原木↔回表面横跳修复) 已有进行中的原木收集任务时
             // 别再用"回表面"反复打断 (导航路线若中途低于表面会触发横跳)。
-            boolean woodTaskActive = _woodStockpileTask != null && !_woodStockpileTask.isFinished(mod);
+            // (2026-09-17 口径扩展, 事故 20260917-143638) 旧口径只认私有实例
+            // `_woodStockpileTask` —— 床链内部的 MineAndCollectTask(木头) 不是它, 于是
+            // 门控认为"没人砍木", 把正在为自己供料的床链整个顶掉: 3 羊毛已到手、
+            // 只差 3 木板, 14:38:02 被 GoToSurfaceTask 抢走, 整夜再没做床 (次日
+            // t=1691 背包 3 羊毛+3 木板已满足配方却无人发起)。
+            // 现在 woodTaskActive 同时涵盖"链上确有一个木头目标的采集任务"。
             if (!woodTaskActive && (isUndergroundDebounced(mod) || isInPit(mod))) {
                 setDebugState("Returning to surface to collect wood.");
                 return new GoToSurfaceTask();
@@ -2538,7 +2550,7 @@ public class BeatMinecraft2Task extends Task {
                         "stockpiled=" + _woodStockpiled
                                 + " logCount=" + logCount
                                 + " minWoodLogs=" + _config.minWoodLogs
-                                + " woodTaskActive=" + (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))
+                                + " woodTaskActive=" + woodTaskActive
                                 + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
                 // (2026-08-27 一次性粘性) 复用同一个任务实例, 不再每 tick new。
                 if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
@@ -2556,13 +2568,34 @@ public class BeatMinecraft2Task extends Task {
                     "logCount=" + logCount
                             + " restockThresh=" + _config.woodRestockThreshold
                             + " settleTarget=" + _config.minWoodLogs
-                            + " woodTaskActive=" + (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod)));
+                            + " woodTaskActive=" + woodTaskActive);
             if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
                 _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.minWoodLogs);
             }
             return prependAxeForWood(mod, _woodStockpileTask);
         }
         return null;
+    }
+
+    /**
+     * (2026-09-17 新增, 事故 20260917-143638) 当前【运行中的任务链】上是否已有木头类采集任务。
+     *
+     * <p>为什么需要它: {@code getWoodPerfusionTask} 的"是否已在砍木"原先只看私有字段
+     * {@code _woodStockpileTask} —— 那只能认出门控自己派出去的囤木任务。别人派发的木类
+     * 采集任务(典型: 床链 Crafting bed → CollectRecipeResources → Crafting planks →
+     * MineAndCollectTask)完全不可见, 于是门控在"地下 + 原木 < 4"时把它整条顶成
+     * GoToSurfaceTask。实测事故 20260917-143638: 3 羊毛已到手、只差 3 块木板, 14:38:02
+     * 床链被"回地表囤木"掐断; 5 秒后夜间找床计时器到期判定"附近无机会"→
+     * {@code _nightBedGivenUp} 锁一整夜, 背包里的羊毛白白躺着。
+     *
+     * <p>实现: 从链顶层任务沿当前激活子链({@code Task.thisOrChildSatisfies} 走 {@code _sub})
+     * 自省, 命中任一"木头目标"的 {@link MineAndCollectTask} 即算"已在砍木"。
+     * 只读、无副作用, 不改变任何任务的调度。
+     */
+    private boolean woodMiningActiveInChain(AltoClef mod) {
+        Task top = mod.getUserTaskChain().getCurrentTask();
+        if (top == null) return false;
+        return top.thisOrChildSatisfies(t -> t instanceof MineAndCollectTask mac && mac.isWoodTarget());
     }
 
     /**
@@ -2833,6 +2866,7 @@ public class BeatMinecraft2Task extends Task {
                 // (2026-08-31 白天重置"本夜放弃找床") 让新的夜晚可以再次尝试找床。
                 _nightBedFindInProgress = false;
                 _nightBedGivenUp = false;
+                _bedWoolHoldLogged = false;
             }
         }
         boolean effectiveCanSleep = rawCanSleep || (_wasSleepableOnce && !_notSleepableTimer.elapsed());
@@ -2878,8 +2912,15 @@ public class BeatMinecraft2Task extends Task {
             // 有羊, 却在走过去的路上被 30s 倒计时硬掐断, 去挖木头)。改为: 到点时先查
             // 区块内【有没有床/羊/就近羊毛机会】—— 有就重设计时器继续找, 不放弃;
             // 只有区块内确无床/羊/近羊毛才放弃 (熬夜推进挖矿收食物)。
+            // (2026-09-17 "背包羊毛也算机会", 事故 20260917-143638) 上面所有"机会"口径
+            // (nightBedOpportunityNearby) 都只看【世界】(32 格内床/羊毛方块/羊), 不看
+            // 自己的背包 —— 3 羊毛已在手、只差 3 块木板时仍被判"无机会" → 放弃整夜。
+            // 实测: 14:38:02 床链被囤木门控掐断, 14:38:07 计时器到期判"无机会"→给定放弃,
+            // 而 t=1691 (14:38:15) 背包已是 3 羊毛 + 3 木板 (配方可满足) 却无人发起。
+            // 现在: 背包里已有【同色 ≥3 羊毛】= 做床只差木头, 属于"手上的机会", 与
+            // 世界里的机会同权 —— 不放弃、直接续做床链。
             if (_nightBedGivenUp) {
-                if (nightBedOpportunityNearby(mod)) {
+                if (nightBedOpportunityNearby(mod) || hasBedWoolInBag(mod)) {
                     _nightBedGivenUp = false;
                     _nightBedFindInProgress = true;
                     _nightBedFindTimer.reset();
@@ -2898,8 +2939,21 @@ public class BeatMinecraft2Task extends Task {
                     // 区块内确实还有床/羊/就近羊毛: 不能放弃, 重置计时器继续找/走过去。
                     _nightBedFindTimer.reset();
                     setDebugState("Still night bed opportunity (bed/sheep/wool nearby), continuing");
+                } else if (hasBedWoolInBag(mod)) {
+                    // (2026-09-17) 世界里的机会没了, 但羊毛已在背包: 不算"放弃找床",
+                    // 而是"不必再找"—— 重设计时器, 继续推进做床链 (缺木头由床链自己挖)。
+                    // 边沿打点(只落盘不进聊天, 遵循"长驻状态分支必须边沿触发"约定):
+                    // 生效判据 = 出现 [BedWool]; 失败判据 = 背包 ≥3 同色羊毛仍出现
+                    // "Returning to surface"/整夜无床链。
+                    _nightBedFindTimer.reset();
+                    if (!_bedWoolHoldLogged) {
+                        _bedWoolHoldLogged = true;
+                        Debug.logToFile("altoclef_diag.log",
+                                "[BedWool] holding bed chain: >=3 same-colour wool in bag, skip night-give-up");
+                    }
+                    setDebugState("Still night bed opportunity (bed/sheep/wool nearby), continuing");
                 } else {
-                    // 区块内确无床/羊/近羊毛: 真放弃, 去挖矿/收食物熬过夜。
+                    // 区块内确无床/羊/近羊毛, 背包里也没有: 真放弃, 去挖矿/收食物熬过夜。
                     // (2026-09-01 同类噪音修复) 返回 null 的分支不设状态, 理由同上。
                     _nightBedFindInProgress = false;
                     _nightBedGivenUp = true;
@@ -3071,6 +3125,28 @@ public class BeatMinecraft2Task extends Task {
         // 3) 附近 32 格内有羊 (有羊 = 现成的羊毛来源, 能原地杀羊做床)
         for (SheepEntity sheep : mod.getEntityTracker().getTrackedEntities(SheepEntity.class)) {
             if (sheep != null && sheep.isAlive() && sheep.getBlockPos().isWithinDistance(pos, NEAR)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-17 新增, 事故 20260917-143638) 背包里是否已有【同色 ≥3 羊毛】=
+     * 做一张床只差木板。
+     *
+     * <p>{@link #nightBedOpportunityNearby} 判的是"世界里的机会"(附近床/羊毛方块/羊),
+     * 全套都看不见【自己背包】。于是一旦因为任意一次打断(本次是囤木门控抢了正在供料的
+     * 挖原木任务)触发 {@code _nightBedGivenUp}, 就算 3 羊毛捏在手里也会被锁一整夜 ——
+     * 实测 14:38:07 判定"无机会"放弃, 14:38:15 背包已是 3 羊毛 + 3 木板(配方满足)
+     * 却无人发起, 天亮前再无任何做床尝试。
+     *
+     * <p>用 {@code ItemHelper.WOOL} 16 色逐一计数, 要求【同色 ≥3】(床配方是 3 块同色羊毛,
+     * 混色凑数做不出来, 不能放宽成"总羊毛数 ≥3")。计数走
+     * {@link StorageHelper#countItemInInventoryRealIncludingCraftGrid} —— 与全项目"材料进
+     * 合成格/光标不算缺失"的统一口径一致 (床配方任务可能正把羊毛摆在 3x3 格上)。
+     */
+    private boolean hasBedWoolInBag(AltoClef mod) {
+        for (Item wool : ItemHelper.WOOL) {
+            if (StorageHelper.countItemInInventoryRealIncludingCraftGrid(mod, wool) >= 3) return true;
         }
         return false;
     }

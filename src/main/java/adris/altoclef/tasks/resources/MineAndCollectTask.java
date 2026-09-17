@@ -143,6 +143,20 @@ public class MineAndCollectTask extends ResourceTask {
         this(new ItemTarget(item, count), blocksToMine, requirement);
     }
 
+    /**
+     * (2026-09-17 口径外露, 事故 20260917-143638) 本采集任务的目标方块是不是【木头类】。
+     *
+     * <p>由来: 上层"囤木门控"要回答"链上是否已经有人在砍木头"。旧口径只看囤木门控自己的
+     * 私有实例 {@code _woodStockpileTask}, 认不出别人派发的采集任务 —— 床链
+     * (Crafting bed → CollectRecipeResources → Crafting planks → MineAndCollectTask)
+     * 正在为自己供料时被门控判成"没在砍木", 于是整条床链被 GoToSurfaceTask 顶掉
+     * (3 羊毛已到手、只差 3 木板, 却整夜再没做床)。此处把 {@code _subtask} 的私有
+     * 判定公开出来, 让门控能沿任务链自省。
+     */
+    public boolean isWoodTarget() {
+        return _subtask != null && _subtask.isTargetingWood();
+    }
+
     public static Block[] itemTargetToBlockList(ItemTarget[] targets) {        List<Block> result = new ArrayList<>(targets.length);
         for (ItemTarget target : targets) {
             for (Item item : target.getMatches()) {
