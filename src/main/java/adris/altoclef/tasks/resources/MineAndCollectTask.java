@@ -427,6 +427,9 @@ public class MineAndCollectTask extends ResourceTask {
         // [GreedyPickup] hold 日志刚打, 07.914 整链 STOP by 钻石链)。正确语义:
         // 完成 = 没有近场活 且 不在宽限挂住期。
         if (_greedy) {
+            // latch 必须在 hasNearbyMineableTarget 之前更新: 掉落物回册时后者为 true,
+            // holdGreedyForDrop 因 && 短路不会被调用, latch 就没机会记录"见过掉落物"。
+            updateGreedyDropLatch(mod);
             return !hasNearbyMineableTarget(mod) && !holdGreedyForDrop(mod);
         }
         return !hasNearbyMineableTarget(mod);
@@ -438,6 +441,45 @@ public class MineAndCollectTask extends ResourceTask {
     // 尚未回册), 所以只需按破坏时刻计时; 掉落物一旦回册, hasNearbyMineableTarget
     // 的 itemDropped 条款自动接管挂住/捡取。
     private static final long GREEDY_DROP_GRACE_MS = 2500;
+    // (2026-09-17 贪心收尾提前释放, 用户"挖掉最后一块之后都要顿一下卡几秒") 上面的宽限
+    // 是【无条件硬等 2.5s】: 掉落物通常 0.3~1.0s 就落地回册并被吸入, 两个挂住判据早已
+    // 为 false, 但 holdGreedyForDrop 只按破坏时刻计时 → 每次挖空都白等满 2.5s 才走人,
+    // 现场表现就是"顿一下再走开"。
+    // 修复: 【破坏后掉落物曾被感知回册】作 latch; 回册过之后再消失 = 已捡走/已消失,
+    // 无需继续挂住。防抖: 消失需持续 DROP_LOST_CONFIRM_MS 才确认 —— 掉落物合并/吸入
+    // 瞬间 1~2 tick isValid=false 会横跳 (574295d8 教训), 否则会把还没捡走的掉落物放掉,
+    // 退回 2026-09-10 "挖掉还没拾取就被抢走"的老问题。
+    // 从未回册的 (掉岩浆/落在 FOV 外) latch 不置位, 照旧等满 2.5s + scoop 兜底。
+    private static final long GREEDY_DROP_LOST_CONFIRM_MS = 400;
+    private long _greedyDropEpisodeMs = 0;
+    private boolean _greedyDropSeen = false;
+    private long _greedyDropLostSinceMs = 0;
+    private long _greedyEarlyReleaseEpisodeMs = 0;
+
+    /** 每 tick 维护"破坏后掉落物是否回册过"的 latch (见 GREEDY_DROP_LOST_CONFIRM_MS 注释)。 */
+    private void updateGreedyDropLatch(AltoClef mod) {
+        long brokenMs = _subtask.miningTargetBrokenMs();
+        if (brokenMs == 0) {
+            _greedyDropEpisodeMs = 0;
+            _greedyDropSeen = false;
+            _greedyDropLostSinceMs = 0;
+            return;
+        }
+        if (_greedyDropEpisodeMs != brokenMs) {
+            // 新的一次破坏 = 新 episode, latch 全部重置。
+            _greedyDropEpisodeMs = brokenMs;
+            _greedyDropSeen = false;
+            _greedyDropLostSinceMs = 0;
+        }
+        boolean dropSeen = mod.getEntityTracker().itemDropped(_itemTargets);
+        if (dropSeen) {
+            _greedyDropSeen = true;
+            _greedyDropLostSinceMs = 0;
+        } else if (_greedyDropSeen && _greedyDropLostSinceMs == 0) {
+            _greedyDropLostSinceMs = System.currentTimeMillis();
+        }
+    }
+
     // (2026-09-11 背包满顺延) scoop/腾格子进行中的宽限顺延上限(总窗口 = GRACE + 此值)。
     private static final long GREEDY_DROP_SCOOP_EXTEND_MS = 5000;
     private long _greedyGraceLogEpisodeMs = 0;
@@ -445,7 +487,20 @@ public class MineAndCollectTask extends ResourceTask {
     private boolean holdGreedyForDrop(AltoClef mod) {
         long brokenMs = _subtask.miningTargetBrokenMs();
         if (brokenMs == 0) return false;
-        long sinceBroken = System.currentTimeMillis() - brokenMs;
+        long now = System.currentTimeMillis();
+        // (2026-09-17 提前释放) 掉落物回册过且已连续消失 CONFIRM_MS → 已捡走/已消失,
+        // 不必再挂住 (见 GREEDY_DROP_LOST_CONFIRM_MS 注释)。scoop 顺延期间同样生效:
+        // 此时掉落物既已消失, 走过去也没得捡。
+        if (_greedyDropSeen && _greedyDropLostSinceMs != 0
+                && now - _greedyDropLostSinceMs >= GREEDY_DROP_LOST_CONFIRM_MS) {
+            if (_greedyEarlyReleaseEpisodeMs != brokenMs) {
+                _greedyEarlyReleaseEpisodeMs = brokenMs;
+                Debug.logToFile("altoclef_diag.log", "[GreedyPickup]\tearly release — drop perceived then gone "
+                        + "(picked up/lost) after " + (now - brokenMs) + "ms, grace was " + GREEDY_DROP_GRACE_MS + "ms");
+            }
+            return false;
+        }
+        long sinceBroken = now - brokenMs;
         boolean withinGrace = sinceBroken < GREEDY_DROP_GRACE_MS;
         // (2026-09-11 背包满顺延, 09:58:56 金矿实锤) scoop 走到破坏点后捡不起来:
         // 背包满, "Ensuring inventory is free" 腾格子耗时超过剩余宽限 → 58.27 宽限
