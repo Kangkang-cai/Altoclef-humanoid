@@ -9,6 +9,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Blocks;
@@ -406,21 +407,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 目标 —— 第二次撤离时能同时避开先前那一处, 不至于在两处岩浆之间来回跑。
     private final Set<BlockPos> _lavaHazards = new HashSet<>();
 
-    // ==== (2026-09-17 近场岩浆感知) 已挖开空间里出现岩浆 → 立刻弃道 ====
+    // ==== (2026-09-17 视觉岩浆感知) 看得见的岩浆 = 弃道, 不再"装作看不见" ====
     // 09-14 的弃道判据只认 "待挖队首那一格" (skipAirAndWater 里的 isLava), 覆盖不到
     // "通道挖通之后岩浆从侧壁/脚下渗进已挖空间"。20260917-101352 场次实锤: 隧道
     // dug 41/80 正常推进, 岩浆从侧壁 + 脚下流入 bot 已经站进去的格子, 全场零条
     // [MineDown-Lava] / [MineDown-LavaAbandon], _inLavaDetour 从未进入 → bot 站在
     // 自己挖的通道里被烧, health 20 → 0 只用 6 秒 (cause=onFire, death (408,-57,-647))。
-    // 口径 (用户 2026-09-17 拍板): "只判前一格是为了不透视, 但这时岩浆是已经流进来的、
-    // 不是源头, 所以看到了就应该弃坑"。
-    //   —— 只查【与玩家紧邻的 11 格】: 玩家所在格 / 水平四邻 / 脚下 / 斜下四角 / 头顶。
-    //   限制在紧邻即天然合规, 不存在透视路径: MC 流体传播下, 与已挖开空气格相邻的
-    //   岩浆必然已经(或正在)流入那个空气格 —— 我们能读到"紧邻格是岩浆"本身就意味着
-    //   它贴着通道; 反之隔着石头读到远处源头才叫透视, 而这里根本扫不到那里。
-    //   绝不扫 2 格以上半径、绝不查未挖方块背后 (与 09-10 "直直挖" 结论同款约束)。
-    // 触发时机: 只在本任务处于正常挖掘状态 (!_ascendMode && !_baritoneAscent) 且不在
-    // 撤离中时检查 —— 爬升阶段身边常有岩浆 (下界尤其), 在那里弃道会和爬升打架。
+    // 口径 (用户 2026-09-17 拍板): "只判前一格是为了不透视; 岩浆在前面几格也装作
+    // 看不见是不对的 —— 只要视觉范围内扫到的岩浆, 那就叫看见了, 看见了就该弃坑"。
+    // 因此主判据直接走仓内【人类式视觉】统一入口 VisibilityHelper.isBlockPerceivable
+    // (与找矿/找水/找床同一套): 岩浆必须过"表面暴露(正上方是空气/洞穴空气)"前置 +
+    // LOS 射线无遮挡。隔着岩壁 / 被岩石包裹的岩浆照旧判不可见 → 反透视边界不变,
+    // 不存在"隔着石头读到源头"的路径。三档触发口径由窄到宽:
+    //   dig-queue-head = 待挖队首那格就是岩浆 (09-14 原有, 挖穿瞬间就在眼前);
+    //   seen           = 视觉范围内 (12/6 椭球) 确实看得见的岩浆 (09-17 新增, 主路径);
+    //   adjacent       = 贴身 11 格兜底 (09-17 新增, 次路径)。
+    // 贴身兜底为什么留着: ①LOS 射线在脚下 / 紧贴方块处几何不稳 (同 VisibilityHelper
+    // 里 CRAFTING_TABLE 16 格豁免的教训); ②紧邻格已是岩浆 = 危险已经贴上身体, 任何
+    // 判据都得兜住, 不能因为"射线没打准"就放过。
     private static final BlockPos[] NEAR_LAVA_OFFSETS = {
             new BlockPos(0, 0, 0),
             new BlockPos(1, 0, 0), new BlockPos(-1, 0, 0),
@@ -429,8 +433,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             new BlockPos(1, -1, 0), new BlockPos(-1, -1, 0),
             new BlockPos(0, -1, 1), new BlockPos(0, -1, -1),
     };
-    // 近场扫描节流: 11 次 getBlockState 本身极便宜, 但没必要每 tick 都扫
-    // (岩浆流速最快约 1 格/0.5s, 100ms 已远超所需灵敏度)。口径同 SPAWNER_SCAN_INTERVAL_MS。
+    // 视觉感知扫描半径 (椭球): 水平 12 / 垂直 6。取 12 而不是全渲染距离 —— 只关心
+    // "会挡到自己这条通道"的近场; 同一个岩浆湖远处的湖面属正常地形, 不该触发弃道。
+    // 垂直压到 6: 下界岩浆海常在头顶正上方一层, 再远的头顶岩浆不构成"挖出来的危险"。
+    private static final int LAVA_SIGHT_RADIUS_XZ = 12;
+    private static final int LAVA_SIGHT_RADIUS_Y = 6;
+    // 扫描节流: 半径 12/6 椭球约 8k 格 getBlockState, 200ms 一次 (与 BlockTracker 的
+    // 近场采样同量级, 远低于其 16 格全量扫描)。命中才打 LOS 射线, 而 LOS 自带 400ms
+    // 短缓存 + 玩家位移失效率 (VisibilityHelper.isBlockVisible)。
+    private static final long LAVA_SIGHT_SCAN_INTERVAL_MS = 200;
+    private long _lastLavaSightScanMs = 0;
+    // 贴身兜底节流: 11 次 getBlockState 极便宜; 口径同 SPAWNER_SCAN_INTERVAL_MS。
     private static final long NEAR_LAVA_SCAN_INTERVAL_MS = 100;
     private long _lastNearLavaScanMs = 0;
 
@@ -815,14 +828,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             retreatAndRedig(mod, lava);
         }
 
-        // (2026-09-17 近场岩浆感知) 与玩家紧邻的已挖开空间出现岩浆 (侧壁/脚下渗入) →
-        // 立刻弃道。放在 _inLavaDetour 分支【之后】: 撤离中由上面接管, 不重复触发;
-        // 又放在水改道与所有挖掘推进【之前】: 危险源优先, 绝不让 bot 先往前迈一步
-        // 再发现脚下已经变岩浆。判据与合规边界见字段区 NEAR_LAVA_OFFSETS 注释。
+        // (2026-09-17 视觉岩浆感知) 看得见的岩浆 (含侧壁/脚下渗进已挖空间的那种) → 立刻
+        // 弃道, 不再"装作看不见"。放在 _inLavaDetour 分支【之后】: 撤离中由上面接管,
+        // 不重复触发; 又放在水改道与所有挖掘推进【之前】: 危险源优先, 绝不让 bot 先往
+        // 前迈一步才发现脚下已经变岩浆。判据 / 合规边界 / 三档 cause 见字段区注释。
         if (!_inLavaDetour && !_ascendMode && !_baritoneAscent) {
-            BlockPos nearLava = findNearbyLava(mod);
-            if (nearLava != null) {
-                abandonTunnelForLava(mod, nearLava, "near-player");
+            // 主判据: 仓内人类式视觉 (表面暴露 + LOS 无遮挡), 危险能在 3~12 格外被抓出来。
+            BlockPos seenLava = findSeenLava(mod);
+            // 兜底: 贴身 11 格 (LOS 射线在脚下/紧贴方块处几何不稳; 且贴身 = 危险已上身)。
+            BlockPos hazard = seenLava != null ? seenLava : findAdjacentLava(mod);
+            if (hazard != null) {
+                abandonTunnelForLava(mod, hazard, seenLava != null ? "seen" : "adjacent");
             }
         }
 
@@ -1350,13 +1366,58 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-17 近场岩浆感知) 扫【与玩家紧邻的 11 格】(见 NEAR_LAVA_OFFSETS),
-     * 命中返回该岩浆格坐标, 否则 null。合规边界与"为什么紧邻不算透视"见字段区注释。
+     * (2026-09-17 视觉岩浆感知, 主判据) 在玩家周围 (水平 {@value #LAVA_SIGHT_RADIUS_XZ} /
+     * 垂直 {@value #LAVA_SIGHT_RADIUS_Y} 的椭球) 找【看得见】的岩浆, 命中返回坐标。
      *
-     * 顺序刻意从"最贴近玩家"开始 (玩家所在格 → 水平四邻 → 脚下 → 斜下 → 头顶),
-     * 命中哪一格只影响日志与 hazards 记录, 弃道动作(MineDown-LavaAbandon)完全一致。
+     * "看得见"走仓内统一视觉入口 {@link VisibilityHelper#isBlockPerceivable}: 岩浆必须先过
+     * "表面暴露(正上方是空气/洞穴空气)"前置, 再过 LOS 射线。所以:
+     *   - 侧壁/脚下渗进已挖空间的岩浆, 上方就是通道空气 → 暴露 → 看得见 → 弃道;
+     *   - 隔着岩壁、或被岩石包裹的源头岩浆, 表面被封 → 判不可见 → 不触发 (反透视边界不变);
+     *   - 前提仍是区块已加载 (isLava 里的 isChunkLoaded)。
+     *
+     * 成本: 椭球约 8k 格 getBlockState / 200ms, 只在"是岩浆"的少数格上打 LOS 射线, 而
+     * LOS 自带 400ms 短缓存 (VisibilityHelper.isBlockVisible), 不会退化成每帧射线风暴。
      */
-    private BlockPos findNearbyLava(AltoClef mod) {
+    private BlockPos findSeenLava(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
+        long now = System.currentTimeMillis();
+        if (now - _lastLavaSightScanMs < LAVA_SIGHT_SCAN_INTERVAL_MS) return null;
+        _lastLavaSightScanMs = now;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        int xzSq = LAVA_SIGHT_RADIUS_XZ * LAVA_SIGHT_RADIUS_XZ;
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (int dy = -LAVA_SIGHT_RADIUS_Y; dy <= LAVA_SIGHT_RADIUS_Y; dy++) {
+            for (int dx = -LAVA_SIGHT_RADIUS_XZ; dx <= LAVA_SIGHT_RADIUS_XZ; dx++) {
+                for (int dz = -LAVA_SIGHT_RADIUS_XZ; dz <= LAVA_SIGHT_RADIUS_XZ; dz++) {
+                    int hSq = dx * dx + dz * dz;
+                    if (hSq > xzSq) continue; // 椭球水平截断
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (!isLava(mod, p)) continue; // 便宜的血缘复核 (区块未加载/已非岩浆直接跳过)
+                    if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue; // 贵的那步: 表面暴露 + LOS
+                    double d = hSq + (double) dy * dy;
+                    if (d < bestSq) {
+                        bestSq = d;
+                        best = p; // 取最近的一处: 撤离目标/后撤方向都更准
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * (2026-09-17 视觉岩浆感知, 贴身兜底) 扫【与玩家紧邻的 11 格】(见 NEAR_LAVA_OFFSETS),
+     * 命中返回该岩浆格坐标, 否则 null。
+     *
+     * 为什么在视觉判据之外还要留这一层: ① cleanLineOfSight 对脚下/紧贴方块的几何本就
+     * 不稳 (同仓 CRAFTING_TABLE_PERCEIVE_DISTANCE 16 格豁免的教训); ② 紧邻格已是岩浆
+     * 意味着危险已经贴上身体, 不能因为射线没打准就放过。
+     *
+     * 顺序刻意从"最贴近玩家"开始 (玩家所在格 → 水平四邻 → 脚下 → 斜下 → 头顶);
+     * 命中哪一格只影响日志与 hazards 记录, 弃道动作 (MineDown-LavaAbandon) 完全一致。
+     */
+    private BlockPos findAdjacentLava(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return null;
         long now = System.currentTimeMillis();
         if (now - _lastNearLavaScanMs < NEAR_LAVA_SCAN_INTERVAL_MS) return null;
