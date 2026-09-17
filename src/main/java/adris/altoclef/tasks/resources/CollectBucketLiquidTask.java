@@ -29,6 +29,7 @@ import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
+import net.minecraft.util.registry.Registry;
 import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
@@ -634,16 +635,34 @@ public class CollectBucketLiquidTask extends ResourceTask {
             var fluid = world.getBlockState(pos).getFluidState();
             String src = sourceRejectReason(mod, pos, false);
             String flow = flowingRejectReason(mod, pos, false);
+            // (2026-09-17 v2, 20260917-225345 场: 最近的水 3.2 格却 src=blind)
+            // blind 只是"不可感知"的总称, 定位不到是哪一条子判据; 这里补上直接证据:
+            //   above = 水格正上方是什么方块 (perceiveSourceInner 的流体分支要求它必须是
+            //           空气/洞穴空气, 否则直接判不可感知 —— 防隔岩壁透视的前置闸门);
+            //   perc  = VisibilityHelper.perceiveSource 的感知来源标签
+            //           (los/fluid_los/fluid_surface → 真视线; null → 不可感知)。
+            // 两者合起来一眼区分"上方被岩石压着"和"LOS 被挡"。
             sb.append(shown == 0 ? "" : " | ")
                     .append(pos.toShortString())
                     .append(" d=").append(String.format("%.1f", Math.sqrt(pos.getSquaredDistance(playerPos))))
                     .append(" lvl=").append(fluid.getLevel())
                     .append(" still=").append(fluid.isStill())
+                    .append(" above=").append(describeAbove(mod, pos))
+                    .append(" perc=").append(String.valueOf(VisibilityHelper.perceiveSource(mod, pos)))
                     .append(" src=").append(src == null ? "OK" : src)
                     .append(" flow=").append(flow == null ? "OK" : flow);
             shown++;
         }
         return shown == 0 ? "(no known " + _toCollect + ")" : sb.toString();
+    }
+
+    /** 水格正上方那个方块的简名 (流体分支的第一道硬闸门)。 */
+    private static String describeAbove(AltoClef mod, BlockPos pos) {
+        var world = MinecraftClient.getInstance().world;
+        if (world == null) return "?";
+        var above = world.getBlockState(pos.up());
+        String name = String.valueOf(Registry.BLOCK.getId(above.getBlock()));
+        return above.isAir() ? name + "(air)" : name;
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {
