@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 
 /**
  * (2026-09-17 数据集录制) 训练数据集导出总控 —— 六通道逐帧全量快照。
@@ -60,6 +61,7 @@ public final class RecordManager {
     private static int _sessionIndex = 0;
     private static Path _sessionDir = null;
     private static boolean _disabled = false;
+    private static String _disabledReason = null;
     private static int _errors = 0;
     private static long _framesQueued = 0;
 
@@ -103,10 +105,20 @@ public final class RecordManager {
 
     /** 每游戏 tick 调用一次 (由 AltoClef.onClientTick 挂载)。 */
     public static void tick(AltoClef mod) {
-        if (_disabled) return;
+        if (_disabled) {
+            // (2026-09-17) 出错自禁用后仍要把已开的会话收掉 —— gzip 流不 close
+            // 就是半个文件损坏, 之前录的都读不出来。onSessionEnd 幂等。
+            onSessionEnd();
+            return;
+        }
         try {
             Settings s = mod.getModSettings();
-            if (s == null || !s.isRecordDatasetEnabled()) return;
+            if (s == null || !s.isRecordDatasetEnabled()) {
+                // 设置被关掉 (@record off / 文件改回 false / reload_settings):
+                // 同样必须走收尾, 让队列排空、gzip 尾部写全、meta 补上统计。
+                onSessionEnd();
+                return;
+            }
             if (!AltoClef.inGame()) return;
             if (_frames == null && !startSession(mod)) return;
             if (_frames.getError() != null) return; // 写盘线程已挂, 别再堆队列
@@ -281,6 +293,7 @@ public final class RecordManager {
             Files.createDirectories(dir);
         } catch (Throwable t) {
             _disabled = true;
+            _disabledReason = "无法创建录制目录 " + dir + ": " + t;
             Debug.logWarning("[Record] 无法创建录制目录 " + dir + ", 录制已禁用: " + t);
             return false;
         }
@@ -429,7 +442,72 @@ public final class RecordManager {
         }
         if (_errors >= MAX_ERRORS_BEFORE_DISABLE) {
             _disabled = true;
+            _disabledReason = where + " 连续异常 " + _errors + " 次: " + t;
             Debug.logWarning("[Record] 连续异常达 " + MAX_ERRORS_BEFORE_DISABLE + " 次, 本次会话录制已禁用 (不影响 bot 行为)");
         }
+    }
+
+    // ===== (2026-09-17) 聊天命令支持 (@record) =====
+
+    /** 清除"出错自禁用"状态, 让 {@code @record on} 能在下一 tick 重新开始一次会话。 */
+    public static void clearDisabled() {
+        _disabled = false;
+        _disabledReason = null;
+        _errors = 0;
+    }
+
+    /** 当前是否有活跃录制会话 (与"设置开关是否 ON" 是两回事)。 */
+    public static boolean hasActiveSession() {
+        return _frames != null;
+    }
+
+    public static String getSessionDirString() {
+        return _sessionDir == null ? null : _sessionDir.toString();
+    }
+
+    /** {@code @record} 的状态报告 (人类可读多行, 交给 mod.log 输出)。 */
+    public static List<String> statusReport(AltoClef mod) {
+        List<String> out = new java.util.ArrayList<>();
+        boolean enabled = false;
+        try {
+            enabled = mod.getModSettings() != null && mod.getModSettings().isRecordDatasetEnabled();
+        } catch (Throwable ignored) {
+        }
+        out.add("[Record] 设置开关=" + (enabled ? "ON" : "OFF")
+                + "  活跃会话=" + (_frames != null ? "YES" : "NO")
+                + (_disabled ? "  (已自禁用: " + _disabledReason + ")" : ""));
+        if (_frames == null) {
+            out.add("[Record] 当前未录制。@record on 开始。输出目录: <游戏运行目录>/record/<会话时间戳>/");
+            out.add("[Record] 四个通道: frames(每帧) / perception(每帧) / memory(变化时) / events(稀疏); meta.json 记录口径与配置。");
+            return out;
+        }
+        out.add("[Record] 会话目录: " + _sessionDir);
+        out.add("[Record] 已采样 " + _framesQueued + " 帧 (seq=" + _seq + "), 异常 " + _errors + " 次");
+        out.add("[Record] 已落盘  frames=" + sinkLines(_frames)
+                + "  perception=" + sinkLines(_perception)
+                + "  memory=" + sinkLines(_memory)
+                + "  events=" + sinkLines(_events));
+        long droppedAll = dropped(_frames) + dropped(_perception) + dropped(_memory) + dropped(_events);
+        if (droppedAll > 0) {
+            out.add("[Record] 警告: 有 " + droppedAll + " 行因写盘跟不上被丢弃 (队列满, 磁盘可能卡了)");
+        }
+        try {
+            Settings s = mod.getModSettings();
+            if (s != null) {
+                out.add("[Record] 感知截断: 方块≤" + s.getRecordPerceptionMaxBlocks()
+                        + " 实体≤" + s.getRecordPerceptionMaxEntities()
+                        + " 距离≤" + s.getRecordPerceptionRange() + "格 (meta.json 有分级口径)");
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private static String sinkLines(JsonlSink sink) {
+        return sink == null ? "-" : String.valueOf(sink.getWrittenLines());
+    }
+
+    private static long dropped(JsonlSink sink) {
+        return sink == null ? 0 : sink.getDroppedLines();
     }
 }

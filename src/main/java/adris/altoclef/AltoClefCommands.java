@@ -34,7 +34,9 @@ public class AltoClefCommands {
                 new ListCommand(),
                 new CustomCommand(),
                 // (2026-09-11 P2) 异常看门狗状态查询。
-                new AnomalyCommand()
+                new AnomalyCommand(),
+                // (2026-09-17) 训练数据集录制开关/状态。
+                new RecordCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

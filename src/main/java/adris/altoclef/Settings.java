@@ -737,6 +737,15 @@ public class Settings implements IFailableConfigFile {
         return recordDatasetEnabled;
     }
 
+    /**
+     * (2026-09-17) 运行时开关 ({@code @record on/off})。只改内存字段, 【不】回写
+     * altoclef_settings.json —— 临时采集不该悄悄改掉用户的持久配置; 想永久开启
+     * 请直接改 settings 文件里的 recordDatasetEnabled。
+     */
+    public void setRecordDatasetEnabled(boolean value) {
+        recordDatasetEnabled = value;
+    }
+
     public int getRecordPerceptionMaxBlocks() {
         return recordPerceptionMaxBlocks;
     }
