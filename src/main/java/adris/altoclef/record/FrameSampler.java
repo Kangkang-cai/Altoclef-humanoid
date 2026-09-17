@@ -38,6 +38,9 @@ final class FrameSampler {
         sb.append(",\"dim\":");
         Json.str(sb, dimension(mod));
 
+        // ---- A 通道附属: 环境标量 (2026-09-17) ----
+        sb.append(",\"env\":").append(environment(mod));
+
         // ---- B 通道: 任务标签 ----
         appendLabels(sb, mod);
 
@@ -57,6 +60,47 @@ final class FrameSampler {
             return mod.getWorld().getRegistryKey().getValue().toString();
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /**
+     * (2026-09-17 A 通道附属) 环境标量: 日时间/生物群系/光照/天气。
+     * 几个字节的成本, 换"刷怪预测与行为节奏"的直接输入 —— 夜里该防怪、
+     * 黑暗地面会刷怪、下雨影响行进决策。全 try/catch, 单字段失败整段省略。
+     */
+    private static String environment(AltoClef mod) {
+        try {
+            var world = mod.getWorld();
+            var p = mod.getPlayer();
+            if (world == null || p == null) return "null";
+            StringBuilder sb = new StringBuilder(128);
+            sb.append("{\"day\":").append(world.getTimeOfDay());
+            try {
+                var biome = world.getBiome(p.getBlockPos());
+                String id = null;
+                try {
+                    id = biome.getKey().map(k -> k.getValue().toString()).orElse(null);
+                } catch (Throwable ignored) {
+                }
+                if (id == null) {
+                    id = net.minecraft.util.registry.Registry.BIOME.getId(biome.value()).toString();
+                }
+                sb.append(",\"biome\":");
+                Json.str(sb, id);
+            } catch (Throwable ignored) {
+            }
+            try {
+                net.minecraft.util.math.BlockPos pos = p.getBlockPos();
+                sb.append(",\"skyL\":").append(world.getLightLevel(net.minecraft.world.LightType.SKY, pos));
+                sb.append(",\"blkL\":").append(world.getLightLevel(net.minecraft.world.LightType.BLOCK, pos));
+            } catch (Throwable ignored) {
+            }
+            sb.append(",\"rain\":").append(world.isRaining());
+            sb.append(",\"thunder\":").append(world.isThundering());
+            sb.append('}');
+            return sb.toString();
+        } catch (Throwable t) {
+            return "null";
         }
     }
 
