@@ -121,6 +121,14 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
      */
     @Override
     public boolean shouldForce(AltoClef mod, Task interruptingCandidate) {
+        // (2026-09-17 达标即放行) 目标槽已满足时不再保护: 搬运目的已达成,
+        // 父级切走是正确行为。旧版只看"光标持有目标物" → 达标后仍挡父级
+        // 接管 3s (MOVE_FORCE_FUSE_MS), 期间 place-one 循环继续把整堆料塞
+        // 进炉 (20260917-173950 实锤: 目标 raw_iron x1, 实塞 12; 燃料任务
+        // oak_planks/coal x1/coal x2 三次接管全被 [ForceProtect] 挡回,
+        // 3.0s 保险丝到期才切走 = 用户所见"烧东西横跳"; 燃料侧同样盲点,
+        // fuel 卡 x1 仍连点 10 次 3.1s)。
+        if (isFinished(mod)) return false;
         if (System.currentTimeMillis() - _startedMs > MOVE_FORCE_FUSE_MS) return false;
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         boolean cursorHoldsTarget = !cursor.isEmpty()
@@ -179,6 +187,12 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
                 return _lastClickTask;
             } else {
                 // Place one at a time.
+                // (2026-09-17 诊断) place-one 每次点击记一行: 达标后本分支
+                // 不该再被走到 (shouldForce 已加达标即放行), 若仍出现连续
+                // place-one 即父级接管仍被挡/未接管, 直接量化"多塞了几个"。
+                Debug.logToFile("altoclef_diag.log", "[MoveDiag]\tplace-one dest=" + _destination
+                        + " held=" + currentHeld.getCount() + " placed=" + currentlyPlaced
+                        + " target=" + _toMove.getTargetCount());
                 _lastClickTask = new ClickSlotTask(_destination, 1);
                 return _lastClickTask;
             }
@@ -191,6 +205,12 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
             // 的光标兜底抢跑, 把光标上的材料 Dumping 放回背包)。
             if (_pendingPickup != null
                     && System.currentTimeMillis() - _pendingPickupSinceMs < PICKUP_SYNC_GRACE_MS) {
+                // (2026-09-17 诊断) 宽限期内点目标槽时光标仍空 = PICKUP 未
+                // 落地, 这一击会从目标槽【拿起】(若目标槽非空) — 即"拿起
+                // 又放下"引擎。20260917-173950 燃料侧 fuel 卡 x1 连点 10 次
+                // 疑似此路径, 记日志定案。
+                Debug.logToFile("altoclef_diag.log", "[MoveDiag]\tgrace-branch destination click with EMPTY cursor, source="
+                        + _pendingPickup + " dest=" + _destination + " (dest stack=" + atTarget.getItem() + " x" + atTarget.getCount() + ")");
                 _lastClickTask = new ClickSlotTask(_destination);
                 return _lastClickTask;
             }
