@@ -235,6 +235,23 @@ public final class AnomalyWatchdog {
         _lastReportMs.put(dedupKey, now);
         _totalReports++;
         _reportsByType.merge(a.type(), 1, Integer::sum);
+        // (2026-09-17 决策知识入流) 异常判定进录制事件流: stall/oscillation/unreachable/
+        // idle/duration 这些看门狗结论是"bot 为什么卡住/为什么被判定异常"的官方归因,
+        // 不录的话训练时只能从行为反推瞎猜。emit 自带 (type,key) 冷却去重, 事件量稀疏。
+        try {
+            StringBuilder rsb = new StringBuilder(192);
+            rsb.append("{\"type\":");
+            adris.altoclef.record.RecordManager.quote(rsb, a.type());
+            rsb.append(",\"key\":");
+            adris.altoclef.record.RecordManager.quote(rsb, a.key());
+            rsb.append(",\"sev\":");
+            adris.altoclef.record.RecordManager.quote(rsb, a.severity().name());
+            rsb.append(",\"sum\":");
+            adris.altoclef.record.RecordManager.quote(rsb, a.summary());
+            rsb.append('}');
+            adris.altoclef.record.RecordManager.event("anomaly", rsb.toString());
+        } catch (Throwable ignored) {
+        }
         writeAnomaly(a, ctx);
     }
 

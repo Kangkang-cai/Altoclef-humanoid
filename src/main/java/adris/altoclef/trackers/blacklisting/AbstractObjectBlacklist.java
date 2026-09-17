@@ -44,6 +44,8 @@ public abstract class AbstractObjectBlacklist<T> {
         }
         BlacklistEntry entry = _entries.get(item);
         entry.totalFailures++;
+        int totalFailuresBefore = entry.totalFailures - 1; // (2026-09-17 录制) 0 = 首次登记
+        boolean resetHappened = false;                     // (2026-09-17 录制) 本次是否走了"距离改善/工具升级 RESET"
         double newDistance = getPos(item).squaredDistanceTo(mod.getPlayer().getPos());
         MiningRequirement newTool = StorageHelper.getCurrentMiningRequirement(mod);
         // (2026-09-15 最严阈值粘滞) 旧实现无条件 entry.allowed = 本次调用值 ——
@@ -74,12 +76,50 @@ public abstract class AbstractObjectBlacklist<T> {
                 if (newDistance < entry.bestDistanceSq) entry.bestDistanceSq = newDistance;
                 entry.numberOfFailures = 0;
                 entry.lastResetTick = nowTick;
+                resetHappened = true;
                 Debug.logMessage("Blacklist RESET: " + item.toString());
             }
         }
         entry.numberOfFailures++;
         Debug.logMessage("Blacklist: " + item.toString() + ": Try " + entry.numberOfFailures + " / " + entry.numberOfFailuresAllowed
                 + (entry.totalFailures >= TOTAL_FAILURE_CAP ? " (total " + entry.totalFailures + ", reset disabled)" : ""));
+        emitRecordEvent(item, entry, totalFailuresBefore, resetHappened);
+    }
+
+    /**
+     * (2026-09-17 决策知识入流) 把本次黑名单判定作为一条稀疏事件交给录制器。
+     *
+     * <p>这是方块黑名单 ({@link WorldLocateBlacklist}) 与实体黑名单
+     * ({@link EntityLocateBlacklist}) 的<b>唯一</b>写入汇聚点 —— 插一处, 两类
+     * "目标为什么被放弃"的决策知识全进数据流。训练时模型看到 bot 突然绕路/换目标,
+     * 就能归因到"这个格子失败次数打满被拉黑", 而不是瞎猜。
+     *
+     * <p>纪律: 只读 + 全包 try/catch —— 任何异常绝不影响黑名单本身的判定流程;
+     * 未录制时 {@code RecordManager.event} 内部零成本早退。
+     */
+    private void emitRecordEvent(T item, BlacklistEntry entry, int totalFailuresBefore, boolean resetHappened) {
+        try {
+            Vec3d pos = getPos(item);
+            StringBuilder sb = new StringBuilder(192);
+            sb.append("{\"kind\":");
+            adris.altoclef.record.RecordManager.quote(sb,
+                    this instanceof WorldLocateBlacklist ? "block"
+                            : this instanceof EntityLocateBlacklist ? "entity" : "other");
+            sb.append(",\"pos\":[").append((int) Math.floor(pos.x)).append(',')
+                    .append((int) Math.floor(pos.y)).append(',')
+                    .append((int) Math.floor(pos.z)).append(']');
+            sb.append(",\"fail\":").append(entry.numberOfFailures);
+            sb.append(",\"allowed\":").append(entry.numberOfFailuresAllowed);
+            sb.append(",\"total\":").append(entry.totalFailures);
+            sb.append(",\"tool\":");
+            adris.altoclef.record.RecordManager.quote(sb, entry.bestTool.name());
+            sb.append(",\"reset\":").append(resetHappened);
+            sb.append(",\"banned\":").append(entry.numberOfFailures > entry.numberOfFailuresAllowed);
+            sb.append(",\"first\":").append(totalFailuresBefore == 0);
+            sb.append('}');
+            adris.altoclef.record.RecordManager.event("blacklist", sb.toString());
+        } catch (Throwable ignored) {
+        }
     }
 
     protected abstract Vec3d getPos(T item);
