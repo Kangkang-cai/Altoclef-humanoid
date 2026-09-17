@@ -78,8 +78,7 @@ public class DeathRecoveryTask extends Task {
 
     private final TimerGame _overallTimer;
     private final TimerGame _noDropsTimer;
-    // (2026-09-09 空窗僵住修复) 空窗 Wander 用缓存实例 keep-alive, 不反复 new。
-    private final TimeoutWanderTask _noDropsWander = new TimeoutWanderTask(20);
+    // (2026-09-17 去 wander) 空窗期不再漫游 —— 见 tickPickup 的注释。
     // (2026-09-10 水下感知盲区) 拟人感知 (EntityTracker 视线+FOV/声音) 从未
     // 发现过任何掉落物时为 false; 一旦发现过 (含降级扫描命中) 为 true。
     private boolean _everSawDropNearGrave = false;
@@ -88,6 +87,9 @@ public class DeathRecoveryTask extends Task {
     private final TimerGame _degradeScanTimer = new TimerGame(DEGRADE_SCAN_GIVE_UP_SECONDS);
     // Track whether the first onTick has logged the header.
     private boolean _started = false;
+    // (2026-09-17 进度保留) onStart 只在实例首次启动时做初始化, 恢复(抢占后 reset
+    // 再次进入 onStart)时保留进度。详见 onStart 注释。
+    private boolean _initialized = false;
 
     // (2026-09-12 GOTO 中途升级镐子) 空手导航到深埋墓地时 baritone 成本模型
     // 爆炸算不出路径 (20260912-114028 实锤: 空手复活地表 y=63 → 墓 y=-26,
@@ -135,6 +137,28 @@ public class DeathRecoveryTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
+        // (2026-09-17 进度保留 / 空窗永不收工根因修复)
+        // onStart 会被调用两次: ①实例首次启动; ②被高优先级链(Mob Defense 等)
+        // 抢占后恢复 —— SingleTaskChain 恢复时调 Task.reset() → _first=true →
+        // 下一个 tick 再次进入 onStart (Task.java L99-105)。
+        //
+        // 原实现无条件把 _phase 打回 GOTO_GRAVE 并清零全部计时器, 实测
+        // 20260917-134215 造成死循环: 到达墓碑 → 扫描不到掉落物(本就无掉落) →
+        // 空窗 5s 还没攒满就被骷髅弓箭抢占 → 恢复后 _noDropsTimer 归零且 phase
+        // 回 GOTO → 重新导航 → 再次空窗 → ... 5s 永远攒不满, bot 在墓碑旁反复
+        // 打转直到被射死。总体超时(270s)同样被无限刷新而失效。
+        //
+        // 修法: 首次启动才做初始化; 恢复时保留进度(phase / 各计时器 / 失速采样 /
+        // 镐子升级标志), 只丢弃子任务引用, 让当前 phase 按需重建子任务。
+        if (_initialized) {
+            Debug.logToFile("death_recovery.log", String.format(
+                    "[TASK RESUME] phase=%s grave=%s dim=%s (progress kept across interruption)",
+                    _phase, _gravePos, _graveDim));
+            _currentSub = null;
+            _pickaxeSub = null;
+            return;
+        }
+        _initialized = true;
         _phase = Phase.GOTO_GRAVE;
         _currentSub = null;
         _overallTimer.reset();
@@ -239,6 +263,33 @@ public class DeathRecoveryTask extends Task {
                     _gravePos, _graveDim, mod.getPlayer().getBlockPos()));
             _phase = Phase.PICKUP;
             _noDropsTimer.reset();
+
+            // (2026-09-17 到达即判定, 用户"到了死亡地点找不到掉落物, 于是原地打转")
+            // 到达墓碑这一刻, 该区块已在加载中、实体已同步, 此时"感知(EntityTracker
+            // 视线+FOV/声音)"与"直扫已加载实体"双双为空的话, 继续空窗等待或漫游都
+            // 不会带来新信息 —— 直接收工。直扫沿用降级扫描的开关与 PICKUP_RADIUS
+            // 同口径(范围锁死墓碑半径, 不是通用透视)。
+            Optional<ItemEntity> immediate = findClosestDropNearGrave(mod, mod.getEntityTracker().getDroppedItems());
+            boolean directScanUsed = false;
+            if (immediate.isEmpty() && mod.getModSettings().shouldDeathRecoveryDegradeScan()) {
+                directScanUsed = true;
+                immediate = findClosestDropNearGrave(mod, scanLoadedDropsNearGrave(mod));
+            }
+            if (immediate.isEmpty()) {
+                Debug.logMessage(String.format(
+                        "No item drops around grave (%d,%d,%d) on arrival — nothing to pick up, finishing.",
+                        _gravePos.getX(), _gravePos.getY(), _gravePos.getZ()));
+                Debug.logToFile("death_recovery.log", String.format(
+                        "[PICKUP EMPTY] grave=%s dim=%s directScan=%s radius=%d — nothing here, done without waiting/wandering",
+                        _gravePos, _graveDim, directScanUsed ? "Y" : "N", PICKUP_RADIUS));
+                _phase = Phase.DONE;
+                return null;
+            }
+            // 有目标: 交给 PICKUP 阶段的粘性目标逻辑继续追。
+            if (!_everSawDropNearGrave) {
+                _everSawDropNearGrave = true;
+            }
+            _currentPickupTarget = immediate.get();
             return null;
         }
 
@@ -256,7 +307,7 @@ public class DeathRecoveryTask extends Task {
                 _currentSub = new GetToBlockTask(_gravePos, _graveDim);
                 return _currentSub;
             }
-            if (_pickaxeSub == null) {
+            if (_pickaxeSub == null || _pickaxeSub.isFinished(mod) || _pickaxeSub.stopped()) {
                 _pickaxeSub = new SatisfyMiningRequirementTask(MiningRequirement.STONE,
                         "death-recovery-task/buried-grave");
             }
@@ -368,20 +419,12 @@ public class DeathRecoveryTask extends Task {
             setDebugState(String.format(
                     "Near grave — waiting to see drops (%.0fs / %ds)",
                     waited, NO_DROPS_GIVE_UP_SECONDS));
-            // Small wander so the player doesn't stand still and starve /
-            // keeps the render distance ticking over.
-            // (2026-09-09 空窗僵住修复, 用户"捡完了任务还不更新") 旧条件
-            // `_currentSub == null || _currentSub.isFinished(mod)` 在上一个
-            // 子任务是 GetToEntityTask 时永不成立 —— GetToEntityTask 不覆写
-            // isFinished, Task 基类默认恒 false。实锤: 22:29 场次最后一件
-            // (sand) 捡完后, 旧的追实体子任务对已消失实体引用跑了 15s
-            // ("Swimming directly to target"), 任务栈全程静止, 直到
-            // noDropsTimer 到期才 DONE, 期间从未进入 Wander。改为强制切到
-            // 缓存的 Wander 实例 (keep-alive)。
-            if (!(_currentSub instanceof TimeoutWanderTask)) {
-                _currentSub = _noDropsWander;
-            }
-            return _currentSub;
+            // (2026-09-17 去 wander, 用户"原地打转") 旧实现在这段空窗里跑缓存的
+            // TimeoutWanderTask(20) 漫游 —— 用户看到的就是"在墓碑旁来回打转"。
+            // 空窗的作用只是给掉落物一个进入感知/区块的确认时间, 站在墓碑旁等
+            // 就已经足够(人类也是站定环顾), 漫游既不加速确认, 一旦被高优先级链
+            // 抢占还要从头再来。这里改为原地待机, 返回 null 不派任何子任务。
+            return null;
         }
 
         // We have a target. Restart the "no drops" timers — as long as we

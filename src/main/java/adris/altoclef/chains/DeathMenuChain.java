@@ -3,6 +3,8 @@ package adris.altoclef.chains;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
+import adris.altoclef.tasks.movement.DeathRecoveryTask;
+import adris.altoclef.util.helpers.DropValuationHelper;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.Dimension;
@@ -95,13 +97,38 @@ public class DeathMenuChain extends TaskChain {
                         // (holder 放普通类而非 Mixin 类: Mixin 会把非 private 方法合并进
                         // 目标类, public static 辅助方法被拒应用 → 19:06 启动崩溃实锤。)
                         String deathCause = PlayerDamageCauseHolder.consumeLastDeathCause();
-                        mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
-                        String msg = String.format(
-                                "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s",
-                                deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                deathTick, _deathCount + 1, deathCause);
-                        Debug.logMessage(msg);
-                        Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
+
+                        // (2026-09-17 空墓过滤, 用户"没有大量物资的情况就不要拾取了, 比如食物, 矿物")
+                        // 取样时机是唯一可靠的: 此刻玩家仍停在死亡点、该区块仍在加载,
+                        // 死亡掉落物实体已生成并同步到客户端 (死亡屏出现后再等 2s ≈ 40 tick,
+                        // 本地集成服务器足够)。复活之后墓地区块可能已被卸载, 那时扫描只会
+                        // 得到空 —— 把"真掉落物"误判成"没有", 所以判据必须在此刻取样。
+                        // 判据: 高价值物(装备/工具/护甲/附魔/稀有素材)任一 → 必捡;
+                        //       否则普通物资总件数需 ≥ deathRecoveryMinOrdinaryDropCount。
+                        DropValuationHelper.Assessment assessment = DropValuationHelper.assess(
+                                DropValuationHelper.scanNear(deathPos, DeathRecoveryTask.getPickupRadius()));
+                        if (assessment.worthRecovery(mod.getModSettings().getDeathRecoveryMinOrdinaryDropCount())) {
+                            mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
+                            String msg = String.format(
+                                    "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s drops[%s]",
+                                    deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
+                                    deathTick, _deathCount + 1, deathCause, assessment.describe());
+                            Debug.logMessage(msg);
+                            Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
+                        } else {
+                            // 不值得回去捡 → 只推进连续死亡 streak, 不写墓碑。
+                            // 墓碑表保持原样(可能仍是上一次值得捡的墓, 或空), 链层
+                            // getDeathGrave() 因此取到空 → 完全不介入: 不搞镐、不白跑、
+                            // 不打断主任务。
+                            mod.getWorldMemory().noteDeathWithoutGrave(deathTick);
+                            String msg = String.format(
+                                    "DEATH GRAVE skipped (drops not worth recovering): dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s drops[%s] ordinaryThreshold=%d",
+                                    deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
+                                    deathTick, _deathCount + 1, deathCause, assessment.describe(),
+                                    mod.getModSettings().getDeathRecoveryMinOrdinaryDropCount());
+                            Debug.logMessage(msg);
+                            Debug.logToFile("death_recovery.log", "[SKIP GRAVE] " + msg);
+                        }
                     } else {
                         Debug.logWarning("Failed to record death grave: player/world is null.");
                         Debug.logToFile("death_recovery.log",

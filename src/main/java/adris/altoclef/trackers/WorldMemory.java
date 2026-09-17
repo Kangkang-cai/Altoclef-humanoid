@@ -636,11 +636,31 @@ public final class WorldMemory {
      * 顺带把死因一起记下来, 供 DeathRecoveryChain 判定是否弃墓。
      */
     public void rememberDeathGrave(Dimension dim, BlockPos pos, long deathGameTick, String deathCause) {
-        _consecutiveDeaths++;
-        _lastDeathGameTick = deathGameTick;
+        bumpDeathStreak(deathGameTick);
         _deathGraveMemory.put(dim, new DeathGraveRecord(new BlockPos(pos), deathGameTick, deathCause));
         // (2026-09-17 数据集录制) 墓碑是记忆的一条, 变化要进快照与事件轨。
         bumpRevision("grave", deathCause, pos);
+    }
+
+    /**
+     * (2026-09-17 空墓过滤) 死亡了, 但这次【不记录墓碑】—— 死亡瞬间取样判定
+     * "掉落物不值得回去捡"(见 DropValuationHelper / DeathMenuChain)。
+     *
+     * 只推进连续死亡 streak 与最后死亡时刻, 墓碑表不动: 链层后续
+     * getDeathGrave(当前维度) 会取到"上一次值得捡的墓"或空, 从而完全不介入
+     * (不搞镐、不白跑、不打断主任务)。
+     *
+     * 注意: streak 累加与 {@link #rememberDeathGrave} 完全同步 —— 空墓也是
+     * 一次死亡, 语义上不能因为"没记墓碑"就让连死计数漏掉一次。
+     */
+    public void noteDeathWithoutGrave(long deathGameTick) {
+        bumpDeathStreak(deathGameTick);
+    }
+
+    /** 连续死亡 streak 累加 + 最后死亡时刻。两个死亡入口共用, 防止口径漂移。 */
+    private void bumpDeathStreak(long deathGameTick) {
+        _consecutiveDeaths++;
+        _lastDeathGameTick = deathGameTick;
     }
 
     /**
