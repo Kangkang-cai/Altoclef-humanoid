@@ -800,10 +800,14 @@ public class MineAndCollectTask extends ResourceTask {
         // 镐子永远站不稳)。正在吃时直接 return, 吃完 isTryingToEat=false 自然恢复。
         if (_toolEquipTimer.elapsed() && !mod.getFoodChain().isTryingToEat()) {
             _toolEquipTimer.reset();
-            BlockPos miningPos = _subtask.miningPos();
-            if (miningPos == null && mod.getControllerExtras().isBreakingBlock()) {
-                miningPos = mod.getControllerExtras().getBreakingBlockPos();
-            }
+            // (2026-09-17 工具按真实破坏对象选, 212108 场实锤) 优先取控制器【正在
+            // 破坏】的方块: 目标是合成台(木→斧)而挡块是石头时, 旧顺序用目标方块
+            // 选型 → 拿石斧撸石头 ([ToolEquip] equip stone_axe for crafting_table,
+            // 实际在挖 occluder 石头, 6s 只啃一点点)。正在破坏的方块才是本次
+            // 装备真正要加速的对象; 没在破坏时才看子任务目标位。
+            BlockPos miningPos = mod.getControllerExtras().isBreakingBlock()
+                    ? mod.getControllerExtras().getBreakingBlockPos()
+                    : _subtask.miningPos();
             if (miningPos == null) return;
             BlockState state = mod.getWorld().getBlockState(miningPos);
             if (state.isAir()) return; // 位置陈旧/方块已挖掉, 不换工具

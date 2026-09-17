@@ -610,12 +610,17 @@ public class ThrowCursorTask extends Task {
                 }
                 // 同级偏好更远: 5 格 (25 格距平方) 封顶, 越接近 5 格越好。
                 double score = Math.min(distSq, 25.0);
-                if (getPitDepth(mod, h) >= 2) {
+                // (2026-09-17 浅坑口径收紧, 212108 场实锤 depth=0 的坑也被选中:
+                // 1 格深的洞丢进去物品就在洞口, 原版拾取半径照样够到 → 弹回。
+                // 浅坑档要求至少 2 格深 (depth>=1), 只有 1 格深的洞不如走挖脚前
+                // 洞/头高隧道流程。)
+                int depth = getPitDepth(mod, h);
+                if (depth >= 2) {
                     if (score > bestDeepScore) {
                         bestDeepScore = score;
                         bestDeep = h;
                     }
-                } else if (score > bestShallowScore) {
+                } else if (depth >= 1 && score > bestShallowScore) {
                     bestShallowScore = score;
                     bestShallow = h;
                 }
