@@ -100,6 +100,7 @@ AltoClef.onClientTick()
 
 ```json
 {"seq":1,"t":306,"wt":1789610428997,"dim":"minecraft:overworld",
+ "env":{"day":6000,"biome":"minecraft:plains","skyL":15,"blkL":0,"rain":false,"thunder":false},
  "labels":{"chain":"User Tasks","chainPrio":50.000,
            "chains":[{"name":"User Tasks","prio":50.000,"active":true}, ...],
            "stack":[{"i":0,"c":"CollectItemTask","d":"Collect 3 logs","s":"Collecting","f":false}, ...]},
@@ -107,6 +108,7 @@ AltoClef.onClientTick()
 ```
 
 - `seq` = 录制器自增序号 (跨通道对齐用); `t` = 游戏 tick; `wt` = 墙钟 ms
+- `env` (2026-09-17): 日时间/生物群系/天光/方块光/雨/雷 —— 刷怪预测与行为节奏的直接输入
 - `labels.stack` 是**本 tick 完整任务栈** (父→子, 由 `TaskChain.addTaskToChain` 累积),
   最后一个元素就是叶子任务
 - **`chainPrio` / `chains[].prio` 为 `null` 有两种含义**: ①该链本 tick 非活跃 (`chains`);
@@ -116,19 +118,31 @@ AltoClef.onClientTick()
   onGround/inWater/submerged/inLava/onFire/sneaking/sprinting/swimming/riding/dead/
   main/off/hotbarSel/usingItem/cursor/effects[]/inv{}
 - `act` 字段: keys[]/bkeys[]/pathing/customGoal/builder/pathLen/pathDest/
-  breaking{pos,prog}/screen/syncId/atkCd/swing
+  breaking{pos,prog}/screen/syncId/**slots[]**/atkCd/swing
+- `act.slots` (2026-09-17): **容器类界面打开时**导出 handler 全槽位 `{"i":下标,"id":物品,"n":数量}`,
+  空槽跳过; `i` 就是 ClickSlot 协议下标。熔炉燃料/箱子内容/合成格材料 —— 容器侧之前完全没录,
+  是训练熔炼/合成任务的直接输入。PlayerScreenHandler 不导 (背包已有 self.inv)。
 
 ### perception.jsonl.gz (D)
 
 ```json
 {"seq":42,"t":1424,
- "blocks":[{"p":[376,-38,-645],"b":"minecraft:furnace","d":2.5,"src":"los","g":"observed","age":3}],
+ "blocks":[{"p":[376,-38,-645],"b":"minecraft:furnace","d":2.5,"src":"los","g":"observed","age":3,
+            "st":{"facing":"north","lit":"true"}}],
  "entities":[{"id":686,"type":"minecraft:item","p":[..],"v":[..],"d":2.2,"hp":null,
               "item":"minecraft:gravel","n":1,"src":"sight","g":"observed"}],
- "sounds":[{"id":"entity.blaze.ambient","p":[..],"ageMs":1200,"d":9.4}],
+ "sounds":[{"id":"entity.zombie.ambient","p":[..],"cat":"hostile","v":1.0,"pt":1.0,"ageMs":600,"d":9.4}],
  "stats":{"candBlocks":..,"shownBlocks":..,"sightCache":..,"slice":..,"slices":25,
           "nearR":12,"farStep":4,"maxBlocks":512,"maxEntities":64,...}}
 ```
+
+- `blocks[].st` (2026-09-17): 方块状态属性 —— 只给 **d ≤ `recordPerceptionStateRadius`(默认 5) 且
+  本扫描圈确认过 (fresh)** 的方块; 非 fresh 永不带 st (**诚实边界: 不给老记忆造假新状态**)。
+  无属性方块 (石头等) 不输出。近距操作 (开门/取燃料/收作物) 的直接输入。
+- `sounds[]` (2026-09-17 重做): 源改为 `SoundSystemMixin` 在**声音引擎总入口**截获的录制专用
+  缓冲 (8s 窗口 + 128 上限) —— 服务端广播/实体语音/自己动作音/环境音全覆盖。旧源只收
+  `PlaySoundS2CPacket`, 实测整段 0 条。可闻过滤 `d ≤ 16×volume` (游戏衰减机制近似)。
+  SoundTracker (bot 决策输入) 语义零改动。
 
 ### memory.jsonl.gz (E)
 
@@ -147,7 +161,15 @@ AltoClef.onClientTick()
 ```
 
 类型: `memory_write` / `memory_read` / `damage` / `heal` / `death` / `respawn` /
-`chain_switch` / `leaf_switch`
+`chain_switch` / `leaf_switch` / `blacklist` / `anomaly`
+
+- `blacklist` (2026-09-17 决策知识入流): `AbstractObjectBlacklist.blackListItem` 是方块
+  (`WorldLocateBlacklist`) + 实体 (`EntityLocateBlacklist`) 黑名单的**唯一写入汇聚点**。
+  data: kind/pos/fail/allowed/total/tool/reset/banned/first。**`banned:true` = 该目标已从
+  搜索中排除** —— bot 放弃/绕路/换目标的官方归因, 训练时不至于瞎猜。
+- `anomaly` (2026-09-17 决策知识入流): `AnomalyWatchdog.emit` (轮询+事件式上报的唯一汇聚点,
+  自带 (type,key) 冷却去重)。data: type/key/sev/sum —— stall/oscillation/unreachable/idle/
+  duration 看门狗结论。
 
 ---
 
@@ -218,7 +240,7 @@ baritone 走 override **不 setPressed** —— 只读 `isHeldDown` 看不到任
 - 记: `memory_write`(写入点插桩) / `memory_read`(**只在决策入口** `getNearest*`、
   `getRememberedCenters`, 内层循环的 `getXxxLocations` 不记以免淹掉事件流, 且同 tick
   按 (类型,键) 去重) / `damage` `heal` `death` `respawn` `chain_switch` `leaf_switch`
-  (从逐帧状态派生)
+  (从逐帧状态派生) / `blacklist` `anomaly` (2026-09-17 决策知识入流, 见 §4)
 - **故意不记**: 合成/物品变化事件 —— 背包逐帧全量已含该信息, 重复导出只是翻倍体积。
   ⚠️ 这条前提依赖 `recordInventoryPerTick=true`; 若关掉它, 合成事件就**推不出来**了。
 
@@ -284,14 +306,12 @@ tick 的真值**。
 
 | 缺口 | 说明 | 影响 |
 |---|---|---|
-| **听觉通道基本为空** | `SoundEventHappenedEvent` 只从 `mixins/ClientPlayNetworkHandlerMixin.onPlaySound` 发布, 即**只收服务端广播包**。自己挖/走的声音、客户端环境音 (熔炉噼啪是 `randomDisplayTick` 客户端音) **都进不来**。实测整段 0 条。 | "循声"行为的输入缺失 |
+| ~~听觉通道基本为空~~ **(2026-09-17 已修)** | 改为 `SoundSystemMixin` 在声音引擎总入口截获 (服务端广播/实体语音/自己动作音/环境音), 缓冲 8s+128, 可闻过滤 `d≤16×volume`。SoundTracker 决策语义零改动。 | 已解决 |
 | 无地形/可达性输入 | 感知通道给的是"可见方块", 但 baritone 寻路直接读世界 (可走性/阻挡)。这部分没进数据。 | L3 移动原语学不完整 |
 | 合成/物品变化不可直接查 | 依赖背包逐帧 diff (见 §5.7) | 关 `recordInventoryPerTick` 即失效 |
 | 瞬时记忆是两套 | 录制器自持的视觉记忆与 `MineAndCollectTask._recentlySeen`/`_seenOreTick` 口径一致但**不同步** | 数据里看不到"任务自己记的那份" |
 | `chainPrio: null` 二义 | 见 §4 | 离线分析要写防御性判空 |
-
-补听觉的做法 (若要动手): 加一个只喂录制器的新 mixin (客户端 `playSound`),
-**不要**动 `SoundTracker` 的语义 —— "听到怪"是 bot 的决策输入, 改了会影响行为。
+| ~~任务内部临时状态~~ **(2026-09-17 部分解决)** | 黑名单 (`blacklist` 事件) 与看门狗结论 (`anomaly` 事件) 已入流; 但任务内部更细的私有租约/冷却 (FIRE 锚点 180s 租约、CursorArbiter 意图租约等) 仍未录 —— 好在任务栈 debug 文案大体表达了它们。 | 极端场景的行为转折仍需从 `d`/`s` 文案推断 |
 
 ---
 
@@ -304,7 +324,7 @@ tick 的真值**。
 | `frames` 有数据但 `labels` 全空 | bot 没在跑任务 (没启用/空闲) → 正常; 或 `TaskRunner` 被早退 |
 | `perception.blocks` 很少 | 看同帧 `stats`: `sightCache` 上不去 = 扫描没跑; `candBlocks` 大而 `shownBlocks` 小 = 被 `maxBlocks` 截断; 全 0 = 玩家不在游戏内 |
 | `perception.blocks` 只有眼前一两个方块 | 检查 `stats.slice/slices` 有没有在推进 (分期卡住 → 永远只扫第 0 列) |
-| `sounds` 恒空 | 已知缺口 (§7), 不是 bug |
+| `sounds` 恒空 | 2026-09-17 起源是 SoundSystemMixin 漏斗; 若恒空查 mixin 是否注册 (altoclef.mixins.json) / 游戏里是否真的有声音事件 (走路/挖矿必发声) |
 | `memory` 只有 1-2 行 | 记忆真没变 → 正常。若 `rev` 变了但内容空 → 版本号假变化回归 (§5.6) |
 | 录制本身拖慢游戏 | `@record` 看有没有"丢弃行"警告 (写盘跟不上); 否则查 `altoclef_jank.log` 的帧阶段耗时 |
 | 录制器报异常 | `altoclef_diag.log` 里的 `[Record]` 行 (最多记 3 条, 20 次后自禁用) |
@@ -326,8 +346,8 @@ $fr[0] | ConvertFrom-Json
 | `RecordManager.java` | 生命周期 (开/收/自禁用)、挂载入口 `tick()`、`meta.json`、事件 API、派生事件 |
 | `FrameSampler.java` | A/B 通道装配 (时间 + 任务标签), 委托 C/G |
 | `StateSampler.java` | C 通道: 玩家状态 + 背包全量 + 状态效果; 物品/效果注册名缓存 |
-| `ActionSampler.java` | G 通道: 两套按键 + baritone 导航 + 破坏进度 + 界面类型 |
-| `PerceptionSampler.java` | D 通道: 近场/远场分期扫 + 录制专用视觉记忆 + 实体 + 声音 |
+| `ActionSampler.java` | G 通道: 两套按键 + baritone 导航 + 破坏进度 + 界面类型 + **容器槽位快照 (slots)** |
+| `PerceptionSampler.java` | D 通道: 近场/远场分期扫 + 录制专用视觉记忆 + 实体 + **声音 (SoundSystemMixin 喂入的缓冲) + 近域 blockstate (st)** |
 | `MemoryRecorder.java` | E 通道: 三块记忆的快照, 只在版本号变化时输出 |
 | `JsonlSink.java` | 异步 gzip JSONL 落盘 (队列 + 后台线程 + 丢弃计数) |
 | `Json.java` | 手写 JSON 转义/数字格式化 (不引依赖、不建对象树) |
@@ -343,6 +363,10 @@ $fr[0] | ConvertFrom-Json
   → `bumpRevision` → `RecordManager.event("memory_write", ...)`
 - 记忆读取: `WorldMemory.getNearestOre/Animal/Portal/Bed`、`KnowledgeMemory.getRememberedCenters`
   → `RecordManager.eventThrottled("memory_read", ...)`
+- 决策知识 (2026-09-17): `AbstractObjectBlacklist.blackListItem` → `event("blacklist", ...)` ·
+  `AnomalyWatchdog.emit` → `event("anomaly", ...)`
+- 听觉 (2026-09-17): `mixins/SoundSystemMixin` (SoundSystem.play 总入口) →
+  `RecordManager.onSoundPlayed` → `PerceptionSampler.onClientSound` (只喂录制器, 不进 SoundTracker)
 - 所有插桩都是 `RecordManager.event*` 内部先判 `_frames == null` 早退, 未录制时零成本。
 
 ---
