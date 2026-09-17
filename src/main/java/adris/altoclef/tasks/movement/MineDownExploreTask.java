@@ -194,6 +194,36 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, java.util.LinkedHashSet<BlockPos>> _exploredCaveByKey
             = new java.util.HashMap<>();
     private static boolean _exploredCaveLoaded = false;
+
+    // =========================================================================
+    // (2026-09-17 FIRE 标记降级为"临时租约", 用户"感觉有忽略没探索过的矿洞的嫌疑")
+    //
+    // 症状: FIRE 那一刻就 markExploredCaveRegion 写盘(r16/y±8, 跨会话永久生效)。
+    // 审计实锤(会话 20260917-173950 + 20260917-155653):
+    //   - 16:08:24.471 FIRE(-61,38,-27) -> 16:08:28.868 被 Destroy block 抢占,
+    //     整场探索只活了 4.4 秒, 却留下 (-61,38,-27) y[30,46] + 到达点(-56,20,-28)
+    //     y[12,28] 两层永久封禁;
+    //   - 93 分钟后同一洞区再扫: natural 从 176 掉到 24 —— 恰好等于阈值
+    //     MIN_NATURAL_CAVE_AIR=24 (前两次 22/23 被拒, 差 1 就永远发现不了);
+    //   - 该次 FIRE 行 explored=217/313, 玩家周围 BFS±8 立方体 75% 落在封禁内。
+    // 用户现象: "洞口就在旁边, bot 却不进去"(不是没扫到, 是扫到了被判已探索)。
+    //
+    // 语义修正: FIRE 锚点只代表"本洞【正在】被探索", 这是【租约】不是【结论】。
+    //   - 租约期内(默认 180s)照旧排除 -> 保住 2026-09-07 防"同洞反复吸引"的原始诉求
+    //     (那次是因为链重建导致结束标记难产, 同洞 19 秒内二次 FIRE);
+    //   - 租约到期自动失效 -> 因为超时/被抢占【恰恰说明本洞没探索完】, 不该永久封禁。
+    //   - 持久记忆只由两类【事实】写入: 真实到达点(markExploredCavePoints, 2026-09-12)
+    //     与探索结束时玩家所在位置(_inCave 退出分支)。
+    // 形状判据与持久记忆同源(r = EXPLORED_CAVE_RADIUS / y ± EXPLORED_CAVE_Y_BAND),
+    // 不引入第二套口径 —— 唯一区别是"会过期"。
+    //
+    // 用墙钟而非 TimerGame: 租约要的是"防抖窗口", 暂停时宁可少租一会儿(过期 = 放开,
+    // 比永久封禁安全); TimerGame 走 ClientConnection.ticks, 单机暂停会冻结、Esc 挂机
+    // 反而延长租约(2026-09-03 那条冻结修复只保证单调不冻结, 语义上不适用于租约)。
+    // =========================================================================
+    private static final long FIRE_LEASE_MS = 180_000L;
+    private static final java.util.Map<String, java.util.Map<BlockPos, Long>> _recentCaveAnchors
+            = new java.util.HashMap<>();
     // (2026-09-06 闸门级诊断, 用户"22:31 在大矿洞里没触发探洞") findNearbyCave 有
     // 多个【静默】返回点(露天闸门/跨度/邻居), 日志上完全看不出被哪道闸门拦下,
     // 也无法区分"没扫"和"扫了被拒"。每次评估返回时打一行 [CaveScan] 原因:
@@ -966,10 +996,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     BlockPos anchor = cave.get();
                     // (2026-09-07 FIRE 时即标记, 用户"刚转去挖洞没一会又被同一个洞吸引去探索")
                     // 原设计只在探索结束(超时/完成)时标记, 但链重建会中途丢弃探索任务导致
-                    // mark 难产 → 同洞反复吸引。改为 FIRE 承诺探索时立即标记洞锚点;
-                    // 本次探索不受影响(ExploreCaveTask 选点豁免区域记忆), 探索结束路径的
-                    // 标记保留(玩家最终位置与锚点相距>24 时多记一个中心, 覆盖更全)。
-                    markExploredCaveRegion(mod, anchor);
+                    // mark 难产 → 同洞反复吸引。
+                    // (2026-09-17 降级为临时租约) 原实现直接 markExploredCaveRegion 写盘,
+                    // 审计发现"FIRE 了但没真探索"会把洞永久封禁(实锤: 一次 4.4 秒就被打断的
+                    // 探索留下两层 r16/y±8 封禁, 93 分钟后同洞 natural 从 176 掉到阈值 24),
+                    // 用户现象"洞口在旁边却不进"。改取租约: 180s 内仍防同洞反复吸引, 到期
+                    // 自动放开。本次探索不受影响(ExploreCaveTask 选点豁免区域记忆), 探索
+                    // 结束路径的持久化标记保留(那里记的玩家位置是真走过的)。
+                    markRecentCaveAnchor(mod, anchor);
                     _lastFireAnchor = anchor.toImmutable();
                     Debug.logMessage("Found cave at shaft bottom at " + anchor.toShortString() + ", exploring it.");
                     _caveExploreTimer.reset();
@@ -1002,7 +1036,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 _inCave = true;
                 BlockPos anchor = cave.get();
                 // (2026-09-07 FIRE 时即标记, 同 reachedBottom 分支注释)。
-                markExploredCaveRegion(mod, anchor);
+                // (2026-09-17 降级为临时租约, 同上)。
+                markRecentCaveAnchor(mod, anchor);
                 _lastFireAnchor = anchor.toImmutable();
                 Debug.logMessage("Found cave while digging at " + anchor.toShortString() + ", exploring it.");
                 Debug.logToFile("altoclef_diag.log",
@@ -1742,7 +1777,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static String exploredCaveKey(AltoClef mod) {
         // (2026-09-17 跨世界污染) 显示名 → 存档目录名, 统一走 WorldIdentity。
         // 旧 key 的存量"已探索洞区"记录自然作废(它们本就有同名世界互灌风险)。
-        return adris.altoclef.util.helpers.WorldIdentity.key(mod);
+        // (2026-09-17 FIRE 标记降级) 版本后缀 #v2: 本版起 FIRE 锚点不再落盘, 而存量
+        // 记录里混着大量"只跑了几秒就被打断"的冤标记(实锤 16:08 那次 4.4s 留下两层
+        // 封禁, 93 分钟后让同洞的 natural 从 176 掉到 24) —— 与新版语义不兼容, 一律
+        // 作废从零重建。旧行仍留在 explored.log 里(append-only, 不删文件), 回滚只需
+        // 去掉后缀。到期租约(_recentCaveAnchors)在内存里, 不受本后缀影响。
+        return adris.altoclef.util.helpers.WorldIdentity.key(mod) + "#v2";
     }
 
     /**
@@ -1753,6 +1793,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      */
     public static void onWorldBoundary() {
         _exploredCaveByKey.clear();
+        // (2026-09-17 FIRE 标记降级) 租约是"本世界本维度"的, 换存档必须一起清。
+        _recentCaveAnchors.clear();
         _selfDugByDim.clear();
         _lastFireAnchor = null;
     }
@@ -1797,12 +1839,37 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (2026-09-17 FIRE 标记降级) FIRE 时刻取一份【临时租约】: 锚点在 FIRE_LEASE_MS 内
+     * 参与"已探索"排除(防链重建导致同洞反复吸引), 到期自动失效 —— 因为超时/被抢占
+     * 恰恰说明本洞没探索完, 不该永久封禁。**不写盘**。
+     *
+     * 与 markExploredCaveRegion 的关系: 那个管"事实"(故事后保留), 这个管"意图"(租约)。
+     * 形状判据同源(见 isInExploredCaveRegion)。
+     */
+    static void markRecentCaveAnchor(AltoClef mod, BlockPos anchor) {
+        if (mod == null || mod.getWorld() == null || anchor == null) return;
+        String key = exploredCaveKey(mod);
+        java.util.Map<BlockPos, Long> leases = _recentCaveAnchors
+                .computeIfAbsent(key, k -> new java.util.HashMap<>());
+        long now = System.currentTimeMillis();
+        leases.entrySet().removeIf(e -> now - e.getValue() > FIRE_LEASE_MS);
+        leases.put(anchor.toImmutable(), now);
+        Debug.logToFile("altoclef_diag.log",
+                "[ExploredCave] fire lease taken center=" + anchor.toShortString()
+                        + " ttl=" + (FIRE_LEASE_MS / 1000) + "s activeLeases=" + leases.size()
+                        + " key=" + key);
+    }
+
+    /**
      * (2026-09-03 记录一个已探索洞穴区域) 探索结束(超时/完成)时以玩家位置为圆心,
      * 记录扁圆柱区域(水平 EXPLORED_CAVE_RADIUS / 垂直 ±EXPLORED_CAVE_Y_BAND)内的
      * 洞穴为"不再触发探索"。与已有中心水平距离不足 EXPLORED_CAVE_MIN_SEP 且 y 带
      * 重叠则视为重复(同一片洞区)丢弃, 防密集堆点。
      * (2026-09-11 同心丢弃改扁形匹配: 旧 3D 距离会把"同一水平位置但 y 带不相交"
      * 的两个独立区域误判为重复而丢弃。)
+     * (2026-09-17 FIRE 标记降级) 本方法**不再由 FIRE 调用** —— FIRE 改走
+     * markRecentCaveAnchor 取临时租约。此处只剩一个调用方: _inCave 退出分支
+     * (超时/完成), 玩家位置是【真走过】的位置, 值得持久化。
      */
     private static void markExploredCaveRegion(AltoClef mod, BlockPos center) {
         if (mod == null || mod.getWorld() == null || center == null) return;
@@ -1882,13 +1949,28 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * (2026-09-03 判定 pos 是否落在任一已探索洞穴区域内) 供探测/目标选择排除用。
      * (2026-09-11 3D 球改扁圆柱: 水平距离 ≤ EXPLORED_CAVE_RADIUS 且 |Δy| ≤
      * EXPLORED_CAVE_Y_BAND 才算命中, 上层洞标记不再挡深层/浅层新洞。)
+     * (2026-09-17 FIRE 标记降级) 判据 = 持久记忆 ∪ 未过期的 FIRE 租约。两者形状
+     * 完全同源, 唯一区别是租约会到期 —— 不引入第二套半径口径。
      */
     private static boolean isInExploredCaveRegion(AltoClef mod, BlockPos pos) {
         if (mod == null || mod.getWorld() == null || pos == null) return false;
-        ensureExploredCaveLoaded();
-        java.util.Set<BlockPos> set = _exploredCaveByKey.get(exploredCaveKey(mod));
-        if (set == null || set.isEmpty()) return false;
+        String key = exploredCaveKey(mod);
         int rSq = EXPLORED_CAVE_RADIUS * EXPLORED_CAVE_RADIUS;
+        java.util.Map<BlockPos, Long> leases = _recentCaveAnchors.get(key);
+        if (leases != null && !leases.isEmpty()) {
+            long now = System.currentTimeMillis();
+            for (java.util.Map.Entry<BlockPos, Long> e : leases.entrySet()) {
+                if (now - e.getValue() > FIRE_LEASE_MS) continue;
+                BlockPos center = e.getKey();
+                if (Math.abs(pos.getY() - center.getY()) > EXPLORED_CAVE_Y_BAND) continue;
+                int dx = pos.getX() - center.getX();
+                int dz = pos.getZ() - center.getZ();
+                if (dx * dx + dz * dz <= rSq) return true;
+            }
+        }
+        ensureExploredCaveLoaded();
+        java.util.Set<BlockPos> set = _exploredCaveByKey.get(key);
+        if (set == null || set.isEmpty()) return false;
         for (BlockPos center : set) {
             if (Math.abs(pos.getY() - center.getY()) > EXPLORED_CAVE_Y_BAND) continue;
             int dx = pos.getX() - center.getX();
