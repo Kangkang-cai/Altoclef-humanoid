@@ -406,6 +406,34 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 目标 —— 第二次撤离时能同时避开先前那一处, 不至于在两处岩浆之间来回跑。
     private final Set<BlockPos> _lavaHazards = new HashSet<>();
 
+    // ==== (2026-09-17 近场岩浆感知) 已挖开空间里出现岩浆 → 立刻弃道 ====
+    // 09-14 的弃道判据只认 "待挖队首那一格" (skipAirAndWater 里的 isLava), 覆盖不到
+    // "通道挖通之后岩浆从侧壁/脚下渗进已挖空间"。20260917-101352 场次实锤: 隧道
+    // dug 41/80 正常推进, 岩浆从侧壁 + 脚下流入 bot 已经站进去的格子, 全场零条
+    // [MineDown-Lava] / [MineDown-LavaAbandon], _inLavaDetour 从未进入 → bot 站在
+    // 自己挖的通道里被烧, health 20 → 0 只用 6 秒 (cause=onFire, death (408,-57,-647))。
+    // 口径 (用户 2026-09-17 拍板): "只判前一格是为了不透视, 但这时岩浆是已经流进来的、
+    // 不是源头, 所以看到了就应该弃坑"。
+    //   —— 只查【与玩家紧邻的 11 格】: 玩家所在格 / 水平四邻 / 脚下 / 斜下四角 / 头顶。
+    //   限制在紧邻即天然合规, 不存在透视路径: MC 流体传播下, 与已挖开空气格相邻的
+    //   岩浆必然已经(或正在)流入那个空气格 —— 我们能读到"紧邻格是岩浆"本身就意味着
+    //   它贴着通道; 反之隔着石头读到远处源头才叫透视, 而这里根本扫不到那里。
+    //   绝不扫 2 格以上半径、绝不查未挖方块背后 (与 09-10 "直直挖" 结论同款约束)。
+    // 触发时机: 只在本任务处于正常挖掘状态 (!_ascendMode && !_baritoneAscent) 且不在
+    // 撤离中时检查 —— 爬升阶段身边常有岩浆 (下界尤其), 在那里弃道会和爬升打架。
+    private static final BlockPos[] NEAR_LAVA_OFFSETS = {
+            new BlockPos(0, 0, 0),
+            new BlockPos(1, 0, 0), new BlockPos(-1, 0, 0),
+            new BlockPos(0, 0, 1), new BlockPos(0, 0, -1),
+            new BlockPos(0, -1, 0), new BlockPos(0, 1, 0),
+            new BlockPos(1, -1, 0), new BlockPos(-1, -1, 0),
+            new BlockPos(0, -1, 1), new BlockPos(0, -1, -1),
+    };
+    // 近场扫描节流: 11 次 getBlockState 本身极便宜, 但没必要每 tick 都扫
+    // (岩浆流速最快约 1 格/0.5s, 100ms 已远超所需灵敏度)。口径同 SPAWNER_SCAN_INTERVAL_MS。
+    private static final long NEAR_LAVA_SCAN_INTERVAL_MS = 100;
+    private long _lastNearLavaScanMs = 0;
+
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
     // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
@@ -785,6 +813,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
             retreatAndRedig(mod, lava);
+        }
+
+        // (2026-09-17 近场岩浆感知) 与玩家紧邻的已挖开空间出现岩浆 (侧壁/脚下渗入) →
+        // 立刻弃道。放在 _inLavaDetour 分支【之后】: 撤离中由上面接管, 不重复触发;
+        // 又放在水改道与所有挖掘推进【之前】: 危险源优先, 绝不让 bot 先往前迈一步
+        // 再发现脚下已经变岩浆。判据与合规边界见字段区 NEAR_LAVA_OFFSETS 注释。
+        if (!_inLavaDetour && !_ascendMode && !_baritoneAscent) {
+            BlockPos nearLava = findNearbyLava(mod);
+            if (nearLava != null) {
+                abandonTunnelForLava(mod, nearLava, "near-player");
+            }
         }
 
         // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
@@ -1311,6 +1350,26 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (2026-09-17 近场岩浆感知) 扫【与玩家紧邻的 11 格】(见 NEAR_LAVA_OFFSETS),
+     * 命中返回该岩浆格坐标, 否则 null。合规边界与"为什么紧邻不算透视"见字段区注释。
+     *
+     * 顺序刻意从"最贴近玩家"开始 (玩家所在格 → 水平四邻 → 脚下 → 斜下 → 头顶),
+     * 命中哪一格只影响日志与 hazards 记录, 弃道动作(MineDown-LavaAbandon)完全一致。
+     */
+    private BlockPos findNearbyLava(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
+        long now = System.currentTimeMillis();
+        if (now - _lastNearLavaScanMs < NEAR_LAVA_SCAN_INTERVAL_MS) return null;
+        _lastNearLavaScanMs = now;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        for (BlockPos off : NEAR_LAVA_OFFSETS) {
+            BlockPos p = feet.add(off);
+            if (isLava(mod, p)) return p;
+        }
+        return null;
+    }
+
+    /**
      * (2026-09-14 岩浆弃道) 立即放弃当前这条通道: 清空挖掘队列、切到后撤子任务,
      * 等后撤结束后由 onTick 的 _inLavaDetour 分支换向重挖。
      *
@@ -1320,12 +1379,22 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      *   3. 后撤完【换方向】, 不回原通道继续挖。
      */
     private void abandonTunnelForLava(AltoClef mod, BlockPos lava) {
+        abandonTunnelForLava(mod, lava, "dig-queue-head");
+    }
+
+    /**
+     * (2026-09-17 近场岩浆感知) cause 用于现场区分触发口径, 两条路径共用同一套弃道动作:
+     *   dig-queue-head = 待挖队首那格就是岩浆 (09-14 原有, "挖穿后岩浆就在眼前");
+     *   near-player    = 与玩家紧邻的已挖开空间出现岩浆 (侧壁/脚下渗入, 09-17 新增)。
+     */
+    private void abandonTunnelForLava(AltoClef mod, BlockPos lava, String cause) {
         _lavaEncounters++;
         BlockPos lavaFixed = lava.toImmutable();
         _lavaHazards.add(lavaFixed);
         if (_lavaEncounters <= 3 || _lavaEncounters % 10 == 0) {
             String m = "[MineDown-Lava] 挖通道撞上岩浆 " + lavaFixed.toShortString()
-                    + " (y=" + lavaFixed.getY() + ", 累计 " + _lavaEncounters + ")"
+                    + " (y=" + lavaFixed.getY() + ", 累计 " + _lavaEncounters
+                    + ", cause=" + cause + ")"
                     + " player=" + mod.getPlayer().getBlockPos().toShortString()
                     + " mode=" + (_tunnelMode ? "tunnel" : _ascendMode ? "ascend" : "staircase")
                     + " step=" + _step + " nether=" + _nether;
