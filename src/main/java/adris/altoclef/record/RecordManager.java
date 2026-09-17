@@ -25,9 +25,12 @@ import java.util.List;
  * A 时间溯源 + B 任务标签 + C 自身状态 + G 动作信号  → frames.jsonl.gz      (每帧)
  * D 可见世界                                        → perception.jsonl.gz  (每帧)
  * E 记忆快照                                        → memory.jsonl.gz      (变化时才写)
- *   记忆读写/任务切换/合成/受伤等稀疏事件            → events.jsonl.gz
- *   配置与世界信息                                    → meta.json
+ *   记忆读写/受伤/死亡/任务切换等稀疏事件            → events.jsonl.gz
+ *   配置与世界信息 (种子/维度/口径/分级表)            → meta.json
  * </pre>
+ *
+ * <p>维护这份模块的长期记忆见仓库根目录 {@code RECORDING.md} (设计取舍、坑位清单、
+ * 已见的失败模式、维护检查表)。改本模块前先读它。
  *
  * <h3>为什么不在 logs/altoclef/ 下</h3>
  * {@code Debug.pruneOldSessionsOnce} 会把 {@code logs/altoclef/} 里最旧会话目录
@@ -78,13 +81,12 @@ public final class RecordManager {
     private static String _lastChainName = null;
     private static String _lastLeafClass = null;
 
-    // 通道启用位 (阶段2 逐项打开; 关闭的通道不建 sink、不占盘)
-    private static final boolean PHASE2_PERCEPTION = true;
-    private static final boolean PHASE2_MEMORY = true;
+    // 通道启用位: 四个通道都已在用。刻意不设开关 —— 少一档配置就少一处"关着的通道
+    // 为什么没数据"的排查成本; 要减体积请调 perceptionCaps 或关 recordInventoryPerTick。
 
     /**
-     * 是否正在录制 (供阶段2 的记忆写入点插桩做零成本早退)。热路径上只是一次
-     * 静态读, 开销可忽略。
+     * 是否正在录制 (供记忆写入点插桩做零成本早退)。热路径上只是一次静态读,
+     * 开销可忽略。
      */
     public static boolean isRecording() {
         return _frames != null && !_disabled;
@@ -136,10 +138,10 @@ public final class RecordManager {
             _frames.write(FrameSampler.sample(mod, seq));
             _framesQueued++;
 
-            if (PHASE2_PERCEPTION && _perception != null && _perception.getError() == null) {
+            if (_perception != null && _perception.getError() == null) {
                 _perception.write(PerceptionSampler.sample(mod));
             }
-            if (PHASE2_MEMORY && _memory != null && _memory.getError() == null) {
+            if (_memory != null && _memory.getError() == null) {
                 String mem = MemoryRecorder.sample(mod);
                 if (mem != null) _memory.write(mem);
             }
@@ -347,11 +349,9 @@ public final class RecordManager {
         _lastChainName = null;
         _lastLeafClass = null;
         _frames = new JsonlSink(dir.resolve("frames.jsonl.gz"));
-        if (PHASE2_PERCEPTION) _perception = new JsonlSink(dir.resolve("perception.jsonl.gz"));
-        if (PHASE2_MEMORY) {
-            _memory = new JsonlSink(dir.resolve("memory.jsonl.gz"));
-            _events = new JsonlSink(dir.resolve("events.jsonl.gz"));
-        }
+        _perception = new JsonlSink(dir.resolve("perception.jsonl.gz"));
+        _memory = new JsonlSink(dir.resolve("memory.jsonl.gz"));
+        _events = new JsonlSink(dir.resolve("events.jsonl.gz"));
         writeMeta(false);
         String msg = "[Record] 开始录制 -> " + dir + " (决策 20Hz; 感知通道的可见性判定走 "
                 + "VisibilityHelper 的 400ms LOS 缓存, 属感知延迟)";
