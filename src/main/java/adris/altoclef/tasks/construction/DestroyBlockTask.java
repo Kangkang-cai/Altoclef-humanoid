@@ -11,6 +11,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.PlaceBlockSchematic;
 import adris.altoclef.util.time.TimerGame;
+import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
@@ -107,110 +108,69 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 详见 refuseIfProtected。
     private boolean _protectedRefusalLogged = false;
 
-    // ==================== (2026-09-14 垫塔接近) ====================
+    // ==================== (2026-09-14 垫塔接近 → 2026-09-17 统一) ====================
     // 用户推翻 2026-09-03 的"够不到直接放弃, 不做搭方块垫脚", 明确要求
     // "搭方块垫脚上去够" (原话: "怎么没触发搭过去靠近")。
     //
     // 现场 20260914-113531: bot 站在 (88.50, 63.00, 0.79), feet y=63 → 眼 y=64.62;
     // 目标悬空原木 (89/90,70,2~3) 下表面 y=70 → 眼到方块 5.38 格 (> 4.5 真实
     // blockReachDistance), 用户现场确认"那个方块确实够不到"; 3D 距离 7.55。
-    // 用户确认现场形态: 树干是 bot 自己挖空的 —— memory/selfdug.log 有据:
-    //   overworld 90 63 2 / 90 64 2 / … / 90 69 2 / 91 70 2
-    // 即 x=90, z=2 的树干被从 y=63 一路挖到 y=69, 只剩 (90,70,2) 悬空一格。
+    // 用户确认现场形态: 树干是 bot 自己挖空的 —— memory/selfdug.log 有据。
     //
-    // 旧行为(两步都坏): reach 缺失 → 落 "Getting to block…" → 只
-    // setGoalAndPath(GoalNear(_pos,1)) → 对"站立面之上 7 格"不可满足 → baritone
-    // 每 6s 一轮全展开失败 (latest.log 11:35:59 = 7562368 movements / 11:36:05 =
-    // 8514176 movements, 均无 "Path goes for") → 原地冻结 26s 到用户手动停。
-    // diag.log 的 [NAV-STUCK] 快照全为 customGoal=true pathing=false path=absent、
-    // bIn/inputs 全 false、hand=stone_axe。
+    // 三轮演进(别再重走):
+    //   09-14 f697d790  自写 PillarJumpHelper 垫塔。连打 6+ 补丁仍与 baritone 打架
+    //                   (20260915-180535: 撸叶/自写垫塔/handoff 三套抢输入, 18s 零进展)。
+    //   09-15           删自写垫塔。用户原话: "baritone 设定挖的目标后应该自己会解决
+    //                   靠近; 垫塔当初是为头顶海洋写的, 为什么变成通用搭高"。baritone
+    //                   的 MovementPillar 本来就是"挖头顶 up(2) + 放脚下"(反编译实锤),
+    //                   干竖井/干口袋它完全能上; PillarJumpHelper 只保留在 GoToSurfaceTask
+    //                   的海洋逃生场景(它的诞生地)。
+    //   09-17           爬升状态机整段抽出为 AscentHandoffHelper 与 InteractWithBlockTask
+    //                   共用 —— 现场 20260917-143636 实锤: "去工作台右键"要走同一段竖直
+    //                   爬升, 却因为补料逻辑只长在本类里, 在自挖竖井底原地跳 33.2s 零产出。
+    //                   本类此后只负责"准入判据"与"挖掘特有的完成条件", 爬不上去的
+    //                   观察/补救/判负全部交协调器。
     //
-    // 新行为: reach 持续缺失 + 目标在眼睛及上方 + 背包有垫块 → 复用
-    // PillarJumpHelper 竖直垫塔 (每步净上升 1 格), 直到 LookHelper.getReach 变
-    // present, 下一 tick 自然走正常挖掘分支。
-    //
-    // ⚠ (2026-09-14 用户约束) **不含原木** —— 原木是挖树任务结算的目标物, 拿它
-    // 垫 1 格就等于木料 -1。用户原话"别用原木, 木板可以"。完全没料时由
-    // tickBaritoneHandoff 的 stall 检测反应式补一次 (见下), 绝不动原木。
+    // ⚠ (2026-09-14 用户约束) 垫料清单 **不含原木** —— 原木是挖树任务结算的目标物,
+    // 拿它垫 1 格就等于木料 -1。用户原话"别用原木, 木板可以"。缺料时由协调器
+    // 反应式补一次 (挖 5 格泥土), 绝不动原木。
     private static final Item[] _pillarMaterials = PillarJumpHelper.withWoodNoLogs();
-    /** 垫塔总时长上限: 20s 净升 ~15 格有余, 超了就是垫不动。 */
-    private final TimerGame _pillarTotalTimer = new TimerGame(20);
-    /** 连续 4s 净高度没上升 (原地跳 / 头顶被挡) = 垫不动。 */
-    private final TimerGame _pillarNoProgressTimer = new TimerGame(4);
-    /**
-     * 上次【落地时】采到的脚块 y。
-     * ⚠ 必须用落地采样: 跳跃上升途中 getBlockPos().getY() 会瞬时 +1, 拿它当
-     * "高度上升了"会让无进展计时恒被重置 → 反复原地跳永不超时 (这正是本仓
-     * "卡死检测必须排除合法零速状态"教训的镜像: 这里要排除的是【合法瞬时升高】)。
-     */
-    private int _pillarLastY = Integer.MIN_VALUE;
-    private boolean _pillarActive = false;
-    // (2026-09-14 v4 交还 baritone) 头顶被【可挖】方块挡住 (树叶/土/木/半砖…) 时,
-    // 自写 PillarJumpHelper 只会 hold(JUMP) 空跳 —— 它不挖头顶, 而"脚块变空气"的
-    // 放置窗口永远开不了 ⇒ 空跳到超时。但这类挡头不该判"垫不到": baritone 的
-    // MovementPillar 构造就是 positionsToBreak={start.above(2)} + positionToPlace=start
-    // (反编译实锤), **它本来就是"挖头顶 + 放脚下"**。用户原话: "baritone 会处理悬空方块"。
-    // 所以: 让位给 baritone, 用 GoalYLevel(目标层) 驱动; 只有挖不动的 (基岩) 才拉黑。
-    private boolean _pillarHandoff = false;
-    /** 交还后的观察窗口 20s; 期间 y 有上升就重置 (baritone 在爬只是慢)。 */
-    private final TimerGame _pillarHandoffTimer = new TimerGame(HANDOFF_TOTAL_SECONDS);
-    private final TimerGame _pillarHandoffStallTimer = new TimerGame(HANDOFF_STALL_SECONDS);
-    private int _pillarHandoffLastY = Integer.MIN_VALUE;
-    // (2026-09-15 GoalNear 进场) 上次 tick 的水平位置: handoff 目标改成
-    // GoalNear(目标, 2) 后 baritone 可能先【走】到目标附近再爬 —— 进场走路阶段
-    // y 不涨, 若 stall 只看 y 会把正常进场误判成"上不去"。XZ 位移也算进度;
-    // 原地跳(唯一要抓的死锁)XZ 不变、y 不创新高, 两条判据都抓得住它。
-    private int _pillarHandoffLastX = Integer.MIN_VALUE;
-    private int _pillarHandoffLastZ = Integer.MIN_VALUE;
-    /** 本实例是否已交过一次 —— 交过还失败才拉黑, 避免"交还↔自写"来回抖。 */
-    private boolean _pillarHandoffTried = false;
-    /**
-     * (2026-09-14 垫塔判据滞后) 垫塔期间【锁定】的落脚基准, 净空闸门只按它算。
-     *
-     * 为什么不能每 tick 取 getBlockPos(): PillarJumpHelper 靠 hold(JUMP) 起跳,
-     * 起跳那一瞬间玩家的 BlockPos y 会 +1 —— 而 headroomBlockedForPillar 看的是
-     * feet.up(2)。玩家踩在自己的隧道底 (y=-60) 时 aboveHead=-58 (空气, 放行);
-     * 一跳起来 feet 变 -59, aboveHead 立刻变成 -57 —— **那正是要挖的目标方块本身
-     * (实心)** → 判"净空被挡" → endPillar → 下一 tick 判据又翻转回来重开。
-     *
-     * 现场 20260914-162715 实锤: [PillarApproach] start 重入 13 次、PillarDiag 里
-     * PLACE 分支 0 次 (从没进入过放置窗口), debugstate 每 300ms 在
-     * "Pillaring up to reach" 与 "Getting to block..." 之间横跳 10s。
-     * 而且 start 会顺带 reset _pillarLastY/_pillarNoProgressTimer/_pillarTotalTimer
-     * ⇒ 20s 总超时闸门永远被重置, 只能靠上层的 DigStuck 超时拽出来。
-     *
-     * 滞后语义: 只在【落地且高度真的提升了】时用新的落脚点重锁基准。
-     */
-    private BlockPos _pillarBaseFeet = null;
 
-    // ---- (2026-09-14 缺垫块 → 去挖几格) 用户: "没方块为什么不触发挖几个方块" ----
-    // 旧行为: tryPillarUpToReach 一发现没垫块就 return false, 落回导航 → 对"站立面
-    // 之上 N 格"的目标导航永远不可满足 → 冻结或拉黑换目标。现场 20260914-115322
-    // 里 bot 只有原木(按新约束不算垫块)时走的正是这条死路。
-    // 新行为: 目标是头顶的 + 水平已在身边 + 无可用垫块 → 派采集任务挖 3 格泥土
-    // (草方块/土/土径, 手挖即可), 拿到后下一轮自然进垫塔分支。
-    /** 一次采集几格垫块。净升 1 格即可把"眼→方块下表面"缩进 reach (本现场 5.38→4.38)。 */
-    private static final int ACQUIRE_MATERIALS_COUNT = 5;
-
-    // (2026-09-15 反应式补料) baritone 交还期间多久没往上爬过一格算"真上不去"。
-    // MovementPillar 每格约 1.5s, 4s 无上升 = 要么没料, 要么路径断了, 不必再等。
-    private static final double HANDOFF_STALL_SECONDS = 4;
-    // 交还总窗口: 09-14 ~ 09-15 是 20s, 期间"有上升就续命"导致 bot 能反复跳十几秒
-    // (用户观感"为啥不像以前 2s 就放弃")。补一次料 + 再爬一轮用不到 20s, 收紧到 12s。
-    private static final double HANDOFF_TOTAL_SECONDS = 12;
     /**
-     * 采集子任务: **实例缓存 keep-alive** —— 父 onTick 每 tick 重跑, 每 tick new 一个
-     * 会被框架的 isEqual/防横跳逻辑挡下或反复重启 (本仓"侧线子任务必须实例缓存"铁律)。
+     * (2026-09-17 统一) 垂直爬升协调器。三档: 1.5s 无进展 → 重挂 baritone 导航
+     * (零成本, 能挖的挡块它自己会处理) → 再 1.5s 无垫料则补一次 → 再不行判不可达。
+     * 本类不再自己管 stall 计时/补料子任务/交还基准采样 —— 那些都在协调器里,
+     * 与其他消费方同一份口径。
      */
-    private Task _acquireMaterialsTask = null;
+    private final AscentHandoffHelper _ascent =
+            new AscentHandoffHelper("destroy", _pillarMaterials);
 
-    // (2026-09-15 口径改"够爬") 本次采集要凑的垫块量 = 保底 3 / 目标层差(封顶 10)。
-    private int _acquireWant = ACQUIRE_MATERIALS_COUNT;
-    /** 每个 DestroyBlockTask 实例只采一次; 采完仍不够就落回原有放弃路径, 不无限循环。 */
-    private boolean _acquireStarted = false;
-    /** 单次采集总时长上限。超了收工, 交回原有放弃路径换目标。 */
-    private final TimerGame _acquireTotalTimer = new TimerGame(30);
-    private boolean _acquireDoneLogged = false;
+    /**
+     * (2026-09-17) 协调器本 tick 派出的补料子任务出口。
+     *
+     * `tryPillarUpToReach` 用 boolean 表达"已接管", 子任务只能靠这个字段带出来 ——
+     * 调用方(主循环)必须原样返回它, 否则采集任务每 tick 被重建 (本仓"侧线子任务
+     * 实例缓存 keep-alive"铁律)。
+     */
+    private Task _ascentChild = null;
+    // (2026-09-14 v4 交还 baritone → 2026-09-17 交协调器) 让位期间本类【绝不动输入】,
+    // 只做两件事: ① 挖掘特有的完成判定 (够了到了 / reach 到位) ② 把协调器的判负
+    // 结果转成"拉黑换目标"。stall 计时、重挂导航、补料、采样基准全在
+    // AscentHandoffHelper —— 本类不再持有任何 handoff 状态字段。
+    //
+    // 为什么当初要交还: 头顶被【可挖】方块挡住 (树叶/土/木/半砖…) 时, 自写
+    // PillarJumpHelper 只会 hold(JUMP) 空跳 —— 它不挖头顶, 而"脚块变空气"的放置
+    // 窗口永远开不了 ⇒ 空跳到超时。baritone 的 MovementPillar 构造是
+    // positionsToBreak={start.above(2)} + positionToPlace=start(反编译实锤),
+    // 本来就是"挖头顶 + 放脚下"。用户原话: "baritone 会处理悬空方块"。
+
+    // ---- (2026-09-14 缺垫块 → 去挖几格 → 2026-09-17 上移协调器) ----
+    // 历史: 09-14 在 tryPillarUpToReach 里"预判没垫块就派采集(挖 3 格泥土)", 死路一条
+    // (现场 20260914-115322: bot 只有原木, 按约束不算垫块 → 落回对"站立面之上 N 格"
+    // 的不可满足导航 → 冻结)。09-15 改成"让 baritone 先上, 真上不去时 stall 反应式
+    // 补一次"—— 用户拍板理由: "方块需求量不好求, 容易错误触发"。
+    // 09-17 这套状态机(含采集子任务 keep-alive、早停口径、超时)整体移入
+    // AscentHandoffHelper, "反应式补一次"的语义不变, 只是不再由本类持有。
 
     public DestroyBlockTask(BlockPos pos) {
         _pos = pos;
@@ -227,22 +187,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _farGiveUpSuppressed = false;
         _protectedRefusalLogged = false;
         _unbreakableRefusedLogged = false;
-        // (2026-09-14 垫塔接近) 新实例归零。timer 新建即到期, 进垫塔分支时才 reset。
-        _pillarActive = false;
-        _pillarLastY = Integer.MIN_VALUE;
-        // (2026-09-14 垫塔判据滞后) 垫塔基准脚块同样归零: 残留会让新实例沿用上一次
-        // 落脚层位的 aboveHead 判净空, 与当前玩家实际位置错位。
-        _pillarBaseFeet = null;
-        // (2026-09-14 交还 baritone) 同上, 交还状态也必须随实例归零 —— 残留会让
-        // 新目标一上来就被送去爬上一次的 GoalYLevel。
-        _pillarHandoff = false;
-        _pillarHandoffLastY = Integer.MIN_VALUE;
-        _pillarHandoffTried = false;
-        // (2026-09-14 缺垫块采集) 子任务引用必须清 —— 残留会让新实例 keep-alive 一个
-        // 已经不该跑的采集任务。标记归零: 实例重建即新一轮, 允许再采一次。
-        _acquireMaterialsTask = null;
-        _acquireStarted = false;
-        _acquireDoneLogged = false;
+        // (2026-09-17 统一) 爬升状态随实例归零: 新目标不允许沿用上一次的 GoalNear /
+        // 采样基准 (残留会让新目标一上来就被送去爬上一次的位置)。协调器 stop 内部
+        // 已含 onLostControl + 松键, 这里不用再重复那些动作。
+        _ascent.stop(mod);
         // 保险: 若上一实例被抢占, 其 onStop 已 release; 这里再松一次防残漏长按。
         PillarJumpHelper.release(mod);
 
@@ -375,9 +323,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 只在"最近 5s reach 都缺失"(真走不到) 时 moveChecker 失败才拉黑。
         // (2026-09-14 垫塔接近) 垫塔期间同样豁免: 竖直垫塔 XZ 天然零位移, 不豁免
         // 就会 6s 一到被 moveChecker 判"卡住" → 强制 Wander 把垫塔打断。
-        // (2026-09-15 删自写垫塔) handoff 期间同样豁免: baritone 挖挡块/走位阶段
-        // 可能 >6s 零位移, 卡死由 handoff 自己的 20s 超时兜底, 不劳 moveChecker。
-        if (!_pillarActive && !_pillarHandoff && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
+        // (2026-09-15 删自写垫塔 / 2026-09-17 交协调器) 让位期间豁免卡死检测:
+        // baritone 挖挡块/走位阶段可能 >6s 零位移, 卡死由协调器自己的 1.5s 档兜底,
+        // 不劳 moveChecker 在这里插一脚。
+        if (!_ascent.isActive() && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
             _moveChecker.reset();
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             _wanderTask.resetWander();
@@ -395,10 +344,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // We're trying to mine
         Optional<Rotation> reach = LookHelper.getReach(_pos);
         if (reach.isPresent()) {
-            // (2026-09-14 垫塔接近) 垫塔期间够到了 → 收工并松开跳跃键。垫塔的退出
-            // 路径必须 release, 否则 residual hold(JUMP) 会让 bot 持续起跳
-            // (PillarJumpHelper 的设计约束)。
-            endPillar(mod);
+            // (2026-09-14 垫塔接近 / 2026-09-17 统一) 够到了 → 收工并释放 baritone
+            // 目标 + 松开可能残留的按键。协调器 stop 是幂等的, 未启动时无副作用。
+            _ascent.stop(mod);
             // (2026-09-12 v17) 转换沿: tryToMine 刚从"缺 reach 超时"回到可达 = 开始
             // 一轮新挖掘, 重置总挖掘计时 (TimerGame 新建即到期, 不能 onStart reset)。
             if (_tryToMineTimer.elapsed()) {
@@ -510,7 +458,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // (树叶等可挖方块)挡住 → 先挖掉挡块, 不进垫塔。现场 20260915-174702:
             // 原木 (9,79,183) 被橡树叶包裹, bot 站 2 格外 eyeY=79.74, targetAboveEye
             // (80>=79.74) 以 0.26 的边距成立 → 每 0.6s 重进 PillarApproach 原地跳
-            // 18s 一格不升 (起跳瞬间 eyeY 越过 80 → reach 短暂出现 → endPillar →
+            // 18s 一格不升 (起跳瞬间 eyeY 越过 80 → reach 短暂出现 → 让位收工 →
             // 落地重入)。人对"手边被树叶包住的原木"不会先垫塔, 会先把叶子撸掉。
             // 只有目标超出挖掘距离 (真够不着) 或挡块挖不动时才落回垫塔/放弃路径。
             if (tryClearOccluder(mod)) {
@@ -518,28 +466,22 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
 
-            // (2026-09-14 缺垫块 → 先去挖几格) 用户: "没方块为什么不触发挖几个方块"。
-            // 目标在头顶 + 水平已在身边 + 完全没有可用垫块 (原木不算, 见 _pillarMaterials)
-            // → 先派采集任务挖 3 格泥土, 采到后下一轮自然进下面的垫塔分支。
-            // 必须排在 tryPillarUpToReach 之前 —— 后者见无材料会直接 return false。
-            // 子任务实例缓存 keep-alive, 完成/超时才收工 (见 pumpAcquireMaterials)。
-            if (_acquireMaterialsTask != null) {
-                Task acquire = pumpAcquireMaterials(mod);
-                if (acquire != null) {
-                    _gettingToBlockTick = 0;
-                    return acquire;
-                }
-            }
-            // (2026-09-15 反应式补料) 派采集的决策点从"预判不够"改到 stall 侧
-            // (tickBaritoneHandoff), 这里只负责 keep-alive 已派出的采集任务。
+            // (2026-09-17 统一) 补料子任务的 keep-alive 已并入协调器 —— 它会在下面
+            // tryPillarUpToReach 的 tick 里被驱动并原样返回, 这里不再单独接一手。
 
             // (2026-09-14 垫塔接近) 目标在眼睛及上方 + reach 够不到 + 背包有垫块
             // → 垫方块升上去够 (用户"搭方块垫脚上去够", 推翻 09-03 的放弃决定)。
             // 垫塔接管时本 tick 直接返回, 且不累计下面的"够不着"计数 —— 垫塔本身
             // 要跑好几秒, 累计会让它在半路被放弃闸门打断。
+            // (2026-09-14 垫塔接近 / 2026-09-17 统一协调器) 目标在眼睛及上方 + reach
+            // 够不到 → 交协调器让 baritone 爬升。接管时本 tick 直接返回, 且不累计
+            // 下面的"够不着"计数 —— 爬升本身要跑好几秒, 累计会让它半路被放弃闸门打断。
             if (tryPillarUpToReach(mod)) {
                 _gettingToBlockTick = 0;
-                return null;
+                Task child = _ascentChild;
+                _ascentChild = null;
+                // 非 null = 协调器派的补料子任务, 必须原样交回框架 (keep-alive)。
+                return child;
             }
 
             // (2026-09-03 够不着即放弃) reach 持续缺失且累计足够长仍够不着 → 判不可达,
@@ -628,15 +570,13 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *         挡块自己也够不着, 交回 handoff 与放弃路径。
      */
     private boolean tryClearOccluder(AltoClef mod) {
-        // (20260916 1330 场次 死循环修复) handoff 期间【完全让位】: 台阶地形 bot 随
-        // baritone 起跳/落步上下漂移, 眼-目标瞬时距离会在腾空瞬间假达标 (≤4.5) ——
-        // 本分支随即拆 handoff 抢输入 (20260915 互斥方向 = 挡块优先); 下一 tick bot
-        // 落回低台阶, 4.5 门又关上, 本分支自己也退出 → "handoff 起跳 → 拆 → 退出 →
-        // 重挂" 1.1s 死循环 25+ 轮零产出 (diag.log [PillarHandoff] start x25, 无一
-        // done/give up/timeout/STALL)。互斥方向反转: handoff 优先。baritone 的
-        // MovementPillar 本来就挖一垫一, 路径挡块它自己处理; handoff 按自身体系退出
-        // (done/STALL 补料/12s 超时/立即拉黑) 后本分支自然恢复, 收尾半格撸叶不变。
-        if (_pillarHandoff) {
+        // (20260916 1330 场次 死循环修复 / 2026-09-17 交协调器) 让位期间【完全让位】:
+        // 台阶地形 bot 随 baritone 起跳/落步上下漂移, 眼-目标瞬时距离会在腾空瞬间
+        // 假达标(≤4.5) → 本分支拆掉让位抢输入; 下一 tick 落回低台阶又退出 →
+        // "起跳 → 拆 → 退出 → 重挂" 1.1s 死循环 25+ 轮零产出。互斥方向: 让位优先。
+        // baritone 的 MovementPillar 本来就挖一垫一, 路径挡块它自己处理; 协调器按
+        // 自身体系退出(1.5s 重挂 / 补料 / 判不可达)后本分支自然恢复。
+        if (_ascent.isActive()) {
             return false;
         }
         Vec3d eye = mod.getPlayer().getEyePos();
@@ -761,37 +701,42 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         return true;
     }
 
+    /**
+     * (2026-09-14 垫塔接近 → 2026-09-17 统一协调器) reach 够不到时把垂直爬升交给
+     * {@link AscentHandoffHelper}。
+     *
+     * 本方法只负责**准入判据** + **挖掘特有的完成条件**; 爬不上去之后怎么办
+     * (1.5s 无进展重挂导航 / 补料 5 格 / 判不可达) 全在协调器里 —— 与
+     * `InteractWithBlockTask` 共用同一份口径, 不再各写一套 (现场 20260917-143636
+     * 就是"补料只长在本类里"导致的: 去工作台要走同一段竖直爬升却原地跳 33.2s)。
+     *
+     * @return true = 本 tick 已由让位/协调器接管 (含"挡头挖不动 → 判不可达")。
+     *         子任务(补料)通过 {@link #_ascentChild} 传出。false = 不适用
+     *         (目标不在上方 / 水平还没到位), 交回原导航+放弃逻辑。
+     */
     private boolean tryPillarUpToReach(AltoClef mod) {
-        // (2026-09-14 交还 baritone) 已经让位给 baritone 的垂直搭高: 期间不要抢
-        // 输入通道, 只盯着"够到了没 / 超时没"。抢回去 = 把它的 pillar 腰斩。
-        if (_pillarHandoff) {
-            return tickBaritoneHandoff(mod);
+        _ascentChild = null;
+        // ① 让位中 → 本类只做"挖掘特有的完成判定", 其余全交给协调器。
+        if (_ascent.isActive()) {
+            return tickAscentHandoff(mod);
         }
-        // (2026-09-15 删自写垫塔, 用户"baritone 设定挖的目标后应该自己会解决靠近;
-        // 垫塔当初是为头顶海洋写的, 为什么变成通用搭高") 自写 PillarJumpHelper 垫塔
-        // 09-14 (f697d790) 引入后连打 6+ 补丁仍与 baritone 打架 (现场 20260915-180535:
-        // 撸叶/自写垫塔/handoff 三套机制互相抢输入, 18s 零进展)。baritone 的
-        // MovementPillar 本来就会挖挡路块+放脚下爬升, 靠近与爬升全交它; PillarJumpHelper
-        // 只保留在 GoToSurfaceTask 的海洋逃生场景 (它的诞生地)。
-        // ① 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
+        // ② 只处理"目标方块整体在眼睛及上方"。水平远处的目标是导航问题 ——
         //    垫高只会让水平距离更远, 人也不会为了够 20 格外的方块先垫个塔。
         if (!targetAboveEye(mod)) {
             return false;
         }
-        // ② 水平已在身边 (<=2 格) 才交爬升 —— 与 closeEnoughToJudge 的 horizontallyInPlace
-        //    同一判据源。否则"头顶上方 + 水平 50 格"这类目标会误触发。
+        // ③ 水平已在身边 (<=2 格) 才交爬升 —— 与 closeEnoughToJudge 的
+        //    horizontallyInPlace 同一判据源。否则"头顶上方 + 水平 50 格"会误触发。
         if (horizontalDistanceSqToPlayer(mod) > 4.0) {
             return false;
         }
-        // ③ (2026-09-15 反应式补料, 用户"方块需求量不好求, 容易错误触发") 这里
-        //    不再预判需要几块 —— 层差猜多了白挖一堆泥、猜少了照样料尽。改为让
-        //    baritone 先上: 有多少块就先垫多少, 真上不去时由 tickBaritoneHandoff
-        //    的 stall 检测反应式补一次料, 再不行就拉黑放弃 (09-03 地基)。
-        // ③b 头顶被【挖不动】的方块 (基岩类) 挡死 → baritone 爬不上去, 直接判不可达,
-        //    省掉整轮 handoff。可挖挡头 (树叶/泥土) 不拦 —— baritone 自己会挖。
+        // ④ 头顶被【挖不动】的方块 (基岩类) 挡死 → baritone 爬不上去, 直接判不可达,
+        //    省掉整轮让位。可挖挡头 (树叶/泥土) 不拦 —— baritone 自己会挖。
+        //    ③ (2026-09-15) 不再预判"需要几块垫料": 用户"方块需求量不好求, 容易错误
+        //    触发"。改为让 baritone 先上, 真上不去时由协调器反应式补一次。
         if (headroomBlockedForPillar(mod, mod.getPlayer().getBlockPos())
                 && !isBlockerDiggable(mod, mod.getPlayer().getBlockPos().up(2))) {
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] skip: headroom UNBREAKABLE at "
+            Debug.logToFile("altoclef_diag.log", "[Ascent] skip: headroom UNBREAKABLE at "
                     + mod.getPlayer().getBlockPos().up(2).toShortString()
                     + " target=" + _pos.toShortString() + " -> unreachable");
             // (2026-09-15 立即拉黑) baritone 爬不上去是判死刑的强信号, 默认阈值 4
@@ -799,7 +744,43 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
             return true;
         }
-        startBaritoneHandoff(mod, mod.getPlayer().getBlockPos(), "target above eye, out of reach");
+        startAscentHandoff(mod);
+        return true;
+    }
+
+    /** (2026-09-17) 让位中每 tick 的唯一入口: 完成判定 → 协调器裁决。 */
+    private boolean tickAscentHandoff(AltoClef mod) {
+        int y = mod.getPlayer().getBlockPos().getY();
+        // (2026-09-15 落地门控) 完成判定只在【落地时】做。现场 20260915-160447:
+        // bot 站 y=69 头顶橡树叶 → 让位 baritone, baritone 起跳那一瞬 blockPos 还是
+        // 69 但真实 Y 已过 69.38 → eyeY>71 → targetAboveEye 瞬间翻 false → 这里
+        // 误判 "done" 腰斩它的起跳 → 落地重入 → 1.4s 一轮 start/done 死循环 8 轮。
+        // 腾空期间的即时位置一律不可信。
+        // (2026-09-15 GoalNear) 爬到目标 2 格内可能还差半层 (y=78 贴着 79 的目标),
+        // 此时 y<目标层 但挖掘距离已到 —— reach 判定补上这个口。
+        if (mod.getPlayer().isOnGround()
+                && (!targetAboveEye(mod) || y >= _pos.getY() || withinMiningReach(mod))) {
+            Debug.logToFile("altoclef_diag.log", "[Ascent] done tag=destroy y=" + y
+                    + " target=" + _pos.toShortString() + " -> back to normal mining");
+            _ascent.stop(mod);
+            return false;
+        }
+        AscentHandoffHelper.TickResult r = _ascent.tick(mod);
+        if (!r.handled) {
+            return false;
+        }
+        if (r.unreachable) {
+            // (2026-09-15 立即拉黑) baritone 爬不上去一次即判死刑, 不给默认阈值 4
+            // 留 4 轮每轮 10-15s 的重试浪费。
+            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
+            return true;
+        }
+        if (r.child != null) {
+            setDebugState("Acquiring pillar materials for " + _pos.toShortString());
+            _ascentChild = r.child;
+            return true;
+        }
+        setDebugState("Baritone pillar to " + _pos.toShortString());
         return true;
     }
 
@@ -817,8 +798,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     /**
      * (2026-09-14 v2 落脚基准入参) 净空必须按【指定的落脚位置】算, 不能默认读即时
      * BlockPos —— 起跳那一 tick 脚位会瞬时 +1, aboveHead 随之撞上目标方块本身,
-     * 判据自激翻转。垫塔中用 _pillarBaseFeet (见该字段注释), 首次准入/派采集前
-     * 用即时位置 (那时玩家应当站稳)。
+     * 判据自激翻转。本类只在"准入前"调用它, 那时玩家应当站稳, 故传即时位置;
+     * 让位期间的采样基准由 AscentHandoffHelper 自己管(它也只在落地时更新)。
      */
     private boolean headroomBlockedForPillar(AltoClef mod, BlockPos feet) {
         BlockPos aboveHead = feet.up(2);
@@ -852,243 +833,42 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-14 v4 交还 baritone 垂直搭高) 自写 PillarJumpHelper 只放不挖,
-     * 遇到挡头只会空跳到超时; 而 baritone 会挖。让位: 挂 GoalYLevel(目标层),
-     * 由它的 A* 自己选 MovementPillar (挖 up(2) + 放脚下) 爬上去。
+     * (2026-09-14 v4 让位 baritone → 2026-09-17 交协调器) 把垂直爬升交给 baritone。
      *
-     * (2026-09-15 GoalYLevel → GoalNear(pos,2), 用户"这不是回表面任务, GoalYLevel
-     * 纯 Y 目标也是错的") GoalYLevel 是 GoToSurfaceTask 的遗产 —— 那里只关心
-     * "到某一层", 在哪根柱子爬都行。挖目标的 handoff 关心的是爬到【目标旁边】。
-     * 现场 20260915-224849: baritone 挑了 8 格外的柱子爬 (树冠下净空差, 它选了
-     * 好爬的), 两次爬到 y=79 都是假 done —— 目标不在手边, 挖掘进度 -12, wander
-     * 挪走重来, 全场零产出。GoalNear(pos,2) 允许脚站在目标邻格/下一层 (含斜角),
-     * 对树干旁的可站立格可满足; 即便个别几何不可满足, 现在 stall 4s + 总窗口
-     * 12s + 立即拉黑已把最坏情况封顶, 不再是 09-14 那个 26s 冻结的无底洞。
+     * 为什么是 baritone 而不是自写垫塔: 自写 PillarJumpHelper 只放不挖, 遇到挡头
+     * (树叶/土/木/半砖) 只会空跳到超时; 而 baritone 的 MovementPillar 构造就是
+     * positionsToBreak={start.above(2)} + positionToPlace=start (反编译实锤),
+     * 天生"挖一垫一", 干竖井/干口袋完全能上。用户原话: "baritone 会处理悬空方块"。
+     *
+     * 目标用 GoalNear(_pos, 2) 而不是 GoalYLevel: 后者只约束高度(GoToSurfaceTask
+     * 的遗产, "到某一层"在哪根柱子爬都行), 而挖方块关心的是爬到【目标旁边】。
+     * 现场 20260915-224849: baritone 挑了 8 格外的柱子爬, 两次爬到 y=79 都是
+     * 假 done —— 目标不在手边, 挖掘进度 -12, wander 挪走重来, 全场零产出。
+     * GoalNear(pos,2) 允许脚站在目标邻格/下一层 (含斜角), 对树干旁的可站立格可满足。
+     *
+     * 让位期间本类**绝不动输入**; 爬升观察 / 重挂导航 / 补料 / 判负全在
+     * AscentHandoffHelper (1.5s 无进展一档, 不再是 09-14 那个 26s 冻结的无底洞)。
      */
-    private void startBaritoneHandoff(AltoClef mod, BlockPos feet, String reason) {
-        endPillar(mod);
-        if (!_pillarHandoff) {
-            _pillarHandoff = true;
-            _pillarHandoffTried = true;
-            _pillarHandoffLastY = mod.getPlayer().getBlockPos().getY();
-            _pillarHandoffLastX = mod.getPlayer().getBlockPos().getX();
-            _pillarHandoffLastZ = mod.getPlayer().getBlockPos().getZ();
-            _pillarHandoffTimer.reset();
-            _pillarHandoffStallTimer.reset();
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] start target="
-                    + _pos.toShortString()
-                    + " from y=" + _pillarHandoffLastY
-                    + " blockedBy=" + mod.getWorld().getBlockState(feet.up(2)).getBlock()
-                    + " (" + reason + ") -> GoalNear(" + _pos.toShortString() + ", 2)");
-        }
+    private void startAscentHandoff(AltoClef mod) {
         // 与自写垫塔同款: builder 不会自己停, 占着输入通道会让 baritone 的
         // pillar 动不了 (现场 20260914-115322)。
         mod.getClientBaritone().getBuilderProcess().onLostControl();
-        mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_pos, 2));
+        _ascent.start(mod, _pos, _pos.getY(),
+                () -> new GoalNear(_pos, 2),
+                "target above eye, out of reach");
     }
-
     /**
-     * (2026-09-14 v4) 交还期间每 tick 只做三件事, **绝不动输入** —— 抢回去等于
-     * 把 baritone 正在执行的 pillar 腰斩 (与 GoToSurfaceTask 踩过的同一个坑):
-     *   ① 够到了 (目标不在眼睛上方) 或已到目标层 → 收工, 交回常规挖掘;
-     *   ② y 有上升 → 续命 (baritone 搭高每格 1.5s 上下, 别用固定窗口砍它);
-     *   ③ goal 掉线 → 重挂。
-     */
-    private boolean tickBaritoneHandoff(AltoClef mod) {
-        int y = mod.getPlayer().getBlockPos().getY();
-        // (2026-09-15 落地门控) done 判定只在【落地时】做。现场 20260915-160447:
-        // bot 站 y=69 头顶橡树叶 → 交还 baritone GoalYLevel(70), baritone 起跳
-        // 那一瞬 blockPos 还是 69 但真实 Y 已过 69.38 → eyeY>71 →
-        // targetAboveEye 瞬间翻 false → 这里误判 "done y=69" 腰斩它的起跳 →
-        // 落地重入 → 1.4s 一轮 start/done 死循环 8 轮 (diag.log 16:06:31-52)。
-        // 与垫塔 v2 "判据滞后"同病: 腾空期间的即时位置一律不可信, 视为"进行中"。
-        // (2026-09-15 GoalNear) 爬到目标 2 格内可能还差半层 (y=78 贴着 79 的目标),
-        // 此时 y<目标层 但挖掘距离已到 —— reach 判定补上这个口, 否则 baritone 停在
-        // 已满足的 goal 上, y 不再涨 → 4s 后被 STALL 误杀拉黑。
-        if (mod.getPlayer().isOnGround()
-                && (!targetAboveEye(mod) || y >= _pos.getY() || withinMiningReach(mod))) {
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] done y=" + y
-                    + " target=" + _pos.toShortString() + " -> back to normal mining");
-            _pillarHandoff = false;
-            endPillar(mod);
-            return false;
-        }
-        if (y > _pillarHandoffLastY) {
-            _pillarHandoffLastY = y;
-            _pillarHandoffTimer.reset();
-            _pillarHandoffStallTimer.reset();
-        }
-        // (2026-09-15 GoalNear 进场) 走向目标的水平位移也算进度 (见字段注释);
-        // 原地跳 XZ 不变、y 不创新高, 两条都拦不住它 —— 该抓的照抓。
-        BlockPos _cur = mod.getPlayer().getBlockPos();
-        if (_cur.getX() != _pillarHandoffLastX || _cur.getZ() != _pillarHandoffLastZ) {
-            _pillarHandoffLastX = _cur.getX();
-            _pillarHandoffLastZ = _cur.getZ();
-            _pillarHandoffStallTimer.reset();
-        }
-        // (2026-09-15 反应式补料 + 恢复 09-03 "放弃"地基)
-        // baritone 交还期间高度不再上涨 = 真上不去, 分两种情况:
-        //   · 背包一块垫料都没有 且 本实例还没补过 → 补一次 (固定 5 块), 再爬一轮;
-        //   · 已经补过 / 其实有料却爬不上去 → 按 09-03 的地基直接拉黑换目标。
-        // 旧逻辑此时只能干等 20s 总超时, 期间表现为"反复跳跃止不住"。
-        if (_pillarHandoffStallTimer.elapsed()) {
-            int have = PillarJumpHelper.countMaterials(mod, _pillarMaterials);
-            // baritone 的放置总闸 hasThrowaway 依赖它; pause 泄漏时症状 = 只跳不放。
-            boolean paused = mod.getExtraBaritoneSettings().isInteractionPaused();
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] STALL y=" + y
-                    + " lastY=" + _pillarHandoffLastY
-                    + " have=" + have + " paused=" + paused
-                    + " acquired=" + _acquireStarted
-                    + " target=" + _pos.toShortString());
-            if (!_acquireStarted && have == 0) {
-                Task acquire = startAcquireMaterials(mod);
-                if (acquire != null) {
-                    Debug.logToFile("altoclef_diag.log", "[PillarHandoff] -> acquire "
-                            + _acquireWant + " dirt then retry");
-                    return true; // 下一 tick 由 pumpAcquireMaterials keep-alive
-                }
-            }
-            // (2026-09-15 GoalNear) baritone 已把 bot 带进目标挖掘距离 (爬到邻格),
-            // 只是视线被树叶挡/差半格 —— 收工回常规路径 (撸叶/正常挖), 不拉黑。
-            // 拉黑了反而把一个本来够得着的目标判死。
-            if (withinMiningReach(mod)) {
-                Debug.logToFile("altoclef_diag.log", "[PillarHandoff] climb delivered reach, "
-                        + "back to normal mining target=" + _pos.toShortString());
-                _pillarHandoff = false;
-                endPillar(mod);
-                return true;
-            }
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] give up: "
-                    + (_acquireStarted ? "already acquired once" : "has materials but cannot climb")
-                    + " target=" + _pos.toShortString() + " -> unreachable");
-            _pillarHandoff = false;
-            endPillar(mod);
-            // (2026-09-15 立即拉黑) 同上: baritone 爬不上去一次即判死刑, 不给
-            // 默认阈值 4 留 4 轮每轮 10-15s 的重试浪费。
-            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
-            return true;
-        }
-        if (_pillarHandoffTimer.elapsed()) {
-            // (2026-09-15 GoalNear) 超时同理: 已进挖掘距离就不拉黑, 交回常规挖掘。
-            if (withinMiningReach(mod)) {
-                Debug.logToFile("altoclef_diag.log", "[PillarHandoff] timeout at y=" + y
-                        + " but within reach target=" + _pos.toShortString()
-                        + " -> back to normal mining");
-                _pillarHandoff = false;
-                endPillar(mod);
-                return true;
-            }
-            Debug.logToFile("altoclef_diag.log", "[PillarHandoff] timeout 20s at y=" + y
-                    + " lastY=" + _pillarHandoffLastY
-                    + " target=" + _pos.toShortString() + " -> unreachable");
-            _pillarHandoff = false;
-            endPillar(mod);
-            mod.getBlockTracker().requestBlockUnreachable(_pos, 1);
-            return true;
-        }
-        if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
-            mod.getClientBaritone().getBuilderProcess().onLostControl();
-            mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_pos, 2));
-        }
-        setDebugState("Baritone pillar to " + _pos.toShortString());
-        return true;
-    }
-
-    /**
-     * 派采集垫块子任务 (实例缓存, 只建一次)。
+     * 收尾: 幂等释放 baritone 目标 + 松开可能残留的按键 (所有退出路径必调)。
      *
-     * @return 子任务实例 (keep-alive); null = 建不出来 (目录里没有 / 已达尝试上限)。
+     * (2026-09-15 handoff 残留目标) 现场 20260915-224849 末尾实锤: give up 后只清了
+     * 让位标志, GoalYLevel(79) 还挂在 customGoalProcess 上 → baritone 原地跳 19s
+     * (bIn jump=true); 更糟的是导航分支见 "isActive()" 就不设新目标, bot 永远走不到
+     * 目标正下方 → 水平 8 格不满足"到位"前提 → 放弃计数每 tick 清零, 闸门永不触发,
+     * 死锁闭环。故凡退出让位, 必须连 customGoal 一起放掉 —— 现在这一步在协调器
+     * stop 内部, 本方法是"退出即放手"的统一出口。
      */
-    private Task startAcquireMaterials(AltoClef mod) {
-        // (2026-09-15 反应式补料) 不再按层差猜需求量 —— 固定补一小撮够再试一轮。
-        // 真不够时会再次 stall, 那时 _acquireStarted 已 true → 走放弃。
-        _acquireWant = ACQUIRE_MATERIALS_COUNT;
-        Task t = TaskCatalogue.getItemTask(Items.DIRT, _acquireWant);
-        _acquireStarted = true;
-        _acquireDoneLogged = false;
-        if (t == null) {
-            Debug.logToFile("altoclef_diag.log", "[PillarAcquire] no task for " + Items.DIRT
-                    + " target=" + _pos.toShortString() + " → 落回放弃路径");
-            return null;
-        }
-        _acquireMaterialsTask = t;
-        _acquireTotalTimer.reset();
-        // 采集期间不能留残余长按 (垫塔可能上一 tick 还在 hold(JUMP))。
-        endPillar(mod);
-        Debug.logToFile("altoclef_diag.log", "[PillarAcquire] start target=" + _pos.toShortString()
-                + " want=" + _acquireWant + " X " + Items.DIRT
-                + " eyeY=" + String.format("%.2f", mod.getPlayer().getEyeY())
-                + " have=" + PillarJumpHelper.countMaterials(mod, _pillarMaterials));
-        return t;
-    }
-
-    /**
-     * 采集子任务 keep-alive。
-     *
-     * @return 仍在跑 → 返回同一实例 (框架 isEqual 判等, 不会换实例); 已完成/超时 →
-     *         null (调用方不再返回它, 框架会 stop 掉)。
-     */
-    private Task pumpAcquireMaterials(AltoClef mod) {
-        // (2026-09-14 实时计数早停, 现场 20260914-125213 实锤) 不能只信子任务自己的
-        // isFinished —— 它走 ItemTarget/POSSESS 判量(本仓"哨兵 targetCount 陷阱"),
-        // 收够了也判不完: 该现场要 3 份泥土, 实际收了 17 份、自挖 6 格深坑 + 3x3 环
-        // (20+ 方块), 最后靠 30s 硬超时掐掉(还被游戏 5.2s 卡顿吃掉 3.7s)。这里每
-        // tick 直读【真实背包】(getItemCountReal, 不走 500ms 缓存层 —— 判"够没够"
-        // 属于判定关键资源, 按本仓"背包权威计数"惯例一律走 Real)。
-        // (2026-09-15 口径改"够爬") 早停量 = _acquireWant (保底 3, 目标层差封顶 10);
-        // PillarJumpHelper.countMaterials 直读 inventory.main/offHand, 同为真实计数,
-        // 圆石等其他垫块也计入 (bot 有 5 块圆石时别再逼它挖第 6 块泥)。
-        int haveMaterials = PillarJumpHelper.countMaterials(mod, _pillarMaterials);
-        if (haveMaterials >= _acquireWant
-                || mod.getItemStorage().getItemCountReal(Items.DIRT) >= _acquireWant) {
-            logAcquireDone(mod, "enough(materials=" + haveMaterials + ")");
-            _acquireMaterialsTask = null;
-            return null;
-        }
-        if (_acquireTotalTimer.elapsed()) {
-            logAcquireDone(mod, "timeout");
-            _acquireMaterialsTask = null;
-            return null;
-        }
-        boolean finished;
-        try {
-            finished = _acquireMaterialsTask.isFinished(mod);
-        } catch (Throwable t) {
-            // 没 start 过就查 isFinished 可能炸 → 当作完成, 不再重派 (本仓"读不到与 0 同码"
-            // 教训的同款防御: 宁可少采一轮, 不要卡在这个判断上)。
-            finished = true;
-        }
-        if (finished) {
-            logAcquireDone(mod, "finished");
-            _acquireMaterialsTask = null;
-            return null;
-        }
-        return _acquireMaterialsTask;
-    }
-
-    private void logAcquireDone(AltoClef mod, String why) {
-        if (_acquireDoneLogged) return;
-        _acquireDoneLogged = true;
-        Debug.logToFile("altoclef_diag.log", "[PillarAcquire] done(" + why + ") target="
-                + _pos.toShortString()
-                + " have=" + PillarJumpHelper.countMaterials(mod, _pillarMaterials));
-    }
-
-    /** 收尾垫塔: 幂等松开跳跃/移动键 (所有退出路径必调, 见 PillarJumpHelper 设计约束)。 */
-    private void endPillar(AltoClef mod) {
-        // (2026-09-15 handoff 残留目标) handoff 退出(done/超时/give up)必须连
-        // baritone 的 customGoal 一起放掉。现场 20260915-224849 末尾: give up 后
-        // 只清了 _pillarHandoff 标志, GoalYLevel(79) 还挂在 customGoalProcess 上
-        // → baritone 原地跳 19s (bIn jump=true); 更糟的是导航分支见 "isActive()"
-        // 就不设新目标, bot 永远走不到目标正下方 → 水平 8 格不满足"到位"前提 →
-        // 2s 放弃计数每 tick 清零, 闸门永不触发, 死锁闭环。
-        // startBaritoneHandoff 首行也调本方法, 但其后紧跟 setGoalAndPath, 无空窗。
-        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
-        // (2026-09-14 v2) 基准伴生于"正在垫塔", 收工即清空 —— 残留会让下一次
-        // 垫塔准入错位到上一次的落脚层。
-        _pillarBaseFeet = null;
-        if (!_pillarActive) return;
-        _pillarActive = false;
+    private void releaseAscent(AltoClef mod) {
+        _ascent.stop(mod);
         PillarJumpHelper.release(mod);
     }
 
@@ -1131,12 +911,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             adris.altoclef.tasks.movement.MineDownExploreTask.recordBrokenBlock(mod, _pos);
         }
         mod.getBehaviour().pop();
-        // (2026-09-14 垫塔接近) 垫塔期间 hold 的跳跃/移动键必须在【所有】退出路径上
-        // 松开 (被抢占 / 上层换目标 / 链停止都走这里), 否则残漏长按会让 bot 持续起跳。
-        endPillar(mod);
-        // (2026-09-14 缺垫块采集) 子任务引用同样在两个清除点 (onStart/onStop) 都要清 ——
-        // 否则被抢占后残留引用会让下一实例 keep-alive 一个不该跑的采集任务。
-        _acquireMaterialsTask = null;
+        // (2026-09-14 垫塔接近 / 2026-09-17 统一) 让位期间 baritone 握着 customGoal,
+        // 爬上期间也可能残留按键 —— 被抢占 / 上层换目标 / 链停止都走这里, 必须放手,
+        // 否则残漏会让 bot 持续起跳 (现场 20260915-224849 的 19s 原地跳)。
+        releaseAscent(mod);
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // Do not keep breaking.

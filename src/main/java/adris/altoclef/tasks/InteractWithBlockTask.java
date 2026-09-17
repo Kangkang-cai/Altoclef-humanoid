@@ -10,7 +10,9 @@ import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.baritone.GoalAnd;
 import adris.altoclef.util.baritone.GoalBlockSide;
 import adris.altoclef.util.time.TimerGame;
+import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -72,6 +74,20 @@ public class InteractWithBlockTask extends Task {
     private final TimerGame _giveUpTimer = new TimerGame(15);
     // (2026-09-15 统一超时标签) 15s 兜底放弃的边沿标记, 防多条放弃路径重复刷 [TIMEOUT]。
     private boolean _giveUpLogged = false;
+
+    /**
+     * (2026-09-17 统一爬升协调器) "目标在头顶、够不着"的垂直爬升全权交给它:
+     * 1.5s 无进展 → 重挂 baritone 导航(零成本, 能挖的挡块它自己会处理);
+     * 再 1.5s → 补一次垫料; 再不行 → 判不可达交本任务拉黑。
+     *
+     * 现场 20260917-143636 实锤缺的正是这一层: bot 在自挖竖井底 y=60, 要上到
+     * y=66 的工作台右键, `[NAV-STUCK] netXZ=0.00 jump=true pathing=true` 且全场
+     * 零 Place(没垫料, baritone 的 MovementPillar 进不了 A*)—— 原地跳 33.2s 直到
+     * 用户手动停。当时补料逻辑只长在 `DestroyBlockTask` 里, 且本任务自己的 15s
+     * 兜底被"4s 瞬时判负一 tick、其余 tick 全判正"淹没(见 01-task-framework #14)。
+     */
+    private final AscentHandoffHelper _ascent =
+            new AscentHandoffHelper("interact", PillarJumpHelper.withWoodNoLogs());
 
     private ClickResponse _cachedClickStatus = ClickResponse.CANT_REACH;
 
@@ -210,6 +226,8 @@ public class InteractWithBlockTask extends Task {
         // (2026-09-11) 无游荡模式的 15s 总兜底计时。
         _giveUpTimer.reset();
         _giveUpLogged = false;
+        // (2026-09-17) 协调器状态不跨实例存活: 被抢占恢复后按新现场重新判定高度差。
+        _ascent.stop(mod);
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -293,6 +311,47 @@ public class InteractWithBlockTask extends Task {
         switch (_cachedClickStatus) {
             case CANT_REACH -> {
                 setDebugState("Getting to our goal");
+
+                // (2026-09-17 统一爬升协调器) 目标明显比我们高一截时, 把垂直爬升
+                // 整体交给协调器 —— 它自己按"1.5s 无进展 → 重挂导航 → 补垫料 →
+                // 判不可达"推进, 且有明确的 6s 级决策点, 不再出现"baritone 原地跳
+                // 半小时没人管"。仅在还差 ≥2 格时才启动, 免得已到位却点不动时
+                // 反复 start/done 空转。
+                int feetY = mod.getPlayer().getBlockPos().getY();
+                boolean needsClimb = feetY < _target.getY() - 1;
+                if (needsClimb) {
+                    if (!_ascent.isActive()) {
+                        _ascent.start(mod, _target, _target.getY(),
+                                () -> createGoalForInteract(_target, reachDistance, _direction,
+                                        _interactOffset, _walkInto),
+                                "interact target above, feetY=" + feetY
+                                        + " targetY=" + _target.getY());
+                    }
+                    AscentHandoffHelper.TickResult climb = _ascent.tick(mod);
+                    if (climb.handled) {
+                        // 协调器期间不走本任务自己的 15s 兜底: 它才是唯一的决策者,
+                        // 否则两套判据互相清零 (本仓"同一概念只留一个判据源")。
+                        _moveChecker.reset();
+                        _giveUpTimer.reset();
+                        if (climb.done) {
+                            // 已到目标层, 下一 tick 走正常点击流程。
+                            return null;
+                        }
+                        if (climb.unreachable) {
+                            adris.altoclef.util.helpers.TimeoutLog.hit("InteractWithBlockTask.ascent",
+                                    "re-navigate + acquire exhausted, blacklisting target");
+                            mod.getBlockTracker().requestBlockUnreachable(_target);
+                            return _wanderTask;
+                        }
+                        if (climb.child != null) {
+                            setDebugState("Acquiring pillar materials for " + _target.toShortString());
+                            return climb.child;
+                        }
+                        setDebugState("Climbing to " + _target.toShortString() + " (baritone)");
+                        return null;
+                    }
+                }
+
                 // Get to our goal then
                 if (!proc.isActive()) {
                     proc.setGoalAndPath(moveGoal);
@@ -307,6 +366,8 @@ public class InteractWithBlockTask extends Task {
             }
             case WAIT_FOR_CLICK -> {
                 setDebugState("Waiting for click");
+                // 够到了 → 交回普通点击流程, 协调器收工。
+                _ascent.stop(mod);
                 if (proc.isActive()) {
                     proc.onLostControl();
                 }
@@ -356,6 +417,7 @@ public class InteractWithBlockTask extends Task {
             }
             case CLICK_ATTEMPTED -> {
                 Debug.logInternal("(InteractWithBlockTask: Click attempted!)");
+                _ascent.stop(mod);
                 if (proc.isActive()) {
                     proc.onLostControl();
                 }
@@ -384,6 +446,8 @@ public class InteractWithBlockTask extends Task {
     protected void onStop(AltoClef mod, Task interruptTask) {
         mod.getInputControls().release(Input.SNEAK);
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        // (2026-09-17) 协调器可能正握着 customGoal + 按键, 所有退出路径都要收工。
+        _ascent.stop(mod);
     }
 
     @Override
