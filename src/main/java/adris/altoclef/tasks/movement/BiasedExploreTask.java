@@ -46,6 +46,39 @@ import java.util.function.Supplier;
  *       重建全新实例 → 又选中同一根够不着的原木 → 死循环 35 分钟。
  *       修: {@link #_unreachableTargets} 跨实例 + 按方块坐标记 + 5 分钟 TTL。</li>
  * </ol>
+ *
+ * <h3>(2026-09-17) 偏置步真正能走到目标: 目标作废时机 + 步长截断</h3>
+ * 现场 20260917-135722 (用户"偏置探索的目标会切换, 一会选前面那个目标, 一会选后面那个,
+ * 从未真正做出过贡献"): 36.7s 内同一个实例走出三段 46 格的腿, 其中前两段是
+ * <b>48 格出 + 46 格原路折回</b> —— 总路径约 140 格, 净位移只有 25 格。
+ * 排除项 (均有日志): {@code Explore step failed} 0 次, {@code All remembered targets
+ * checked} 0 次, 无 slowtick.log, {@code exploration recreated} 全场仅 2 次
+ * (即实例未被重建) → 不是卡死、不是拉黑、不是重建清空, 是<b>每步换方向</b>。
+ * <p>
+ * 两个代码级缺口 (都与"目标距离"无关地写死了 48):
+ * <ol>
+ *   <li><b>耗时/作废时机错</b> — {@link #onTick} 到达的是 48 格外的【落脚点】
+ *       ({@code ARRIVED_DISTANCE=3} 是相对落脚点判的), 却在这一刻把
+ *       {@code _currentBiasTarget} 记进 {@link #_visitedBiasTargets}。于是
+ *       <b>任何 > BIAS_TARGET_REACH 的目标都只贡献一次 48 格位移就被永久作废</b>,
+ *       78~250 格的记忆目标根本不可能被抵达; 而作废后重选的"最近未访问目标"
+ *       常在身后 (刚朝 A 走了 48 格, 最近的往往是出发那侧) → 掉头, 一来一回。</li>
+ *   <li><b>步长不看目标距离</b> — {@code EXPLORE_STEP=48} 恒定。目标 46 格时一步
+ *       跨过头 2 格, 却因"落脚点到达"被判成访问完成。</li>
+ * </ol>
+ * 修法 (三条, 都在本文件内):
+ * <ol>
+ *   <li>步长截断: {@code min(EXPLORE_STEP, 目标距离 - ARRIVED_DISTANCE)}, 下限
+ *       {@link #MIN_EXPLORE_STEP} —— 目标 ≤51 格时一步正好落在目标跟前。</li>
+ *   <li>多步逼近 (锁定): {@link #chooseNewTarget} 顶部若 {@code _currentBiasTarget}
+ *       仍有效且跳数未超上限, 就继续朝<b>同一个</b>目标走, 不再每步重选最近的
+ *       —— 这是"> 48 格的记忆目标能被多步逼近"的关键。</li>
+ *   <li>作废时机: 只有玩家进到 {@link #BIAS_TARGET_REACH} 内才记 visited;
+ *       追满 {@link #BIAS_MAX_HOPS_PER_TARGET} 步仍未靠近则判"走不到"作废。</li>
+ * </ol>
+ * 另: {@link #logBiasStep} 新增 {@code [BiasStep]} 每步决策日志 —— 本次排查时
+ * <b>没有任何一行日志记录"这一步选了哪个 bias 目标、多远、第几跳"</b>, 只能靠
+ * {@code [MOB-DIAG] player=} 的位置采样反推, 白花一轮。
  */
 public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
@@ -66,6 +99,17 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int MAX_FAIL_COUNT = 10;
     // Distance to consider a step "arrived".
     private static final double ARRIVED_DISTANCE = 3;
+
+    // ===== (2026-09-17 目标作废时机 + 步长截断 + 多步逼近) 见类注释第三节 =====
+    // 判定"真的走到 bias 目标了"的距离。只有玩家进到这个距离内, 才把该目标记为已访问。
+    // 原实现是"到达 48 格外的【落脚点】就记为已访问" → 目标只贡献一次位移就作废。
+    private static final double BIAS_TARGET_REACH = 16;
+    // 同一个目标最多连续追这么多步。48 * 6 = 288 > BIAS_MAX_DISTANCE(256), 够走到最远
+    // 目标; 追满仍没靠近 = 这个目标实际走不到 → 作废换下一个, 防死磕。
+    private static final int BIAS_MAX_HOPS_PER_TARGET = 6;
+    // 步长下限: 目标只剩 9 格时不做 6 格的碎步, 至少走这么多。
+    private static final double MIN_EXPLORE_STEP = 8;
+
     // Attempts to pick a non-water, non-failed target before counting the step as failed.
     private static final int MAX_PICK_ATTEMPTS = 12;
     // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取食物")
@@ -132,7 +176,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
     private BlockPos _currentTarget;
     // The bias target the current step is steered towards (null = random step).
+    // (2026-09-17) 语义收紧: 它是"我正在逼近的那个记忆目标", 会被【跨步锁定】——
+    // 随机抖动的步不再把它清空 (见 chooseNewTarget 的 random 分支), 直到真的走进
+    // BIAS_TARGET_REACH 或追满 BIAS_MAX_HOPS_PER_TARGET 步才换下一个。
     private BlockPos _currentBiasTarget;
+    // 自上一个目标被"消费"以来, 已经朝 bias 目标走了几步 (每个 biased 步 +1)。
+    // 到 BIAS_MAX_HOPS_PER_TARGET 仍未靠近 → 作废当前目标 (见 onTick 到达分支)。
+    private int _biasHops;
     private Vec3d _origin;
     private int _failCounter;
     private boolean _lastWasBiased;
@@ -214,6 +264,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _failCounter = 0;
         _currentTarget = null;
         _currentBiasTarget = null;
+        _biasHops = 0;
         _hadBiasOnce = false;
         _biasExhausted = false;
         _heading = Double.NaN;
@@ -255,9 +306,26 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (_currentTarget == null || arrivedAtCurrentTarget(mod)) {
-            // Consume the bias target we just finished walking towards.
+            // (2026-09-17 作废时机修正) 到的是 48 格外的【落脚点】, 不是目标点。
+            // 原实现在这里无条件把 _currentBiasTarget 记为已访问 → 每个目标只贡献
+            // 一次位移就永久作废 (78~250 格的记忆目标永远到不了), 且重选出的"最近
+            // 未访问"常在身后 → 48 格出 + 46 格回 (现场 20260917-135722 实锤)。
+            // 现在只有两种情况才换目标:
+            //   ① 玩家真的进到 BIAS_TARGET_REACH 内 (走到了);
+            //   ② 追满 BIAS_MAX_HOPS_PER_TARGET 步仍未靠近 (走不到, 别死磕)。
+            // 其余情况保留 _currentBiasTarget, 下一步继续朝它走 (多步逼近)。
             if (_currentBiasTarget != null) {
-                _visitedBiasTargets.add(_currentBiasTarget);
+                if (arrivedAtBiasTarget(mod)) {
+                    _visitedBiasTargets.add(_currentBiasTarget);
+                    logBiasStep(mod, _currentTarget, -1, -1, "bias target REACHED, next");
+                    _currentBiasTarget = null;
+                    _biasHops = 0;
+                } else if (_biasHops >= BIAS_MAX_HOPS_PER_TARGET) {
+                    _visitedBiasTargets.add(_currentBiasTarget);
+                    logBiasStep(mod, _currentTarget, -1, -1, "bias target GIVE UP after hop cap");
+                    _currentBiasTarget = null;
+                    _biasHops = 0;
+                }
             }
             // Pick a new exploration step.
             _currentTarget = chooseNewTarget(mod, mod.getPlayer().getPos());
@@ -283,11 +351,16 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             _failCounter++;
             _failedTargets.add(_currentTarget);
             // Unreachable step: don't steer towards its bias target again either.
-            if (_currentBiasTarget != null) {
+            // (2026-09-17) 只在【本步确实朝它走】时才拉黑 (随机抖动步失败跟它无关,
+            // 不该把一个还在逼近中的目标打成够不着)。
+            if (_currentBiasTarget != null && _lastWasBiased) {
                 _visitedBiasTargets.add(_currentBiasTarget);
                 // (2026-09-17 P0 拉黑) 本实例的下场就是被父任务丢弃重建 —— 拉黑只写在
                 // 实例字段里等于没写 (新实例三样全空, 又选回同一根原木)。见字段区注释。
                 markUnreachable(_currentBiasTarget, mod);
+                logBiasStep(mod, _currentTarget, -1, -1, "step timed out, bias target blacklisted");
+                _currentBiasTarget = null;
+                _biasHops = 0;
             }
             Debug.logMessage("Explore step failed, picking a new direction.");
             _currentTarget = null;
@@ -318,6 +391,41 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         return mod.getPlayer().getBlockPos().isWithinDistance(_currentTarget, ARRIVED_DISTANCE);
     }
 
+    /**
+     * (2026-09-17) 玩家是否真的走到了 bias 目标跟前。只有它为真 (或跳数超限) 才换目标 ——
+     * 原实现用的是 arrivedAtCurrentTarget (相对 48 格外的落脚点), 那是"这一步走完了",
+     * 不是"目标到了"。见类注释第三节。
+     */
+    private boolean arrivedAtBiasTarget(AltoClef mod) {
+        return _currentBiasTarget != null
+                && mod.getPlayer().getBlockPos().isWithinDistance(_currentBiasTarget, BIAS_TARGET_REACH);
+    }
+
+    /**
+     * [BiasStep] 偏置探索【每步决策】的零行为日志: 这一步选了哪个 bias 目标、离多远、
+     * 第几跳、本步多远、落脚点在哪。
+     *
+     * <p>为什么加它: 现场 20260917-135722 排查"偏置探索目标来回切换"时, <b>没有任何
+     * 一行日志记录"这一步选了哪个目标"</b> —— 只能拿 {@code [MOB-DIAG] player=}
+     * 的位置采样去反推目标方向和步长, 白花一轮。决策点没有日志 = 没法证伪, 以后
+     * 这类地方一律先落日志。
+     *
+     * <p>验证 grep: 每行 = 一步。正常的"多步逼近"应看到 target 保持不变而 dist 单调
+     * 变小直到 hop 归零 (REACHED); 若 dist 忽大忽小且 target 反复变 = 还在折返。
+     */
+    private void logBiasStep(AltoClef mod, BlockPos stepPoint, double biasDist, double stepLen, String note) {
+        StringBuilder sb = new StringBuilder("[BiasStep] ");
+        sb.append(_lastWasBiased ? "biased" : "random");
+        sb.append(" target=").append(_currentBiasTarget == null ? "none" : _currentBiasTarget.toShortString());
+        sb.append(" dist=").append(biasDist >= 0 ? String.valueOf((int) Math.round(biasDist)) : "-");
+        sb.append(" hop=").append(_biasHops).append("/").append(BIAS_MAX_HOPS_PER_TARGET);
+        sb.append(" step=").append(stepLen < 0 ? "-" : String.valueOf((int) Math.round(stepLen)));
+        sb.append(" -> ").append(stepPoint == null ? "?" : stepPoint.toShortString());
+        if (mod.getPlayer() != null) sb.append(" player=").append(mod.getPlayer().getBlockPos().toShortString());
+        if (note != null) sb.append(" (").append(note).append(')');
+        Debug.logToFile("altoclef_diag.log", sb.toString());
+    }
+
     private BlockPos chooseNewTarget(AltoClef mod, Vec3d pos) {
         // (2026-09-04 用户"在水里不需要什么高级导航") 玩家已在水里(海洋)时, 探索
         // 应直接游向最近陆地, 而不是拒绝所有海洋方向 → 四周全海 → "no dry target"
@@ -326,7 +434,18 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // dry-point 高级寻路。
         boolean swimming = isPlayerInWater(mod);
 
-        Optional<BlockPos> biased = pickBiasedTarget(pos);
+        // (2026-09-17 多步逼近/锁定) 若手上还有一个"正在逼近"的目标 (仍有效、未被拉黑、
+        // 跳数未超上限、仍在 BIAS_MAX_DISTANCE 内), 就继续朝【同一个】目标走, 不再每步
+        // 重选一次最近目标。原实现每步都 pickBiasedTarget(最近未访问) —— 刚朝 A 走了
+        // 48 格, 最近的未访问往往是身后那批 → 掉头, 目标永远走不到
+        // (现场 20260917-135722 实锤: 46 格出 + 46 格原路回)。
+        boolean locked = _currentBiasTarget != null
+                && _biasHops < BIAS_MAX_HOPS_PER_TARGET
+                && !_visitedBiasTargets.contains(_currentBiasTarget)
+                && !isUnreachable(_currentBiasTarget)
+                && _currentBiasTarget.isWithinDistance(pos, BIAS_MAX_DISTANCE);
+
+        Optional<BlockPos> biased = locked ? Optional.of(_currentBiasTarget) : pickBiasedTarget(pos);
         if (biased.isEmpty() && _hadBiasOnce) {
             // We used to have bias targets but checked them all: done here.
             // End the task so the parent re-decides (dig, follow new memory, ...).
@@ -334,6 +453,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             Debug.logMessage("All remembered targets checked, biased exploration done.");
             return null;
         }
+        // 本步锁定的 bias 目标离玩家的水平距离 (无偏置时为 +inf)。
+        double biasDist = biased.isPresent()
+                ? Math.sqrt(biased.get().getSquaredDistance(pos)) : Double.POSITIVE_INFINITY;
         for (int attempt = 0; attempt < MAX_PICK_ATTEMPTS; ++attempt) {
             double angle;
             if (swimming) {
@@ -346,7 +468,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                     angle = nextRandomHeading();
                 }
                 _heading = angle;
+                // 游泳是另一套模式 (朝最近陆地), 与记忆目标无关: 清掉逼近线程。
                 _currentBiasTarget = null;
+                _biasHops = 0;
                 _lastWasBiased = false;
             } else if (biased.isPresent() && Math.random() < P_BIASED) {
                 // Steer towards the target, with some randomness around its direction.
@@ -360,17 +484,26 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             } else {
                 // Keep heading roughly the same direction instead of spinning around.
                 angle = nextRandomHeading();
-                _currentBiasTarget = null;
+                // (2026-09-17) 这里原先把 _currentBiasTarget 清空 —— 一次 15% 概率的随机
+                // 抖动就把"我正在逼近 A"这条线断掉, 下一步重选最近目标 → 又可能掉头。
+                // 改成保留: 随机抖动只影响【这一步的方向】, 不影响"在追谁"
+                // (哪一步真正朝目标走由 _lastWasBiased 单独记录)。
                 _lastWasBiased = false;
             }
+
+            // (2026-09-17 步长截断) 步长不再恒为 48: 目标比 48 格近时只走到目标跟前,
+            // 免得"一步跨过头"却因为落脚点到达而把目标判成访问完成 (见类注释)。
+            double stepLen = _lastWasBiased && Double.isFinite(biasDist)
+                    ? Math.max(MIN_EXPLORE_STEP, Math.min(EXPLORE_STEP, biasDist - ARRIVED_DISTANCE))
+                    : EXPLORE_STEP;
 
             // (2026-08-31 探索目的地定位到地表, 用户"explore 床/羊目标定位到地下/天上")
             // 原实现 candidate.y = 玩家当前 y: 玩家在地下洞里探索找羊时, 目标也落在
             // 地下(y 低) — baritone 朝地下走, 而羊/床都在地表永远找不到; 在高处探索时
             // 目标又落到天上。动物/床/树/村庄都是地表目标, 探索 step 的 y 应取该 xz
             // 抵达位置的地表高度, 而非玩家当前 y。
-            int candX = (int) Math.floor(pos.x + Math.cos(angle) * EXPLORE_STEP);
-            int candZ = (int) Math.floor(pos.z + Math.sin(angle) * EXPLORE_STEP);
+            int candX = (int) Math.floor(pos.x + Math.cos(angle) * stepLen);
+            int candZ = (int) Math.floor(pos.z + Math.sin(angle) * stepLen);
             int candY = surfaceYAt(mod, candX, candZ, (int) Math.floor(pos.y));
             BlockPos candidate = new BlockPos(candX, candY, candZ);
             // Avoid retrying the exact directions we already failed on.
@@ -430,6 +563,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (swimming && isTargetOcean(mod, candidate)) {
                 Debug.logMessage("[Swim-out] already in water, heading towards " + candidate.toShortString());
             }
+            // (2026-09-17) 只有真的朝 bias 目标走的步才算一跳 (随机抖动步不计),
+            // 跳数到 BIAS_MAX_HOPS_PER_TARGET 就作废当前目标 (见 onTick 到达分支)。
+            if (_lastWasBiased) ++_biasHops;
+            logBiasStep(mod, candidate, biasDist, stepLen, locked ? "locked" : null);
             return candidate;
         }
         // Every direction we tried was failed/water: count it as a failed step so
