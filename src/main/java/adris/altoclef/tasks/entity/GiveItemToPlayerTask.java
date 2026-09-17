@@ -77,7 +77,8 @@ public class GiveItemToPlayerTask extends Task {
                             target = new ItemTarget(target, target.getTargetCount() - stack.getCount());
                             _throwTarget.set(i, target);
                             Debug.logMessage("THROWING: " + has.get());
-                            _throwTask = new ThrowCursorTask();
+                            // (2026-09-17) 扔给玩家是故意交付, 豁免"搬运在途"拦截。
+                            _throwTask = new ThrowCursorTask(true);
                             return _throwTask;
                         } else {
                             return new ClickSlotTask(currentlyPresent);

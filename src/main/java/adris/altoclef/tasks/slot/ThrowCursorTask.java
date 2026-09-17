@@ -527,8 +527,41 @@ public class ThrowCursorTask extends Task {
         return "Throwing Cursor";
     }
 
+    // (2026-09-17 统一拦截) 光标物品正被某次两拍搬运持有 (MoveItemToSlotTask
+    // 在途表, 1s 滑动过期) → 本任务拒绝执行丢弃, 立即视为完成让父任务重新
+    // 决策。放本体的原因: ThrowCursorTask 全库共 8 个派发点 (EnsureFree×2、
+    // DoStuffInContainer、SmeltInFurnace、Craft×2、EnsureFreeCursorSlot、
+    // GiveItemToPlayer), 逐派发点加保护已两次漏堵 (0917 清晨 090520/092555
+    // 两场连发), 统一收口到唯一执行体。例外: 构造传 ignoreInFlightGuard=true
+    // (GiveItemToPlayerTask 的"扔给玩家"是故意交付, 物品不经 MoveItemToSlot
+    // 拿起故通常不会命中在途表, 但显式豁免防边缘竞态)。
+    private final boolean _ignoreInFlightGuard;
+    private static long _lastInFlightLogMs = 0;
+
+    public ThrowCursorTask() {
+        this(false);
+    }
+
+    public ThrowCursorTask(boolean ignoreInFlightGuard) {
+        _ignoreInFlightGuard = ignoreInFlightGuard;
+    }
+
     @Override
     public boolean isFinished(AltoClef mod) {
+        if (!_ignoreInFlightGuard) {
+            ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+            if (!cursor.isEmpty() && MoveItemToSlotTask.isCursorItemInFlight(cursor.getItem())) {
+                long now = System.currentTimeMillis();
+                if (now - _lastInFlightLogMs > 2000) {
+                    _lastInFlightLogMs = now;
+                    Debug.logToFile("altoclef_diag.log", "[MOVE-GUARD-TC] refused to throw in-flight "
+                            + cursor.getItem().getTranslationKey());
+                }
+                // 拒绝丢弃: 立即"完成"交还父任务重新决策 (父会重派或让路,
+                // 在途表 1s 过期后搬运卡死场景自动解除保护)。
+                return true;
+            }
+        }
         return _throwTask.isFinished(mod);
     }
 }
