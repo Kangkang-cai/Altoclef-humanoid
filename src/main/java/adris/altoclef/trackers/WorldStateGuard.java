@@ -10,6 +10,7 @@ import adris.altoclef.tasks.movement.BearingExpeditionTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.util.helpers.HitRegistry;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldIdentity;
 
@@ -109,5 +110,6 @@ public final class WorldStateGuard {
         // ---- 缓存(危害: 陈旧坐标命中) ----
         register("VisibilityHelper(LOS 缓存)", VisibilityHelper::onWorldBoundary);
         register("PerceptionSampler(感知快照)", PerceptionSampler::onWorldBoundary);
+        register("SurfaceHelper(地表判据迟滞)", SurfaceHelper::onWorldBoundary);
     }
 }

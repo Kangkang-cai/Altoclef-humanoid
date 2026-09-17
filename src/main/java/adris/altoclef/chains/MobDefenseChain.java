@@ -17,6 +17,7 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ProjectileHelper;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import baritone.api.BaritoneAPI;
 import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.Rotation;
@@ -1336,14 +1337,21 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
-     * Roughly "are we underground?": solid blocks overhead.
+     * "我们在地下吗": 走全项目统一判据 {@link SurfaceHelper}。
+     * <p>
+     * (2026-09-17 判据统一) 旧实现是"头顶 1..12 格逐格扫实心"，与全项目其他
+     * 4 份口径互不相同: 站在树冠下/1 格屋檐下 → 扫到实心 → 误判"地下" →
+     * 高逃跑升级时错误进 DIG_ESCAPE (往下挖着逃)，而人实际在地表。
+     * 统一后语义 = "5 点采样里 ≥3 点未见天"。
+     * <p>
+     * 用【无迟滞】的 {@link SurfaceHelper#isBelowSurface}(而非 Debounced) 是
+     * 有意为之: 本方法只在 {@code _retreatEscalation >= 2} 的每 tick 状态选择
+     * 里用一次, 状态机本身每 tick 重算 —— 需要的是"当下这一刻", 不是"上一个
+     * 稳定结论"。5 点多数投票已抹平单列抖动, 不需要再叠时间迟滞。
      */
     private boolean isUnderground(AltoClef mod) {
-        BlockPos p = mod.getPlayer().getBlockPos();
-        for (int y = 1; y <= 12; y++) {
-            if (mod.getWorld().getBlockState(p.up(y)).isSolidBlock(mod.getWorld(), p.up(y))) return true;
-        }
-        return false;
+        if (mod.getPlayer() == null) return false;
+        return SurfaceHelper.isBelowSurface(mod);
     }
 
     /**

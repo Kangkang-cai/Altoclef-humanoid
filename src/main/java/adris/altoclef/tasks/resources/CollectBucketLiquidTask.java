@@ -14,6 +14,7 @@ import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -132,9 +133,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
         //_blacklist.clear();
 
         _wanderTask.resetWander();
-        // 静态模式锁存随任务实例重置 (水/岩浆子类共享 static)
-        _modeInit = false;
-        _flapRejected = 0;
+        // (2026-09-17 判据统一) 原来这里重置本类私有的静态模式锁存 (_modeInit/_flapRejected)。
+        // 判据搬到 SurfaceHelper 后【故意不再重置】: 那份迟滞是全局事实(所有调用方共看
+        // 一个答案), 而本任务实例每 tick 都可能重建 —— 在 onStart 里清它等于每 tick 把
+        // 全局迟滞清零, 迟滞直接失效。跨存档复位由 WorldStateGuard 统一负责。
 
         _progressChecker.reset();
     }
@@ -498,59 +500,21 @@ public class CollectBucketLiquidTask extends ResourceTask {
      * y=57 在地表却被 y<58 误判地下, 加上 1 格宽阈值 + 跳节点 y 震荡, 分支
      * 1-10s/轮互翻 (20260916-1128 场次 11:27:59 单秒三翻面) → 原地不动。
      */
-    // (20260916 修翻面振荡) 判"地下"不再用 y<58 短路: 露天山谷 y=57 在地表却被误判
-    // 地下 → 反复爬向山顶; 且 1 格宽阈值 + baritone 跳节点 y 在 57↔58 震荡 → 分支
-    // 每 1-10s 互翻 (1128 场次 11:27:59 单秒三翻面), 每翻一次子树 STOP 重建、
-    // 48 格探索腿报废 (实测相邻目标仅差 5-14 格) → bot 原地不动。
-    // (20260916 v2 空间多数投票, 1146 场次实锤) 5s 迟滞只把振荡压成 5s 节拍:
-    // rejectedFlaps 高达 90+/5s ≈ 单点 isSkyVisible(pos.up()) 每 tick 抖一次
-    // (水面漂浮 bobbing 时 pos.up() 交替水/空气, 高度图把水算遮挡)。
-    // 改: 脚上方 + 4 水平邻柱共 5 采样点, ≥3 未见天才算"地下" —— 单列抖动
-    // 被空间票数抹平; 5s 迟滞保留作兜底。
-    private static final long MODE_MIN_DWELL_MS = 5000;
-    private static boolean _modeBelow = false;
-    private static long _modeSetAt = 0;
-    private static boolean _modeInit = false;
-    private static int _flapRejected = 0;
-
+    // (20260916 v2 → 20260917 判据统一) 本处曾是全项目"最智能"的一份地表判据
+    // (5 点多数投票 + 5s 迟滞)，现已抽到 SurfaceHelper 作为全项目唯一实现。
+    // 演进史 (别再往回改):
+    //  ① 纯 y<58 短路: 露天山谷 y=57 在地表却被误判地下 → 反复爬向山顶;
+    //    且 1 格宽阈值 + baritone 跳节点 y 在 57↔58 震荡 → 分支每 1-10s 互翻
+    //    (20260916-1128 场次 11:27:59 单秒三翻面), 每翻一次子树 STOP 重建、
+    //    48 格探索腿报废 (实测相邻目标仅差 5-14 格) → bot 原地不动。
+    //  ② v2 单点 isSkyVisible(pos.up()) + 5s 迟滞: 仍抖, rejectedFlaps 高达
+    //    90+/5s ≈ 每 tick 抖一次 (水面漂浮 bobbing 时 pos.up() 交替水/空气,
+    //    高度图把水算遮挡)。
+    //  ③ v3 (现行) 5 点采样 + ≥3 多数投票 + 5s 驻留, 见 SurfaceHelper。
+    // 日志标签 [LiquidSearch] mode -> 并入统一的 [Surface] mode ->
+    // (字段更全: y / covered=n/5 / dim / rejectedFlaps)。
     private boolean isBelowSurface(AltoClef mod) {
-        if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD
-                || mod.getPlayer() == null || mod.getWorld() == null) {
-            return false;
-        }
-        BlockPos pos = mod.getPlayer().getBlockPos();
-        // 与 GoToSurfaceTask.isDeepForEscape 同口径 (isSkyVisible 走 MOTION_BLOCKING
-        // 高度图, 水面也算盖 → 海里必须游到水面才算见天)。
-        // 5 点采样: 中心脚上方 + 四个水平邻柱同高 (岩浆/水收集时脚下常是液体面,
-        // 邻柱多为实 地, 票数稳定)。单列 bobbing 抖动 → 票数 2/5 左右摆动,
-        // 不会越过 ≥3 多数线; 真洞穴/树冠下 5 点全遮 → 稳定 below。
-        int notVisible = 0;
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        for (int[] d : new int[][]{{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
-            m.set(pos.getX() + d[0], pos.getY() + 1, pos.getZ() + d[1]);
-            if (!mod.getWorld().isSkyVisible(m.toImmutable())) notVisible++;
-        }
-        boolean raw = notVisible >= 3;
-        long now = System.currentTimeMillis();
-        if (!_modeInit) {
-            _modeInit = true;
-            _modeBelow = raw;
-            _modeSetAt = now;
-            return raw;
-        }
-        if (raw != _modeBelow) {
-            if (now - _modeSetAt < MODE_MIN_DWELL_MS) {
-                _flapRejected++;
-                return _modeBelow;
-            }
-            Debug.logMessage("[LiquidSearch] mode -> " + (raw ? "below(return to surface)" : "surface(explore)")
-                    + " (y=" + pos.getY() + ", covered=" + notVisible + "/5"
-                    + ", rejectedFlaps=" + _flapRejected + ")");
-            _flapRejected = 0;
-            _modeBelow = raw;
-            _modeSetAt = now;
-        }
-        return _modeBelow;
+        return SurfaceHelper.isBelowSurfaceDebounced(mod);
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {

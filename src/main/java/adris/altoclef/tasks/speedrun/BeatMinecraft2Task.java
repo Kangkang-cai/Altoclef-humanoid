@@ -461,12 +461,9 @@ public class BeatMinecraft2Task extends Task {
     private final Task _sleepThroughNightTask = new SleepThroughNightTask();
     private final Task _killDragonBedStratsTask = new KillEnderDragonWithBedsTask(new WaitForDragonAndPearlTask());
 
-    // (2026-08-22) isDeepUnderground 去抖: 洞口/峡谷边缘头顶方块判定每
-    // 几 tick 翻转 (y<58 硬阈值 + 头顶 24 格扫描), bed↔GoToSurface 分支
-    // 横跳 (tasks.log 11:22:32 t=1724-1796 每 2 tick 切换)。双稳态: 状态
-    // 翻转需连续 2 秒新值才生效。
-    private final TimerGame _surfaceFlipTimer = new TimerGame(2);
-    private boolean _stableUnderground = false;
+    // (2026-09-17 判据统一) 原 _surfaceFlipTimer/_stableUnderground 双稳态去抖已删:
+    // 它包装的 WorldHelper.isDeepUnderground 现在本身就走 SurfaceHelper 的
+    // 5 点多数投票 + 5s 驻留, 再叠一层 2s 去抖只会让结论多滞后 2s。见 isUndergroundDebounced。
     // (2026-08-22 贪心收集) 顺手挖眼前可见矿石的粘性任务实例 + 触发
     // 节流 (无活可干时每 3 秒才重扫一次, 防 onTick 每 tick 全量扫描)。
     private CollectVisibleOresTask _greedyOreTask = null;
@@ -2701,23 +2698,23 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * (2026-08-22) isDeepUnderground 的双稳态去抖版: 洞口边缘 (挖到
-     * y=58+ 且头顶露天的瞬间) 判定会逐 tick 翻转, 曾导致 bed↔
-     * GoToSurface 每 2 tick 横跳 (tasks.log t=1724-1796)。翻转需连续
-     * 2 秒才生效。峡谷搭高 (getPitEscapeY) 不经过去抖 — 它只在
-     * wood/food 前置分支用, 且壁顶判定本身稳定 (16 格采样)。
+     * (2026-08-22 → 2026-09-17 判据统一) "是否在地下"的稳定版: 直接转
+     * {@link WorldHelper#isDeepUnderground}, 后者已指向全项目唯一判据
+     * {@code SurfaceHelper.isBelowSurfaceDebounced} (5 点多数投票 + 5s 驻留)。
+     *
+     * <p>保留本方法名而非删除: 本类有 5 个调用点 (:1973/:1991/:2514/:2525/:2542),
+     * 删了要改 5 处而无收益。
+     *
+     * <p>历史: 本方法原是"洞口边缘头顶方块判定逐 tick 翻转"的 2s 双稳态补丁
+     * (tasks.log 11:22:32 t=1724-1796 bed↔GoToSurface 每 2 tick 横跳)。判据统一后
+     * 抖动已由 5 点空间投票抹平、过渡期由 5s 驻留吸收, 补丁本身成为多余的额外
+     * 滞后 → 移除 (否则真实翻面要 5s+2s 才生效)。
+     *
+     * <p>峡谷搭高 (getPitEscapeY) 仍不经此方法 — 它只在 wood/food 前置分支用,
+     * 且壁顶判定 (16 格采样 + 对向双墙) 本身稳定。
      */
     private boolean isUndergroundDebounced(AltoClef mod) {
-        boolean raw = WorldHelper.isDeepUnderground(mod);
-        if (raw == _stableUnderground) {
-            _surfaceFlipTimer.reset();
-            return _stableUnderground;
-        }
-        if (_surfaceFlipTimer.elapsed()) {
-            _stableUnderground = raw;
-            _surfaceFlipTimer.reset();
-        }
-        return _stableUnderground;
+        return WorldHelper.isDeepUnderground(mod);
     }
 
     /**

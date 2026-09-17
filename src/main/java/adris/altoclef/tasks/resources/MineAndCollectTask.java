@@ -22,6 +22,7 @@ import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -957,6 +958,9 @@ public class MineAndCollectTask extends ResourceTask {
         // Overworld sea level; surface biomes (forests / plains / jungles) nearly
         // always sit at y>=62. We use this as a soft target for "get back to the
         // surface" before exploring for wood.
+        // (2026-09-17) 仅作【锚点高度】用, 不再兼任"是否在地下"的判据 —— 判据走统一
+        // 的 SurfaceHelper (见下方 createNextExplorationTask)。本常量取值 63 是
+        // "主世界地表典型高度"的经验值, 与 SurfaceHelper 的采样口径互不耦合。
         private static final int SURFACE_SEA_LEVEL_Y = 63;
 
         // 近处矿绕过 FOV 的距离上限（格）。地下矿洞/隧道场景矿都在这个
@@ -2160,11 +2164,18 @@ public class MineAndCollectTask extends ResourceTask {
                 // SURFACE RESOURCES (wood ONLY) EXIST ON THE SURFACE.
                 // Digging a shaft down is the opposite of what a human would do.
                 List<Supplier<Collection<BlockPos>>> biasSources = new ArrayList<>();
-                // If we're deep underground, push the first bias toward "climb
+                // If we're underground, push the first bias toward "climb
                 // back up to sea level" first — otherwise we'll wander a cave
                 // forever looking for trees that don't exist there.
-                int y = mod.getPlayer().getBlockPos().getY();
-                if (y < SURFACE_SEA_LEVEL_Y - 2) {
+                //
+                // (2026-09-17 判据统一) 原判据是内联硬编码 y < SURFACE_SEA_LEVEL_Y - 2
+                // (= y < 61)。这是全项目第 5 份互不相同的"是否在地下"口径, 且在
+                // 20260917-120830 场次实锤翻车: bot 恰在 y=62 的 1 格宽阶梯地道里,
+                // y<61 不成立 → 爬升锚点不注入 → BiasedExplore 拿洞外 y=79 的原木
+                // 当目标, 在 3 格厚的洞顶下面耗了 35 分钟 (见 SurfaceHelper 类注释)。
+                // 改走统一判据 (5 点多数投票 + 5s 迟滞): 1 格宽地道里四个水平邻柱
+                // 同高全是实心 → covered 5/5 → 稳定判地下, 锚点正常注入。
+                if (SurfaceHelper.isBelowSurfaceDebounced(mod)) {
                     BlockPos player = mod.getPlayer().getBlockPos();
                     BlockPos upAnchor = new BlockPos(player.getX(), SURFACE_SEA_LEVEL_Y, player.getZ());
                     biasSources.add(() -> Collections.singletonList(upAnchor));

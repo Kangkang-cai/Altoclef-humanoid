@@ -7,6 +7,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.item.Item;
@@ -101,16 +102,21 @@ import net.minecraft.world.Heightmap;
 public class GoToSurfaceTask extends Task {
 
     /**
-     * (2026-09-12 v20) 本任务专属"深处"判据 = v7 语义: y<58 硬阈值, 或
-     * 头顶无天空视线 (isSkyVisible 走 MOTION_BLOCKING 高度图, 水面也算盖 →
-     * 海里必须游到水面才算见天, 即"连着天的海洋")。只服务逃生完工判定,
-     * 不与全局共享口径混用 —— 全局 isDeepUnderground 已回滚 y<58。
+     * (2026-09-17 判据统一) 本任务专属"深处"判据已并入全项目唯一口径
+     * {@link SurfaceHelper}：5 点多数投票 + 5s 迟滞。
+     *
+     * 历史: v20 曾是"y&lt;58 硬阈值，或 !isSkyVisible(pos.up()) 单点"，理由是
+     * "海里必须游到水面才算见天（水面也算盖）"。5 点采样用的是同一个
+     * isSkyVisible/MOTION_BLOCKING 语义（水面同样算遮挡），所以"连着天的海洋
+     * 不算完"这条语义完整保留；丢掉的是单点抖动与 y&lt;58 短路 ——
+     * 后者会让露天山谷 y=57 被判深处（20260916-1128 三翻面实锤）。
+     *
+     * 完工判据（isFinished）用迟滞版是刻意的：见天后最多晚 5s 收工无害，
+     * 而判据抖动会让上层反复 START/STOP 本任务。井底场景仍由 inShaft 兜底
+     * （井底 5 点全露天，采样会说"在地表"，但四面实心出不去）。
      */
     private static boolean isDeepForEscape(AltoClef mod) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
-        BlockPos pos = mod.getPlayer().getBlockPos();
-        if (pos.getY() < 58) return true;
-        return !mod.getWorld().isSkyVisible(pos.up());
+        return SurfaceHelper.isBelowSurfaceDebounced(mod);
     }
 
     private enum AscentMode {

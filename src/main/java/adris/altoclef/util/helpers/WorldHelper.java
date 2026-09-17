@@ -222,31 +222,25 @@ public interface WorldHelper {
     }
 
     /**
-     * Rough "are we in a cave/mine" check: our head is covered by solid blocks
-     * within a short column above us, OR we're well below sea level. Used to
-     * decide whether the bot should climb back to the surface (e.g. sheep and
-     * other surface animals will never be found down here).
+     * 「是否需要回到地表」：本方法自 2026-09-17 起**只是 {@link SurfaceHelper}
+     * 的统一判据的转发口**，自身不再含任何阈值。
      *
-     * (2026-08-27 用户拍板: y≥58 即视为地表) 旧版 y<58 判深 + 头顶 24 格长扫描
-     * 判深。卡死现场 (15:46): bot 站 y=63 (村庄/山脚, 旁边就有自己放的床),
-     * 头顶 +2~+26 扫到远处屋顶/山体/岸坡 1 个实心块 → deep=true 恒定 → 反复
-     * Returning to surface 派 GetToYTask(58) (58<63, 反而往下挖) → 横跳打转,
-     * 连近在眼前能睡的床都被 route1"地下跳过"挡住。故: y≥58 直接算地表;
-     * 24 格长扫描撤销, 只保留 y<58 的深硬阈值。真挖矿(通常 y<58)不受影响。
+     * <h3>演进史（别再往回改）</h3>
+     * ① 旧版 y&lt;58 + 头顶 24 格长扫描 → 站 y=63 村庄被远处屋顶扫到 1 个实心即
+     * 判深 → 反复 Returning to surface 派 GetToYTask(58)（58&lt;63 反而往下挖）
+     * 横跳打转（2026-08-27），遂砍成长扫描、只留 y&lt;58。
+     * ② v7 (23ece415) 把"头顶无天空视线"并入本判据 → 树冠/门框/屋檐下每走一步
+     * 翻转，本方法有 5+ 个共享调用点（睡觉优先 / 囤木头 / 找羊 / 扔眼），
+     * 睡觉↔囤木分支每 550ms 抖三次（20260912-195954）→ 回滚。
+     * ③ 2026-09-17 全项目判据统一：v7 失败的真因是【单点采样 + 零迟滞】，
+     * 不是"天空口径"本身。{@link SurfaceHelper} 用 5 点多数投票抹平单列抖动
+     * + 5s 驻留吸收过渡期翻面，正是 ② 缺的那两样。故本方法改为转发它，
+     * y&lt;58 硬阈值（含"露天山谷 y=57 误判地下"的已知缺陷）随之废弃。
+     *
+     * 保留方法名而非删除：本方法有 5+ 个调用点，改名会放大改动面而无收益。
      */
     static boolean isDeepUnderground(AltoClef mod) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return false;
-        BlockPos pos = mod.getPlayer().getBlockPos();
-        // 5+ blocks below sea level: genuinely deep cave/mine.
-        // (2026-09-12 回滚 v7 23ece415 的全局语义扩张, 用户"睡觉烧东西都被异常打断")
-        // v7 曾把"头顶无天空视线"并入本判据 —— 但本方法有 5+ 个共享调用点
-        // (睡觉优先 isNightSleepPriority / 囤木头 / 找羊 / 扔眼), 树冠/门框/
-        // 屋檐下每走一步 deep 翻转 → 睡觉↔囤木分支每 550ms 抖 (20260912-195954
-        // diag 实锤: deep=true/false 三次翻转, branch 同步抖三次)。
-        // "重见天日"判据是 GoToSurfaceTask 的完工语义, 收归其私有
-        // isDeepForEscape(同 v7 语义), 共享口径恢复 y<58 硬阈值 (2026-08-27
-        // 用户拍板: y≥58 即视为地表, 24 格长扫描撤销的结论不变)。
-        return pos.getY() < 58;
+        return SurfaceHelper.isBelowSurfaceDebounced(mod);
     }
 
     /**
