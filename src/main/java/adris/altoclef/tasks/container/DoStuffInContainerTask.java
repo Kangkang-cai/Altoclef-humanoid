@@ -8,6 +8,7 @@ import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
+import adris.altoclef.tasks.slot.MoveItemToSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
 import adris.altoclef.tasksystem.CursorArbiter;
 import adris.altoclef.tasksystem.Task;
@@ -337,6 +338,18 @@ public abstract class DoStuffInContainerTask extends Task {
             if (CursorArbiter.isHeldBy(CursorArbiter.INTENT_RELOCATE)) {
                 setDebugState("Cursor leased by free-space chain, holding free task");
                 return acquireFreeTask();
+            }
+            // (2026-09-17 搬运在途豁免) 光标物品正被某次两拍搬运持有 (如往熔炉塞
+            // raw_iron 的拿起→放下之间, 见 MoveItemToSlotTask._inFlightCursorItems)
+            // → 跳过本清理分支, 落到下方主容器逻辑重新派发容器子任务 (塞料子树
+            // 会继续搬运)。不清光标的理由: 092555 场实锤, 本分支把塞料两拍中的
+            // raw_iron 整堆扔进坑 (interrupted by <Throwing Cursor>), 上层又派
+            // Pickup 捡回 = "扔了又捡"死循环; 且本分支优先级高于自家塞料子树,
+            // 等于父任务拆自己的搬运。在途表 1s 滑动过期, 搬运卡死自动解除。
+            if (MoveItemToSlotTask.isCursorItemInFlight(
+                    StorageHelper.getItemStackInCursorSlot().getItem())) {
+                setDebugState("Cursor holds in-flight move item, skipping clear");
+                return _openTableTask;
             }
             setDebugState("Clearing cursor slot (otherwise this causes BIG problems)");
             // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)` —

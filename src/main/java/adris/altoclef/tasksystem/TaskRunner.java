@@ -21,10 +21,12 @@ public class TaskRunner {
     // 导致节流失效、每 tick 刷屏。
     private long _lastSlowChainLogMs = 0;
 
-    // 决策降频：决策链（用户任务/食物/死亡恢复）的任务树每 N 个游戏 tick
-    // 执行一次（默认 4 = 5Hz，更接近人类决策速度）。链仲裁（优先级抢占、
+    // 决策降频机制：决策链（用户任务/食物/死亡恢复）的任务树每 taskTickInterval
+    // 个游戏 tick 执行一次。默认 1 = 每 tick 执行（20Hz 全速）。历史上曾用 4（5Hz）
+    // 想减少切换噪音，但因容器交互决策间隔拉长、叠加光标同步延迟引发
+    // "拿起/放下反复 4-5 次"，2026-08-24 回滚为 1（详见 Settings.taskTickInterval
+    // 注释）—— 如再启用 5Hz 务必先回归容器搬运链路。链仲裁（优先级抢占、
     // 反射链如 MLG/岩浆逃生/怪物防御）始终保持 20Hz，安全不受影响。
-    // Settings.taskTickInterval = 1 可恢复每 tick 执行。
     private int _tickCounter = 0;
 
     public TaskRunner(AltoClef mod) {
