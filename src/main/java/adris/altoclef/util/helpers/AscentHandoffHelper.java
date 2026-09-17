@@ -232,13 +232,23 @@ public final class AscentHandoffHelper {
             return TickResult.done();
         }
 
-        // ③ 有进展就续命。
+        // ③ 合法零速豁免: baritone 正在挖挡块时, 挖一格可能**远慢于 1.5s**
+        //    (空手挖石头 7.5s)。这段 XZ/y 都不动, 但它是在干活 —— 若算作 stall 就会
+        //    反复 onLostControl 打断它的挖掘(进度清零), 越修越爬不上去。
+        //    本仓"卡死检测必须排除合法零速状态"铁律的同款应用; 同族豁免见
+        //    detail/02-diagnosis.md(挖方块/下落中/竖直垫塔/岩浆上浮)。
+        if (mod.getControllerExtras().isBreakingBlock()) {
+            _stallTimer.reset();
+            return TickResult.running(null);
+        }
+
+        // ④ 有进展就续命。
         if (progressed(mod)) {
             _stallTimer.reset();
             return TickResult.running(null);
         }
 
-        // ④ 无进展 → 三档补救。总窗口只作防爆兜底("来回挪一格"每轮都算进展时)。
+        // ⑤ 无进展 → 三档补救。总窗口只作防爆兜底("来回挪一格"每轮都算进展时)。
         boolean totalExpired = _totalTimer.elapsed();
         if (!_stallTimer.elapsed() && !totalExpired) {
             return TickResult.running(null);
