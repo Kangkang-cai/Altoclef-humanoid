@@ -134,8 +134,11 @@ public class EnsureFreeInventorySlotTask extends Task {
                 return new ConsolidateInventoryTask();
             }
             // (2026-09-08 腾位穿甲, 用户"背包满有盔甲他穿上也可以") 光标为空时,
-            // 背包里有比当前护甲槽更好(或空槽)的盔甲 → 先穿甲: 空出一个背包格
+            // 背包里有【对应护甲槽为空】的盔甲 → 先穿甲: 空出一个背包格
             // 且不掉任何物资。放在丢弃级联之前, 合并之后 (同样无损)。
+            // (2026-09-17) 只认空护甲槽: 替换已穿护甲会把换下的那件送回背包,
+            // 净空格 0, 满包时会把本任务永久钉在无效路径上 (详见
+            // StorageHelper.findEquippableArmorUpgrade 注释)。
             // 若当前开着别的界面, 先关界面等下一 tick (穿甲要用 PlayerScreenHandler
             // 槽位映射, 见 EquipArmorTask 同款守卫)。
             Slot armorSlot = StorageHelper.findEquippableArmorUpgrade(mod);

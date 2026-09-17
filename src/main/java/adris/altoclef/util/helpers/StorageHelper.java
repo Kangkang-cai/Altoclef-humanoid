@@ -971,30 +971,33 @@ public class StorageHelper {
     }
 
     /**
-     * (2026-09-08 腾位穿甲) 扫真背包里的可穿戴盔甲, 找出"比当前对应护甲槽
-     * 更好(或护甲槽为空)"的, 返回其背包槽位 —— 供 EnsureFreeInventorySlotTask
-     * 腾位级联"先穿甲再丢东西": 穿甲占护甲槽不占背包, 空出一个背包格且不掉任何
-     * 物资 (用户 2026-09-08: "背包满了有盔甲他穿上也可以")。
-     * 只认严格更好 (护甲点数更高), 避免来回换装。无则返回 null。
+     * (2026-09-08 腾位穿甲) 扫真背包里的可穿戴盔甲, 找出"对应护甲槽为空"的, 返回
+     * 其背包槽位 —— 供 EnsureFreeInventorySlotTask 腾位级联"先穿甲再丢东西":
+     * 穿上后该物品离开背包、护甲槽不占背包格 → 净空出一个背包格且不掉任何物资
+     * (用户 2026-09-08: "背包满了有盔甲他穿上也可以")。无则返回 null。
+     *
+     * (2026-09-17 只认空槽) 旧实现按"护甲值增益"挑最优, 包含【替换已穿护甲】。
+     * 但替换时换下来的那件要回背包 —— 净空格 = 0, 腾位目的完全落空; 满包场景下
+     * EnsureFreeInventorySlotTask 就永远卡在这条无效路径上: 每轮拿起铁靴 → 被
+     * CLEAR 抢断塞回 → 下轮重试, 真垃圾 (gravel) 一次都没被丢, 合成收不下产物,
+     * CRAFT/CLEAR 每 3s 互抢 (20260917-085346 实锤: emptySlots=0、
+     * findMergeablePair=false、garbageSlot=gravel, 穿甲循环 6+ 轮)。
+     * 装备升级另有显式路径 (EquipArmorTask / gear 阶段指定目标), 腾位路径只做
+     * "能立刻净空出格子"的事。
      */
     public static Slot findEquippableArmorUpgrade(AltoClef mod) {
         Slot bestSlot = null;
-        int bestGain = 0;
+        int bestProt = -1;
         for (Slot slot : getRealBackpackSlots()) {
             ItemStack stack = getItemStackInSlot(slot);
             if (!(stack.getItem() instanceof ArmorItem armor)) continue;
             ItemStack equipped = mod.getPlayer().getInventory()
                     .getArmorStack(armor.getSlotType().getEntitySlotId());
-            int curProt = -1;
-            if (equipped.getItem() instanceof ArmorItem ea) {
-                // (2026-09-08 修上个会话遗留编译错误) 1.18.2 Yarn 的
-                // ArmorMaterial.getProtectionAmount 需要传 EquipmentSlot
-                curProt = ea.getProtection();
-            }
+            // 护甲槽已占用: 换下的那件要回背包, 净空格为 0 → 不算腾位。
+            if (!equipped.isEmpty()) continue;
             int newProt = armor.getProtection();
-            int gain = newProt - curProt;
-            if (gain > bestGain) {
-                bestGain = gain;
+            if (newProt > bestProt) {
+                bestProt = newProt;
                 bestSlot = slot;
             }
         }
