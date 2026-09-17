@@ -82,6 +82,18 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         return _gridOwnerOutput != null;
     }
 
+    /**
+     * (2026-09-17 世界边界) 换存档时清空 static 冷却与台格归属。
+     * `_giveUpOutputItem` 按【物品名】记 30s 放弃 —— 上个存档放弃过的产物
+     * (木板 / 木棍这类常见品) 在新存档开局会被直接跳过, 且没有任何存档判定;
+     * `_gridOwnerOutput` 指向的台格在新存档并不存在。
+     */
+    public static void onWorldBoundary() {
+        _giveUpOutputItem = null;
+        _giveUpUntilMs = 0;
+        _gridOwnerOutput = null;
+    }
+
     // (2026-09-13 释放阀下移) 原先暴露在此的 isFillRecentlyStalled(Item) 已删除 ——
     // 它唯一的消费方是 CollectFoodTask 的 10s 重评估释放阀, 而释放职责已下移到合成类
     // 自身(CraftInInventoryTask / CraftInTableTask 在 collect=false 且

@@ -43,6 +43,17 @@ public final class VisibilityHelper {
     // 2 格 = 移动/挖洞后立即重新评估, 杜绝用旧位置的 LOS 结果造成短暂透视。
     private static final long LOS_CACHE_MOVE_DRIFT_SQ = 4;
 
+    /**
+     * (2026-09-17 世界边界) 换存档清空 LOS 缓存。
+     * 缓存本身有 400ms TTL + 位移失效, 危害有限, 但旧世界的 BlockPos 在这里
+     * 不可能有正确结果 —— 清了零成本。
+     */
+    public static void onWorldBoundary() {
+        synchronized (_losCacheLock) {
+            _losCache.clear();
+        }
+    }
+
     // Human view parameters (tunable defaults) — used for ENTITIES.
     public static final double MAX_VIEW_DISTANCE = 64.0;
     public static final double FOV_HALF_DEGREES = 55.0; // half-width of our view cone (110 degrees)

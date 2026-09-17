@@ -1629,7 +1629,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private static String selfDugDimKey(AltoClef mod) {
-        return mod.getWorld().getRegistryKey().getValue().toString();
+        // (2026-09-17 跨世界污染) 旧口径只按【维度】→ 上个存档的自挖隧道在新存档
+        // 里被当"自己挖过的空气"(那些位置在新存档很可能是实心天然岩石), 直接
+        // 错判矿洞/空气判据。改成 存档:维度, 与洞区记忆同口径; 旧格式记录自然
+        // 查不到(自动作废)。
+        return adris.altoclef.util.helpers.WorldIdentity.key(mod);
     }
 
     private static java.nio.file.Path selfDugFile() {
@@ -1736,15 +1740,21 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private static String exploredCaveKey(AltoClef mod) {
-        String levelName = "?";
-        try {
-            var server = MinecraftClient.getInstance().getServer();
-            if (server != null && server.getSaveProperties() != null && server.getSaveProperties().getLevelName() != null) {
-                levelName = server.getSaveProperties().getLevelName();
-            }
-        } catch (Exception ignored) {
-        }
-        return levelName + ":" + mod.getWorld().getRegistryKey().getValue().toString();
+        // (2026-09-17 跨世界污染) 显示名 → 存档目录名, 统一走 WorldIdentity。
+        // 旧 key 的存量"已探索洞区"记录自然作废(它们本就有同名世界互灌风险)。
+        return adris.altoclef.util.helpers.WorldIdentity.key(mod);
+    }
+
+    /**
+     * (2026-09-17 世界边界丢弃) 换存档时清空矿洞相关 static:
+     * 已探索洞区 / 自挖方块记录 / 探洞交接锚点。
+     * 其中最危险的一点: 上个存档的"自挖隧道"位置在新存档里可能是实心
+     * 天然岩石, 留着会把它们当"自己挖过的空气"而错判矿洞判据。
+     */
+    public static void onWorldBoundary() {
+        _exploredCaveByKey.clear();
+        _selfDugByDim.clear();
+        _lastFireAnchor = null;
     }
 
     private static java.nio.file.Path exploredCaveFile() {

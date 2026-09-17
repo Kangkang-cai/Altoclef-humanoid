@@ -237,6 +237,10 @@ public class AltoClef implements ModInitializer {
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
             tickInteractionPauseWatchdog();
+            // (2026-09-17 跨世界残留状态) 换存档(不重启游戏)时 static 字段全部存活
+            // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
+            // 变化即清空。清单见 WorldStateGuard.registerAll()。
+            adris.altoclef.trackers.WorldStateGuard.tick(this);
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)

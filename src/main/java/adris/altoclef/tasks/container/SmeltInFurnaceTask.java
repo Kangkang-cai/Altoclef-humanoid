@@ -966,6 +966,19 @@ public class SmeltInFurnaceTask extends ResourceTask {
     private static final List<InflightSmelt> INFLIGHT_SMELTS = new ArrayList<>();
     private static final int INFLIGHT_LEDGER_CAP = 8;
 
+    /**
+     * (2026-09-17 世界边界) 换存档时清空熔炉侧 static 状态:
+     *  - `_staticGaveUpUntilMs` (30s 放弃冷却): 上个存档放弃过烧制 → 新存档开局直接不烧;
+     *  - `_activeSmeltPos` (活跃炉坐标) + `INFLIGHT_SMELTS` / `ORPHAN_FURNACES`
+     *    两个静态账本: 会把上个世界的炉位当本世界的在途炉去认领 / 回收。
+     */
+    public static void onWorldBoundary() {
+        _staticGaveUpUntilMs = 0;
+        _activeSmeltPos = null;
+        INFLIGHT_SMELTS.clear();
+        ORPHAN_FURNACES.clear();
+    }
+
     /** 开屏观察到炉内容后登记/更新在途账 (生料+产物都算)。双零即销账。 */
     private static void recordInflight(BlockPos pos, SmeltTarget target, ItemStack mat, ItemStack out) {
         Item raw = target.getMaterial().getMatches()[0];

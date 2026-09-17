@@ -388,16 +388,23 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
     }
 
     protected static String expeditionKey(AltoClef mod) {
-        String levelName = "?";
-        try {
-            var server = MinecraftClient.getInstance().getServer();
-            if (server != null && server.getSaveProperties() != null
-                    && server.getSaveProperties().getLevelName() != null) {
-                levelName = server.getSaveProperties().getLevelName();
-            }
-        } catch (Exception ignored) {
-        }
-        return levelName + ":" + mod.getWorld().getRegistryKey().getValue().toString();
+        // (2026-09-17 跨世界污染) 显示名 → 存档目录名, 统一走 WorldIdentity。
+        return adris.altoclef.util.helpers.WorldIdentity.key(mod);
+    }
+
+    /**
+     * (2026-09-17 世界边界丢弃) 清空方位 / 锚点 / 试探进度 static。
+     * `_anchorByKey`(远征锚点) 与 `_probeStartPosByKey`(试探起点) 都是坐标 ——
+     * 不清就是"上个世界的锚点被当本世界的导航目标"(2026-09-10 传送门同款事故)。
+     */
+    public static void onWorldBoundary() {
+        _headingByKey.clear();
+        _anchorByKey.clear();
+        _maxRadiusByKey.clear();
+        _probeOffsetByKey.clear();
+        _probeStartMaxByKey.clear();
+        _probeStartPosByKey.clear();
+        _lastProgressTickByKey.clear();
     }
 
     protected static String fmtDeg(double rad) {

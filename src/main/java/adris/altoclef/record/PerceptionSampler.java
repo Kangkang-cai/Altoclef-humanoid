@@ -56,7 +56,11 @@ import java.util.PriorityQueue;
  * </ul>
  * 被岩石包住/隔墙的方块永远不会进记忆 —— 反透视边界不变。
  */
-final class PerceptionSampler {
+/**
+ * (2026-09-17) 可见性改为 public: 世界边界守卫(WorldStateGuard, 在 trackers 包)
+ * 需要在换存档时清空本类的静态视觉记忆 `_sight`。
+ */
+public final class PerceptionSampler {
 
     private PerceptionSampler() {}
 
@@ -82,6 +86,17 @@ final class PerceptionSampler {
     private static final int SIGHT_CAP = 60000;
     private static int _sliceCursor = 0;
     private static long _lastPruneTick = Long.MIN_VALUE;
+
+    /**
+     * (2026-09-17 世界边界) 换存档清空视觉记忆与扫描游标。
+     * `_sight` 存的是【坐标 → 最近可见信息】, 坐标来自旧世界; 游标与 prune tick
+     * 也都挂在旧世界的 tick 轴上, 复位让新世界从零推进。
+     */
+    public static void onWorldBoundary() {
+        _sight.clear();
+        _sliceCursor = 0;
+        _lastPruneTick = Long.MIN_VALUE;
+    }
 
     static String sample(AltoClef mod) {
         Settings s = mod.getModSettings();

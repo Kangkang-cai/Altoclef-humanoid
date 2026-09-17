@@ -490,15 +490,28 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // ------------------------------------------------------------------ //
 
     private static String fortressVisitedKey(AltoClef mod) {
-        String levelName = "?";
-        try {
-            var server = MinecraftClient.getInstance().getServer();
-            if (server != null && server.getSaveProperties() != null && server.getSaveProperties().getLevelName() != null) {
-                levelName = server.getSaveProperties().getLevelName();
-            }
-        } catch (Exception ignored) {
-        }
-        return levelName + ":" + mod.getWorld().getRegistryKey().getValue().toString();
+        // (2026-09-17 跨世界污染) 显示名 → 存档目录名, 统一走 WorldIdentity。
+        // 旧 key 的存量走廊记忆自然作废。
+        return adris.altoclef.util.helpers.WorldIdentity.key(mod);
+    }
+
+    /**
+     * (2026-09-17 世界边界丢弃) 换存档时清空本任务的全部 static 状态:
+     * 走廊格子 / 方位 / 远征锚点 / 试探进度 / 记忆查讫。
+     * 这些里 `_anchorByKey` / `_probeStartPosByKey` 存的是【坐标】, 不清就是
+     * "上个世界的锚点被当本世界的导航目标"。
+     * 刻意不动 `_visitedCellsLoaded`: 保持 true = 不重载磁盘(丢弃语义)。
+     */
+    public static void onWorldBoundary() {
+        _visitedCellsByKey.clear();
+        _headingByKey.clear();
+        _anchorByKey.clear();
+        _maxRadiusByKey.clear();
+        _probeOffsetByKey.clear();
+        _probeStartMaxByKey.clear();
+        _probeStartPosByKey.clear();
+        _lastProgressTickByKey.clear();
+        _checkedMemoryByKey.clear();
     }
 
     private static java.nio.file.Path fortressVisitedFile() {

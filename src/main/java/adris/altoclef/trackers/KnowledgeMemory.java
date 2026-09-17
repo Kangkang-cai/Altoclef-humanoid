@@ -198,23 +198,19 @@ public final class KnowledgeMemory {
 
     /** 当前 存档:维度 key (与 FortressExploreTask.fortressVisitedKey 同口径)。 */
     private String worldKey() {
-        String levelName = "?";
-        try {
-            var server = MinecraftClient.getInstance().getServer();
-            if (server != null && server.getSaveProperties() != null
-                    && server.getSaveProperties().getLevelName() != null) {
-                levelName = server.getSaveProperties().getLevelName();
-            }
-        } catch (Exception ignored) {
-        }
-        String dim = "?";
-        try {
-            if (_mod.getWorld() != null) {
-                dim = _mod.getWorld().getRegistryKey().getValue().toString();
-            }
-        } catch (Exception ignored) {
-        }
-        return levelName + ":" + dim;
+        // (2026-09-17 跨世界污染) 显示名 → 存档目录名, 统一走 WorldIdentity。
+        // 旧 key(显示名:维度) 的存量记录自然作废 —— 它们本身就有"新建世界默认
+        // 同名"的互灌风险, 换掉正是目的。
+        return adris.altoclef.util.helpers.WorldIdentity.key(_mod);
+    }
+
+    /**
+     * (2026-09-17 世界边界丢弃) 换存档时清空地标中心内存。
+     * 刻意不动 `_centersLoaded`: 保持 true 才是不重载磁盘(丢弃语义), 否则下次
+     * 访问会把另一个存档的地标读进来当导航目标。
+     */
+    public static void onWorldBoundary() {
+        _centersByKey.clear();
     }
 
     private static void ensureCentersLoaded() {

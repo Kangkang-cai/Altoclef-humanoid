@@ -2,7 +2,6 @@ package adris.altoclef.trackers;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.util.Dimension;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 
 import java.nio.charset.StandardCharsets;
@@ -54,18 +53,9 @@ public final class PortalMemoryStore {
      * 目录名 (每个新世界自动递增, 物理唯一) + "w2:" 版本前缀, 旧格式 key 永不匹配,
      * 存量脏记录自动作废。 */
     private static String key(AltoClef mod, Dimension dim) {
-        String worldId = "?";
-        try {
-            var server = MinecraftClient.getInstance().getServer();
-            if (server != null) {
-                Path root = server.getSavePath(net.minecraft.util.WorldSavePath.ROOT);
-                if (root != null && root.getFileName() != null) {
-                    worldId = root.getFileName().toString();
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return "w2:" + worldId + ":" + dim.name();
+        // (2026-09-17 统一口径) 目录名 + "w2:" 版本前缀的实现已抽到 WorldIdentity,
+        // 与地标/堡垒/矿洞/远征四处共用同一份 —— 口径只此一处, 不再各写一份。
+        return adris.altoclef.util.helpers.WorldIdentity.key(dim);
     }
 
     private static Path file() {
@@ -164,5 +154,16 @@ public final class PortalMemoryStore {
         ensureLoaded();
         Set<BlockPos> set = _seenByKey.get(key(mod, dim));
         return set != null ? new HashSet<>(set) : new HashSet<>();
+    }
+
+    /**
+     * (2026-09-17 世界边界丢弃) 换存档时清空内存。
+     * 刻意不动 `_loaded`: 保持 true 才是不重载磁盘(用户拍板的"丢弃"语义) ——
+     * 否则下次访问会把另一个存档的记录读回来, 正是要修的跨世界污染。
+     * 新存档此后靠 bot 亲眼穿过/看见重新积累, 并照常落盘。
+     */
+    public static void onWorldBoundary() {
+        _usedByKey.clear();
+        _seenByKey.clear();
     }
 }

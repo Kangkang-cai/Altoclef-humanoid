@@ -55,6 +55,19 @@ public class FoodChain extends SingleTaskChain {
     public static long s_foodSearchStartMs = -1;
     public static double s_foodSearchBestPotential = -1;
 
+    /**
+     * (2026-09-17 世界边界) 换存档时清空食物哨兵。
+     * `s_foodPeakReached` 是【锁存】语义(达到过峰值后, 分数回落不再触发收集) ——
+     * 上个存档"吃满了"的结论不该管到新存档, 新存档背包本来就空, 复位反而更准确。
+     * 远征状态 (锁定方位角/搜索基线) 同理, 留着会让新世界的觅食沿用旧方位。
+     */
+    public static void onWorldBoundary() {
+        s_foodPeakReached = false;
+        s_foodExpeditionActive = false;
+        s_foodSearchStartMs = -1;
+        s_foodSearchBestPotential = -1;
+    }
+
     private int _cachedFoodScore;
     private Optional<Item> _cachedPerfectFood = Optional.empty();
 
