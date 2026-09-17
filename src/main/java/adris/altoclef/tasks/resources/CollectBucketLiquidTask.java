@@ -31,7 +31,12 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.world.RaycastContext;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -83,10 +88,30 @@ public class CollectBucketLiquidTask extends ResourceTask {
     private final TimerGame _memoryLogTimer = new TimerGame(5);
 
     // (2026-09-04 溯源任务实例, 用户"看到水流应定位水源") 持有当前溯源任务引用以读取
-    // 失败状态; 溯源失败(gaveUp)时把起始流动水加入 _blacklist, 避免重试同一处。
+    // 失败状态; 溯源失败(gaveUp)时把起始流动水加入溯源黑名单, 避免重试同一处。
     private TraceFlowingWaterToSourceTask _traceTask = null;
     // (2026-09-13 v25) 溯源失败后的重试冷却 (static: 实例频繁重建会被绕过)。
     private static long _traceRetryCooldownUntilMs = 0;
+
+    // (2026-09-17 黑名单口径拆分 —— "看到水源却没找"的现场病根之一)
+    // 原来 _blacklist 一份两用: ①舀/破坏失败的液体格 ②溯源失败的起点流动水。
+    // 两者语义不同却共用一个集合, 而 isSourceLiquid 会查它 → 溯源失败把起点拉黑后,
+    // 【眼前那格真的是源的水】在后继判定里被永久忽略。现场 20260917-220709:
+    // 22:15:52 溯源放弃并拉黑起点, 此后 if 分支每 tick 打 "No flowing water
+    // found in BlockTracker either", 而水就在玩家正前方 1 格。
+    // 拆法: _blacklist 保留"操作不了"(仍参与 isSourceLiquid);
+    //       _traceBlacklist 只装"这条链走过了", 只参与 isFlowingWater, 且带 TTL。
+    // static: 本任务实例被框架频繁重建, 实例层集合会被绕过 (铁律, 同 v25 冷却)。
+    private static final Map<BlockPos, Long> _traceBlacklist = new HashMap<>();
+    private static final long TRACE_BLACKLIST_TTL_MS = 60_000;
+
+    // (2026-09-17) "No flowing water found" 诊断行节流 —— 原来该行在 2s 节流块之外,
+    // 每 tick 一条 (现场 22:15:53-56 打了 200+ 条), 既刷屏又拖帧。
+    private final TimerGame _noFlowDiagTimer = new TimerGame(5);
+
+    // (2026-09-17) 判据拒绝原因台账 (原因 -> 2s 窗口内次数)。回答"眼前的液体为什么
+    // 不被认": 黑名单/不可见/不可达/非源, 四选一。static + 2s 清零: 实例重建不丢中期数据。
+    private static final Map<String, Integer> _rejectStats = new HashMap<>();
 
     // (2026-09-04 海洋中转头找陆地, 用户"扫描时配合视角转动, 使得陆地满足fov")
     // bot 上浮到海面后不能"透视"biome 直接知道陆地方向 — 像人类一样转头环顾,
@@ -197,30 +222,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
             return TaskCatalogue.getItemTask(Items.BUCKET, bucketsNeeded);
         }
 
-        Predicate<BlockPos> isSourceLiquid = blockPos -> {
-            if (_blacklist.contains(blockPos)) return false;
-            // (2026-09-03 用户原则: 不满足 FOV/LOS 的不评估可达性, 且不限制距离)
-            // 看不到的水(墙后/未暴露表面)直接排除, 不进入后续 canReach。
-            // LOS 射线已有 400ms 短缓存 (VisibilityHelper), 不会每 tick 重打。
-            // (2026-09-04 见过即记忆, 用户"岩浆等重要物资见过就该一直感知") 倒完
-            // 岩浆面朝 cast、池子在身后 → 此刻 FOV/LOS 找不到刚舀过的池子 →
-            // "Exploring for lava" 越走越远。真感知过一次的源进长期记忆表,
-            // 此刻看不见也凭记忆走回去舀 (人记得池子在哪)。当前不可见且无记忆
-            // 的 (没见过的/被岩石包裹的) 仍然拒绝 — 反透视边界不变。
-            if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)
-                    && !VisibilityHelper.isValuableRemembered(mod, _toCollect, blockPos)) return false;
-            if (!WorldHelper.canReach(mod, blockPos)) return false;
-            if (!WorldHelper.canReach(mod, blockPos.up())) return false; // We may try reaching the block above.
-            assert MinecraftClient.getInstance().world != null;
-
-            // Lava, we break the block above. If it's bedrock, ignore.
-            if (_toCollect == Blocks.LAVA && !WorldHelper.canBreak(mod, blockPos.up())) {
-                return false;
-            }
-
-            // 2026-08-23: 对水，接受水源方块；对熔岩，只接受源
-            return WorldHelper.isSourceBlock(mod, blockPos, false);
-        };
+        // (2026-09-17 判据与诊断同源) 谓词本体搬到 sourceRejectReason(): 返回拒绝原因
+        // 或 null(=接受)。谓词与 [Diag-water] 诊断复用同一份判据 —— 判据只有一份,
+        // 杜绝"诊断口径与决策口径不一致"这条本项目最高频根因 (detail/03-consistency.md)。
+        Predicate<BlockPos> isSourceLiquid = blockPos -> sourceRejectReason(mod, blockPos) == null;
 
         // 2026-08-23: 诊断 - 检查 BlockTracker 是否感知到任何水
         // (2026-09-03 节流: 原每 tick 打印一条, 无水源时也刷屏, 影响帧率/难读日志)
@@ -238,9 +243,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
                     flowingWaterKnown++;
                 }
             }
-            Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s",
+            Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s reject=%s",
                     totalWaterKnown, sourceWaterKnown, flowingWaterKnown,
-                    totalWaterKnown > 0 ? "checking..." : "NONE");
+                    totalWaterKnown > 0 ? "checking..." : "NONE", drainRejectSummary());
+            // (2026-09-17) 逐格报告: 距玩家最近 3 个已知液体坐标 + 各自的拒绝原因 ——
+            // 直接回答"眼前这格水/岩浆为什么不算数"(黑名单/不可见/不可达/非源)。
+            Debug.logMessage("[Diag-water] nearest: %s", nearestWaterReport(mod));
         }
 
         // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
@@ -252,8 +260,13 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // 处理上次溯源任务的结果: 失败则黑名单其起点, 成功/失败都清理实例。
             if (_traceTask != null && _traceTask.isFinished(mod)) {
                 if (_traceTask.gaveUp() && _traceTask.getStartPos() != null) {
-                    _blacklist.add(_traceTask.getStartPos());
-                    Debug.logMessage("[Diag-water] trace failed, blacklisting start "
+                    // (2026-09-17 黑名单拆口径) 只进溯源黑名单 (60s TTL), 不再写
+                    // isSourceLiquid 的 _blacklist —— 否则眼前"真的是源"的那格水
+                    // 会被永久忽略 (现场 20260917-220709: 拉黑后每 tick 打
+                    // "No flowing water found", 而水就在玩家正前方 1 格)。
+                    _traceBlacklist.put(_traceTask.getStartPos(),
+                            System.currentTimeMillis() + TRACE_BLACKLIST_TTL_MS);
+                    Debug.logMessage("[Diag-water] trace failed, blacklisting start for tracing only (60s) "
                             + _traceTask.getStartPos().toShortString());
                 }
                 // (2026-09-13 v25) 失败即给全局溯源冷却, 防"new→秒放弃→再new"刷屏。
@@ -262,15 +275,9 @@ public class CollectBucketLiquidTask extends ResourceTask {
                 }
                 _traceTask = null;
             }
-            Predicate<BlockPos> isFlowingWater = blockPos -> {
-                if (_blacklist.contains(blockPos)) return false;
-                // (2026-09-03 用户原则) 不满足 FOV/LOS 的不评估可达性。
-                if (!VisibilityHelper.isBlockPerceivable(mod, blockPos)) return false;
-                if (!WorldHelper.canReach(mod, blockPos)) return false;
-                assert MinecraftClient.getInstance().world != null;
-                var state = MinecraftClient.getInstance().world.getBlockState(blockPos);
-                return state.getBlock() == Blocks.WATER && !state.getFluidState().isStill();
-            };
+            // (2026-09-17) 同 sourceRejectReason: 判据本体搬进 flowingRejectReason,
+            // 谓词与诊断共用一份; 黑名单改用 _traceBlacklist (见字段区注释)。
+            Predicate<BlockPos> isFlowingWater = blockPos -> flowingRejectReason(mod, blockPos) == null;
 
             if (_traceTask == null && mod.getBlockTracker().anyFound(isFlowingWater, Blocks.WATER)
                     // (2026-09-13 v25 防重建刷屏, 20260913-091045 实锤: "giving up
@@ -286,7 +293,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
             if (_traceTask != null) {
                 return _traceTask;
             }
-            Debug.logMessage("[Diag-water] No flowing water found in BlockTracker either");
+            // (2026-09-17 节流) 原每 tick 一条 (现场 22:15:53-56 打了 200+ 条)。
+            if (_noFlowDiagTimer.elapsed()) {
+                _noFlowDiagTimer.reset();
+                Debug.logMessage("[Diag-water] No flowing water found in BlockTracker either | "
+                        + drainRejectSummary() + " | nearest: " + nearestWaterReport(mod));
+            }
         }
 
         // Find nearest water and right click it
@@ -515,6 +527,123 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // (字段更全: y / covered=n/5 / dim / rejectedFlaps)。
     private boolean isBelowSurface(AltoClef mod) {
         return SurfaceHelper.isBelowSurfaceDebounced(mod);
+    }
+
+    // ===== (2026-09-17 判据本体 + 诊断: 一份判据两处用) =====
+
+    /**
+     * 返回"不接受这个液体格"的原因; null = 接受。判据语义与原内联谓词逐条一致
+     * (只把 return false 换成原因字符串):
+     * ①黑名单: 舀/破坏失败过的位置不再试;
+     * ②不可感知 (2026-09-03 用户原则): 不满足 FOV/LOS 的不评估可达性, 且不限制距离
+     *   —— 看不到的液体(墙后/未暴露表面)直接排除; 但 (2026-09-04 见过即记忆) 真感知
+     *   过一次的源进长期记忆表, 此刻看不见也能凭记忆走回去舀 (人记得池子在哪);
+     * ③不可达: BlockTracker 标记 unreachable —— 水格与其上方一格都要可达 (得站上去舀);
+     * ④岩浆额外要求上方可破坏 (要挖开顶盖);
+     * ⑤必须真的是源 (level==8 且上方不是液体)。
+     * <p>
+     * 谓词与诊断共用这一份: 本项目最高频根因就是"两个口径不一致"
+     * (detail/03-consistency.md), 诊断再写一遍判据只会制造第 N+1 份口径。
+     */
+    private String sourceRejectReason(AltoClef mod, BlockPos pos) {
+        return sourceRejectReason(mod, pos, true);
+    }
+
+    /** @param count 是否计入拒绝台账 (诊断自身的探查性调用传 false, 避免污染统计)。 */
+    private String sourceRejectReason(AltoClef mod, BlockPos pos, boolean count) {
+        if (_blacklist.contains(pos)) return reject("blacklist", count);
+        if (!VisibilityHelper.isBlockPerceivable(mod, pos)
+                && !VisibilityHelper.isValuableRemembered(mod, _toCollect, pos)) return reject("blind", count);
+        if (!WorldHelper.canReach(mod, pos)) return reject("unreachable", count);
+        if (!WorldHelper.canReach(mod, pos.up())) return reject("unreachableUp", count);
+        if (_toCollect == Blocks.LAVA && !WorldHelper.canBreak(mod, pos.up()))
+            return reject("cannotBreakAbove", count);
+        if (!WorldHelper.isSourceBlock(mod, pos, false)) return reject("notSource", count);
+        return null;
+    }
+
+    /**
+     * 溯源专用: 返回"不接受这个流动水格"的原因; null = 接受。
+     * 黑名单用 _traceBlacklist (只挡重复溯源), 不查 _blacklist 的"操作不了"语义。
+     */
+    private String flowingRejectReason(AltoClef mod, BlockPos pos) {
+        return flowingRejectReason(mod, pos, true);
+    }
+
+    private String flowingRejectReason(AltoClef mod, BlockPos pos, boolean count) {
+        if (traceBlacklisted(pos)) return reject("traceBlacklist", count);
+        // (2026-09-03 用户原则) 不满足 FOV/LOS 的不评估可达性。
+        if (!VisibilityHelper.isBlockPerceivable(mod, pos)) return reject("blind", count);
+        if (!WorldHelper.canReach(mod, pos)) return reject("unreachable", count);
+        var world = MinecraftClient.getInstance().world;
+        if (world == null) return reject("noWorld", count);
+        var state = world.getBlockState(pos);
+        if (state.getBlock() != _toCollect || state.getFluidState().isStill())
+            return reject("notFlowing", count);
+        return null;
+    }
+
+    private static String reject(String reason, boolean count) {
+        if (count) {
+            synchronized (_rejectStats) {
+                _rejectStats.merge(reason, 1, Integer::sum);
+            }
+        }
+        return reason;
+    }
+
+    /** (2026-09-17) 溯源黑名单查询 —— 带 60s TTL, 过期即忘 (不让一次失败永久闭嘴)。 */
+    private static boolean traceBlacklisted(BlockPos pos) {
+        Long until = _traceBlacklist.get(pos);
+        if (until == null) return false;
+        if (System.currentTimeMillis() > until) {
+            _traceBlacklist.remove(pos);
+            return false;
+        }
+        return true;
+    }
+
+    /** 打出并清空判据拒绝台账 (按次数降序)。 */
+    private static String drainRejectSummary() {
+        synchronized (_rejectStats) {
+            if (_rejectStats.isEmpty()) return "(no calls)";
+            StringBuilder sb = new StringBuilder();
+            _rejectStats.entrySet().stream()
+                    .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                    .forEach(e -> sb.append(sb.length() == 0 ? "" : ",")
+                            .append(e.getKey()).append('=').append(e.getValue()));
+            _rejectStats.clear();
+            return sb.toString();
+        }
+    }
+
+    /**
+     * (2026-09-17 诊断) 距玩家最近的 3 个已知液体格 + 逐格拒绝原因 —— 直接回答
+     * "眼前那格水/岩浆为什么不算数"。探查用 count=false, 不污染台账。
+     */
+    private String nearestWaterReport(AltoClef mod) {
+        Vec3d playerPos = mod.getPlayer().getPos();
+        List<BlockPos> known = new ArrayList<>(mod.getBlockTracker().getKnownLocations(_toCollect));
+        known.sort(Comparator.comparingDouble((BlockPos p) -> p.getSquaredDistance(playerPos)));
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (BlockPos pos : known) {
+            if (shown >= 3) break;
+            var world = MinecraftClient.getInstance().world;
+            if (world == null) break;
+            var fluid = world.getBlockState(pos).getFluidState();
+            String src = sourceRejectReason(mod, pos, false);
+            String flow = flowingRejectReason(mod, pos, false);
+            sb.append(shown == 0 ? "" : " | ")
+                    .append(pos.toShortString())
+                    .append(" d=").append(String.format("%.1f", Math.sqrt(pos.getSquaredDistance(playerPos))))
+                    .append(" lvl=").append(fluid.getLevel())
+                    .append(" still=").append(fluid.isStill())
+                    .append(" src=").append(src == null ? "OK" : src)
+                    .append(" flow=").append(flow == null ? "OK" : flow);
+            shown++;
+        }
+        return shown == 0 ? "(no known " + _toCollect + ")" : sb.toString();
     }
 
     public static class CollectWaterBucketTask extends CollectBucketLiquidTask {

@@ -48,9 +48,14 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     // 此刻 wander 会把 bot 从 1 格宽柱井里拽下去再重爬 (20260915-0807 会话实锤:
     // y=19 段垫到 y=3 → wander 接管 → 掉回 -6 → 再垫, 反复横跳到用户退出)。
     // 处置: 爬升场景 checker 失败只重置检查器让 baritone 继续; 真卡死 (距上次
-    // 最高脚下 Y 刷新超 20s 仍无 +1) 才退回 wander 兜底。非爬升 goal (goalY()
-    // 返回 -1 或目标在下/平) 行为完全不变。
+    // 最高脚下 Y 刷新超 20s 仍无 +1) 才退回 wander 兜底。非爬升 goal (目标在下/平)
+    // 行为完全不变。
+    // (2026-09-17 哨兵值修正) 原来用 goalY() == -1 当作"非爬升"的过滤条件 ——
+    // 哨兵 -1 参与算术后在地下恒真 (见 goalY() 注释与 onTick 里 climbing 分支),
+    // 现在哨兵独立为 UNKNOWN_GOAL_Y, 必须显式判等, 不再依赖 y 的正负。
     private int _climbWatchBestY = Integer.MIN_VALUE;
+    /** goalY() 的"未知/不支持"哨兵 (不参与大小比较)。 */
+    private static final int UNKNOWN_GOAL_Y = Integer.MIN_VALUE;
     private final TimerGame _climbStallTimer = new TimerGame(20);
 
     // ===== 水中直游 (2026-08-25) =====
@@ -240,7 +245,10 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                 // 自身有 5s 失速 + 出水 release 兜底, 不会误控失控。
                 if (inWater && !_directSwimControl) {
                     int ty = goalY();
-                    if (ty > 0 && ty > mod.getPlayer().getBlockPos().getY()) {
+                    // (2026-09-17) 哨兵显式判等。旧代码靠 `ty > 0` 顺带过滤哨兵 -1;
+                    // 哨兵改为 MIN_VALUE 后保留 y>0 (上浮只针对水面以上的目标),
+                    // 与旧版逐条等价, 不做额外放宽。
+                    if (ty != UNKNOWN_GOAL_Y && ty > 0 && ty > mod.getPlayer().getBlockPos().getY()) {
                         // (2026-09-11) 水平闸门: GoalYLevel 无 XZ 保持原行为;
                         // 带水平目标时只有贴近目标柱 (<=8 格) 才允许垂直上浮,
                         // 远距离一律交 baritone / 水平平游, 详见常量注释。
@@ -276,7 +284,15 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                     // (2026-09-15 垂直爬升不被 wander 腰斩, 见字段注释)
                     int climbGoalY = goalY();
                     int climbPlayerY = mod.getPlayer().getBlockPos().getY();
-                    if (climbGoalY - climbPlayerY > 1) {
+                    // (2026-09-17 哨兵闸门, 20260917-220709 场实锤) goalY() 对
+                    // GoalNear/GoalXZ 等返回哨兵; 旧代码让哨兵直接进算术 (-1),
+                    // 地下玩家 (y=-52) 时 `-1 - (-52) = 51 > 1` 恒真 → 每 tick 走
+                    // 本豁免分支: _checker.reset() 清掉进度检查 + return null 不
+                    // 干预 → wander 兜底全部失效。现场: 溯源接近点不可达, 玩家
+                    // (-45,-52,-122) 差 1 格, baritone pathing=false 零输入原地
+                    // 冻结, 状态一直显示 "Completing goal (climbing, holding
+                    // baritone)", 直到上层 4s 判据把整条水流链判死。
+                    if (climbGoalY != UNKNOWN_GOAL_Y && climbGoalY - climbPlayerY > 1) {
                         if (climbPlayerY > _climbWatchBestY) {
                             // 脚下 Y 创新高 = baritone 在真推进, 续命看门狗。
                             _climbWatchBestY = climbPlayerY;
@@ -468,16 +484,21 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     }
 
     /**
-     * (2026-09-04) 提取 baritone goal 的目标 Y, 不支持的类型返回 -1。
-     * 供水下垂直上浮用 (GoalYLevel 无 XZ, goalXZ() 返回 null)。
+     * (2026-09-04) 提取 baritone goal 的目标 Y, 不支持的类型返回哨兵
+     * {@link #UNKNOWN_GOAL_Y}。供水下垂直上浮用 (GoalYLevel 无 XZ, goalXZ() 返回 null)。
+     * <p>
+     * (2026-09-17 哨兵值修正) 原哨兵是 -1, 而 -1 会被调用方直接代入算术 ——
+     * 地下 (玩家 y<-2) 时 `-1 - playerY > 1` 恒真, 把所有非垂直 goal (GoalNear/
+     * GoalXZ/GoalBlock...) 误判成"目标在上方" (见 onTick 里 climbing 豁免分支)。
+     * 改用 Integer.MIN_VALUE 做显式哨兵, 调用方必须先判等再比较。
      */
     private int goalY() {
         Goal g = _cachedGoal;
-        if (g == null) return -1;
+        if (g == null) return UNKNOWN_GOAL_Y;
         if (g instanceof GoalYLevel gyl) return gyl.level;
         if (g instanceof GoalBlock gb) return gb.getGoalPos().getY();
         if (g instanceof GoalTwoBlocks gtb) return gtb.getGoalPos().getY();
-        return -1;
+        return UNKNOWN_GOAL_Y;
     }
 
     private double horizontalDist(AltoClef mod, BlockPos target) {

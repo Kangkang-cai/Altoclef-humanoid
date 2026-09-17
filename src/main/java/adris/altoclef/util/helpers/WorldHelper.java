@@ -148,6 +148,48 @@ public interface WorldHelper {
     }
 
     /**
+     * (2026-09-17 溯源/舀液接近点口径, 20260917-220709 场实锤) 找 liquid 附近
+     * 【干燥、可站立】的地面格 —— 供"走到水流/岩浆旁边"的导航用。
+     *
+     * 为什么不能直接用 {@link #findStandableAirNear}: 它的候选含 target 自身,
+     * 而液体格 (水/岩浆) 的 isSolidBlock 为 false → 液体格本身会被选中。玩家
+     * "站进去"实际会沉到液体格内部 (BlockPos 降一层), 于是 `GoalNear(液体格上方, 0)`
+     * 这类精确目标**永不满足** → baritone 全展开后 pathing=false、无路径、原地冻结
+     * (现场: 玩家 (-44.51,-52,-121.77) 距目标 1 格, 4s 零位移, 把整条溯源链判死)。
+     *
+     * 候选 = liquid 的水平 8 邻域 (不含自身); 要求 ①自身非液体且非实心 (能站进去)
+     * ②头位非实心 (不卡半砖) ③脚下实心 (能站住)。取离玩家最近者。
+     *
+     * @return 可站格; 四周全是液体/墙 (找不到干燥落脚点) 时返回 null, 调用方自行放弃。
+     */
+    public static BlockPos findStandableNearLiquid(AltoClef mod, BlockPos liquid) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                BlockPos c = liquid.add(dx, 0, dz);
+                if (!isDryStandable(mod, c)) continue;
+                double d = c.getSquaredDistance(player);
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = c;
+                }
+            }
+        }
+        return best;
+    }
+
+    /** 干燥可站立: 自身非液体且非实心, 头位非实心, 脚下实心。 */
+    public static boolean isDryStandable(AltoClef mod, BlockPos pos) {
+        if (mod.getWorld().getBlockState(pos).getBlock() instanceof FluidBlock) return false;
+        if (isSolid(mod, pos)) return false;
+        if (isSolid(mod, pos.up())) return false;
+        return isSolid(mod, pos.down());
+    }
+
+    /**
      * Get the "head" of a block with a bed, if the block is a bed.
      */
     static BlockPos getBedHead(AltoClef mod, BlockPos posWithBed) {
