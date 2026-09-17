@@ -21,6 +21,8 @@ public class EnsureFreeInventorySlotTask extends Task {
 
     // (2026-08-27 合并诊断日志) 每 2 秒一条写独立文件, 便于检索合并为何不触发。
     private static long _lastConsolidateDiag = 0;
+    // (2026-09-17 搬运在途让路) [MOVE-GUARD] 打点节流时间戳。
+    private long _lastMoveGuardLogMs = 0;
 
     // (2026-09-14 穿甲两拍搬运粘滞) 持有本任务派发的穿甲搬运子任务与目标物品:
     // 两拍中转的第一拍 PICKUP 把靴子拿上光标后, 下一 tick 重入时 cursorBusy=true
@@ -64,6 +66,24 @@ public class EnsureFreeInventorySlotTask extends Task {
                 CursorArbiter.release(CursorArbiter.INTENT_RELOCATE);
                 return null;
             }
+        }
+        // (2026-09-17 搬运在途让路) 光标上的物品正被某次两拍搬运持有 (如往熔炉
+        // 塞 raw_iron 的拿起→放下之间) → 本任务的丢弃级联 (Throwing bulk stack
+        // from cursor / tossing bulk stack) 会把任务材料整堆扔进坑, 上层又派
+        // Pickup 捡回 = "扔了又捡"死循环 (20260917-090520 场实锤, 用户确认症状)。
+        // 让路: 维持现状不进丢弃级联, 等搬运两拍走完 (在途登记 1s 滑动过期,
+        // 搬运卡死/被停后保护自动解除, 不会永久遮蔽腾位)。
+        ItemStack cursorNow = StorageHelper.getItemStackInCursorSlot();
+        if (!cursorNow.isEmpty()
+                && MoveItemToSlotTask.isCursorItemInFlight(cursorNow.getItem())) {
+            long deferLogNow = System.currentTimeMillis();
+            if (deferLogNow - _lastMoveGuardLogMs > 2000) {
+                _lastMoveGuardLogMs = deferLogNow;
+                Debug.logToFile("altoclef_diag.log", "[MOVE-GUARD] cursor holds in-flight "
+                        + cursorNow.getItem().getTranslationKey() + ", deferring discard cascade");
+            }
+            setDebugState("Cursor holds in-flight move item, deferring discard");
+            return null;
         }
         // (2026-09-14 穿甲两拍搬运粘滞) 见字段注释。必须在 cursorBusy 判定之前:
         // 中间态(物品已上光标)恰好会让 cursorBusy=true 而跳过穿甲分支。

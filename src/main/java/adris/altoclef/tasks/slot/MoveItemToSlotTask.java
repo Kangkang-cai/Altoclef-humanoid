@@ -12,11 +12,36 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
 public class MoveItemToSlotTask extends Task implements ITaskCanForce {
+
+    // (2026-09-17 搬运在途登记) 光标上正被两拍搬运的目标物品表 (item -> 登记时间戳)。
+    // 背景: 20260917-090520 场, bot 往熔炉塞 raw_iron 的两拍之间 (拿起→放下),
+    // EnsureFreeInventorySlotTask 的丢弃级联把光标上的 raw_iron 当"外来滞留"整堆
+    // 扔进坑 → 又派 Pickup 捡回 → 再塞再扔 ("扔了又捡"死循环, 用户确认症状)。
+    // 塞料任务没有 CursorArbiter 租约 (RELOCATE 是腾位链自己持有的, 同 intent
+    // 豁免对持租者本人无效), 故用独立在途表: 拿起目标物时登记 (1s 滑动过期),
+    // 腾位链丢弃前查询让路。滑动过期 = Moving 实例每 tick 重建不空窗、
+    // Moving 卡死/被停 1s 后保护自动解除, 不会永久遮蔽腾位。
+    private static final Map<Item, Long> _inFlightCursorItems = new HashMap<>();
+    private static final long IN_FLIGHT_TTL_MS = 1000L;
+
+    /** 光标物品是否正被某次两拍搬运持有 (腾位/丢弃派发前查询)。 */
+    public static boolean isCursorItemInFlight(Item item) {
+        if (item == null) return false;
+        long now = System.currentTimeMillis();
+        Long since = _inFlightCursorItems.get(item);
+        return since != null && now - since <= IN_FLIGHT_TTL_MS;
+    }
+
+    private static synchronized void markInFlight(Item item) {
+        if (item != null) _inFlightCursorItems.put(item, System.currentTimeMillis());
+    }
 
     private final ItemTarget _toMove;
     private final Slot _destination;
@@ -124,6 +149,9 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         // (2026-08-24 拿起放下反复修复) 光标已拿到目标材料 → 放到目标槽,
         // 并清空"待确认拿起"状态。
         if (!currentHeld.isEmpty() && !wrongItemHeld) {
+            // (2026-09-17 搬运在途登记) 光标持有目标物 = 两拍中转进行中,
+            // 登记防腾位链整堆扔掉 (见 _inFlightCursorItems 注释)。
+            markInFlight(currentHeld.getItem());
             _pendingPickup = null;
             int currentlyPlaced = Arrays.asList(validItems).contains(atTarget.getItem()) ? atTarget.getCount() : 0;
             if (currentHeld.getCount() + currentlyPlaced <= _toMove.getTargetCount()) {
