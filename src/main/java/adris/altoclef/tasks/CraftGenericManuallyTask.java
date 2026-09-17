@@ -2,6 +2,7 @@ package adris.altoclef.tasks;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.slot.ClickSlotTask;
+import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.MoveItemToSlotFromInventoryTask;
 import adris.altoclef.tasks.slot.ReceiveCraftingOutputSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
@@ -115,15 +116,12 @@ public class CraftGenericManuallyTask extends Task implements ITaskUsesCraftingG
         // Ensure our cursor is empty/can receive our item
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         if (!ItemHelper.canStackTogether(StorageHelper.getItemStackInSlot(outputSlot), cursor)) {
-            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`: 背包满时
-            // 点垃圾槽只交换不扔 → 直接扔光标杂物腾光标。
-            Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursor, false);
-            if (toFit.isPresent()) {
-                return new ClickSlotTask(toFit.get());
-            } else {
-                // Eh screw it — 背包满放不下 → 扔光标杂物
-                return new ThrowCursorTask();
-            }
+            // (2026-09-17 收敛 B 类复制) 旧内联(试放回→放不下扔)与
+            // DoStuffInContainer/SmeltInFurnace/CraftGenericWithRecipeBooks 逐字
+            // 同构, 统一替换为 EnsureFreeCursorSlotTask 正版状态机, 见
+            // DoStuffInContainerTask 同日注释。
+            setDebugState("Clearing cursor to receive crafted item");
+            return new EnsureFreeCursorSlotTask();
         }
 
         if (!StorageHelper.getItemStackInSlot(outputSlot).isEmpty()) {

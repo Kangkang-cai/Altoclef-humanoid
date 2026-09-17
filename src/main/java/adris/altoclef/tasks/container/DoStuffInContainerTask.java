@@ -7,6 +7,7 @@ import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.PlaceBlockNearbyTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
+import adris.altoclef.tasks.slot.EnsureFreeCursorSlotTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasks.slot.MoveItemToSlotTask;
 import adris.altoclef.tasks.slot.ThrowCursorTask;
@@ -352,20 +353,14 @@ public abstract class DoStuffInContainerTask extends Task {
                 return _openTableTask;
             }
             setDebugState("Clearing cursor slot (otherwise this causes BIG problems)");
-            // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)` —
-            // 背包满时点垃圾槽只交换不扔, 光标杂物永远腾不掉 → 走 EnsureFree 真正扔出。
-            // (2026-09-03 满包腾位时"拿垃圾→被点回"死循环修复) 这个分支原本把光标物品
-            // "放回背包某个能放下的真槽"——但若该物品正是满包腾位时从 slot 里主动拿起的
-            // **垃圾**(攻击家化等低价值物), 放回等于抵消腾位, 且与游走腾位/挖方块链互相
-            // 拆台(日志 14:31 t=598 反复: EnsureFree 拿 slot16→Throwing→DestroyBlock→父容器
-            // Clearing cursor→Click 点回 slot16→又拿…… 2秒一轮死循环)。因此这里不再"放回",
-            // 而是干脆把光标垃圾真正【扔出】青远, 由 ThrowCursorTask(含挖面前方块兜底)处理。
-            Optional<Slot> toMoveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(StorageHelper.getItemStackInCursorSlot(), false);
-            if (toMoveTo.isEmpty() || ItemHelper.canThrowAwayStack(mod, StorageHelper.getItemStackInCursorSlot())) {
-                return new ThrowCursorTask();
-            } else {
-                return new ClickSlotTask(toMoveTo.get());
-            }
+            // (2026-09-17 收敛 B 类复制) 旧实现是 EnsureFreeCursorSlotTask 的内联
+            // 粗糙拷贝 (一拍判定: toFit 有→点回 / 无或可扔→ThrowCursorTask), 与
+            // SmeltInFurnace/CraftGenericManually/CraftGenericWithRecipeBooks 三处
+            // 逐字同构 (注释互引"同 LootContainerTask 根因"), 判定口径还各有漂移,
+            // 是 0916-0917 两次漏堵"扔掉搬运在途材料"的直接土壤。统一替换为
+            // EnsureFreeCursorSlotTask 正版状态机 (3 次放置尝试→真实扫描→硬时间
+            // 兜底→丢弃级联), 行为变化: 优先放回背包, 扔是最后手段。
+            return new EnsureFreeCursorSlotTask();
         }
         return _openTableTask;
         //return new GetToBlockTask(nearest, true);

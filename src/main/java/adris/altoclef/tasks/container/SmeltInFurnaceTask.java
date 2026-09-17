@@ -639,17 +639,12 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 // Ensure our cursor is empty/can receive our item
                 ItemStack outCursor = StorageHelper.getItemStackInCursorSlot();
                 if (!ItemHelper.canStackTogether(output, outCursor)) {
-                    // (2026-09-01 同 LootContainerTask 根因) 删 `.or(getGarbageSlot)`
-                    // 回退 — 背包满时点垃圾槽只交换不扔, 光标垃圾永远腾不掉, 收输出
-                    // 与点垃圾槽无限互换。无空位时直接扔光标(非材料/燃料的杂物), 腾出
-                    // 光标收输出。
-                    Optional<Slot> toFit = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(outCursor, false);
-                    if (toFit.isPresent()) {
-                        return new ClickSlotTask(toFit.get());
-                    } else {
-                        // Eh screw it — 背包满放不下 → 扔光标杂物腾光标
-                        return new ThrowCursorTask();
-                    }
+                    // (2026-09-17 收敛 B 类复制) 旧内联(试放回→放不下扔)与
+                    // DoStuffInContainer/CraftGeneric×2 逐字同构, 统一替换为
+                    // EnsureFreeCursorSlotTask 正版状态机(真实扫描优先/放置上限/
+                    // 硬时间兜底→丢弃级联), 见 DoStuffInContainerTask 同日注释。
+                    setDebugState("Clearing cursor to receive output");
+                    return new EnsureFreeCursorSlotTask();
                 }
                 // (2026-09-05 收产物改 QUICK_MOVE, 用户"金子拿起又放下4次") 原来用
                 // PICKUP 把产物拿到光标 → 下一 tick 本任务的 Dumping 光标守卫

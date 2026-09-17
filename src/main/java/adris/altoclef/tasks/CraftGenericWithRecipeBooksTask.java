@@ -259,8 +259,14 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
                         }
                     }
                 }
-                // Crafting grid is full, and we still have the item, throw it away.
-                return new ThrowCursorTask();
+                // (2026-09-17 收敛 B 类复制) 旧实现合成格满直接扔光标配方材料;
+                // 统一替换为 EnsureFreeCursorSlotTask 正版状态机——先试放回背包
+                // (材料不浪费, 下次填充仍可用), 放不下才进丢弃级联。行为变化:
+                // 不再无脑扔, 与 DoStuffInContainer/SmeltInFurnace/CraftGeneric
+                // Manually 三处口径一致 (原 TODO "Add as an alternative method
+                // to EnsureCursorSlotTask" 即此收敛)。
+                setDebugState("Clearing cursor (grid full, returning materials)");
+                return new EnsureFreeCursorSlotTask();
             }
         }
 
