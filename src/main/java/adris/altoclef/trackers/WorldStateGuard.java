@@ -7,6 +7,7 @@ import adris.altoclef.record.PerceptionSampler;
 import adris.altoclef.tasks.CraftGenericWithRecipeBooksTask;
 import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.movement.BearingExpeditionTask;
+import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.util.helpers.HitRegistry;
@@ -111,5 +112,6 @@ public final class WorldStateGuard {
         register("VisibilityHelper(LOS 缓存)", VisibilityHelper::onWorldBoundary);
         register("PerceptionSampler(感知快照)", PerceptionSampler::onWorldBoundary);
         register("SurfaceHelper(地表判据迟滞)", SurfaceHelper::onWorldBoundary);
+        register("BiasedExploreTask(够不着的目标拉黑表)", BiasedExploreTask::onWorldBoundary);
     }
 }

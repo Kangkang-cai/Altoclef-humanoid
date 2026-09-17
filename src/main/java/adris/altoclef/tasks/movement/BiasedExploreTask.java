@@ -15,8 +15,11 @@ import net.minecraft.util.math.Vec3d;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -30,6 +33,19 @@ import java.util.function.Supplier;
  * an angle range. This speeds up finding targets while keeping human-like behavior.
  *
  * If no bias candidates exist, it degrades to random exploration.
+ *
+ * <h3>(2026-09-17) 两处 churn 修复</h3>
+ * 现场 20260917-120830: bot 困在 1 格宽阶梯地道, `[NAV-STUCK]` ×419 + `Explore step
+ * failed` ×137 + `BiasedExplore RE-path` 每 150ms 一次 (repath# 275)。两个独立缺口:
+ * <ol>
+ *   <li><b>卡住没人处置</b> — 本类只 extends Task, 从不调用
+ *       {@link JumpStuckResolver}(它只有 CustomBaritoneGoalTask / ExploreCaveTask
+ *       两个调用方) → 原地弹跳/顶墙时不挖障、不换路、不 wander。见 {@link #onTick} 开头。</li>
+ *   <li><b>拉黑被重建清空</b> — {@link #_visitedBiasTargets}/{@link #_failedTargets}/
+ *       {@code _failCounter} 都是实例字段, 父任务 (MineAndCollectTask:1996) 每 5s
+ *       重建全新实例 → 又选中同一根够不着的原木 → 死循环 35 分钟。
+ *       修: {@link #_unreachableTargets} 跨实例 + 按方块坐标记 + 5 分钟 TTL。</li>
+ * </ol>
  */
 public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
@@ -88,6 +104,32 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // A human doesn't keep walking back to the same spot they already checked.
     private final Set<BlockPos> _visitedBiasTargets = new HashSet<>();
 
+    // ===== (2026-09-17 P0 拉黑) 跨实例"够不着"的 bias 目标拉黑表 =====
+    //
+    // 现场 (20260917-120830 场次): bot 在 1 格宽阶梯地道里, 已知原木缓存 206 条
+    // 全部不可感知 (最近的在 74m 外)。每次实例这样结束一轮:
+    //   选最近的已知原木当 bias 目标 → 朝它走 48 格 → progressChecker 6s 无位移
+    //   判失败 (chat 里 "Explore step failed" ×137) → 11 次后 _failCounter > 10
+    //   → isFinished → 父任务 (MineAndCollectTask:1996, 5s 冷却后) 重建【全新实例】。
+    // _visitedBiasTargets / _failedTargets / _failCounter 都是**实例字段**, 新实例
+    // 三样全空 → 又选中同一根原木 → 死循环 (35 分钟)。
+    //
+    // 为什么只按【bias 目标】跨实例拉黑, 不拉黑 step 目标:
+    //   - bias 目标来自 "最近已知位置", 在同一位置是**确定性重选** (每次都是那一条),
+    //     正是死循环的引擎;
+    //   - step 目标带 25° 随机抖动, 同一 BlockPos 几乎不会重现, 实例内的
+    //     _failedTargets 已覆盖同轮重试, 跨实例拉黑反而可能压掉后来合法的探索方向。
+    //
+    // 为什么要 TTL (而不是永久拉黑): 同一个存档里, bot 一旦真爬回地表/绕出地道,
+    // 那根"够不着"的原木就重新可达了。永久拉黑 = 目标明明在眼前却再也不去。
+    // TTL 到点自动放行; 父任务重建节奏是 5s, 5 分钟足够压掉 ~60 次重建。
+    //
+    // key 用 BlockPos (方块坐标) —— 与调用方 (_visitedBiasTargets) 同键口径;
+    // 换存档必须清 (旧存档的坐标在新世界无意义) → onWorldBoundary, 已挂 WorldStateGuard。
+    private static final Map<BlockPos, Integer> _unreachableTargets = new HashMap<>();
+    private static final int UNREACHABLE_TTL_TICKS = 6000; // 5 min @20tps
+    private static final int UNREACHABLE_MAX = 512;        // 上限: 防无限膨胀
+
     private BlockPos _currentTarget;
     // The bias target the current step is steered towards (null = random step).
     private BlockPos _currentBiasTarget;
@@ -118,6 +160,53 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         this(false, biasSources);
     }
 
+    // ===== 跨实例拉黑表操作 (static, 见字段区注释) =====
+
+    /** 换存档复位 (WorldStateGuard): 旧存档的方块坐标在新世界无意义。 */
+    public static void onWorldBoundary() {
+        _unreachableTargets.clear();
+    }
+
+    /**
+     * 把一个"够不着"的 bias 目标拉黑。日志标记 {@code [BiasBlacklist]} —— 验证时
+     * grep 它: 每行 = 一次"本来会回到同一个目标"的死循环节拍点被拦下。
+     */
+    private static void markUnreachable(BlockPos target, AltoClef mod) {
+        if (target == null) return;
+        pruneUnreachable();
+        _unreachableTargets.put(target, WorldHelper.getTicks());
+        Debug.logToFile("altoclef_diag.log", "[BiasBlacklist] unreachable " + target.toShortString()
+                + " (size=" + _unreachableTargets.size() + "/" + UNREACHABLE_MAX
+                + ", ttl=" + UNREACHABLE_TTL_TICKS + "t)"
+                + " player=" + (mod.getPlayer() != null ? mod.getPlayer().getBlockPos().toShortString() : "?"));
+    }
+
+    /** 该目标是否仍在拉黑期内。过期即顺手移除 (惰性清理)。 */
+    private static boolean isUnreachable(BlockPos target) {
+        if (target == null || _unreachableTargets.isEmpty()) return false;
+        Integer markedAt = _unreachableTargets.get(target);
+        if (markedAt == null) return false;
+        if (WorldHelper.getTicks() - markedAt >= UNREACHABLE_TTL_TICKS) {
+            _unreachableTargets.remove(target);
+            return false;
+        }
+        return true;
+    }
+
+    /** 清理过期项 + 压到上限 (超限时按拉黑时刻从早到晚丢)。 */
+    private static void pruneUnreachable() {
+        if (_unreachableTargets.isEmpty()) return;
+        int now = WorldHelper.getTicks();
+        _unreachableTargets.entrySet().removeIf(e -> now - e.getValue() >= UNREACHABLE_TTL_TICKS);
+        int over = _unreachableTargets.size() - UNREACHABLE_MAX;
+        if (over <= 0) return;
+        List<BlockPos> oldest = new ArrayList<>(_unreachableTargets.keySet());
+        oldest.sort(Comparator.comparingInt(p -> _unreachableTargets.getOrDefault(p, 0)));
+        for (int i = 0; i < over && i < oldest.size(); ++i) {
+            _unreachableTargets.remove(oldest.get(i));
+        }
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _origin = mod.getPlayer().getPos();
@@ -137,6 +226,23 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-17 P0-b) 跳跃卡死「检测+处置」共享件。本任务原先直接 extends Task,
+        // 【完全不调用】它 —— 而它只有两个调用方 (CustomBaritoneGoalTask / ExploreCaveTask),
+        // 所以本任务里 bot 原地弹跳/顶墙时没有任何处置: 不挖障、不 forceCancel 换路、
+        // 也不强制 wander, 只剩 _progressChecker 每 6s 判一次"这一步失败"然后换方向。
+        // 20260917-120830 场次实锤: [NAV-STUCK] ×419 (netXZ 0.01~0.45, yRange 3~4,
+        // mode=frozen) 全程伴随 "Explore step failed" ×137 —— 就是"检测有了、处置没有"。
+        //
+        // 与 CustomBaritoneGoalTask:160 同款前置return。处置任务返回期间【重置】进度
+        // 检查器: 挖障/wander 期间 bot 本来就不产生水平位移, 不重置的话处置一结束
+        // 检查器会立刻误报"这一步失败", 而这一步的失败会把正在被处置的 bias 目标
+        // 拉黑 (markUnreachable) —— 处置刚生效、目标就被自己拉黑, 自相矛盾。
+        Task jumpFix = JumpStuckResolver.tick(mod);
+        if (jumpFix != null) {
+            _progressChecker.reset();
+            return jumpFix;
+        }
+
         // All bias targets checked: nothing left to explore towards. End so the
         // parent task can re-decide (e.g. go dig instead of circling the surface).
         if (_biasExhausted) return null;
@@ -179,6 +285,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // Unreachable step: don't steer towards its bias target again either.
             if (_currentBiasTarget != null) {
                 _visitedBiasTargets.add(_currentBiasTarget);
+                // (2026-09-17 P0 拉黑) 本实例的下场就是被父任务丢弃重建 —— 拉黑只写在
+                // 实例字段里等于没写 (新实例三样全空, 又选回同一根原木)。见字段区注释。
+                markUnreachable(_currentBiasTarget, mod);
             }
             Debug.logMessage("Explore step failed, picking a new direction.");
             _currentTarget = null;
@@ -265,7 +374,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             int candY = surfaceYAt(mod, candX, candZ, (int) Math.floor(pos.y));
             BlockPos candidate = new BlockPos(candX, candY, candZ);
             // Avoid retrying the exact directions we already failed on.
-            if (_failedTargets.contains(candidate)) continue;
+            // (2026-09-17) 跨实例拉黑目标同样跳过: 它可能恰好落在这个候选点上。
+            if (_failedTargets.contains(candidate) || isUnreachable(candidate)) continue;
             // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取
             // 食物") 找食物探索: 落点必须是干燥陆地。原逻辑对 biased (河/湖按"过河放行"
             // 处理) 与 swimming 两种情况直接放行水面落点, 于是 bot 走到水面上再开始找
@@ -275,7 +385,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // "过河可以、下海不行"的定论。
             if (_foodExplore && !isDryLanding(mod, candidate)) {
                 BlockPos dry = findDryLandingAlong(mod, pos, angle);
-                if (dry == null || _failedTargets.contains(dry)) {
+                if (dry == null || _failedTargets.contains(dry) || isUnreachable(dry)) {
                     _failedTargets.add(candidate);
                     Debug.logToFile("altoclef_diag.log",
                             "[DRY-LANDING] food explore: no dry landing along "
@@ -467,6 +577,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             for (BlockPos candidate : _plainsTargets) {
                 if (candidate == null) continue;
                 if (_visitedBiasTargets.contains(candidate)) continue;
+                if (isUnreachable(candidate)) continue;
                 if (!candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) continue;
                 double d = candidate.getSquaredDistance(pos);
                 if (d < bestDist) {
@@ -487,6 +598,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 if (candidate == null) continue;
                 // Already walked to this one — don't steer back to it forever.
                 if (_visitedBiasTargets.contains(candidate)) continue;
+                // (2026-09-17 P0 拉黑) 跨实例: 上一个实例判过"够不着"的目标, 本实例
+                // (父任务重建出来的) 也不该再选它。TTL 到期自动放行。
+                if (isUnreachable(candidate)) continue;
                 if (candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) {
                     double d = candidate.getSquaredDistance(pos);
                     if (d < bestDist) {
