@@ -287,6 +287,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 不动 (典型: 水淹岩层, baritone 垂直爬升在水体无解, 09-14 取证) → 回退楼梯。
     private static final int BARITONE_ASCENT_STALL_SECONDS = 20;
     private static final int BARITONE_ASCENT_STALL_MIN_GAIN = 2;
+    // (2026-09-17 头顶净空步上) 低行事线恰好 1 格时挖头顶净空块的超时 (超时交还
+    // baritone 正常流程, 防不可挖方块挂死本状态)。
+    private static final int CEILING_STEP_UP_TIMEOUT = 8;
     // =========================================================================
     // (2026-09-05 下界目标带, 用户"高度无法确定, 只要在一个合适范围内, 适用于
     //  不同下界任务") 单点目标高度 (70) 改为【生成带】: 调用方给 [min,max], 每个
@@ -385,6 +388,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private GetToYTask _baritoneAscentTask = null;
     private int _baritoneAscentBestY = Integer.MIN_VALUE;
     private final TimerGame _baritoneAscentStall = new TimerGame(BARITONE_ASCENT_STALL_SECONDS);
+    // (2026-09-17 头顶净空步上) 非 null = 正在挖这个头顶块, 挖开后交 baritone
+    // 垫一步上行事线。2 格高隧道里跳高不足 1 格、pillar 放不进方块, baritone
+    // 无解; 挖掉头顶净空块变 3 格高后 pillar 可行 —— 人类做法。
+    private BlockPos _ceilingStepUp = null;
+    private final TimerGame _ceilingStepUpTimer = new TimerGame(CEILING_STEP_UP_TIMEOUT);
     private int _dirX = STAIR_DIR_X;
     private int _dirZ = STAIR_DIR_Z;
     // [Diag-water] how many water blocks we've skipped so far this run.
@@ -604,6 +612,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // Already at mining depth? Don't dig a pointless 1-block "shaft" that
         // finishes instantly and leaves the bot wandering — dig a tunnel instead.
         _tunnelMode = !_ascendMode && !_baritoneAscent && _digStart.getY() <= _targetY;
+        if (_tunnelMode) {
+            // (2026-09-17 行事线对齐, 20260917-183338 实锤) 隧道走行线 = _digStart.y
+            // (首步 k=1 在前方挖 [ground, ground.up()] 两格, bot 落进去走 ground.y 层)。
+            // 旧锚 feet.down() 让走行线 = 脚 y − 1: 钻石带掷到下限 -57 时挖降恰好停
+            // 在 -57, 隧道平挖在 -58, 与 floor 门控 (y < -57 即 engage 爬升) 正面相撞
+            // —— "bot 爬到边界、通道刚好低边界一格"死循环的结构性根源。锚改用脚所在
+            // 格: 走行线 = 脚 y, 永不低于行事线; 缓降 drop 公式继续把 ground.y 压到
+            // floorY 为止, floorY 以上的缓降行为不变。
+            _digStart = mod.getPlayer().getBlockPos();
+        }
         if (_ascendMode) {
             int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
             _dirX = dir[0];
@@ -694,7 +712,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 重建。要点:
      * - _realDigs【不清零】—— 预算是整轮探索的真实挖掘额度, 爬升只是中途状态;
      * - 隧道几何是 _digStart + k*dir 的纯递推, 爬升后原锚点早已无意义 → 必须重锚
-     *   到当前位置 (同 reanchorToPlayer 的下行口径: 锚点 = 脚下地板);
+     *   到当前位置 (2026-09-17 行事线对齐: 锚点 = 脚所在格, 走行线 = 脚 y);
      * - 方向重掷: 爬升可能位移了十几格, 原方向继续大概率一头撞回刚爬出来的那片洞;
      * - _tunnelMode = true 使 reachedBottom 走"只看步数上限"分支, isFinished 恒
      *   false, 父层不再重建。
@@ -711,7 +729,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
         _dirX = dir[0];
         _dirZ = dir[1];
-        _digStart = mod.getPlayer().getBlockPos().down();
+        _digStart = mod.getPlayer().getBlockPos();
+        // (2026-09-17 行事线对齐) 旧 _digStart = feet.down(): 走行线 = 锚点 y, 即
+        // 比 resume 时的脚位低 1 格。配合"半空到线即 resume"曾把续挖隧道钉死在
+        // floor−1 (20260917-183338: [MineDown-AscentResume] at 20,-58,-81, 行事线
+        // -57)。resume 现在只在落地后执行 (见 reachedBottom/onTick), 锚用脚所在格,
+        // 走行线 = 脚 y 恰在行事线上; 缓降 drop 公式不变。
         _step = 0;
         _skipStreak = 0;
         _digQueue.clear();
@@ -750,6 +773,31 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             }
         }
 
+        // (2026-09-17 头顶净空步上) 低行事线恰好 1 格时的人类做法: 2 格高隧道里
+        // 跳高不足 1 格、pillar 放不进方块, baritone 无解 (20260917-183338: 11 轮
+        // engage 无一爬上)。先挖掉头顶净空块变 3 格高, 再交 baritone 垫一步上来。
+        if (_ceilingStepUp != null) {
+            if (_ceilingStepUpTimer.elapsed()) {
+                Debug.logToFile("altoclef_diag.log", "[MineDown-CeilingStep] timeout at "
+                        + _ceilingStepUp.toShortString() + " (unbreakable/protected?), hand to baritone.");
+                _ceilingStepUp = null;
+                _subTask = null;
+            } else if (mod.getWorld().getBlockState(_ceilingStepUp).isAir()) {
+                Debug.logToFile("altoclef_diag.log", "[MineDown-CeilingStep] ceiling open at "
+                        + _ceilingStepUp.toShortString() + ", pillar up via baritone from y="
+                        + mod.getPlayer().getBlockPos().getY() + ".");
+                _ceilingStepUp = null;
+                _subTask = null;
+                // 落到下方 floor 门控: 头顶已净空 → 直接 engage baritone (3 格高 pillar 可行)。
+            } else {
+                setDebugState("Digging headroom overhead to step up to the mining floor");
+                if (_subTask == null || _subTask.isFinished(mod)) {
+                    _subTask = new DestroyBlockTask(_ceilingStepUp);
+                }
+                return _subTask;
+            }
+        }
+
         // (2026-09-14 主世界深陷兜底) 上一处只管下界。主世界 bot 在挖掘【过程中】也会
         // 掉出行事线: 探洞时顺着洞往下走、坠入岩浆湖底、 Tunnel 缓降踩空。旧实现里一旦
         // 到了行事线以下就再也回不去 (drop 公式退化为 0, 见 DEEP_ASCEND_BUFFER 注释),
@@ -757,7 +805,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 与下界同款处置: 立刻切上行模式挖回目标带。用 tunnelFloorY() 而不是
         // ascendTriggerY(): 开局判定需要缓冲防抖动, 这里是已经跑偏的事实纠正, 不必
         // 再等 2 格 —— 玩家在 TUNNEL_MIN_Y 以下就该马上开始爬。
-        if (!_nether && !_ascendMode && !_baritoneAscent
+        if (!_nether && !_ascendMode && !_baritoneAscent && _ceilingStepUp == null
                 && mod.getPlayer().getBlockPos().getY() < tunnelFloorY()) {
             _tunnelMode = false;
             _inCave = false;
@@ -773,6 +821,25 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 Debug.logToFile("altoclef_diag.log", "[MineDown-FloorEscape] 低于行事线 "
                         + tunnelFloorY() + " at " + mod.getPlayer().getBlockPos().toShortString()
                         + " targetY=" + _targetY + " (water) -> ascendMode (staircase).");
+            } else if (mod.getPlayer().getBlockPos().getY() == tunnelFloorY() - 1 && isPlayerGrounded(mod)) {
+                // (2026-09-17 头顶净空步上) 恰好低 1 格: 能清头顶就先清 (3 格高后
+                // baritone pillar 可行), 清不了/已净空按普通路径 engage。
+                BlockPos headroom = mod.getPlayer().getBlockPos().up(2);
+                if (mod.getWorld().getBlockState(headroom).isAir()) {
+                    enterBaritoneAscent(mod, "below mining floor by 1 with open headroom (y="
+                            + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY() + ")");
+                } else if (isClearableHeadroom(mod, headroom)) {
+                    _ceilingStepUp = headroom;
+                    _ceilingStepUpTimer.reset();
+                    _subTask = null;
+                    Debug.logToFile("altoclef_diag.log", "[MineDown-CeilingStep] 1 below floor (y="
+                            + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY()
+                            + "), digging headroom " + headroom.toShortString() + " for a pillar step-up.");
+                    return null;
+                } else {
+                    enterBaritoneAscent(mod, "below mining floor (y="
+                            + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY() + ")");
+                }
             } else {
                 enterBaritoneAscent(mod, "below mining floor (y="
                         + mod.getPlayer().getBlockPos().getY() + ", floor " + tunnelFloorY() + ")");
@@ -782,36 +849,57 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-15 baritone-first 上行) 爬升阶段: 交给 baritone, 本任务只做看门狗。
         if (_baritoneAscent) {
             int y = mod.getPlayer().getBlockPos().getY();
-            if (y < _targetY) {
-                if (y > _baritoneAscentBestY) {
-                    if (y - _baritoneAscentBestY >= BARITONE_ASCENT_STALL_MIN_GAIN) {
-                        _baritoneAscentStall.reset();
+            boolean grounded = isPlayerGrounded(mod);
+            // (2026-09-17 落地判据) 半空 y==targetY 不算到顶: 2 格高隧道里 bot 只能
+            // 靠跳瞬时够线, 空中 resume 曾把续挖隧道重锚到 floor−1 再触门控 (死循环
+            // 链第 2 环)。空中只等落地, 不 resume、不积累看门狗。
+            if (y < _targetY || !grounded) {
+                if (grounded) {
+                    if (y > _baritoneAscentBestY) {
+                        if (y - _baritoneAscentBestY >= BARITONE_ASCENT_STALL_MIN_GAIN) {
+                            _baritoneAscentStall.reset();
+                        }
+                        _baritoneAscentBestY = y;
                     }
-                    _baritoneAscentBestY = y;
-                }
-                if (_baritoneAscentStall.elapsed()) {
-                    String m = "[MineDown-AscentFallback] baritone 爬升 " + BARITONE_ASCENT_STALL_SECONDS
-                            + "s 净进展不足 " + BARITONE_ASCENT_STALL_MIN_GAIN + " 格 (bestY=" + _baritoneAscentBestY
-                            + ") at " + mod.getPlayer().getBlockPos().toShortString() + " -> 回退自写 45° 楼梯";
-                    Debug.logMessage(m);
-                    Debug.logToFile("altoclef_diag.log", m);
-                    _baritoneAscent = false;
-                    _baritoneAscentTask = null;
-                    _ascendMode = true;
-                    retreatAndRedig(mod);
+                    if (_baritoneAscentStall.elapsed()) {
+                        String m = "[MineDown-AscentFallback] baritone 爬升 " + BARITONE_ASCENT_STALL_SECONDS
+                                + "s 净进展不足 " + BARITONE_ASCENT_STALL_MIN_GAIN + " 格 (bestY=" + _baritoneAscentBestY
+                                + ") at " + mod.getPlayer().getBlockPos().toShortString() + " -> 回退自写 45° 楼梯";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                        _baritoneAscent = false;
+                        _baritoneAscentTask = null;
+                        _ascendMode = true;
+                        retreatAndRedig(mod);
+                    } else {
+                        // (2026-09-17) baritone 可能因半空瞬时到线而"完成"过目标; 落地后
+                        // 仍未到线 → 重挂导航。看门狗【不】重置, 20s 预算跨重挂累计 ——
+                        // 旧实现每轮重建都 reset, 看门狗永远攒不满, 兜底楼梯永不触发
+                        // (死循环链第 3 环)。
+                        if (_baritoneAscentTask == null || _baritoneAscentTask.isFinished(mod)) {
+                            _baritoneAscentTask = new GetToYTask(_targetY);
+                        }
+                        setDebugState("Climbing back to y=" + _targetY + " via baritone (stall watchdog "
+                                + BARITONE_ASCENT_STALL_SECONDS + "s)");
+                        return _baritoneAscentTask;
+                    }
                 } else {
-                    setDebugState("Climbing back to y=" + _targetY + " via baritone (stall watchdog "
-                            + BARITONE_ASCENT_STALL_SECONDS + "s)");
-                    return _baritoneAscentTask;
+                    setDebugState("Climbing to y=" + _targetY + " (airborne, waiting to land)");
+                    if (_baritoneAscentTask != null && !_baritoneAscentTask.isFinished(mod)) {
+                        return _baritoneAscentTask;
+                    }
+                    return null;
                 }
-            }
+            } else {
             // (2026-09-16 爬完续挖) y >= _targetY: 到顶【不再收工】。原语义是保持
             // _baritoneAscent 让 reachedBottom 判完工 → "Shaft done" → 父层重建全新
             // 实例, _realDigs 进度/隧道方向全丢 → 隧道每次从 0/80 重来, 与"缓降触线
             // → 逃生爬升"凑成横跳死循环 (20260916-094427 五轮实锤: dug 52/80 被扔,
             // engage(y=4,floor=5) → 爬回 11 → 0/80 重挖, 3 分钟 5 轮)。改为原地切回
             // 隧道模式续挖, 真实挖掘预算保留; 预算耗尽/岩浆弃道仍照常收工。
+            // (2026-09-17) 本分支现在只在【落地】后进入, resume 重锚不再空中取样。
             resumeTunnelAfterAscent(mod);
+            }
         }
 
         // (2026-09-12 冷却语义修正, 用户"同一段矿洞放弃后又重复去探索") 原实现在此
@@ -1368,8 +1456,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _lastReanchorMs = System.currentTimeMillis();
         // 上行: 锚点取【脚所在的空气格】, 下一轮 ground(k=1) 才是"前进一步 + 上一格";
         // 取 .down() (实心地板) 会先把脚下的支撑挖掉, 玩家反而掉下去。
-        // 下行/平挖: 保持原意 —— 锚点是脚下的地板, 挖开它就是"往下挖"。
-        _digStart = _ascendMode ? feet : feet.down();
+        // (2026-09-17 行事线对齐) 隧道平挖同上行取脚所在格: 走行线 = _digStart.y,
+        // 取 .down() 会让走行线比脚低 1 格, 撞 floor 门控 (20260917-183338 实锤)。
+        // 下行楼梯: 保持原意 —— 锚点是脚下的地板, 挖开它就是"往下挖"。
+        _digStart = (_ascendMode || _tunnelMode) ? feet : feet.down();
         _step = 0;
         _digQueue.clear();
         enqueueNextStep();
@@ -1615,9 +1705,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (_tunnelMode) return false;
         // (2026-09-15 baritone-first 上行) baritone 爬升: 回到目标高度即完成
         // (与 ascend 楼梯同语义; bot 可能超过目标高度一点, 一样算回带内)。
-        if (_baritoneAscent) return mod.getPlayer().getBlockPos().getY() >= _targetY;
-        // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成。
-        if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _targetY;
+        // (2026-09-17 落地判据, 20260917-183338 实锤) 半空瞬时到线曾被判"到顶" →
+        // isFinished TRUE → 父层重建/resume 空中重锚 → floor 门控再 engage 死循环。
+        // 到线必须落地才算 (与 ITaskRequiresGrounded 同口径)。
+        if (_baritoneAscent) return mod.getPlayer().getBlockPos().getY() >= _targetY && isPlayerGrounded(mod);
+        // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成 (同上, 落地才算)。
+        if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _targetY && isPlayerGrounded(mod);
         // FIX (task ping-pong): use the player's ACTUAL Y, not the old
         // `_digStart.getY() - _step` formula. The step counter increments even
         // when the step's blocks were ALREADY air (re-entering a previously dug
@@ -2383,6 +2476,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     public static boolean isPlayerGrounded(AltoClef mod) {
         var p = mod.getPlayer();
         return p != null && (p.isOnGround() || p.isSwimming() || p.isTouchingWater() || p.isClimbing());
+    }
+
+    /**
+     * (2026-09-17 头顶净空步上) 头顶净空候选块是否值得派 DestroyBlockTask:
+     * 可挖实体方块 → true; 液体与不可挖(基岩等) → false, 走普通 baritone 爬升。
+     */
+    private boolean isClearableHeadroom(AltoClef mod, BlockPos pos) {
+        var state = mod.getWorld().getBlockState(pos);
+        if (state.isAir()) return true;
+        if (state.getMaterial().isLiquid()) return false;
+        return state.getHardness(mod.getWorld(), pos) >= 0;
     }
 
     @Override
