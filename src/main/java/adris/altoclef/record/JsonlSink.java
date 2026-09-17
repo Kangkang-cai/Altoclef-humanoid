@@ -23,12 +23,27 @@ import java.util.zip.GZIPOutputStream;
  *
  * <p>用完必须 {@link #closeAndFlush()}: 让线程把队列排空、把 gzip 尾部写全,
  * 否则最后一段数据会丢 (gzip 流没 close 等于半个文件损坏)。
+ *
+ * <p>(2026-09-17) 另一个兜底: 线程一启动就先落一个合法空 gzip 占位 (见 {@link #EMPTY_GZIP}),
+ * 首行到来才开真流覆盖它 —— 这样"会话刚建立就被硬杀"留下的也是能正常读出 0 行的文件,
+ * 而不是只有 gzip 头的残片。
  */
 final class JsonlSink {
 
     /** 队列容量: 20Hz 下约 400 秒的缓冲, 正常写盘速度远超消费, 只有磁盘卡死才会满。 */
     private static final int QUEUE_CAPACITY = 8192;
     private static final String POISON = "\u0000__close__";
+
+    /**
+     * (2026-09-17 空文件兜底) 一个"完整、已终结的空 gzip" (20 字节):
+     * 头(10) + 空 deflate 终块 03 00(2) + CRC32(4) + ISIZE(4, 全 0)。
+     * 见 {@link #run()} 里"先落占位"的用法说明。
+     */
+    private static final byte[] EMPTY_GZIP = {
+            0x1f, (byte) 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+            0x03, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
 
     private final Path _path;
     private final BlockingQueue<String> _queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
@@ -57,17 +72,28 @@ final class JsonlSink {
         Writer out = null;
         try {
             Files.createDirectories(_path.getParent());
-            out = new OutputStreamWriter(
-                    new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(_path.toFile()), 1 << 16)),
-                    StandardCharsets.UTF_8);
+            // (2026-09-17 空文件兜底) 先在盘上落一个"完整、已终结的空 gzip"(20 字节),
+            // 而不是立刻开流式成员: 开流后 GameClient 被硬杀 (shutdown hook 没跑 / 任务
+            // 管理器结束进程) 会在盘上留下【只有 gzip 头 10 字节、读不出来的残片】
+            // (20260917-100000-r2 实测 4 个 10 字节文件)。占位文件是合法 gzip, 任何
+            // 读取器都能正常读出 0 行。
+            // 首行真正到来时才开流式成员并【覆盖】占位 —— 保持"单成员"格式, 不引入
+            // 多成员 gzip (Windows PowerShell 的 GZipStream 只读第一个成员, 多成员
+            // 会让它把整份数据读成 0 行)。
+            Files.write(_path, EMPTY_GZIP);
             while (true) {
                 String line = _queue.poll(200, TimeUnit.MILLISECONDS);
                 if (line == null) {
                     // 队列空 → 冲刷。崩溃时最多丢最后 200ms 的数据, 换来"随时可读"。
-                    out.flush();
+                    if (out != null) out.flush();
                     continue;
                 }
                 if (POISON.equals(line)) break;
+                if (out == null) {
+                    out = new OutputStreamWriter(
+                            new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(_path.toFile()), 1 << 16)),
+                            StandardCharsets.UTF_8);
+                }
                 out.write(line);
                 out.write('\n');
                 _writtenLines++;
