@@ -2547,10 +2547,15 @@ public class BeatMinecraft2Task extends Task {
                 return prependAxeForWood(mod, _woodStockpileTask);
             }
         } else if (logCount < _config.woodRestockThreshold) {
-            setDebugState("Restocking wood (logs): " + logCount + "/" + _config.woodRestockThreshold);
+            // (2026-09-17 显示口径修正) 旧串 "Restocking wood (logs): 3/4" 里的 4 是
+            // 【触发水位】, 收集目标其实是 minWoodLogs(25) —— 用户据此误读为"只补 4 个,
+            // 用掉 1 个就又补"。这里把水位与目标同时写出来; 前缀保持原样以兼容既有判据。
+            setDebugState("Restocking wood (logs): " + logCount + "/" + _config.woodRestockThreshold
+                    + " (waterline, settle target " + _config.minWoodLogs + ")");
             diagIronPhase(mod, "restock wood",
                     "logCount=" + logCount
                             + " restockThresh=" + _config.woodRestockThreshold
+                            + " settleTarget=" + _config.minWoodLogs
                             + " woodTaskActive=" + (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod)));
             if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
                 _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.minWoodLogs);
