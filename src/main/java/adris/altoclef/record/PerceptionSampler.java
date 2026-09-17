@@ -174,6 +174,8 @@ public final class PerceptionSampler {
         }
         sb.append(",\"blocks\":[");
         boolean first = true;
+        double stateRadius = s == null ? 5 : s.getRecordPerceptionStateRadius();
+        double stateRadiusSq = stateRadius > 0 ? stateRadius * stateRadius : -1;
         for (BlockPos bp : picked) {
             Sight sight = _sight.get(bp);
             if (sight == null) continue;
@@ -186,12 +188,19 @@ public final class PerceptionSampler {
             Json.ivec(sb, bp.getX(), bp.getY(), bp.getZ());
             sb.append(",\"b\":");
             Json.str(sb, sight.block);
-            sb.append(",\"d\":").append(Json.f(Math.sqrt(bp.getSquaredDistance(eye))));
+            double dist = Math.sqrt(bp.getSquaredDistance(eye));
+            sb.append(",\"d\":").append(Json.f(dist));
             sb.append(",\"src\":");
             Json.str(sb, fresh ? sight.src : "remembered");
             sb.append(",\"g\":");
             Json.str(sb, fresh ? grade(sight.src) : "remembered");
             sb.append(",\"age\":").append(age);
+            // (2026-09-17 L1 操作域) 近域 + 本圈确认过的方块带状态属性: 门/熔炉/作物
+            // 的可交互状态是近距操作任务的直接输入。fresh 才读 —— "刚看过"才允许说
+            // 出它的当前状态, 不给老记忆造假新状态 (诚实边界)。
+            if (fresh && stateRadiusSq > 0 && bp.getSquaredDistance(eye) <= stateRadiusSq) {
+                appendBlockState(sb, mod, bp);
+            }
             sb.append('}');
         }
         sb.append(']');
@@ -418,6 +427,33 @@ public final class PerceptionSampler {
             return Registry.BLOCK.getId(block).toString();
         } catch (Throwable t) {
             return String.valueOf(block);
+        }
+    }
+
+    /**
+     * (2026-09-17 L1 操作域) 追加方块的当前状态属性 ({@code "st":{"facing":"north",...}})。
+     * 无属性方块 (石头/泥土等) 不输出 —— 大多数方块没有可说的, 不浪费字节。
+     * 只读操作; 任何异常直接不给 st 字段, 不影响整帧。
+     */
+    private static void appendBlockState(StringBuilder sb, AltoClef mod, BlockPos bp) {
+        try {
+            net.minecraft.block.BlockState st = mod.getWorld().getBlockState(bp);
+            com.google.common.collect.ImmutableMap<net.minecraft.state.property.Property<?>, Comparable<?>> entries =
+                    st.getEntries();
+            if (entries.isEmpty()) return;
+            sb.append(",\"st\":{");
+            boolean first = true;
+            int n = 0;
+            for (Map.Entry<net.minecraft.state.property.Property<?>, Comparable<?>> e : entries.entrySet()) {
+                if (!first) sb.append(',');
+                first = false;
+                Json.str(sb, e.getKey().getName());
+                sb.append(':');
+                Json.str(sb, String.valueOf(e.getValue()));
+                if (++n >= 12) break; // 属性异常多的方块 (红石线等) 封顶, 防御性
+            }
+            sb.append('}');
+        } catch (Throwable ignored) {
         }
     }
 

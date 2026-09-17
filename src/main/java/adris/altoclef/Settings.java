@@ -734,6 +734,15 @@ public class Settings implements IFailableConfigFile {
     private double recordSightMemorySeconds = 20;
 
     /**
+     * (2026-09-17) L1 操作域 blockstate 导出半径 (格)。
+     * 感知通道里该半径内、且本扫描圈确认过 (fresh) 的方块, 额外导出方块状态属性
+     * (门开没开/熔炉燃没燃/作物长到第几段/楼梯朝向...) —— 近距操作 (开门/取燃料/
+     * 收作物) 的直接输入, 只靠方块 id 训练时只能瞎猜。0 = 关闭。
+     * 只在导出时对半径内方块多读一次 getBlockState (L1 域方块最多百来个), 开销可忽略。
+     */
+    private double recordPerceptionStateRadius = 5;
+
+    /**
      * (2026-09-17) 是否每帧导出背包全量物品计数。
      * 背包是 L2 操作层 ("检查背包是否有所需物品/拿出物品") 的直接输入, 逐帧全量最完整;
      * 关掉可显著减小 frames.jsonl.gz (背包每帧重复度极高)。
@@ -803,6 +812,10 @@ public class Settings implements IFailableConfigFile {
 
     public double getRecordSightMemorySeconds() {
         return recordSightMemorySeconds;
+    }
+
+    public double getRecordPerceptionStateRadius() {
+        return recordPerceptionStateRadius;
     }
 
     public boolean shouldRecordInventoryPerTick() {
