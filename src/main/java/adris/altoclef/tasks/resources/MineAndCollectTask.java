@@ -95,6 +95,19 @@ public class MineAndCollectTask extends ResourceTask {
     private boolean _axeCommitted = false;
     private Task _axeTask = null;
 
+    // (2026-09-17 斧链重入护栏 —— 同毫秒 21 轮死循环实锤)
+    // 现场 20260917-103520 11:09:24: Restocking 门控派 MineAndCollectTask(log) → 无斧
+    // 即 COMMIT 斧链 → 派木斧 → 配方链要 3 木板 → 要原木 → 又派【全新】的
+    // MineAndCollectTask(log), 它的 _axeCommitted 是初始 false → 又 COMMIT → 闭环,
+    // 同一毫秒 chat/tasks 各刷出 21 轮, 原木恒 0~3。上面那个实例字段 latch 挡不住
+    // "新实例重置状态"这条路径, 所以护栏必须放在实例之外。
+    // 语义: 斧链由某实例发起后, 【其它】实例在窗口内不得再 COMMIT(发起者自己照常推进);
+    // 窗口到期或发起者解除 COMMIT 时自动释放, 避免发起者被丢弃导致永久封死。
+    private static Task _axeChainOwner = null;
+    private static long _axeChainGuardUntilMs = 0L;
+    private static final long AXE_CHAIN_GUARD_MS = 45_000L;
+    private static long _lastAxeGuardLogMs = 0L;
+
     // (2026-09-16 满足采矿工具需求任务粘性缓存) 旧逻辑每 tick new
     // SatisfyMiningRequirementTask → 与内部 getItemTask→CollectCobblestoneTask→
     // new MineAndCollectTask 形成递归嵌套链 (日志实锤 stack 嵌套 3 层)。粘滞复用
@@ -158,6 +171,8 @@ public class MineAndCollectTask extends ResourceTask {
         _axeCommitted = false;
         _axeTask = null;
         _satisfyTask = null;
+        // (2026-09-17) 本实例若曾是斧链发起者, 重开时释放护栏(只释放自己持有的)。
+        releaseAxeChainGuard();
     }
 
     @Override
@@ -221,6 +236,9 @@ public class MineAndCollectTask extends ResourceTask {
             if (!_axeCommitted && shouldCommitToAxeChain(mod)) {
                 _axeCommitted = true;
                 _axeTask = null;
+                // (2026-09-17 护栏) 登记自己是发起者: 斧链跑完前, 别的
+                // MineAndCollectTask 实例(多为配方链回派出来的挖原木任务)不得再 COMMIT。
+                markAxeChainOwned();
                 Debug.logMessage("[Axe] Committing to axe chain before chopping wood.");
             }
             if (_axeCommitted) {
@@ -230,6 +248,7 @@ public class MineAndCollectTask extends ResourceTask {
                     // 算不出下一步 → 理论不该发生, 解除 COMMIT 继续砍树
                     if (_axeTask == null) {
                         _axeCommitted = false;
+                        releaseAxeChainGuard();
                         return _subtask;
                     }
                 }
@@ -239,6 +258,7 @@ public class MineAndCollectTask extends ResourceTask {
             // 有斧子了（或不是砍树任务）：解除提交状态。
             _axeCommitted = false;
             _axeTask = null;
+            releaseAxeChainGuard();
         }
 
         // (2026-09-01 手挖修复) 追矿石(isMining)与探索挖隧道(isBreakingBlock, 手挖
@@ -300,6 +320,18 @@ public class MineAndCollectTask extends ResourceTask {
      * 一律用真实背包(含 2x2 合成格 + 光标) 计数, 不使用 tracker 缓存。
      */
     private boolean shouldCommitToAxeChain(AltoClef mod) {
+        // (2026-09-17 重入护栏) 已有别的实例在跑斧链 → 本实例直接放弃 COMMIT, 老实挖树。
+        // 递归场景里, 配方链回派出来的 MineAndCollectTask(log) 从这条路径被挡住,
+        // 于是它只能去做本该做的事(挖木头), 闭环就断了。
+        if (isAxeCommitBlockedByGuard()) {
+            long now = System.currentTimeMillis();
+            if (now - _lastAxeGuardLogMs > 5000L) {
+                _lastAxeGuardLogMs = now;
+                Debug.logToFile("altoclef_diag.log", "[AXE-GUARD] reentrant axe commit blocked (owner alive, "
+                        + (_axeChainGuardUntilMs - now) + "ms left)");
+            }
+            return false;
+        }
         int planksReal = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS);
         int logsReal   = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.LOG);
         int sticksReal = StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.STICK);
@@ -310,14 +342,49 @@ public class MineAndCollectTask extends ResourceTask {
         if (hasTableUse && cobbleReal >= 3 && sticksReal >= 2) return true;
         // 木斧立即: 有台 + 3木板 + 2木棍
         if (hasTableUse && planksReal >= 3 && sticksReal >= 2) return true;
-        // 有台 + 木板不足但原木够合成木板(有效≥3) + 木棍够 → 直接派木斧(内部Collect会合木板)
-        if (hasTableUse && effectivePlanks >= 3 && sticksReal >= 2) return true;
+        // (2026-09-17 口径收窄 —— 删掉原"有台 + effectivePlanks>=3 + 木棍够"这条)
+        // 旧条目允许"只有原木、没有真木板"时 COMMIT: 判定侧按 logsReal*4 折算说"能做",
+        // 而配方链只认真木板 → 判缺料 → 要原木 → 回派挖原木任务 → 同毫秒 21 轮闭环
+        // (20260917-103520 实锤)。真木板没到位就不该在这里开工, 交给主收集任务砍够料,
+        // 与第 2/4 步 "abort axe chain, back to chopping" 的处理同构。
         // 全自给(最常见): 没台, 但有效木板≥8 = 4做台 + 3做斧 + 2木棍需1木板 = 8
         // (2026-09-02 递归修复) 仅无台时允许全自给 COMMIT: 有台但缺木棍时做不了
         // 木斧, computeNextAxeTask 会因缺棍落到撸原木 fallback → 形成 wood→做斧→
         // 撸原木→wood 自我递归 (tasks.log t=784 实锤卡死)。有台+缺棍返回 false,
         // 回主收集任务砍树攒料, 木棍由后续合成阶段处理, 不卡死也不递归。
+        // (2026-09-17) 这条路径仍可能被"原木折算"触发, 但即便派出的合成链回头要原木,
+        // 也会被上面的重入护栏挡住 → 最坏只是慢一拍, 不会再自递归。
         return !hasTableUse && effectivePlanks >= 8;
+    }
+
+    // ================================================================
+    // (2026-09-17 斧链重入护栏的实现) 见字段区注释。
+    // ================================================================
+
+    /** 是否有【别的】实例正持有斧链护栏(且未超时)。超时即自动释放, 防永久封死。 */
+    private boolean isAxeCommitBlockedByGuard() {
+        if (_axeChainOwner == null) return false;
+        if (_axeChainOwner == this) return false;
+        if (System.currentTimeMillis() >= _axeChainGuardUntilMs) {
+            _axeChainOwner = null;
+            _axeChainGuardUntilMs = 0L;
+            return false;
+        }
+        return true;
+    }
+
+    /** 发起斧链 COMMIT: 记下发起者与本轮护栏窗口。 */
+    private void markAxeChainOwned() {
+        _axeChainOwner = this;
+        _axeChainGuardUntilMs = System.currentTimeMillis() + AXE_CHAIN_GUARD_MS;
+    }
+
+    /** 解除 COMMIT: 只有发起者能释放护栏(其它实例调用是空操作)。 */
+    private void releaseAxeChainGuard() {
+        if (_axeChainOwner == this) {
+            _axeChainOwner = null;
+            _axeChainGuardUntilMs = 0L;
+        }
     }
 
     /**
@@ -358,8 +425,16 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         // 3) 有工作台了 → 做木斧 (3x3: 3木板 + 2木棍)
-        if (sticksReal >= 2 && effectivePlanks >= 3) {
-            Debug.logMessage("[Axe] phase -> wooden_axe (table=" + hasTableUse + " effPlanks=" + effectivePlanks + " sticks=" + sticksReal + ")");
+        // (2026-09-17 口径修正) 旧条件用 effectivePlanks(=planksReal + logsReal*4) 折算,
+        // 把"原木还能合木板"当成"木板已就位": 判定侧说"能做", 而配方链只认真木板,
+        // 于是判"缺 3 木板" → 要原木 → 回派 MineAndCollectTask(log) → 同毫秒 21 轮
+        // 闭环 (20260917-103520 实锤, chat.log 里 [Axe] phase -> wooden_axe
+        // effPlanks=14 刷屏)。现在只认真材料: 3 真木板 + 2 真木棍;
+        // 木板够(≥5)但缺木棍也可以 —— 合木棍只吃木板, 全程不涉及原木, 不会再回头挖树。
+        // 料不到位就 return null 回主收集任务砍树 (与第 2/4 步同构)。
+        if (planksReal >= 3 && (sticksReal >= 2 || planksReal >= 5)) {
+            Debug.logMessage("[Axe] phase -> wooden_axe (table=" + hasTableUse + " planks=" + planksReal
+                    + " sticks=" + sticksReal + ")");
             return TaskCatalogue.getItemTask(Items.WOODEN_AXE, 1);
         }
 
