@@ -343,6 +343,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
         // We're trying to mine
         Optional<Rotation> reach = LookHelper.getReach(_pos);
+        // (2026-09-17 让位期间不评瞬时门) 起跳瞬间眼睛抬高 ~1.25 格, reach/眼距会短暂
+        // 达标 → 下面 L349 的 `_ascent.stop()` 立刻拆掉正在爬升的 baritone → 落地重入
+        // = "起跳 → 拆 → 退出 → 重挂" 横跳(本仓 09-15 叶包裹原木注释 + 今天 150146
+        // 两段横跳同款)。让位期间一律不采信**腾空瞬间**的空间判据, 只在落地时才认
+        // (与 tickAscentHandoff 的完成判定同口径: 腾空期间的即时位置一律不可信)。
+        if (_ascent.isActive() && !mod.getPlayer().isOnGround()) {
+            reach = Optional.empty();
+        }
         if (reach.isPresent()) {
             // (2026-09-14 垫塔接近 / 2026-09-17 统一) 够到了 → 收工并释放 baritone
             // 目标 + 松开可能残留的按键。协调器 stop 是幂等的, 未启动时无副作用。
@@ -552,6 +560,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 每次切换挖掘进度清零, 3 秒换了 9 轮一片都没断。
     private BlockPos _occluderTarget;
 
+    // (2026-09-17) "目标在挖掘距离内"的双阈值滞回闩锁 (进 4.5 / 出 6.0)。
+    // 详见 tryClearOccluder 里 20260917-150146 的现场注释: 原判据是瞬时的, 跳跃让
+    // 眼距在 4.88 ↔ 3.96 之间横跳 → 每 400ms 一次"选中挡块 ↔ 清 latch", 挖掘进度
+    // 反复归零。铁律: 卡死/放弃类判据不得被腾空瞬间的采样翻转。
+    private boolean _occInRange = false;
+
     // (2026-09-16 藤蔓裹木) 当前挡块是否为无碰撞方块 (藤蔓/花/雪片一类 climbable
     // 或装饰块)。这类方块 COLLIDER 射线必穿透 → LookHelper.getReach 必 miss (该
     // 方法走 baritone `RotationUtils.reachable` → `RayTraceUtils.rayTraceTowards`,
@@ -581,9 +595,27 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         }
         Vec3d eye = mod.getPlayer().getEyePos();
         Vec3d center = Vec3d.ofCenter(_pos);
+        // (2026-09-17 眼距门横跳 = 双阈值滞回) 原判据 `eye.distanceTo(center) > 4.5 → 放弃`.
         // 只处理"目标本体已在挖掘距离内"的情形 —— 超出 reach 的目标是导航/爬升问题,
         // 隔空够不着的挡块挖了也是白挖 (射线终点到不了目标附近)。
-        if (eye.distanceTo(center) > 4.5) {
+        //
+        // 现场 20260917-150146 实锤它是个**瞬时门**: bot 站 (-85.61, ·, -81.46), 目标中心
+        // (-85.5, 66.5, -78.5) —— 站地 feet=61.0/eye=62.62 → **4.88 > 4.5**(不挖, 且清 latch);
+        // 起跳近顶点 feet≈62.25/eye=63.87 → **3.96 < 4.5**(开挖)。跳跃周期 ~0.4s, 于是
+        // `Getting to block...` ↔ `Clearing occluder` 每 400ms 交替 15 秒, 每次落地
+        // L596 还把 `_occluderTarget` 清空 → **挖掘进度反复归零, 一格土都挖不掉**。
+        //
+        // 修: 进 4.5 / 出 6.0 的双阈值滞回 —— 一旦开始挖挡块就锁住, 直到挡块真的变空气
+        // (原有 latch 语义 L590-599 负责换下一片) 或目标真的走远(>6.0)。跳跃 1.25 格的
+        // 越界幅度落在滞回带内, 不再能翻转判据; 而 30 格外的目标依旧进不来(站地就 >6.0)。
+        boolean inEnterRange = eye.distanceTo(center) <= 4.5;
+        boolean inExitRange = eye.distanceTo(center) <= 6.0;
+        if (_occInRange) {
+            if (!inExitRange) _occInRange = false;
+        } else if (inEnterRange) {
+            _occInRange = true;
+        }
+        if (!_occInRange) {
             _occluderTarget = null;
             return false;
         }

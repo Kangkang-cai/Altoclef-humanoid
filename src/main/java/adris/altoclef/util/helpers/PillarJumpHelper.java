@@ -153,6 +153,58 @@ public final class PillarJumpHelper {
         return countMaterials(mod, materials) > 0;
     }
 
+    /**
+     * (2026-09-17 垫块口径统一) **baritone 真正放得下去**的垫块数 —— 与
+     * `InventoryBehavior.selectThrowawayForLocation` 逐条同源:
+     * <ol>
+     *   <li>物品在 `Baritone.settings().acceptableThrowawayItems` 里。本仓该表由
+     *       `Settings.throwawayItems` 灌入(AltoClef 初始化时 addAll), 而
+     *       **圆石自 2026-08-25 起被注释掉**(用户: 合成熔炉/石镐常用), 石头/深板岩/
+     *       木板从来不在表里。</li>
+     *   <li>物品**不是** `AltoClefSettings.isItemProtected` 的。`CraftInTableTask`
+     *       会把配方材料全部 `addProtectedItems`, 而 patched baritone 选垫块时会
+     *       `continue` 掉受保护物品 —— 熔炉配方要 8 圆石 ⇒ 圆石在合成期间不可当垫块。</li>
+     * </ol>
+     *
+     * <p>为什么必须有这条: {@link #countMaterials} 是"背包里像垫块的东西", 与
+     * "baritone 能不能放"**是两个口径**。现场 20260917-150146 打出 `materials=11`,
+     * 而 baritone 一块都放不了(全是圆石/木板) → 协调器据此跳过"补料档"直接判不可达 →
+     * 用户看到的就是"有原石却既不垫也不补"。同概念只留一个判据源。
+     */
+    public static int countBaritonePlaceable(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return 0;
+        java.util.List<Item> acceptable;
+        try {
+            acceptable = mod.getClientBaritoneSettings().acceptableThrowawayItems.value;
+        } catch (Throwable t) {
+            return countMaterials(mod, withWoodNoLogs());
+        }
+        if (acceptable == null) return 0;
+        int count = 0;
+        for (ItemStack stack : mod.getPlayer().getInventory().main) {
+            if (stack == null || stack.isEmpty()) continue;
+            if (!acceptable.contains(stack.getItem())) continue;
+            if (isProtectedForBaritone(mod, stack.getItem())) continue;
+            count += stack.getCount();
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (offhand != null && !offhand.isEmpty()
+                && acceptable.contains(offhand.getItem())
+                && !isProtectedForBaritone(mod, offhand.getItem())) {
+            count += offhand.getCount();
+        }
+        return count;
+    }
+
+    /** patched baritone 的"受保护物品"判据; 拿不到就退回 BotBehaviour 的同名口径。 */
+    private static boolean isProtectedForBaritone(AltoClef mod, Item item) {
+        try {
+            return mod.getExtraBaritoneSettings().isItemProtected(item);
+        } catch (Throwable t) {
+            return mod.getBehaviour().isProtected(item);
+        }
+    }
+
     /** 松开垫塔期间 hold 的跳跃键 (退出路径必调)。 */
     public static void release(AltoClef mod) {
         mod.getInputControls().release(Input.JUMP);

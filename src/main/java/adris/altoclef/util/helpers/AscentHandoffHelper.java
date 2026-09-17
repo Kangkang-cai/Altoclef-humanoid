@@ -201,7 +201,8 @@ public final class AscentHandoffHelper {
         Debug.logToFile("altoclef_diag.log", "[Ascent] start tag=" + _tag
                 + " target=" + shortPos(target) + " targetY=" + targetY
                 + " fromY=" + mod.getPlayer().getBlockPos().getY()
-                + " materials=" + PillarJumpHelper.countMaterials(mod, _materials)
+                + " materials=" + PillarJumpHelper.countBaritonePlaceable(mod)
+                + " rawMaterials=" + PillarJumpHelper.countMaterials(mod, _materials)
                 + " (" + reason + ")");
     }
 
@@ -263,12 +264,13 @@ public final class AscentHandoffHelper {
             applyGoal(mod);
             Debug.logToFile("altoclef_diag.log", "[Ascent] renavigate tag=" + _tag
                     + " round=" + _stallRounds + " y=" + y + " lastY=" + _lastY
-                    + " have=" + PillarJumpHelper.countMaterials(mod, _materials)
+                    + " have=" + PillarJumpHelper.countBaritonePlaceable(mod)
+                    + " raw=" + PillarJumpHelper.countMaterials(mod, _materials)
                     + " target=" + shortPos(_target));
             return TickResult.running(null);
         }
 
-        int have = PillarJumpHelper.countMaterials(mod, _materials);
+        int have = PillarJumpHelper.countBaritonePlaceable(mod);
         if (!totalExpired && have == 0 && !_acquireStarted) {
             // 第二档: 一块垫料都没有 → 补一次。baritone 的 MovementPillar 需要
             // throwaway 方块才能进 A* (`hasThrowaway` false 时 costOfPlacingAt 恒
@@ -358,7 +360,9 @@ public final class AscentHandoffHelper {
         }
         // 实时计数早停: 直读真实背包, 不信子任务自己的 isFinished
         // (哨兵 targetCount 陷阱: 收够了也可能判不完)。
-        if (PillarJumpHelper.countMaterials(mod, _materials) >= ACQUIRE_WANT
+        // (2026-09-17 口径统一) 早停也必须用 baritone 口径 —— 用 countMaterials 会在
+        // "挖到圆石"时误判达标停下, 而圆石 baritone 放不了 = 白采。
+        if (PillarJumpHelper.countBaritonePlaceable(mod) >= ACQUIRE_WANT
                 || mod.getItemStorage().getItemCountReal(Items.DIRT) >= ACQUIRE_WANT) {
             finishAcquire(mod, "enough");
             return null;
@@ -411,7 +415,7 @@ public final class AscentHandoffHelper {
         Debug.logToFile("altoclef_diag.log", "[Ascent] acquire start tag=" + _tag
                 + " want=" + ACQUIRE_WANT + " X " + Items.DIRT
                 + " y=" + mod.getPlayer().getBlockPos().getY()
-                + " have=" + PillarJumpHelper.countMaterials(mod, _materials)
+                + " have=" + PillarJumpHelper.countBaritonePlaceable(mod)
                 + " target=" + shortPos(_target));
         return t;
     }
@@ -422,7 +426,7 @@ public final class AscentHandoffHelper {
         }
         _acquireDoneLogged = true;
         Debug.logToFile("altoclef_diag.log", "[Ascent] acquire done(" + why + ") tag=" + _tag
-                + " have=" + PillarJumpHelper.countMaterials(mod, _materials)
+                + " have=" + PillarJumpHelper.countBaritonePlaceable(mod)
                 + " target=" + shortPos(_target));
     }
 

@@ -91,6 +91,23 @@ public class InteractWithBlockTask extends Task {
 
     private ClickResponse _cachedClickStatus = ClickResponse.CANT_REACH;
 
+    // ==================== (2026-09-17 脱险: 判不可达后必须真的换活) ====================
+    // 现场 20260917-150146 第二段: 协调器 1.5s 重挂 + 1.5s 判不可达 → `requestBlockUnreachable`
+    // + `return _wanderTask` → 但本实例是**容器交互**(wanderOnFailure=false), 下面 L274 的
+    // wander 续跑守卫不成立 → 游荡子任务只被返回**一个 tick** 就被本任务的下一 tick 丢掉
+    // (tasks.log: `Wander for 5.0 blocks` 300ms STOP, 紧接 `<Wander> -> null`) → 换活等于没做;
+    // 50ms 后父级又重建同目标 → 3.15s 一轮 × 5 轮 = 15s 不脱险。
+    //
+    // 修: ① 拉黑后**抱持**休整(锁住本任务最多 ESCAPE_SECONDS, 期间只返回 wander, 不重评
+    // CANT_REACH 把子任务丢掉); ② 游荡实例必须 `resetForReuse` —— 复用实例 `_origin` 是上一次
+    // 使用的位置, 不重置的话 isFinished 立刻成立, 抱持也是空转; ③ 同一目标爬升失败按
+    // **static** 计数封顶(实例级计数会被父级重建绕过 —— 本仓 _clearAboveAttempts 同款教训)。
+    private static final Map<BlockPos, Integer> _ascentAttempts = new HashMap<>();
+    private static final int ASCENT_MAX_ATTEMPTS = 2;
+    private static final double ESCAPE_SECONDS = 5;
+    private boolean _escaping = false;
+    private final TimerGame _escapeTimer = new TimerGame(ESCAPE_SECONDS);
+
     // (2026-09-10 清上方方块止损+持久化) 15:13 场次实锤: 清上方方块的
     // DestroyBlockTask 每次只活 1 tick — 下一 tick reach 状态翻转后 onTick
     // 走了别的分支 return null, 子任务被抛弃, 方块永远挖不掉, "点击 2s 超时
@@ -228,6 +245,8 @@ public class InteractWithBlockTask extends Task {
         _giveUpLogged = false;
         // (2026-09-17) 协调器状态不跨实例存活: 被抢占恢复后按新现场重新判定高度差。
         _ascent.stop(mod);
+        // (2026-09-17) 脱险抱持不跨次进入 —— 新一次交互应当重新尝试 (static 计数仍生效)。
+        _escaping = false;
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -259,6 +278,17 @@ public class InteractWithBlockTask extends Task {
         }
 
         _cachedClickStatus = ClickResponse.CANT_REACH;
+
+        // (2026-09-17 脱险抱持) 已判不可达 → 锁住本任务, 只把游荡子任务挂到底, 不重评
+        // 交互分支(否则下一 tick 就把 wander 丢掉 = 空转)。见字段区注释。
+        if (_escaping) {
+            if (_wanderTask.isFinished(mod) || _escapeTimer.elapsed()) {
+                _escaping = false;
+            } else {
+                setDebugState("Escaping, wandering away from " + _target.toShortString());
+                return _wanderTask;
+            }
+        }
 
         // Get our use item first
         if (!ItemTarget.nullOrEmpty(_toUse) && !StorageHelper.itemTargetsMet(mod, _toUse)) {
@@ -308,6 +338,15 @@ public class InteractWithBlockTask extends Task {
         ICustomGoalProcess proc = mod.getClientBaritone().getCustomGoalProcess();
 
         _cachedClickStatus = rightClick(mod);
+        // (2026-09-17 让位期间不评瞬时门) 起跳瞬间眼睛抬高 ~1.25 格 → `getCurrentReach()`
+        // 会短暂成立 → 落到下面的 WAIT_FOR_CLICK 分支 → 那里 `_ascent.stop(mod)` +
+        // `proc.onLostControl()` 会把**正在爬升**的 baritone 腰斩 → 落地重入 = 横跳
+        // (用户现场描述: "bot 跳起来的一瞬间判定可以撸到方块, 所以没有垫方块…落地时
+        // 又要搭方块")。让位期间腾空时把状态压回 CANT_REACH, 交给协调器继续推进;
+        // 落地后重新评定 —— 落地成立才说明真的站到够得着的位置。
+        if (_ascent.isActive() && !mod.getPlayer().isOnGround()) {
+            _cachedClickStatus = ClickResponse.CANT_REACH;
+        }
         switch (_cachedClickStatus) {
             case CANT_REACH -> {
                 setDebugState("Getting to our goal");
@@ -318,7 +357,13 @@ public class InteractWithBlockTask extends Task {
                 // 半小时没人管"。仅在还差 ≥2 格时才启动, 免得已到位却点不动时
                 // 反复 start/done 空转。
                 int feetY = mod.getPlayer().getBlockPos().getY();
+                int attempts = _ascentAttempts.getOrDefault(_target, 0);
                 boolean needsClimb = feetY < _target.getY() - 1;
+                if (needsClimb && attempts > ASCENT_MAX_ATTEMPTS) {
+                    // (2026-09-17 封顶) 同一目标爬升已失败超限 → 不再重挂, 直接走脱险路径。
+                    startEscape(mod, "ascent attempts " + attempts + " > " + ASCENT_MAX_ATTEMPTS);
+                    return _wanderTask;
+                }
                 if (needsClimb) {
                     if (!_ascent.isActive()) {
                         _ascent.start(mod, _target, _target.getY(),
@@ -335,12 +380,16 @@ public class InteractWithBlockTask extends Task {
                         _giveUpTimer.reset();
                         if (climb.done) {
                             // 已到目标层, 下一 tick 走正常点击流程。
+                            _ascentAttempts.remove(_target);
                             return null;
                         }
                         if (climb.unreachable) {
                             adris.altoclef.util.helpers.TimeoutLog.hit("InteractWithBlockTask.ascent",
                                     "re-navigate + acquire exhausted, blacklisting target");
                             mod.getBlockTracker().requestBlockUnreachable(_target);
+                            // (2026-09-17 脱险) 拉黑 + **真**休整抱持: 只 return 一个 tick 的
+                            // wander 会被下一 tick 丢掉 = 空转, 见字段区注释。
+                            startEscape(mod, "ascent unreachable, blacklisting target");
                             return _wanderTask;
                         }
                         if (climb.child != null) {
@@ -483,6 +532,24 @@ public class InteractWithBlockTask extends Task {
 
     public ClickResponse getClickStatus() {
         return _cachedClickStatus;
+    }
+
+    /**
+     * (2026-09-17) 启动一次**真实**的脱险休整: 累加同目标爬升失败次数(static, 防父级
+     * 重建绕过)、重置游荡实例(复用实例的 `_origin` 是上一次使用的位置, 不重置则
+     * `isFinished` 立刻成立 → 0.3s 就"游荡完成" = 空转)、锁住本任务最多
+     * {@link #ESCAPE_SECONDS} 秒只挂游荡子任务。
+     */
+    private void startEscape(AltoClef mod, String reason) {
+        if (_ascentAttempts.size() > 256) {
+            _ascentAttempts.clear();
+        }
+        int n = _ascentAttempts.merge(_target, 1, Integer::sum);
+        Debug.logToFile("altoclef_diag.log", "[AscentEscape] target=" + _target.toShortString()
+                + " attempts=" + n + "/" + ASCENT_MAX_ATTEMPTS + " reason=" + reason);
+        _wanderTask.resetForReuse(mod);
+        _escaping = true;
+        _escapeTimer.reset();
     }
 
     /**

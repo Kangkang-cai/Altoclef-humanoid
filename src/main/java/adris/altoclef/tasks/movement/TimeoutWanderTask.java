@@ -92,6 +92,30 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         _wanderDistanceExtension = 0;
     }
 
+    /**
+     * (2026-09-17 复用实例重开会话) 本任务是**实例级**的: `onStart` 只在实例第一次
+     * 被 setTask 时跑, 之后同实例被反复 `return` (isEqual 命中) 不会再跑, 于是
+     * `_origin` 会停留在**上一次使用的位置**。若那次在远处, {@link #isFinished} 的
+     * "离原点 > 距离" 立刻成立 → 游荡 0.3s 就返回 "clean 完成" = **空转**。
+     *
+     * <p>现场 20260917-150146 实锤: 爬升判不可达后走"拉黑 + wander 换活"路径, 5 轮
+     * 全是 `Wander for 5.0 blocks` 300ms STOP(clean) —— 换活等于没做, 50ms 后父级
+     * 又重建同目标, 3.15s 一轮循环 15s 不脱险。
+     *
+     * <p>⚠ 这与 `resetWander()` 的语义**不同**: 那个只清"上一次失败造成的 planB/加距"
+     * 状态, 不动原点。要真正重开一次游荡会话必须用本方法(等价于补跑一次 onStart 里
+     * 会重置的那几项)。
+     */
+    public void resetForReuse(AltoClef mod) {
+        resetWander();
+        if (mod.getPlayer() != null && mod.getPlayer().getPos() != null) {
+            _origin = mod.getPlayer().getPos();
+        }
+        _progressChecker.reset();
+        _failCounter = 0;
+        _giveUpLogged = false;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _origin = mod.getPlayer().getPos();
