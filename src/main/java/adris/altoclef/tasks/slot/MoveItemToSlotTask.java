@@ -7,9 +7,13 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.StlHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.slots.FurnaceSlot;
 import adris.altoclef.util.slots.Slot;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.screen.FurnaceScreenHandler;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -96,6 +100,22 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         return _destination;
     }
 
+    /**
+     * (2026-09-17 屏幕身份校验) 目标槽所属屏幕是否真在前台。槽位读写统一走
+     * currentScreenHandler.getSlot(windowSlot) —— 屏幕一旦漂移（同链其他子树
+     * 开了合成台/玩家背包屏，或挖方块清遮挡把界面关了），FurnaceSlot 的
+     * window 0 会被错误套到非熔炉屏的 0 号槽（= 2x2/3x3 合成产物格，只读
+     * 不可写）：右键 place-one 全部哑火、读取恒 EMPTY。20260917-181747 实锤：
+     * [SlotClick] btn=1 slot=0 | slot EMPTY->EMPTY | cursor raw_ironx22->x22
+     * ×6，place-one 循环 0 产出 = 用户所见"放置铁失败"。
+     * 目前只校验 FurnaceSlot 族（本次事故现场）；其他槽族语义未动。
+     */
+    private boolean isDestinationScreenOpen() {
+        if (!(_destination instanceof FurnaceSlot)) return true;
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        return player != null && player.currentScreenHandler instanceof FurnaceScreenHandler;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         _startedMs = System.currentTimeMillis();
@@ -128,6 +148,10 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         // oak_planks/coal x1/coal x2 三次接管全被 [ForceProtect] 挡回,
         // 3.0s 保险丝到期才切走 = 用户所见"烧东西横跳"; 燃料侧同样盲点,
         // fuel 卡 x1 仍连点 10 次 3.1s)。
+        // (2026-09-17 屏幕身份校验) 熔炉界面不在前台时不持盾 —— 此时点击必哑火,
+        // 父级切去重开屏幕是唯一正确动作 (现场: [SlotClick] 6 连击全哑火, 父级
+        // 重开炉的接管被挡满 3s 保险丝)。
+        if (!isDestinationScreenOpen()) return false;
         if (isFinished(mod)) return false;
         if (System.currentTimeMillis() - _startedMs > MOVE_FORCE_FUSE_MS) return false;
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
@@ -144,6 +168,15 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         // 也要续期, 保证 Moving 存活期间在途表持续命中 (100000 场: 竞争链上位
         // 后 Moving 停 tick, 旧时机 mark 永不执行导致防御落空)。
         markAllTargetsInFlight();
+        // (2026-09-17 屏幕漂移即放行) 目标屏幕不在前台 = 本任务点击必然哑火
+        // (window 0 会套到合成产物格上), 且 isFinished 永假 → "达标即放行"
+        // 救不了"永远不达标"的场景。立即放弃保护并停手, 让父级切去重开屏幕
+        // (20260917-181747: 父级每 tick 都想切 Interact 重开炉, 被本任务保护
+        // 挡满 3s 保险丝 took=3.0s, 期间 6 连击全部哑火)。
+        if (!isDestinationScreenOpen()) {
+            Debug.logToFile("altoclef_diag.log", "[MoveDiag]\tbail: destination screen NOT open, dest=" + _destination);
+            return null;
+        }
         if (!mod.getSlotHandler().canDoSlotAction()) {
             // (2026-09-16 冷却期防 churn) 旧实现冷却期直接 return null → 框架停掉
             // 在跑的 ClickSlotTask, 冷却一过又 new 一个 → 每个冷却周期 START/STOP
