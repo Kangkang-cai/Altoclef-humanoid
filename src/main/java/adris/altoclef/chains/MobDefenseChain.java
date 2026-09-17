@@ -182,18 +182,14 @@ public class MobDefenseChain extends SingleTaskChain {
     private static final float ACTIVE_ATTACKER_PRIORITY = 95.0f;
     // 是否正处在"必须击杀已开火骷髅"的加急战斗 (期间不因血量低撤退)。
     private boolean _mustKillAttacker = false;
-    // (2026-09-17 死亡 #2 取证, 场次 20260917-103520) must-kill 图钉的**贴身近战
-    // 豁免**口径。原理由"背对跑=白吃箭"只对远程成立: 现场骷髅在 10.2 格外射箭,
-    // 真正把 bot 从 20 打到 0 的是 1 格内的僵尸 (class_1642), bot 却因为图钉一直
-    // "追骷髅找视线"被贴脸白嫖。血少 + 近战贴身时解除图钉转逃。
-    // 血量口径与 stateFight 里 confident-fight 的 40% 撤退线**同源** (判据一致性)。
+    // (2026-09-17 死亡 #2 取证, 场次 20260917-103520) must-kill 期间的**贴身近战
+    // 优先清理**口径。现场: 骷髅在 10.2 格外射箭, 真正把 bot 从 20 打到 0 的是
+    // 1 格内的僵尸 (class_1642) —— 而 must-kill 的击杀名单只装了骷髅, bot 眼里
+    // 根本没有贴脸的僵尸, 一边追骷髅一边被白嫖。用户 2026-09-17 拍板:
+    // **小白必须击杀, 但先解决贴脸的**。做法 = must-kill 触发时把该半径内的近战怪
+    // 一并纳入 _fightTargets; KillEntitiesTask 走 DoToClosestEntityTask 的"最近优先",
+    // 于是自动先清贴脸怪、再回头打骷髅。图钉与 prio 95 全程不变 (绝不转逃)。
     private static final double MUST_KILL_MELEE_KEEP_DISTANCE = 3.0;   // 近战"贴脸"判定半径
-    private static final float MUST_KILL_RELEASE_HEALTH_RATIO = 0.4f;  // = confident-fight 撤退线
-    // 豁免后的冷静期: 期间拒绝 must-kill 图钉。不加这条 = 豁免形同虚设 —— 逃跑让
-    // 威胁短暂脱离 24 格评估范围后, 状态机 RETREAT->EVALUATE 回流, 骷髅还在射就
-    // 立刻把图钉复位抓回 FIGHT (日志里 11:06:27 逃跑 -> 11:06:29 又 FIGHT 即此)。
-    private static final int MUST_KILL_RELEASE_COOLDOWN_TICKS = 20 * 10;  // 10s
-    private long _mustKillReleaseUntilTick = 0;
 
     public MobDefenseChain(TaskRunner runner) {
         super(runner);
@@ -658,14 +654,17 @@ public class MobDefenseChain extends SingleTaskChain {
         // 射死 (用户实测卡在 "Killing entity.minecraft.skeleton / repositioning
         // for line of sight")。有剑才值得拼杀; 没剑就交给下方正常威胁评估
         // (无胜算 → 逃跑/躲), 不进入加急锁定。
-        // (2026-09-17) 冷静期内不接受图钉: 见 MUST_KILL_RELEASE_COOLDOWN_TICKS 注释。
-        if (activeAttacker != null && hasWeaponToFight(mod) && nowTick >= _mustKillReleaseUntilTick) {
+        if (activeAttacker != null && hasWeaponToFight(mod)) {
             Debug.logMessage("Combat decision: MUST-KILL active skeleton shooter at "
                     + activeAttacker.getBlockPos().toShortString());
             _mustKillAttacker = true;
             _inCombat = true;
             _combatStartTick = nowTick;
             if (!_fightTargets.contains(activeAttacker)) _fightTargets.add(activeAttacker);
+            // (2026-09-17 用户拍板: 小白必须击杀, 但先解决贴脸的) 把贴脸近战怪一并
+            // 纳入击杀名单。KillEntitiesTask 按"最近优先"选目标, 于是先清掉 1 格的
+            // 僵尸, 再回头打 10 格外的骷髅。图钉与 prio 95 全程保持, 绝不转逃。
+            addCloseMeleeTargets(mod);
             _runAwayTask = null;
             _defenseState = DefenseState.FIGHT;
             return ACTIVE_ATTACKER_PRIORITY;
@@ -942,33 +941,6 @@ public class MobDefenseChain extends SingleTaskChain {
             _defenseState = DefenseState.RETREAT;
             return 80;
         }
-        // (2026-09-17 死亡 #2 取证) must-kill 的贴身近战豁免: 血少 + 近战怪贴脸时
-        // 解除图钉转逃。图钉的原始理由 (背对逃跑吃箭) 只对远程威胁成立; 当有近战怪
-        // 贴到 3 格内时, "继续追骷髅找视线"= 站桩挨近战, 实测 7.5s 从 20 血打到 0。
-        // 只在**两个条件同时**满足时解除: (a) 血量 < 40% (与下方 confident-fight 撤退
-        // 线同源); (b) 3 格内存在非远程/非苦力怕的敌对怪。否则图钉行为完全不变。
-        if (_mustKillAttacker) {
-            float hp = mod.getPlayer().getHealth();
-            float maxHp = mod.getPlayer().getMaxHealth();
-            if (hp < maxHp * MUST_KILL_RELEASE_HEALTH_RATIO) {
-                Entity closeMelee = getClosestMeleeHostile(mod, MUST_KILL_MELEE_KEEP_DISTANCE);
-                if (closeMelee != null) {
-                    String m = String.format(
-                            "[MUSTKILL-RELEASE] melee=%s dist=%.1f health=%.0f/%.0f (below %.0f%%) -> retreat, must-kill muted for %ds",
-                            closeMelee.getClass().getSimpleName(), closeMelee.distanceTo(mod.getPlayer()),
-                            hp, maxHp, MUST_KILL_RELEASE_HEALTH_RATIO * 100f,
-                            MUST_KILL_RELEASE_COOLDOWN_TICKS / 20);
-                    Debug.logMessage(m);
-                    Debug.logToFile("altoclef_diag.log", m);
-                    _mustKillReleaseUntilTick = nowTick + MUST_KILL_RELEASE_COOLDOWN_TICKS;
-                    exitFightState();
-                    _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
-                    setTask(_runAwayTask);
-                    _defenseState = DefenseState.RETREAT;
-                    return 80;
-                }
-            }
-        }
         if (!_mustKillAttacker) {
             if (_confidentFight) {
                 // (2026-08-23) 自信战斗中途不走威胁公式/护甲脆弱判定 (无甲时
@@ -1022,28 +994,29 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
-     * (2026-09-17 死亡 #2 取证) range 内最近的"贴身近战"敌对怪, 没有则 null。
+     * (2026-09-17 用户拍板"小白必须击杀, 但先解决贴脸的") 把
+     * MUST_KILL_MELEE_KEEP_DISTANCE 内的近战怪加入击杀名单; 已在名单内则跳过
+     * (幂等, 每 tick 调用不会刷屏/重复)。
      * 排除两类, 与 shouldRetreatMelee 的威胁分类同口径:
-     *  (a) 苦力怕 — 走举盾接爆专门分支 (L606+), 不是持续 DPS 来源;
+     *  (a) 苦力怕 — 走举盾接爆专门分支, 不是持续 DPS 来源;
      *  (b) 远程怪 (骷髅射手/女巫/烈焰人等) — 贴脸不是它们的主要伤害方式,
      *      且骷髅本身就是 must-kill 的目标, 排除后才不会自我抵消。
+     * 名单由 KillEntitiesTask → DoToClosestEntityTask 按"最近优先"消费, 所以贴脸的
+     * 必然先被打掉; 骷髅留在名单里, 清完近战后自动回头打它。
      */
-    private static Entity getClosestMeleeHostile(AltoClef mod, double range) {
-        Entity best = null;
-        double bestDist = Double.MAX_VALUE;
+    private void addCloseMeleeTargets(AltoClef mod) {
         synchronized (BaritoneHelper.MINECRAFT_LOCK) {
             for (Entity h : mod.getEntityTracker().getHostiles()) {
                 if (h == null || !h.isAlive()) continue;
                 if (h instanceof CreeperEntity) continue;
                 if (isRangedThreat(h)) continue;
-                double d = h.distanceTo(mod.getPlayer());
-                if (d <= range && d < bestDist) {
-                    bestDist = d;
-                    best = h;
-                }
+                if (!h.isInRange(mod.getPlayer(), MUST_KILL_MELEE_KEEP_DISTANCE)) continue;
+                if (_fightTargets.contains(h)) continue;
+                _fightTargets.add(h);
+                Debug.logMessage("[MUSTKILL-CLOSE] added close melee %s at %.1fm to kill list (before distant skeleton)",
+                        h.getClass().getSimpleName(), h.distanceTo(mod.getPlayer()));
             }
         }
-        return best;
     }
 
     /**
