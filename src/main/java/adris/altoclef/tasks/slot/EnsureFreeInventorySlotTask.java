@@ -39,10 +39,17 @@ public class EnsureFreeInventorySlotTask extends Task {
     private StoreGarbageInContainerTask _storeTask = null;
     private boolean _containerStoreBlocked = false;
 
+    // (2026-09-17 终极丢垃圾, 用户钦定升级阶梯 L3) 反复触发丢垃圾后不再扔地上:
+    // 就近放箱子, 垃圾全进箱。跨 tick 持有实例; blocked 后本轮落回抛丢级联。
+    private adris.altoclef.tasks.container.GarbageChestDisposalTask _chestDisposeTask = null;
+    private boolean _chestDisposeBlocked = false;
+
     @Override
     protected void onStart(AltoClef mod) {
         _storeTask = null;
         _containerStoreBlocked = false;
+        _chestDisposeTask = null;
+        _chestDisposeBlocked = false;
         _armorMoveTask = null;
         _armorMoveItem = null;
     }
@@ -129,6 +136,35 @@ public class EnsureFreeInventorySlotTask extends Task {
         // 持续 8 次采样, 直到用户手动停止)。光标非空一律直接走下面的腾位/丢弃级联。
         ItemStack cursorStack = StorageHelper.getItemStackInCursorSlot();
         boolean cursorBusy = !cursorStack.isEmpty();
+
+        // (2026-09-17 终极丢垃圾, 用户钦定升级阶梯 L3) 抛丢反复触发升级到 3 级后
+        // 不再扔地上: 就近放一个箱子, 垃圾全进箱 (复用 StoreGarbageInContainerTask
+        // 状态机及已知坑防护)。木料不足 (无箱/无 4 板/无 1 原木) 时不启用, 落回
+        // L2 抛丢。光标拿着非垃圾 (两拍搬运中间态等) 不劫持。
+        int _escLevel = ThrowCursorTask.getEscalationLevel();
+        if (_escLevel >= 3 && !adris.altoclef.tasks.container.GarbageChestDisposalTask.isFlowActive()) {
+            boolean cursorDisposable = cursorStack.isEmpty()
+                    || ItemHelper.canThrowAwayStack(mod, cursorStack);
+            if (cursorDisposable && adris.altoclef.tasks.container.GarbageChestDisposalTask
+                    .hasChestMaterials(mod)) {
+                if (!_chestDisposeBlocked) {
+                    if (_chestDisposeTask == null) {
+                        _chestDisposeTask = new adris.altoclef.tasks.container.GarbageChestDisposalTask();
+                    }
+                    if (_chestDisposeTask.isFinished(mod)) {
+                        _chestDisposeBlocked = true;
+                        Debug.logMessage("(EnsureFreeInventorySlotTask) [GARBAGE-CHEST] chest route blocked, falling back to throwing");
+                    } else {
+                        setDebugState("Ultimate garbage: storing into chest (level "
+                                + _escLevel + ")");
+                        return _chestDisposeTask;
+                    }
+                }
+                // 箱子路线 blocked → 继续走下面的抛丢级联 (相当于 L2 行为)。
+            }
+        }
+        // (2026-09-17 朝向加固联动) 阶梯 ≥1 且光标垃圾已上光标时, 由 ThrowCursorTask
+        // 自己负责走开+强制朝向 (见其 onStart/onTick 阶梯分支), 这里照常派发。
 
         if (!cursorBusy) {
             // (2026-09-07 用户拍板) 站在箱子前腾位: 先把垃圾【存进这个箱子】,

@@ -141,6 +141,35 @@ public class ThrowCursorTask extends Task {
     // 继承时瞄准起点留的余量 (tick): 既不"继承即丢", 也不给抢断拖延收益。
     private static final int INHERIT_AIM_GRACE_TICKS = 5;
 
+    // ── (2026-09-17 丢垃圾升级阶梯, 用户钦定) ─────────────────────────────
+    // 同一件垃圾被扔出后短时间内又回到光标 (被原版拾取吸回) = "又触发丢垃圾"。
+    // 每级给 2 次尝试, 之后再触发就升级:
+    //   L0: 原地正常丢 (封闭→现成坑/挖脚前洞/头高两格隧道)
+    //   L1: 究极丢垃圾 — 走开 ≥5 格 + 强制面朝"落点→当前位置"的离开方向丢
+    //   L2: 大招 — 走开 ≥10 格, 其余同 L1
+    //   L3: 终极大招 — 不扔了, 就近放箱子, 垃圾全进箱 (EnsureFreeInventorySlotTask
+    //       路由到 GarbageChestDisposalTask; 木料不足落回 L2)
+    // 计数器 static (实例被抢断重建不清零, 与会话状态同口径); 按物品回弹窗口
+    // 判定"又触发", 连续丢不同物品不会误升级 (不同物品 lastThrow 为空)。
+    private static final long RETRIGGER_WINDOW_MS = 45_000;
+    private static int _retriggerStreak = 0;
+    private static long _lastStreakMs = 0;
+    // 真实丢出时刻 (throwNow 记录), 供下一轮判定"短时间内又触发"。
+    private static long _lastThrowDoneMs = 0;
+
+    /** 当前升级等级 0..3 (见类内阶梯注释)。超时窗口外自动衰减回 0。 */
+    public static int getEscalationLevel() {
+        if (System.currentTimeMillis() - _lastStreakMs > RETRIGGER_WINDOW_MS * 2) {
+            return 0;
+        }
+        return Math.min(3, _retriggerStreak / 2);
+    }
+
+    /** 该等级的走开距离 (用户钦定: L1 ≥5 格, L2 ≥10 格, L0 弹回熔断沿用 4 格)。 */
+    private static double runAwayDistanceForLevel(int level) {
+        return level >= 2 ? 10 : level == 1 ? 5 : 4;
+    }
+
     /** 挖坑/隧道进行中 → 8s 光标滞留超时豁免 (7.5s/格 vs 8s 超时死循环, 见类注释)。
      *  (2026-09-15) 阶段状态已 static 化, 不依赖实例存活 —— 实例被抢断重建的
      *  间隙里豁免同样成立 (否则 8s 超时会在间隙误触)。 */
@@ -192,33 +221,64 @@ public class ThrowCursorTask extends Task {
             _forcedYaw = null;
             _forceYawStartTick = -1;
             // 弹回检测: 光标物品 8s 内刚被扔过 → 计入弹回, 视弹回次数升级处理。
+            // (2026-09-17 升级阶梯) 计数窗口放宽到 45s: 8s 弹回窗口外但在 45s 内
+            // 又拿上光标同样算"又触发丢垃圾", 推进阶梯; 窗口外的新会话衰减计数。
+            int escLevel = getEscalationLevel();
+            boolean retrigger = false;
             if (!cursor.isEmpty() && mod.getPlayer() != null) {
                 Item item = cursor.getItem();
                 long lastThrow = ItemHelper.getLastCursorThrowMs(item);
                 long now = System.currentTimeMillis();
+                if (lastThrow > 0 && now - lastThrow <= RETRIGGER_WINDOW_MS) {
+                    retrigger = true;
+                }
                 if (lastThrow > 0 && now - lastThrow <= ItemHelper.getThrowBounceWindowMs()) {
                     ItemHelper.notifyGarbageReturned(item);
                     BlockPos lastDrop = ItemHelper.getLastThrowDropPos(item);
                     if (lastDrop != null
                             && lastDrop.isWithinDistance(mod.getPlayer().getBlockPos(), 6)) {
-                        // 先离开上次落点 ≥4 格, 再丢弃。
-                        _runAwayTask = new RunAwayFromPositionTask(4, lastDrop);
+                        // 先离开上次落点 (距离按升级等级: L0=4, L1=5, L2+=10), 再丢弃。
+                        _runAwayTask = new RunAwayFromPositionTask(
+                                runAwayDistanceForLevel(escLevel), lastDrop);
                         _lastDropPos = lastDrop.toImmutable();
                         // (2026-09-15 方向纪律) 记录离开方向 (落点→当前位置), 走开后
                         // 强制面朝这个方向丢, 不交给 TurnToOpenAreaTask 乱挑方向。
-                        double dx = mod.getPlayer().getX() - (lastDrop.getX() + 0.5);
-                        double dz = mod.getPlayer().getZ() - (lastDrop.getZ() + 0.5);
-                        double len = Math.sqrt(dx * dx + dz * dz);
-                        if (len > 0.5) {
-                            _preferredDir = new Vec3d(dx / len, 0, dz / len);
-                            float yaw = (float) Math.toDegrees(
-                                    Math.atan2(-_preferredDir.x, _preferredDir.z));
-                            _forcedYaw = new Rotation(yaw, -15f);
-                            _turnTask = null; // 方向已定, 不再挑"最开阔"。
-                        }
+                        // (2026-09-17 朝向加固) 走开路径可能拐弯, 真正的离开方向在
+                        // 走开【完成时】用落点→当前位置重算 (见 onTick 走开完成分支),
+                        // 这里只记录落点锚。
+                        _turnTask = null; // 方向待走开完成后定, 不挑"最开阔"。
                         Debug.logMessage("(ThrowCursorTask) [ThrowBreaker] " + item
-                                + " bounced back within " + (now - lastThrow) / 1000 + "s — walking away from last drop pos before rethrow");
+                                + " bounced back within " + (now - lastThrow) / 1000 + "s — level="
+                                + escLevel + " walkaway=" + (int) runAwayDistanceForLevel(escLevel)
+                                + " blocks before rethrow");
                     }
+                }
+            }
+            if (retrigger) {
+                _retriggerStreak++;
+                _lastStreakMs = System.currentTimeMillis();
+                if (getEscalationLevel() > escLevel) {
+                    Debug.logMessage("(ThrowCursorTask) [ThrowLadder] garbage re-triggered, escalation level -> "
+                            + getEscalationLevel()
+                            + (getEscalationLevel() >= 3 ? " (chest mode, routed by EnsureFree)" : ""));
+                }
+            } else if (System.currentTimeMillis() - _lastStreakMs > RETRIGGER_WINDOW_MS) {
+                _retriggerStreak = 0;
+            }
+            // (2026-09-17 阶梯 L1+) 即使超出 8s 弹回窗口, 等级 ≥1 时也强制走开再丢,
+            // 不再原地反复丢同一个位置 (用户: 走开至少 5/10 格, 朝远离方向丢)。
+            if (_runAwayTask == null && getEscalationLevel() >= 1 && !cursor.isEmpty()
+                    && mod.getPlayer() != null) {
+                BlockPos lastDrop = ItemHelper.getLastThrowDropPos(cursor.getItem());
+                if (lastDrop != null
+                        && lastDrop.isWithinDistance(mod.getPlayer().getBlockPos(), 12)) {
+                    _runAwayTask = new RunAwayFromPositionTask(
+                            runAwayDistanceForLevel(getEscalationLevel()), lastDrop);
+                    _lastDropPos = lastDrop.toImmutable();
+                    _turnTask = null;
+                    Debug.logMessage("(ThrowCursorTask) [ThrowLadder] level="
+                            + getEscalationLevel() + " walkaway before throw from "
+                            + lastDrop.toShortString());
                 }
             }
         } else {
@@ -251,22 +311,60 @@ public class ThrowCursorTask extends Task {
                 return _runAwayTask;
             }
             _runAwayTask = null;
-            // (2026-09-15 方向纪律) 弹回场景方向已定 (面朝离开方向), 不再挑"最开阔"。
-            _turnTask = (_forcedYaw != null) ? null : new TurnToOpenAreaTask();
+            // (2026-09-17 朝向加固, 用户实测"bot 很容易自己选择一个相反错误的方向")
+            // 走开完成时用【落点→当前位置】现算离开方向并强制面朝它, 拒绝
+            // TurnToOpenAreaTask 乱挑"最开阔"(可能正好回头朝工作台)。
+            if (_lastDropPos != null && mod.getPlayer() != null) {
+                double dx = mod.getPlayer().getX() - (_lastDropPos.getX() + 0.5);
+                double dz = mod.getPlayer().getZ() - (_lastDropPos.getZ() + 0.5);
+                double len = Math.sqrt(dx * dx + dz * dz);
+                if (len > 0.5) {
+                    _preferredDir = new Vec3d(dx / len, 0, dz / len);
+                    float yaw = (float) Math.toDegrees(
+                            Math.atan2(-_preferredDir.x, _preferredDir.z));
+                    _forcedYaw = new Rotation(yaw, -15f);
+                    _turnTask = null;
+                } else {
+                    _turnTask = new TurnToOpenAreaTask();
+                }
+            } else {
+                _turnTask = (_forcedYaw != null) ? null : new TurnToOpenAreaTask();
+            }
         }
         // 0.5) (2026-09-15 丢坑优先档 1) 一次性扫描现成坑: 脚下(-1层)半径 6 格内,
         //      开口/上方无盖/非液体即合格, 优先 ≥2 格深 (路过不会踩进去重拾)。
         //      找到就不挖任何方块, 直接对准坑底中心丢。
+        //      (2026-09-17) 完全封闭空间跳过: 四面都是墙时扫到的"坑"必然在墙后
+        //      (扫描无 LOS), 对准它丢=丢墙上弹回, 直接走头高两格隧道。
         if (!_pitScanned && mod.getPlayer() != null) {
             _pitScanned = true;
-            BlockPos pit = findNearbyPit(mod);
-            if (pit != null) {
-                _pitHole = pit;
-                Debug.logMessage("(ThrowCursorTask) [ThrowPit] using pit " + pit.toShortString()
-                        + " depth=" + getPitDepth(mod, pit));
+            if (!isFullyEnclosed(mod)) {
+                BlockPos pit = findNearbyPit(mod);
+                if (pit != null) {
+                    _pitHole = pit;
+                    Debug.logMessage("(ThrowCursorTask) [ThrowPit] using pit " + pit.toShortString()
+                            + " depth=" + getPitDepth(mod, pit));
+                }
+            } else {
+                Debug.logMessage("(ThrowCursorTask) [ThrowPit] fully enclosed, skip pit scan (head-height tunnel only)");
             }
         }
         // 1) (2026-09-15) 有洞口目标 (现成坑 / 现挖脚前洞) → 对准洞底中心, 命中即丢。
+        if (_pitHole != null) {
+            // (2026-09-17 朝向加固) 走开完成后已定强制离开方向: 坑若在离开方向
+            // 的后半球 (会把垃圾丢回工作台方向), 弃用该坑走强制朝向流程。
+            if (_forcedYaw != null && _preferredDir != null && mod.getPlayer() != null) {
+                double pdx = _pitHole.getX() + 0.5 - mod.getPlayer().getX();
+                double pdz = _pitHole.getZ() + 0.5 - mod.getPlayer().getZ();
+                double plen = Math.sqrt(pdx * pdx + pdz * pdz);
+                if (plen > 0.5
+                        && (pdx / plen) * _preferredDir.x + (pdz / plen) * _preferredDir.z < 0) {
+                    Debug.logMessage("(ThrowCursorTask) [ThrowLadder] pit " + _pitHole.toShortString()
+                            + " is behind escape direction, discarding");
+                    _pitHole = null;
+                }
+            }
+        }
         if (_pitHole != null) {
             if (_pitAimStartTick < 0) _pitAimStartTick = WorldHelper.getTicks();
             LookHelper.lookAt(mod, new Vec3d(_pitHole.getX() + 0.5, _pitHole.getY() + 0.2,
@@ -287,7 +385,25 @@ public class ThrowCursorTask extends Task {
             LookHelper.lookAt(mod, _forcedYaw);
             if (LookHelper.isLookingAt(mod, _forcedYaw)
                     || WorldHelper.getTicks() - _forceYawStartTick > FORCE_YAW_TIMEOUT_TICKS) {
+                // (2026-09-17 空旷闸门, 用户"朝着…空旷（可以挖开两格，逻辑同上）")
+                // 强制方向也必须空旷: 该方向脚层/头顶层连通纵深不足时, 不硬丢
+                // (会撞墙弹回), 改沿该方向挖两格头高隧道 (复用隧道流程)。
+                Rotation dir = _forcedYaw;
                 _forcedYaw = null;
+                if (!isDirectionOpenEnough(mod, dir)) {
+                    double rad = Math.toRadians(dir.getYaw());
+                    int dx = (int) Math.round(-Math.sin(rad));
+                    int dz = (int) Math.round(Math.cos(rad));
+                    BlockPos p = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
+                    if (p != null) {
+                        _tunnelNear = p.add(dx, 1, dz);
+                        _aimFar = p.add(dx * 2, 1, dz * 2);
+                        _tunnelStartTick = WorldHelper.getTicks();
+                        _aimStartTick = -1;
+                        Debug.logMessage("(ThrowCursorTask) [ThrowLadder] escape direction not open, digging head-height tunnel along it");
+                        return null;
+                    }
+                }
                 return throwNow(mod);
             }
             setDebugState("Throw: facing away from last drop");
@@ -373,7 +489,10 @@ public class ThrowCursorTask extends Task {
             if (enclosed && mod.getPlayer() != null) {
                 // (2026-09-15 丢坑优先档 2 先于档 3) 封闭 → 先试挖脚前一格地板成洞,
                 // 没有可挖地板 (全是基岩/岩浆正上方) 才退到两格隧道兜底。
-                BlockPos floor = findFloorPitCandidate(mod);
+                // (2026-09-17 用户钦定) 完全封闭空间跳过脚前洞: 洞在脚下, 物品落
+                // 在身侧 1 格内会被满背包立刻吸回; 只有"身体所在 y 层有空间、四面
+                // 都是墙"时直接挖【与头同高的前面两格】丢隧道。
+                BlockPos floor = isFullyEnclosed(mod) ? null : findFloorPitCandidate(mod);
                 if (floor != null) {
                     _digFloor = floor;
                     _digFloorStartTick = WorldHelper.getTicks();
@@ -414,7 +533,41 @@ public class ThrowCursorTask extends Task {
             }
             _throwRecorded = true;
         }
+        // (2026-09-17 升级阶梯) 记录真实丢出时刻, 供下一轮判定"短时间内又触发"。
+        _lastThrowDoneMs = System.currentTimeMillis();
         return _throwTask;
+    }
+
+    /**
+     * (2026-09-17) 强制离开方向是否足够空旷 (TurnToOpenAreaTask.clearLen 同口径):
+     * 脚层/头顶层连通纵深 ≥3 才允许直接丢 (物品要飞出原版拾取半径), 不足则
+     * 挖两格头高隧道兜底。
+     */
+    private static boolean isDirectionOpenEnough(AltoClef mod, Rotation dir) {
+        if (mod.getPlayer() == null) return true;
+        double rad = Math.toRadians(dir.getYaw());
+        int dx = (int) Math.round(-Math.sin(rad));
+        int dz = (int) Math.round(Math.cos(rad));
+        BlockPos p = mod.getPlayer().getBlockPos();
+        int foot = adris.altoclef.tasks.movement.TurnToOpenAreaTask.clearLen(mod, p, dx, dz, 0);
+        int head = adris.altoclef.tasks.movement.TurnToOpenAreaTask.clearLen(mod, p, dx, dz, 1);
+        return Math.min(foot, head) >= 3;
+    }
+
+    /**
+     * (2026-09-17 用户钦定"完全封闭空间") 只有身体所在 y 层有空间, 四面 (脚层+
+     * 头顶层) 都是墙。此时不试现成坑/脚前洞 (坑在墙后、脚前洞会被自己站在边上
+     * 重拾), 直接走"头高两格隧道"流程。
+     */
+    private static boolean isFullyEnclosed(AltoClef mod) {
+        if (mod.getPlayer() == null) return false;
+        BlockPos p = mod.getPlayer().getBlockPos();
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] d : dirs) {
+            if (!WorldHelper.isSolid(mod, p.add(d[0], 0, d[1]))) return false;
+            if (!WorldHelper.isSolid(mod, p.add(d[0], 1, d[1]))) return false;
+        }
+        return true;
     }
 
     // (2026-09-12 挖墙选点逻辑废弃: findFirstWallInBestDir 删除, 改为用户钦定的

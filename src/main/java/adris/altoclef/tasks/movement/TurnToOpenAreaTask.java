@@ -101,6 +101,8 @@ public class TurnToOpenAreaTask extends Task {
     // 90=西(-X), 前向向量 = (-sin(yaw), 0, cos(yaw)) — 见 PlayerInteractionFixChain
     // /SwingThroughChain/ExploreStrongholdTask 同款算法。旧代码用 (+sin, -cos) 正好
     // 反向: 评分挑的 yaw 其"对面"才是开阔的, bot 面向最不开阔的墙丢东西。
+    // (2026-09-17 改 public static) ThrowCursorTask 强制朝向的空旷判定复用同一
+    // 口径, 不再各写一份 (判据一致性铁律)。
     private double scoreDirection(AltoClef mod, BlockPos p, float yaw) {
         double rad = Math.toRadians(yaw);
         int dx = (int) Math.round(-Math.sin(rad));
@@ -110,7 +112,7 @@ public class TurnToOpenAreaTask extends Task {
         return Math.min(foot, head);
     }
 
-    private int clearLen(AltoClef mod, BlockPos p, int dx, int dz, int dy) {
+    public static int clearLen(AltoClef mod, BlockPos p, int dx, int dz, int dy) {
         for (int d = 1; d <= MAX_LOOK; d++) {
             if (WorldHelper.isSolid(mod, p.add(dx * d, dy, dz * d))) {
                 return d - 1;
