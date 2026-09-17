@@ -29,7 +29,10 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
     // 腾位链丢弃前查询让路。滑动过期 = Moving 实例每 tick 重建不空窗、
     // Moving 卡死/被停 1s 后保护自动解除, 不会永久遮蔽腾位。
     private static final Map<Item, Long> _inFlightCursorItems = new HashMap<>();
-    private static final long IN_FLIGHT_TTL_MS = 1000L;
+    // (2026-09-17 TTL 1s→3s) 对齐 CursorArbiter.LEASE_MS: 竞争链 (EnsureFree)
+    // 连续上位期间 Moving 停 tick, 1s 过期会让保护在拉锯中途脱落; 3s 覆盖
+    // EnsureFree 单轮丢弃动作的典型时长, Moving 卡死场景 3s 后仍自动解除。
+    private static final long IN_FLIGHT_TTL_MS = 3000L;
 
     /** 光标物品是否正被某次两拍搬运持有 (腾位/丢弃派发前查询)。 */
     public static boolean isCursorItemInFlight(Item item) {
@@ -96,6 +99,18 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
     @Override
     protected void onStart(AltoClef mod) {
         _startedMs = System.currentTimeMillis();
+        // (2026-09-17 在途登记时机前移) 旧版只在"光标已持有目标物"分支 mark,
+        // 但竞争链 (EnsureFree) 上位后 Moving 不再被 tick → mark 永不执行 →
+        // 在途表空 → 双层防御查不到 → 光标上的 raw_iron 被扔 (092555+100000
+        // 两场复现实锤)。改为: onStart 就登记全部目标物, onTick 顶部续期 ——
+        // Moving 存活期间在途表持续命中, 被停 1s 后过期解除。
+        markAllTargetsInFlight();
+    }
+
+    private void markAllTargetsInFlight() {
+        for (Item it : _toMove.getMatches()) {
+            markInFlight(it);
+        }
     }
 
     /**
@@ -117,6 +132,10 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-17 在途登记续期) 放在 canDoSlotAction 闸门之前 —— 冷却期
+        // 也要续期, 保证 Moving 存活期间在途表持续命中 (100000 场: 竞争链上位
+        // 后 Moving 停 tick, 旧时机 mark 永不执行导致防御落空)。
+        markAllTargetsInFlight();
         if (!mod.getSlotHandler().canDoSlotAction()) {
             // (2026-09-16 冷却期防 churn) 旧实现冷却期直接 return null → 框架停掉
             // 在跑的 ClickSlotTask, 冷却一过又 new 一个 → 每个冷却周期 START/STOP
