@@ -29,7 +29,8 @@
     "EntryMixin",
     "LoadChunkMixin",
     "PlayerCollidesWithEntityMixin",
-    "PlayerDamageMixin"
+    "PlayerDamageMixin",
+    "SoundSystemMixin"
   ],
   "injectors": {
     "defaultRequire": 1

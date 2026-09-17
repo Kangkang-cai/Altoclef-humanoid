@@ -99,6 +99,56 @@ public final class PerceptionSampler {
     /** 记忆上限: 一整个扫描圈的可见方块量级在千, 20s 窗口内远达不到; 仅防异常膨胀。 */
     private static final int SIGHT_CAP = 60000;
     private static int _sliceCursor = 0;
+
+    // ===== (2026-09-17 听觉通道) 录制专用声音缓冲 (由 SoundSystemMixin 喂入) =====
+
+    /** 声音在缓冲里的存活窗口 (ms), 与 SoundTracker 的 8s 决策口径一致。 */
+    private static final long SOUND_WINDOW_MS = 8000;
+    /** 缓冲上限: 突发刷音 (雨天/连续挖掘) 时丢最旧的, 只防异常膨胀。 */
+    private static final int SOUND_CAP = 128;
+
+    /** 一条"听到过"的声音: 声音引擎总入口的即时快照。 */
+    private static final class ClientSound {
+        final String id;
+        final String category;
+        final double x, y, z;
+        final float volume, pitch;
+        final long timeMs;
+
+        ClientSound(String id, String category, double x, double y, double z, float volume, float pitch, long timeMs) {
+            this.id = id;
+            this.category = category;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.volume = volume;
+            this.pitch = pitch;
+            this.timeMs = timeMs;
+        }
+    }
+
+    /**
+     * 只在客户端线程读写 (mixin 注入点与 tick 采样同线程), 用普通 ArrayList 即可。
+     * 完全不碰 SoundTracker —— 那是 bot 的决策输入, 加内容会改变行为。
+     */
+    private static final List<ClientSound> _clientSounds = new ArrayList<>();
+
+    /** (2026-09-17) 声音引擎总入口回调: RecordManager.onSoundPlayed 转发进来。 */
+    static void onClientSound(String idPath, String category,
+                              double x, double y, double z, float volume, float pitch) {
+        _clientSounds.add(new ClientSound(idPath, category, x, y, z, volume, pitch, System.currentTimeMillis()));
+        if (_clientSounds.size() > SOUND_CAP) {
+            _clientSounds.remove(0); // 丢最旧
+        }
+    }
+
+    /** 清掉超出可闻窗口的旧声音 (每帧采样时顺手做, 列表很小)。 */
+    private static void pruneClientSounds(long nowMs) {
+        if (_clientSounds.isEmpty()) return;
+        long cutoff = nowMs - SOUND_WINDOW_MS;
+        _clientSounds.removeIf(s -> s.timeMs < cutoff);
+    }
+
     /**
      * 距上次剪枝走过的切片数 (满 {@code slices} = 走完一整圈)。
      * (2026-09-17) 原用 {@code _lastPruneTick = Long.MIN_VALUE} 当"还没剪过"的哨兵 +
@@ -114,6 +164,7 @@ public final class PerceptionSampler {
      */
     public static void onWorldBoundary() {
         _sight.clear();
+        _clientSounds.clear();
         _sliceCursor = 0;
         _slicesSincePrune = 0;
     }
@@ -271,20 +322,31 @@ public final class PerceptionSampler {
         sb.append(']');
 
         // ---- 声音 (听觉通道, 独立于视觉) ----
+        // (2026-09-17 补全) 源改为 SoundSystemMixin 喂进来的录制专用缓冲 —— 声音引擎
+        // 总入口的漏斗, 服务端广播/实体语音/自己动作音/环境音全覆盖 (旧源只收
+        // PlaySoundS2CPacket, 实测整段 0 条)。可闻距离按游戏衰减机制近似: 16 格 × 音量。
         sb.append(",\"sounds\":[");
         first = true;
         try {
             long nowMs = System.currentTimeMillis();
-            for (SoundTracker.RecentSound snd : mod.getSoundTracker().dumpRecentSounds()) {
-                if (snd == null) continue;
+            pruneClientSounds(nowMs);
+            for (ClientSound snd : _clientSounds) {
+                double dx = snd.x - eye.x, dy = snd.y - eye.y, dz = snd.z - eye.z;
+                double distSq = dx * dx + dy * dy + dz * dz;
+                double audible = 16.0 * Math.max(0.0, Math.min(snd.volume, 4.0));
+                if (distSq > audible * audible) continue; // 衰减圈外 = 实际听不见
                 if (!first) sb.append(',');
                 first = false;
                 sb.append("{\"id\":");
-                Json.str(sb, snd.soundIdPath);
+                Json.str(sb, snd.id);
                 sb.append(",\"p\":");
-                Json.vec(sb, snd.pos.x, snd.pos.y, snd.pos.z);
+                Json.vec(sb, snd.x, snd.y, snd.z);
+                sb.append(",\"cat\":");
+                Json.str(sb, snd.category);
+                sb.append(",\"v\":").append(Json.f(snd.volume));
+                sb.append(",\"pt\":").append(Json.f(snd.pitch));
                 sb.append(",\"ageMs\":").append(nowMs - snd.timeMs);
-                sb.append(",\"d\":").append(Json.f(Math.sqrt(snd.pos.squaredDistanceTo(eye))));
+                sb.append(",\"d\":").append(Json.f(Math.sqrt(distSq)));
                 sb.append('}');
             }
         } catch (Throwable ignored) {
@@ -404,6 +466,7 @@ public final class PerceptionSampler {
      */
     static void reset() {
         _sight.clear();
+        _clientSounds.clear();
         _sliceCursor = 0;
         _slicesSincePrune = 0;
     }

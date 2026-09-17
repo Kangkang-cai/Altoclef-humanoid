@@ -167,6 +167,22 @@ public final class RecordManager {
     }
 
     /**
+     * (2026-09-17 听觉通道) 由 {@code SoundSystemMixin} 在声音引擎总入口调用 ——
+     * 服务端广播 / 实体语音 / 客户端本地音 (自己挖/走、环境音) 在这里全量汇齐,
+     * 喂给感知通道的录制专用声音缓冲。不进 SoundTracker (那是 bot 的决策输入,
+     * 语义不能动)。未录制时零成本早退。
+     */
+    public static void onSoundPlayed(String idPath, String category,
+                                     double x, double y, double z, float volume, float pitch) {
+        if (!isRecording() || _perception == null) return;
+        try {
+            PerceptionSampler.onClientSound(idPath, category, x, y, z, volume, pitch);
+        } catch (Throwable t) {
+            onError("onSoundPlayed", t);
+        }
+    }
+
+    /**
      * 记录一条稀疏事件 (记忆读写/任务切换/受伤等)。
      * 未开始录制时是零成本早退, 因此可以在任意行为点安全插桩。
      */
