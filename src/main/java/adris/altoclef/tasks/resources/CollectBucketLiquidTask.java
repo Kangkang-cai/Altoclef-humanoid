@@ -247,9 +247,26 @@ public class CollectBucketLiquidTask extends ResourceTask {
             Debug.logMessage("[Diag-water] totalWater=%d, source=%d, flowing=%d, canReach=%s reject=%s",
                     totalWaterKnown, sourceWaterKnown, flowingWaterKnown,
                     totalWaterKnown > 0 ? "checking..." : "NONE", drainRejectSummary());
-            // (2026-09-17) 逐格报告: 距玩家最近 3 个已知液体坐标 + 各自的拒绝原因 ——
+            // (2026-09-17 v2) 逐格报告: 距玩家最近 3 个已知液体坐标 + 各自的拒绝原因 ——
             // 直接回答"眼前这格水/岩浆为什么不算数"(黑名单/不可见/不可达/非源)。
             Debug.logMessage("[Diag-water] nearest: %s", nearestWaterReport(mod));
+            // (2026-09-17 回地表闸门明细, 用户"找水不是应该触发回地表吗")
+            // 现场 20260917-231306: 玩家 y=-45 在洞里, 却落到 "Searching for liquid
+            // by wandering around aimlessly" + [Diag-flow] deep=false → 回地表分支
+            // (isBelowSurface) 判了 false, 而 [Surface] 翻转日志一条都没有 (结论从未变过)。
+            // 这里把判据的中间量全部打出来, 定位是"埋深算错"还是"迟滞锁死":
+            //   below/raw = 迟滞结论 / 原始结论(两者不同 = 卡在 5s 驻留窗口或静态锁死)
+            //   buried    = 5 点采样的中位数 = getTopY(MOTION_BLOCKING_NO_LEAVES) - (y+1)
+            //   oh[]      = 5 点原始值 (下标 0=自身列, 其余 东南西北)
+            //   topY      = 自身列高度图读数 (返回世界底部 = 该 chunk 高度图缺失, 即根因)
+            var pb = mod.getPlayer().getBlockPos();
+            Debug.logMessage("[Diag-water] surfaceGate: below=%s raw=%s buried=%d oh=%s topY=%d y=%d dim=%s",
+                    SurfaceHelper.isBelowSurfaceDebounced(mod), SurfaceHelper.isBelowSurface(mod),
+                    SurfaceHelper.buriedDepth(mod),
+                    java.util.Arrays.toString(SurfaceHelper.overheadSamples(mod)),
+                    mod.getWorld().getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                            pb.getX(), pb.getZ()),
+                    pb.getY(), WorldHelper.getCurrentDimension());
         }
 
         // 2026-08-23: 如果没找到水源，尝试从流动水追踪到源头
