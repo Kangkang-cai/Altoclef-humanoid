@@ -424,13 +424,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 与水的处置对照 (两者物理性质相反, 不能共用参数):
     //   水  : 能走过去 → 累计 2 次才撤, 撤完回原地继续挖, 撤 10 格。
     //   岩浆: 走过去=死 → 第【一】次遇到就立刻弃道(清队列+后撤+换方向), 不再回原道。
-    // 后撤距离按维度分: 下界岩浆流动范围 7 格、流速为主世界 3 倍 → 12 格; 主世界
-    // 流动范围 3 格 → 6 格 (撤更远只是白跑)。
-    // 反透视合规 (沿用 09-10 "直直挖" 结论): 只认【已经挖开、肉眼可见】的岩浆 ——
-    // 判据仅取队列队首那一格, 绝不扫半径、绝不查未挖石头背后的液体。
-    private static final int LAVA_RETREAT_NETHER = 12;
-    private static final int LAVA_RETREAT_OVERWORLD = 6;
-    // 下界撤 12 格要实跑一段, 水的 20s 不够。
+    // 后撤距离 (2026-09-17 重定): 原按"躲开岩浆流动范围"设计 (主世界 6 / 下界 12),
+    // 那是"只判队首"时代的数 —— 撤 6 格就看不见那一格了。09-17 判据换成 12 格视觉
+    // 感知之后, 这个数直接变成 churn 源头: 撤到 6 格外即判"撤离完成", 而 6 < 12 仍
+    // 看得见同一处岩浆 → 立刻再弃道 → 再判"完成"(0 位移, baritone GoalRunAway 说
+    // 已经达标) → 100ms 一轮, 计数一路涨到 22/4 → GiveUp → 父层重建 → 再来一轮。
+    // 20260917-191217 实锤 (19:15:43~52 十秒内 20+ 轮), 用户观感"任务快速跳跃"。
+    // 现在二者解耦但必须【匹配】: 撤离距离 > LAVA_SIGHT_RADIUS_XZ 才能保证"撤完就看
+    // 不见它"。取 16/20 (>12, 留 4~8 格余量吃岩浆流体继续扩散)。
+    private static final int LAVA_RETREAT_NETHER = 20;
+    private static final int LAVA_RETREAT_OVERWORLD = 16;
+    // 撤 16~20 格要实跑一段, 水的 20s 不够。
     private static final double LAVA_DETOUR_TIMEOUT = 30.0;
     // 一轮内弃道次数上限 (水平方向总共只有 TUNNEL_DIRS.length=4 个): 4 个方向全撞上
     // 岩浆 = 这片就是岩浆区, 再换向只会原地打转 → 结束本轮交回父任务重新选址。
@@ -484,6 +488,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 贴身兜底节流: 11 次 getBlockState 极便宜; 口径同 SPAWNER_SCAN_INTERVAL_MS。
     private static final long NEAR_LAVA_SCAN_INTERVAL_MS = 100;
     private long _lastNearLavaScanMs = 0;
+    // (2026-09-17 churn 修复) 撤离刚结束的宽限期: baritone 把 bot 放到"距该 hazard
+    // ≥ LAVA_RETREAT_* 格"的位置后会立刻判撤离完成, 而这条落点可能只是贴着视觉半径
+    // 边缘 (被墙挤住时更差) → 同一秒又"看见"同一处岩浆。给 2s 让撤退动作真正做完再
+    // 重新评估。只压【视觉】路径: 贴身 11 格兜底 (findAdjacentLava) 不受宽限期影响 —
+    // 危险已经贴到身上时, 不能因为"刚撤过"就不救。
+    private static final long LAVA_SIGHT_GRACE_MS = 2000;
+    private long _lavaSightGraceUntilMs = 0;
+    // (2026-09-17 churn 修复) 跨实例播种: GiveUp 后父层重建的是【新实例】, 本地 hazards
+    // 归零 → 换向时没有背离依据, 又冲同一处岩浆。onStart 时从仓内"见过即记忆"表
+    // (VisibilityHelper.getRememberedValuable, 只收真感知过的岩浆, 按维度分表, 非透视)
+    // 把附近的点播进 hazards, 让重建后的 retreatAndRedig 背离判据能生效。
+    private static final double LAVA_MEMORY_SEED_RANGE = 16.0;
+    private static final int LAVA_MEMORY_SEED_LIMIT = 8;
 
     // Cave exploration watchdog.
     private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
@@ -581,6 +598,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _lavaEncounters = 0;
         _lavaAbandonCount = 0;
         _lavaGiveUp = false;
+        _lavaSightGraceUntilMs = 0;
+        // (2026-09-17 churn 修复) 实例可能是 GiveUp 后父层重建的【新实例】, 本地
+        // hazards 已归零 —— 从仓内"见过即记忆"表把附近的岩浆点补回来, 否则换向判据
+        // 无依据, 会再次朝着同一处岩浆挖 (20260917-191217 实锤: GiveUp 后 300ms 又
+        // "累计 1" 重来一轮)。见字段区 LAVA_MEMORY_SEED_* 注释。
+        seedLavaHazardsFromMemory(mod);
         // (2026-09-05 下界维度感知) 缓存维度, 决定隧道下限与上行模式。
         _nether = WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER;
         // (2026-09-05 下界基岩层逃生) 任务开始时已被压到目标高度之下很深 (如上一轮
@@ -912,6 +935,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 岩浆弃道) 岩浆改道优先于水改道: 水只是麻烦, 岩浆是致命的。
         // 同样放在洞穴探索之前。
         if (_inLavaDetour) {
+            // (2026-09-17 churn 修复) 本轮已判"这片挖不动"(GiveUp): 立刻收工。否则实例被
+            // 多 tick 几次时, 这里会继续"撤完→计数+1→再 GiveUp", 计数一路涨到 23/4
+            // (20260917-191217 实锤), 任务链每 100ms 抖一次 —— 用户观感"快速跳跃"。
+            if (_lavaGiveUp) return null;
             if (_subTask != null && !_subTask.isFinished(mod) && !_lavaDetourTimer.elapsed()) {
                 setDebugState("Lava retreat: backing away from lava in dig path");
                 return _subTask;
@@ -924,6 +951,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _inLavaDetour = false;
             _subTask = null;
             _lavaAbandonCount++;
+            // (2026-09-17 churn 修复) 撤离收尾 (完成或超时) 后给视觉判据 2s 宽限, 见字段区
+            // LAVA_SIGHT_GRACE_MS 注释。超时收尾尤其需要 —— 那是"根本没撤到位"的情况。
+            _lavaSightGraceUntilMs = System.currentTimeMillis() + LAVA_SIGHT_GRACE_MS;
             String m = "[MineDown-LavaRetreat] 后撤" + (timedOut ? "超时" : "完成") + " at "
                     + mod.getPlayer().getBlockPos().toShortString()
                     + " (本轮弃道 " + _lavaAbandonCount + "/" + LAVA_ABANDON_LIMIT + ")"
@@ -950,7 +980,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 弃道, 不再"装作看不见"。放在 _inLavaDetour 分支【之后】: 撤离中由上面接管,
         // 不重复触发; 又放在水改道与所有挖掘推进【之前】: 危险源优先, 绝不让 bot 先往
         // 前迈一步才发现脚下已经变岩浆。判据 / 合规边界 / 三档 cause 见字段区注释。
-        if (!_inLavaDetour && !_ascendMode && !_baritoneAscent) {
+        if (!_inLavaDetour && !_lavaGiveUp && !_ascendMode && !_baritoneAscent) {
             // 主判据: 仓内人类式视觉 (表面暴露 + LOS 无遮挡), 危险能在 3~12 格外被抓出来。
             BlockPos seenLava = findSeenLava(mod);
             // 兜底: 贴身 11 格 (LOS 射线在脚下/紧贴方块处几何不稳; 且贴身 = 危险已上身)。
@@ -1506,6 +1536,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private BlockPos findSeenLava(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return null;
         long now = System.currentTimeMillis();
+        // (2026-09-17 churn 修复) 刚撤完的宽限期, 见字段区 LAVA_SIGHT_GRACE_MS 注释。
+        if (now < _lavaSightGraceUntilMs) return null;
         if (now - _lastLavaSightScanMs < LAVA_SIGHT_SCAN_INTERVAL_MS) return null;
         _lastLavaSightScanMs = now;
         BlockPos feet = mod.getPlayer().getBlockPos();
@@ -1556,6 +1588,34 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (2026-09-17 churn 修复) 从"见过即记忆"表把附近的岩浆播进本轮 hazards。
+     *
+     * 只读仓内既有的感知记忆 {@link VisibilityHelper#getRememberedValuable} (按维度分表,
+     * 只收【真感知过】的岩浆, 不是扫描/透视), 半径 {@value #LAVA_MEMORY_SEED_RANGE} 外
+     * 的点自然被距离过滤挡掉, 最多播 {@value #LAVA_MEMORY_SEED_LIMIT} 处, 防止历史记忆
+     * 把 RunAwayFromPositionTask 的"远离所有目标"变成无解。
+     *
+     * 用途单一: 让 GiveUp 后重建的新实例在 retreatAndRedig 换向时能背离这些点, 而不是
+     * 一头再撞回同一处岩浆。
+     */
+    private void seedLavaHazardsFromMemory(AltoClef mod) {
+        if (mod.getPlayer() == null) return;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        int added = 0;
+        for (BlockPos p : VisibilityHelper.getRememberedValuable(mod, Blocks.LAVA)) {
+            if (added >= LAVA_MEMORY_SEED_LIMIT) break;
+            if (!feet.isWithinDistance(p, LAVA_MEMORY_SEED_RANGE)) continue;
+            if (_lavaHazards.add(p.toImmutable())) added++;
+        }
+        if (added > 0) {
+            String m = "[MineDown-LavaSeed] 从记忆播种 " + added + " 处岩浆 hazard (range "
+                    + (int) LAVA_MEMORY_SEED_RANGE + ") at " + feet.toShortString()
+                    + " -> 后续换向会背离这些点";
+            Debug.logToFile("altoclef_diag.log", m);
+        }
+    }
+
+    /**
      * (2026-09-14 岩浆弃道) 立即放弃当前这条通道: 清空挖掘队列、切到后撤子任务,
      * 等后撤结束后由 onTick 的 _inLavaDetour 分支换向重挖。
      *
@@ -1574,6 +1634,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      *   near-player    = 与玩家紧邻的已挖开空间出现岩浆 (侧壁/脚下渗入, 09-17 新增)。
      */
     private void abandonTunnelForLava(AltoClef mod, BlockPos lava, String cause) {
+        // (2026-09-17 churn 修复) 本轮已判"这片挖不动"时不再累积/派发: 防 GiveUp 之后
+        // 实例被多 tick 几次又转起来 (20260917-191217 实锤: GiveUp 后计数仍从 5 涨到 23)。
+        if (_lavaGiveUp) return;
         _lavaEncounters++;
         BlockPos lavaFixed = lava.toImmutable();
         _lavaHazards.add(lavaFixed);
