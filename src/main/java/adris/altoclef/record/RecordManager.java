@@ -119,7 +119,16 @@ public final class RecordManager {
                 onSessionEnd();
                 return;
             }
-            if (!AltoClef.inGame()) return;
+            if (!AltoClef.inGame()) {
+                // (2026-09-17 会话边界) 离开世界 / 死亡菜单 / 断线: 收尾本次会话。
+                // 不收的话 ①退出游戏时 gzip 尾部永远缺失 (20260917-100000-r2 就是
+                // 4 个只有 10 字节 gzip 头的残片); ②再进世界 (或换世界) 会往同一个
+                // 会话里继续写, 而新世界的 tick 从 0 重算、种子/维度都变了, seq↔t
+                // 的对应关系直接作废。再进世界时 startSession 会开一个新目录 (-rN)。
+                onSessionEnd();
+                return;
+            }
+            ensureShutdownHook();
             if (_frames == null && !startSession(mod)) return;
             if (_frames.getError() != null) return; // 写盘线程已挂, 别再堆队列
 
@@ -245,14 +254,38 @@ public final class RecordManager {
         return sb.toString();
     }
 
+    // (2026-09-17 退出兜底) JVM 关闭钩子。没有它的话, 直接退出游戏 (而不是先
+    // @record off / 离开世界) 会让四个 .gz 停在"只有 gzip 头"的状态 —— 没有尾部,
+    // 多数读取器直接报错, 整段数据白录 (20260917-100000-r2 实测 4 个 10 字节文件)。
+    private static boolean _shutdownHookInstalled = false;
+    private static volatile boolean _shuttingDown = false;
+
+    private static void ensureShutdownHook() {
+        if (_shutdownHookInstalled) return;
+        _shutdownHookInstalled = true;
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                _shuttingDown = true;
+                try {
+                    onSessionEnd();
+                } catch (Throwable ignored) {
+                }
+            }, "altoclef-record-close"));
+        } catch (Throwable ignored) {
+            // 装不上钩子不影响正常收尾路径 (@record off / 离开世界 / 停 bot 都还会收)
+        }
+    }
+
     /** 会话收尾: 排空队列、补齐 gzip 尾部、写 meta 的结束统计。幂等。 */
     public static void onSessionEnd() {
         if (_frames == null) return;
         try {
-            _frames.closeAndFlush();
-            if (_perception != null) _perception.closeAndFlush();
-            if (_memory != null) _memory.closeAndFlush();
-            if (_events != null) _events.closeAndFlush();
+            // 关闭钩子里给短超时: 游戏退出不该被写盘卡住, 但 gzip 尾部必须写完。
+            long wait = _shuttingDown ? 1200 : 3000;
+            _frames.closeAndFlush(wait);
+            if (_perception != null) _perception.closeAndFlush(wait);
+            if (_memory != null) _memory.closeAndFlush(wait);
+            if (_events != null) _events.closeAndFlush(wait);
             writeMeta(true);
             StringBuilder m = new StringBuilder("[Record] 会话结束 session=")
                     .append(_sessionDir)
@@ -273,6 +306,7 @@ public final class RecordManager {
             _events = null;
             _sessionDir = null;
             MemoryRecorder.reset();
+            PerceptionSampler.reset();
             _tickEventKeys.clear();
         }
     }
@@ -305,6 +339,7 @@ public final class RecordManager {
         // 跨会话状态复位: 记忆通道必须在新会话首帧就写一份完整快照 (哪怕内容为空),
         // 派生事件也不该把"上一局的最后状态"当成基线。
         MemoryRecorder.reset();
+        PerceptionSampler.reset();
         _tickEventKeys.clear();
         _lastHp = -1;
         _lastDim = null;
@@ -357,20 +392,31 @@ public final class RecordManager {
             sb.append("\"note\": \"录制端只导原始任务栈, 不做层级判定; L1/L2/L3 词表由离线收割得到, ");
             sb.append("手写词表会漏掉新增任务类\"}");
             sb.append(",\n  \"perception\": {\"losCacheTtlMs\": 400, ");
-            sb.append("\"note\": \"可见性判定复用 VisibilityHelper._losCache (400ms TTL), 因此 perception ");
-            sb.append("通道的可见性最多滞后 400ms —— 这是刻意的'感知延迟', 不是瞬时真值\"}");
+            sb.append("\"note\": \"可见性判定复用 VisibilityHelper.perceiveSource (与 bot 决策同一套规则) + ");
+            sb.append("_losCache 400ms TTL, 因此感知最多滞后 400ms —— 这是刻意的'感知延迟', 不是瞬时真值\", ");
+            sb.append("\"scan\": \"近场半径内 step=1 逐格扫 + 远处按 farStep 稀疏扫, 与 BlockTracker 双区扫描同构; ");
+            sb.append("按 X 列分期, 每 tick 只扫 1 列 (slices = 2*nearR+1)\", ");
+            sb.append("\"sightMemory\": \"看得见即写入录制器自持的视觉记忆 (pos→最后可见 tick); ");
+            sb.append("本圈内确认过 → 用其来源分级, 仅窗口内未再确认 → remembered\"}");
             sb.append(",\n  \"selfPerception\": {\"note\": \"感知来源分级: observed=真视线/真近场, ");
             sb.append("inferred=结构推断/介质豁免/经验常识, remembered=记忆中的旧位置\"}");
             sb.append(",\n  \"perceiveSourceMap\": {\"observed\": [\"los\", \"fluid_los\", \"fluid_surface\", ");
             sb.append("\"portal\", \"bed\", \"sight\", \"sound\"], \"inferred\": [\"structure_inference\", ");
             sb.append("\"canopy_inference\", \"stone_medium\", \"experience\", \"crafting_table_near\"], ");
-            sb.append("\"remembered\": [\"实体 20s 感知记忆窗口内的 remembered; 方块侧的见过即记忆在 memory 通道\"]}");
+            sb.append("\"remembered\": [\"方块: 本圈未再确认但仍在 sightMemorySeconds 窗口内; ");
+            sb.append("实体: 20s 感知记忆窗口内\"]}");
             sb.append(",\n  \"perceptionCaps\": {\"maxBlocks\": ");
             sb.append(s == null ? "null" : String.valueOf(s.getRecordPerceptionMaxBlocks()));
             sb.append(", \"maxEntities\": ");
             sb.append(s == null ? "null" : String.valueOf(s.getRecordPerceptionMaxEntities()));
             sb.append(", \"range\": ");
             sb.append(s == null ? "null" : Json.f(s.getRecordPerceptionRange()));
+            sb.append(", \"nearScanRadius\": ");
+            sb.append(s == null ? "null" : String.valueOf(s.getRecordNearScanRadius()));
+            sb.append(", \"farScanStep\": ");
+            sb.append(s == null ? "null" : String.valueOf(s.getRecordFarScanStep()));
+            sb.append(", \"sightMemorySeconds\": ");
+            sb.append(s == null ? "null" : Json.f(s.getRecordSightMemorySeconds()));
             sb.append("}");
             sb.append(",\n  \"settings\": {\"cheatScan\": ");
             sb.append(s == null ? "null" : String.valueOf(s.isCheatScan()));

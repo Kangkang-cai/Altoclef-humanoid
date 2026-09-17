@@ -483,6 +483,26 @@ public final class WorldMemory {
         }
     }
 
+    // (2026-09-17 数据集录制) 动物记忆按 Class 存, 但 Class.getSimpleName() 在发布
+    // jar 里是 intermediary 名 (动物类是 Minecraft 类 → 会变成 "class_1479")。
+    // 用 EntityType 反查注册名 ("minecraft:sheep")。表只覆盖 ANIMAL_TYPES 那 4 种,
+    // 与该文件既有的"各口径私有集合"惯例一致; 查不到时退回类名 (不静默丢数据)。
+    private static final Map<Class<?>, net.minecraft.entity.EntityType<?>> ANIMAL_ENTITY_TYPES = Map.of(
+            SheepEntity.class, net.minecraft.entity.EntityType.SHEEP,
+            CowEntity.class, net.minecraft.entity.EntityType.COW,
+            PigEntity.class, net.minecraft.entity.EntityType.PIG,
+            ChickenEntity.class, net.minecraft.entity.EntityType.CHICKEN);
+
+    private static String animalKey(Class<?> type) {
+        net.minecraft.entity.EntityType<?> et = ANIMAL_ENTITY_TYPES.get(type);
+        if (et == null) return "unknown:" + type.getSimpleName();
+        try {
+            return net.minecraft.util.registry.Registry.ENTITY_TYPE.getId(et).toString();
+        } catch (Throwable t) {
+            return "unknown:" + type.getSimpleName();
+        }
+    }
+
     /**
      * (2026-09-17 数据集录制) 当前维度全部记忆的只读快照 (自描述键 → 坐标列表)。
      * 键形如 {@code ore:minecraft:iron_ore} / {@code animal:SheepEntity} /
@@ -502,7 +522,7 @@ public final class WorldMemory {
             Map<Class<?>, Set<BlockPos>> animals = _animalMemory.get(dim);
             if (animals != null) {
                 for (Map.Entry<Class<?>, Set<BlockPos>> e : animals.entrySet()) {
-                    out.put("animal:" + e.getKey().getSimpleName(), new ArrayList<>(e.getValue()));
+                    out.put("animal:" + animalKey(e.getKey()), new ArrayList<>(e.getValue()));
                 }
             }
             Set<BlockPos> portals = _portalMemory.get(dim);

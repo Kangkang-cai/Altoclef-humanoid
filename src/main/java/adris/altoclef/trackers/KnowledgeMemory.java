@@ -220,6 +220,10 @@ public final class KnowledgeMemory {
     private static void ensureCentersLoaded() {
         if (_centersLoaded) return;
         _centersLoaded = true;
+        // (2026-09-17 数据集录制) 只有真的读进来内容才推进版本号 —— 旧实现无条件
+        // +1, 导致录制器的记忆通道写出一条"rev 变了但内容还是空"的假快照
+        // (20260917-100000 场次第 2 行实测: rev.knowledge=1 而 knowledge={})。
+        boolean loaded = false;
         try {
             java.nio.file.Path f = knowledgeFile();
             if (!java.nio.file.Files.exists(f)) return;
@@ -234,19 +238,19 @@ public final class KnowledgeMemory {
                     Map<StructureType, LinkedHashSet<BlockPos>> byType =
                             _centersByKey.computeIfAbsent(parts[0], k -> new EnumMap<>(StructureType.class));
                     LinkedHashSet<BlockPos> set = byType.computeIfAbsent(type, t -> new LinkedHashSet<>());
-                    if (set.size() < MAX_CENTERS_PER_TYPE) set.add(p);
+                    if (set.size() < MAX_CENTERS_PER_TYPE && set.add(p)) loaded = true;
                 } catch (NumberFormatException ignored) {
                 }
             }
-            Debug.logMessage("[Knowledge] loaded "
-                    + _centersByKey.values().stream().mapToInt(m -> m.values().stream().mapToInt(Set::size).sum()).sum()
-                    + " remembered structure centers from " + KNOWLEDGE_FILE);
+            if (loaded) {
+                Debug.logMessage("[Knowledge] loaded "
+                        + _centersByKey.values().stream().mapToInt(m -> m.values().stream().mapToInt(Set::size).sum()).sum()
+                        + " remembered structure centers from " + KNOWLEDGE_FILE);
+            }
         } catch (Exception e) {
             Debug.logMessage("[Knowledge] failed to load " + KNOWLEDGE_FILE + ": " + e.getMessage());
         } finally {
-            // (2026-09-17 数据集录制) 跨会话回填改变了记忆内容, 必须推进版本号,
-            // 否则录制器会以为"记忆没变"而不写快照。
-            _revision++;
+            if (loaded) _revision++;
         }
     }
 

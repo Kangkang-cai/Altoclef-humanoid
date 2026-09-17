@@ -91,14 +91,22 @@ final class JsonlSink {
 
     /** 关闭并入队剩余数据 (最多等 3s, 绝不挂死游戏退出)。幂等。 */
     void closeAndFlush() {
+        closeAndFlush(3000);
+    }
+
+    /**
+     * (2026-09-17) 带超时的收尾。JVM 关闭钩子走短超时 (游戏退出不该被写盘卡住,
+     * 但 gzip 尾部必须写完 —— 没尾部的文件多数读取器直接报错)。
+     */
+    void closeAndFlush(long maxWaitMs) {
         if (_closing) return;
         _closing = true;
         try {
-            long deadline = System.currentTimeMillis() + 500;
+            long deadline = System.currentTimeMillis() + Math.min(500, maxWaitMs);
             while (!_queue.offer(POISON, 50, TimeUnit.MILLISECONDS)) {
                 if (System.currentTimeMillis() > deadline) break;
             }
-            _thread.join(3000);
+            _thread.join(Math.max(100, maxWaitMs));
         } catch (Throwable ignored) {
         }
     }

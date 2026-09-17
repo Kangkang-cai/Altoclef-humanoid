@@ -5,6 +5,28 @@ import baritone.api.pathing.calc.IPath;
 import baritone.api.utils.input.Input;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.screen.AnvilScreenHandler;
+import net.minecraft.screen.BeaconScreenHandler;
+import net.minecraft.screen.BlastFurnaceScreenHandler;
+import net.minecraft.screen.BrewingStandScreenHandler;
+import net.minecraft.screen.CartographyTableScreenHandler;
+import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.EnchantmentScreenHandler;
+import net.minecraft.screen.FurnaceScreenHandler;
+import net.minecraft.screen.Generic3x3ContainerScreenHandler;
+import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.GrindstoneScreenHandler;
+import net.minecraft.screen.HopperScreenHandler;
+import net.minecraft.screen.HorseScreenHandler;
+import net.minecraft.screen.LecternScreenHandler;
+import net.minecraft.screen.LoomScreenHandler;
+import net.minecraft.screen.MerchantScreenHandler;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.ShulkerBoxScreenHandler;
+import net.minecraft.screen.SmithingScreenHandler;
+import net.minecraft.screen.SmokerScreenHandler;
+import net.minecraft.screen.StonecutterScreenHandler;
 
 import java.util.Optional;
 
@@ -126,7 +148,37 @@ final class ActionSampler {
     private static String screenName(ClientPlayerEntity p) {
         if (p == null || p.currentScreenHandler == null) return null;
         try {
-            return p.currentScreenHandler.getClass().getSimpleName();
+            // (2026-09-17 混淆名修复) 绝不能用 getClass().getSimpleName() ——
+            // 发布 jar 里 Minecraft 类被 remap 成 intermediary, 拿到的是
+            // "class_1723"(熔炉界面)/"class_3858"(玩家背包) 这种不可读的名字
+            // (20260917-100000 场次实测, act.screen 全段都是 class_xxxx)。
+            // instanceof 判定写在源码里是 named, 编译期 remap → 运行期一致, 可靠。
+            ScreenHandler h = p.currentScreenHandler;
+            if (h instanceof PlayerScreenHandler) return "player";
+            if (h instanceof CraftingScreenHandler) return "crafting_table";
+            if (h instanceof FurnaceScreenHandler) return "furnace";
+            if (h instanceof BlastFurnaceScreenHandler) return "blast_furnace";
+            if (h instanceof SmokerScreenHandler) return "smoker";
+            if (h instanceof Generic3x3ContainerScreenHandler) return "dispenser_like";
+            if (h instanceof ShulkerBoxScreenHandler) return "shulker_box";
+            if (h instanceof HopperScreenHandler) return "hopper";
+            if (h instanceof GenericContainerScreenHandler container) {
+                // 箱子/木桶: 行数就是容量 (1..6), 训练时能区分 27 格箱与 54 格大箱
+                return "container_" + container.getRows() + "x9";
+            }
+            if (h instanceof AnvilScreenHandler) return "anvil";
+            if (h instanceof EnchantmentScreenHandler) return "enchanting_table";
+            if (h instanceof BrewingStandScreenHandler) return "brewing_stand";
+            if (h instanceof BeaconScreenHandler) return "beacon";
+            if (h instanceof GrindstoneScreenHandler) return "grindstone";
+            if (h instanceof LoomScreenHandler) return "loom";
+            if (h instanceof StonecutterScreenHandler) return "stonecutter";
+            if (h instanceof CartographyTableScreenHandler) return "cartography_table";
+            if (h instanceof SmithingScreenHandler) return "smithing_table";
+            if (h instanceof LecternScreenHandler) return "lectern";
+            if (h instanceof MerchantScreenHandler) return "merchant";
+            if (h instanceof HorseScreenHandler) return "horse";
+            return "other";
         } catch (Throwable t) {
             return null;
         }

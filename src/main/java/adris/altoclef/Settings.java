@@ -678,7 +678,7 @@ public class Settings implements IFailableConfigFile {
      * 默认关闭 —— 开启后每局会产生可观的数据量 (gzip JSONL), 只在需要采集语料时打开。
      * 关闭时录制器在 tick 里只做一次布尔判断, 无其它开销。
      */
-    private boolean recordDatasetEnabled = false;
+    private boolean recordDatasetEnabled = true;
 
     /**
      * (2026-09-17) 每帧导出的可见方块上限 (按距离由近到远截断)。
@@ -697,6 +697,26 @@ public class Settings implements IFailableConfigFile {
      * 与拟人感知的视线判定叠加 (两者取交集), 纯粹是体积控制手段。
      */
     private double recordPerceptionRange = 48;
+
+    /**
+     * (2026-09-17) 视觉记忆的近场扫描半径 (格)。录制器按"近场全量扫 + 远场稀疏扫"
+     * 重建 bot 的可见世界: 近场半径内 step=1 逐格看, 超出部分按
+     * {@link #recordFarScanStep} 稀疏看。体积与开销正比于半径³, 别开太大。
+     */
+    private int recordNearScanRadius = 12;
+
+    /**
+     * (2026-09-17) 远场稀疏扫描的步长 (格)。远场只看"隔几步一格", 用于开阔地形
+     * 与远处结构 (近处已被近场覆盖, 不重复扫)。
+     */
+    private int recordFarScanStep = 4;
+
+    /**
+     * (2026-09-17) 视觉记忆窗口 (秒)。某个方块最后一次被判定"看得见"之后, 在窗口
+     * 内即使当前不可感知也仍按 {@code remembered} 导出 —— 对应人类的"刚看过的
+     * 东西还记得", 与 EntityTracker 的 20s 实体感知记忆同口径。
+     */
+    private double recordSightMemorySeconds = 20;
 
     /**
      * (2026-09-17) 是否每帧导出背包全量物品计数。
@@ -756,6 +776,18 @@ public class Settings implements IFailableConfigFile {
 
     public double getRecordPerceptionRange() {
         return recordPerceptionRange;
+    }
+
+    public int getRecordNearScanRadius() {
+        return recordNearScanRadius;
+    }
+
+    public int getRecordFarScanStep() {
+        return recordFarScanStep;
+    }
+
+    public double getRecordSightMemorySeconds() {
+        return recordSightMemorySeconds;
     }
 
     public boolean shouldRecordInventoryPerTick() {
