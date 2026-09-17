@@ -915,12 +915,15 @@ public class TaskCatalogue {
         }
 
         // (2026-09-16 守炉死循环修复) 每资源一个"活实例"槽: 缓存最近一次
-        // getResource(count) 产出的实例; 只要它仍活着 (未完成 且 未 stopped) 就复用
+        // getResource(count) 产出的实例; 只要它仍活着 (未完成 且 未"停泊超宽限期") 就复用
         // 同一对象。根因 = 原实现每次调用都 _getResource.apply(count) 新建实例,
         // 多个父任务 (并行链上的 CataloguedResourceTask / CollectRecipeCataloguedResourcesTask
         // 等) 各自持有不同实例, 被轮询 isFinished 的那一个可能是从未被 tick 的"冷实例
         // "(熔炉缓存 known=false) → drained 永假 → 守炉死循环 (144318 / 153652 实锤)。
         // 合并后"被 tick 更新缓存的"与"被 isFinished 轮询的"是同一实例, 冷实例根除。
+        // ⚠ (2026-09-17 根治) 上一版的"未 stopped"判据本身是第二条产线: stopped 不是终态,
+        // 4 秒的瞬时让位被判成死亡 → 又连建两个实例 (A 复活真干活 / B 冷等), 症状照旧复发。
+        // 现判据见下方 PARKED_REBUILD_GRACE_MS 与 getResource 内注释。
         // 注意 count 不同时也复用 (合并正是目的): 缓存实例按 count=4 建立后, 另一处
         // 请求 count=25 必须返回仍活跃的同一实例; 调用方自己的 isFinished / 缺口检查
         // 会驱动后续; 只有当缓存实例 isFinished 后, 下一次调用才按新 count 重建。
@@ -929,6 +932,14 @@ public class TaskCatalogue {
         private ResourceTask _liveInstance = null;
         // (2026-09-16 验证日志) [CAT-CACHE] rebuild 打点节流时间戳。
         private long _lastCacheLogMs = 0;
+        // (2026-09-17 根治验证日志) [CAT-CACHE] reuse parked 打点节流时间戳。
+        private long _lastReuseLogMs = 0;
+
+        // (2026-09-17 守炉死循环根治) "停泊宽限期" —— 缓存实例处于 stopped 状态但停泊
+        // 时长未达此值时不视为死亡, 继续复用。取值依据: 20260917-155653 实锤的误判窗口为
+        // 4 秒 (rebuild iron_ingot (prev stopped) @16:09:21.769 与 @16:09:25.619), 取 2 倍余量;
+        // 超过宽限期仍未被重新 tick 则按"被彻底遗弃"处理, 放行重建 (槽不会被永久钉死)。
+        private static final long PARKED_REBUILD_GRACE_MS = 8000;
 
         public CataloguedResource mineIfPresent() {
             _mineIfPresent = true;
@@ -958,9 +969,34 @@ public class TaskCatalogue {
             // 无 mod 形参)。mod 为 null (极早期、游戏未加载) 时退化为"每次新建"的旧行为,
             // 不影响正确性。stopped() 是 Task 已有 public 方法 (只读 _stopped 字段, 不改状态机)。
             AltoClef mod = AltoClef.getInstance();
+            // (2026-09-17 治本) 原判据里的 `!_liveInstance.stopped()` 把"暂时让位"当成了
+            // "已死亡": stopped() 不是终态 —— stop() 会置 _first=true, 同一实例被任何父任务
+            // 重新 tick 时会复位 _stopped 并重跑 onStart (Task.stop 注释原文 "Next time it's
+            // run it will run onStart")。20260917-155653 实锤: 缓存实例仅停泊 4 秒就被判死,
+            // 于是 4 秒内连建两个 iron_ingot 实例 —— #340443965 随后被原父任务复活、把 9 块
+            // 生铁真烧完 (drained=true 正常完成), 而新建的 #1431795048 从没被 tick、从未开炉
+            // (_cacheKnown=false → drained 恒假), 却被上层链轮询 isFinished → 烧完铁后 9 秒
+            // 空转环 50 轮。改为"停泊超过 PARKED_REBUILD_GRACE_MS 仍未被重新 tick"才算死。
+            // 复用面因此变大 = 正是本槽存在的目的 (被 tick 的与被轮询的是同一实例)。
+            long parkedMs = (_liveInstance == null) ? -1 : _liveInstance.parkedMillis();
             if (_liveInstance != null && mod != null
                     && !Task.isInTickStack(_liveInstance)
-                    && !_liveInstance.isFinished(mod) && !_liveInstance.stopped()) {
+                    && !_liveInstance.isFinished(mod)
+                    && parkedMs < PARKED_REBUILD_GRACE_MS) {
+                // (2026-09-17 验证日志) 复用的实例正处于停泊态 = 宽限期拦下的一次"误判死亡"。
+                // 验证判据 —— 生效: 该行出现在 [CAT-CACHE] rebuild (prev stopped) 原会出现的
+                // 那些时刻, 且其后 [SmeltGate] 不再出现第二个 wrapper#; 失败: 冷实例依旧出现
+                // 且无此日志 = 另有产线, 需回查 onStart 二次进入路径。只落盘不进聊天, 2s 节流。
+                if (parkedMs >= 0) {
+                    long reuseMs = System.currentTimeMillis();
+                    if (reuseMs - _lastReuseLogMs > 2000) {
+                        _lastReuseLogMs = reuseMs;
+                        Debug.logToFile("altoclef_diag.log", String.format(
+                                "[CAT-CACHE] reuse parked %s (%dms < %dms grace, not dead)",
+                                (_targets.length > 0 ? _targets[0].toString() : "?"), parkedMs,
+                                PARKED_REBUILD_GRACE_MS));
+                    }
+                }
                 return _liveInstance;
             }
             // (2026-09-16 防环守卫) isInTickStack = 缓存实例正在被 tick (是当前
@@ -985,11 +1021,16 @@ public class TaskCatalogue {
             // 验证判据 —— 生效: 同一资源 (按首物品名) 的 [CAT-CACHE] rebuild 低频
             // (仅在任务真完成后出现); 失败: 同一资源每秒多条 rebuild = 缓存失效,
             // 冷实例死锁风险回归, 需回查校验顺序。
+            // (2026-09-17 根治) reason 由 "stopped" 改为携带实际停泊时长 —— 下一次现场
+            // 只要看到 `parked <8000ms` 就说明宽限期被绕过, 判据还需收紧; 正常只应出现
+            // `finished` 或 `parked >= 8000ms` (被彻底遗弃的实例被回收)。
             long nowMs = System.currentTimeMillis();
             if (_liveInstance != null && nowMs - _lastCacheLogMs > 2000) {
                 _lastCacheLogMs = nowMs;
                 String reason = (mod == null) ? "no-mod"
-                        : (_liveInstance.stopped() ? "stopped" : "finished");
+                        : (_liveInstance.stopped()
+                        ? ("parked " + _liveInstance.parkedMillis() + "ms")
+                        : (_liveInstance.isFinished(mod) ? "finished" : "cycle-guard"));
                 Debug.logToFile("altoclef_diag.log", String.format(
                         "[CAT-CACHE] rebuild %s (prev %s)",
                         (_targets.length > 0 ? _targets[0].toString() : "?"), reason));

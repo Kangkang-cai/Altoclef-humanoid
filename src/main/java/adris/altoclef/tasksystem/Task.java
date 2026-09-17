@@ -20,6 +20,14 @@ public abstract class Task {
 
     private boolean _active = false;
 
+    // (2026-09-17 守炉死循环根治) 进入"停泊"(_stopped=true) 的墙钟时刻。
+    // 动机: _stopped 只是"此刻没在跑", 不是终态 —— stop() 会置 _first=true,
+    // 同一实例被任何父任务重新 tick 时会复位 _stopped=false 并重跑 onStart
+    // (见 stop() 注释 "Next time it's run it will run onStart")。因此
+    // "停泊了多久" 才是区分"暂时让位"与"被彻底遗弃"的唯一可靠依据。
+    // 消费者: TaskCatalogue.CataloguedResource.getResource 的复用/重建判据。
+    private long _parkedAtMs = 0;
+
     // (2026-08-22 横跳去抖) 任务 onTick 每 tick 全量重估子任务, 当多个候选
     // 子任务条件同时满足 (如合成/熔炉链: 缺材料↔缺容器↔清光标) 时, onTick
     // 返回值会在候选间高频横跳 (用户实测 17:12: DoStuffInFurnaceTask ↔
@@ -103,6 +111,7 @@ public abstract class Task {
             onStart(mod);
             _first = false;
             _stopped = false;
+            _parkedAtMs = 0;
         }
         if (_stopped) return;
 
@@ -178,6 +187,7 @@ public abstract class Task {
         _first = true;
         _active = false;
         _stopped = false;
+        _parkedAtMs = 0;
     }
 
     public void stop(AltoClef mod) {
@@ -202,6 +212,7 @@ public abstract class Task {
         _first = true;
         _active = false;
         _stopped = true;
+        _parkedAtMs = System.currentTimeMillis();
     }
 
     /**
@@ -242,6 +253,19 @@ public abstract class Task {
 
     public boolean stopped() {
         return _stopped;
+    }
+
+    /**
+     * (2026-09-17 守炉死循环根治) 本实例已"停泊"的持续毫秒数; 当前未停泊返回 -1。
+     * 用途: 区分"暂时让位"与"被彻底遗弃"。调用方 (TaskCatalogue 活实例槽) 只有在本实例
+     * 停泊超过宽限期仍未被重新 tick 时, 才认为它已死并放行重建 —— 避免把 4 秒的瞬时
+     * 让位误判成死亡而造出冷实例 (20260917-155653 实锤: 4s 内连建两个 iron_ingot 实例,
+     * 冷的那一个只被 isFinished 轮询、从不 tick → drained 恒假 → 守炉空转环)。
+     * 说明: 停泊期间被重新 tick 会走 tickInternal 复位 (_parkedAtMs=0), 故本值不会回绕。
+     */
+    public long parkedMillis() {
+        if (!_stopped || _parkedAtMs <= 0) return -1;
+        return System.currentTimeMillis() - _parkedAtMs;
     }
 
     protected abstract void onStart(AltoClef mod);
