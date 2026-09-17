@@ -16,7 +16,6 @@ import net.minecraft.util.registry.Registry;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -80,12 +79,33 @@ public final class PerceptionSampler {
         }
     }
 
-    /** 视觉记忆: 坐标 → 最近可见信息。只装"过 perceiveSource 的方块"(反透视)。 */
-    private static final Map<BlockPos, Sight> _sight = new HashMap<>();
-    /** 记忆上限: 正常远达不到 (可视方块量级在千), 仅防异常膨胀。 */
+    /**
+     * 视觉记忆: 坐标 → 最近可见信息。只装"过 perceiveSource 的方块"(反透视)。
+     *
+     * <p>(2026-09-17 感知归零修复) 换成 accessOrder 的 LinkedHashMap + 满上限自动
+     * 淘汰最久未确认的条目 —— 原实现是 HashMap + "满了就静默拒收新坐标", 配合
+     * 下面剪枝失效 (见 {@link #_slicesSincePrune}) 会让记忆彻底冻死在一个旧位置上,
+     * 实测 20260917-155653 场次: {@code sightCache} 精确卡在 60000 长达 1.6 万帧、
+     * 71.6% 的帧方块数为 0。这里 {@code get}/{@code put} 命中已有键都会把它移到
+     * 队尾 (LRU), 因此"最久没再看见的方块" = 队首, 满上限时淘汰的正是它。
+     */
+    private static final Map<BlockPos, Sight> _sight =
+            new java.util.LinkedHashMap<>(1024, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<BlockPos, Sight> eldest) {
+                    return size() > SIGHT_CAP;
+                }
+            };
+    /** 记忆上限: 一整个扫描圈的可见方块量级在千, 20s 窗口内远达不到; 仅防异常膨胀。 */
     private static final int SIGHT_CAP = 60000;
     private static int _sliceCursor = 0;
-    private static long _lastPruneTick = Long.MIN_VALUE;
+    /**
+     * 距上次剪枝走过的切片数 (满 {@code slices} = 走完一整圈)。
+     * (2026-09-17) 原用 {@code _lastPruneTick = Long.MIN_VALUE} 当"还没剪过"的哨兵 +
+     * {@code now - _lastPruneTick >= slices} 判定 —— long 溢出成负数, 条件恒假,
+     * 剪枝一次都没跑过 (条目的 lastSeenTick 永不淘汰, 只能靠上限冻死)。
+     */
+    private static int _slicesSincePrune = 0;
 
     /**
      * (2026-09-17 世界边界) 换存档清空视觉记忆与扫描游标。
@@ -95,7 +115,7 @@ public final class PerceptionSampler {
     public static void onWorldBoundary() {
         _sight.clear();
         _sliceCursor = 0;
-        _lastPruneTick = Long.MIN_VALUE;
+        _slicesSincePrune = 0;
     }
 
     static String sample(AltoClef mod) {
@@ -126,8 +146,10 @@ public final class PerceptionSampler {
         int slices = Math.max(1, nearCols);
 
         scanSlice(mod, p, now, nearR, farStep, slices, (int) Math.max(nearR, range));
-        if (now - _lastPruneTick >= slices) {
-            _lastPruneTick = now;
+        // 每走完一整圈剪一次 (条目的 lastSeenTick 是 tick 轴上的绝对值, 剪枝只需单调
+        // 计数, 不用再拿 tick 当哨兵 —— 原来那种写法会溢出)。
+        if (++_slicesSincePrune >= slices) {
+            _slicesSincePrune = 0;
             pruneSight(now, memoryTicks);
         }
 
@@ -351,9 +373,10 @@ public final class PerceptionSampler {
         Sight prev = _sight.get(pos);
         if (prev != null && prev.block.equals(id)) {
             prev.src = src;
-            prev.lastSeenTick = now;
+            prev.lastSeenTick = now;   // 该 get 已把条目移到 LRU 队尾
         } else {
-            if (_sight.size() >= SIGHT_CAP) return;
+            // 满上限时由 removeEldestEntry 淘汰"最久没再看见的"那条, 不再拒收新坐标
+            // (拒收 = 记忆冻死, 见 _sight 的注释)。
             _sight.put(pos, new Sight(id, src, now));
         }
     }
@@ -373,7 +396,7 @@ public final class PerceptionSampler {
     static void reset() {
         _sight.clear();
         _sliceCursor = 0;
-        _lastPruneTick = Long.MIN_VALUE;
+        _slicesSincePrune = 0;
     }
 
     /** 细粒度来源 → 粗粒度等级。未知来源按 inferred 处理 (保守: 不当作真观测)。 */
