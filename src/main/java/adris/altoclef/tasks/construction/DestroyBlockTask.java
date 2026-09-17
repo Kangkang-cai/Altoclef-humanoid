@@ -623,7 +623,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         BlockPos occ = _occluderTarget;
         if (occ != null) {
             BlockState latched = mod.getWorld().getBlockState(occ);
-            if (latched.isAir() || latched.getHardness(mod.getWorld(), occ) < 0) {
+            if (latched.isAir() || latched.getHardness(mod.getWorld(), occ) < 0
+                    || neverOccluder(mod, occ)) {
                 _occluderTarget = null;
                 _occNoCollision = false;
                 _occAim = null;
@@ -637,11 +638,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                 BlockPos found = hit.getBlockPos();
                 if (!found.equals(_pos)) {
                     BlockState state = mod.getWorld().getBlockState(found);
-                    if (!state.isAir() && state.getHardness(mod.getWorld(), found) >= 0) {
+                    if (!state.isAir() && state.getHardness(mod.getWorld(), found) >= 0
+                            && !neverOccluder(mod, found)) {
                         occ = found;
                         _occluderTarget = occ;
                         _occNoCollision = false;
                         _occAim = null;
+                    } else if (neverOccluder(mod, found)) {
+                        logRefusedContainer(mod, found);
                     }
                 }
             }
@@ -674,11 +678,14 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     BlockPos vfound = vhit.getBlockPos();
                     if (!vfound.equals(_pos)) {
                         BlockState vstate = mod.getWorld().getBlockState(vfound);
-                        if (!vstate.isAir() && vstate.getHardness(mod.getWorld(), vfound) >= 0) {
+                        if (!vstate.isAir() && vstate.getHardness(mod.getWorld(), vfound) >= 0
+                                && !neverOccluder(mod, vfound)) {
                             occ = vfound;
                             _occluderTarget = occ;
                             _occNoCollision = true;
                             _occAim = vhit.getPos();
+                        } else if (neverOccluder(mod, vfound)) {
+                            logRefusedContainer(mod, vfound);
                         }
                     }
                 }
@@ -731,6 +738,40 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         }
         setDebugState("Clearing occluder " + occ.toShortString() + " in front of " + _pos.toShortString());
         return true;
+    }
+
+    // (2026-09-17 拆自己熔炉修复) "refused container" 验证日志节流戳。
+    private long _lastRefuseContainerLogMs = 0;
+
+    /**
+     * (2026-09-17 拆自己熔炉修复) 方块"永不作清遮挡挡块"的判据 —— 带 BlockEntity 的方块
+     * (熔炉/箱子/漏斗/告示牌/箱子类…) 一律跳过:
+     *  ① 里面可能装着我们的资产, 撸掉就地撒落 —— 掉进岩浆 / 滚下山 / 被别的生物捡走即净损失;
+     *  ② 这类方块本来就是"要交互"的对象, 不是"要挖"的障碍。
+     * 口径与 {@link adris.altoclef.util.helpers.JumpObstructionHelper} 的挖障跳过同一先例
+     * (`mod.getWorld().getBlockEntity(pos) != null` → 箱子/熔炉等跳过), 不再各写一套。
+     *
+     * 现场 20260917-155653 16:09 实锤(自己拆自己的炉子):
+     *   bot 往 `-59,25,-31` 的熔炉里投了 `raw_iron x9`(16:09:32), 17s 后为开炉
+     *   (InteractWithBlockTask 的 "Clearing block above interaction target") 去挖它上方的
+     *   `-59,26,-31`, 本类把**这座熔炉自己**选成了挡块并真撸掉:
+     *   `[OccluderClear] clearing -59, 25, -31 (Block{minecraft:furnace}) blocking target=-59, 26, -31`
+     *   → 2.1s 后 `[SmeltFurnaceGone] -59,25,-31 vanished with mat=raw_iron x9 -> recovering drops`。
+     *   这一炉的 9 块生铁是恰好被捡回来了(用户这次看到的就是它); 上一次同类事故的代价
+     *   见 `[SmeltOrphan]` 家族 —— 炉内资产直接丢失。
+     */
+    private boolean neverOccluder(AltoClef mod, BlockPos pos) {
+        return mod.getWorld().getBlockEntity(pos) != null;
+    }
+
+    /** (2026-09-17) 拒拆容器挡块的打点, 2s 节流, 只落盘不进聊天。 */
+    private void logRefusedContainer(AltoClef mod, BlockPos pos) {
+        long now = System.currentTimeMillis();
+        if (now - _lastRefuseContainerLogMs <= 2000) return;
+        _lastRefuseContainerLogMs = now;
+        Debug.logToFile("altoclef_diag.log", "[OccluderClear] refused container "
+                + pos.toShortString() + " (" + mod.getWorld().getBlockState(pos).getBlock()
+                + ") blocking target=" + _pos.toShortString() + " — 不拆容器, 交回常规瞄准/放弃路径");
     }
 
     /**
