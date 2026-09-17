@@ -405,6 +405,9 @@ public class BeatMinecraft2Task extends Task {
     // 分支横跳。修法: 无斧需连续持续 3s 才回切斧链, 期间维持补货分支; 真丢斧只损失 3s。
     private long _axeAbsentSinceMs = 0L;
     private static final long AXE_ABSENT_HYSTERESIS_MS = 3000L;
+    // (2026-09-17) [AXE-HYST] 诊断的边沿闩锁: true = 本轮"无斧"已打过点, 直到
+    // 重新拿到斧 (axeOwned 分支) 才复位。防迟滞放行后的长驻状态每 tick 刷屏。
+    private boolean _axeHystLogged = false;
     // (2026-08-31 收熔炉取空) 收熔炉前的 EmptyFurnaceTask 粘性实例: 一旦派发就
     // 粘住直到完成(取尽炉内物品+拆炉带走), 防止每 tick 新建被其他分支切走,
     // 也确保 onTick 顶部延续块能持续返回同一实例。
@@ -2580,6 +2583,7 @@ public class BeatMinecraft2Task extends Task {
         }
         if (axeOwned) {
             _axeAbsentSinceMs = 0L;
+            _axeHystLogged = false;
             return woodTask;
         }
         // (2026-09-16 迟滞修横跳) 无斧需连续持续 3s 才允许回切斧链。
@@ -2591,11 +2595,17 @@ public class BeatMinecraft2Task extends Task {
             return woodTask;
         }
         setDebugState("Stockpiling wood: crafting stone axe first (gather cobble/table/sticks)");
-        // (2026-09-16 验证日志) 迟滞放行后的真回切, 只落盘不进聊天。
-        // 验证判据 —— 生效: [AXE-HYST] 低频 (真丢斧才一条), Diag-flow 里
-        // "Restocking ↔ crafting axe" 翻转大幅减少; 失败: 翻转依旧且无此日志 =
-        // 翻转发生在本方法之外的其他分支, 需按 Diag-flow 时间戳回查。
-        Debug.logToFile("altoclef_diag.log", "[AXE-HYST] axe absent confirmed, switching to axe chain");
+        // (2026-09-16 验证日志, 2026-09-17 补边沿闩锁) 迟滞放行后的真回切, 只落盘不进聊天。
+        // 本仓约定"长驻状态的分支打点必须边沿触发"(见 TimeoutLog 口径) —— 原实现无
+        // 闩锁, 3s 迟滞放行后【每 tick】都打一条: 20260917-135722 实测 56 秒 1068 条
+        // (≈每 50ms 一条, 20Hz × 56s), 把 diag.log 冲成噪音且掩盖真实事件。改为只在
+        // "持斧/迟滞中 → 放行"这一边沿打一条; 拿到斧时复位闩锁 (见 axeOwned 分支),
+        // 于是"真丢斧"仍是每次一条 —— 原验证判据 (低频、真丢斧才一条) 不变。
+        // 失败判据不变: 翻转依旧且无此日志 = 翻转发生在本方法之外的其他分支。
+        if (!_axeHystLogged) {
+            _axeHystLogged = true;
+            Debug.logToFile("altoclef_diag.log", "[AXE-HYST] axe absent confirmed, switching to axe chain");
+        }
         // (2026-09-16 修复每 tick 重建) 见 _stoneAxeTask 字段注释。石斧到手后上方
         // isItemOwned 命中 → 直接返回 woodTask, 自然回落原木收集; 此间粘滞复用同一
         // 实例, 不再每 tick new 导致石斧链从头跑被自己打断。

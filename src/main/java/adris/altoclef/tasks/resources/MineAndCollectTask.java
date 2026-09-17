@@ -968,6 +968,22 @@ public class MineAndCollectTask extends ResourceTask {
         // 岩石深处，不值得专程走。
         private static final double NEAR_ORE_NO_FOV_RANGE = 24;
 
+        // (2026-09-17 木头选择半径 64→128, 用户"能看到几十格外的树却没去获取") 三套
+        // 范围口径原本互不相同, 木头顶着最窄的那个:
+        //   isBlockPerceivable (Diag-blind 统计"看得见") = 256 格
+        //   pickNearestCacheOre (主选择器, 旧值)        = 64 格
+        //   pickNearestWorldOre (世界直扫兜底)          = min(maxRange,16) 格
+        //   pickNearestNearbySurface (地表资源直扫)     = 8 格
+        //   pickNearestMemoryOre (记忆回溯)             = 显式排除 surface 目标, 木头进不去
+        // ⇒ 缓存里有 64~128 格的树 (BlockTracker 远区扫描半径本就是 128)、感知判定也
+        // "看得见", 但选择器 64 格门槛全拒、记忆导航又不管木头 → 返回空 → wander →
+        // BiasedExplore。20260917-135722 实锤: [Diag-blind] perceivable=16/30/29 而
+        // nearest rejected 全在 78~99 格 (occluded), 用户现场确认"能看到的树在 64 格
+        // 以上"。取 128 = 与 BlockTracker.FAR_SCAN_RADIUS 对齐 (扫得到的就能被选中),
+        // 不再自造第三个数字。仅木头放宽: 矿石/石头仍留 24 (挖矿靠隧道推进, 不值得
+        // 横穿百格; 且深部矿 128 格内海量, 放宽只会让射线开销爆掉)。
+        private static final double WOOD_SEARCH_RANGE = 128;
+
         // wander 探索任务重建冷却（tick，100=5 秒）。
         private static final long EXPLORE_RECREATE_COOLDOWN_TICKS = 100;
 
@@ -1225,7 +1241,9 @@ public class MineAndCollectTask extends ResourceTask {
             // 21:05-21:10 开阔地 30-45m 外的树在视野里, bot 瞎逛 4 分钟不砍) 24 格
             // 感知半径意味着 30m 外的树对 bot 不存在; 配合 VisibilityHelper 树叶透明
             // LOS(2026-09-09) 才能真正锁到远树。仍要求 FOV+LOS, 不透视。
-            int cacheRange = bedTarget ? 96 : (isTargetingWood() ? 64 : 24);
+            // (2026-09-17) 木头 64 → WOOD_SEARCH_RANGE(128): 64 就是同类问题撞到的
+            // 新天花板 (见常量注释), 不再是"看不到"而是"看得见但不要"。
+            int cacheRange = bedTarget ? 96 : (isTargetingWood() ? (int) WOOD_SEARCH_RANGE : 24);
             // (2026-09-01 防透视回归修复) 主线远场恢复 LOS 门控 (用户原则: 主线
             // 发现矿需 FOV+LOS)。上一轮性能修复在这里传了 requireLos=false —
             // BlockTracker 缓存是全 chunk 扫描数据(天然透视), LOS 一关, 被岩石
@@ -1880,6 +1898,55 @@ public class MineAndCollectTask extends ResourceTask {
         // (2026-09-11 自挖因果记忆) 最近一次自己破坏的目标方块位置 + scoop 状态。
         // 实例缓存 keep-alive(任务重选教训): 只在破坏位置变化时重建, 防每 tick 重建。
         private BlockPos _lastSelfBrokenPos = null;
+
+        /**
+         * (2026-09-17 零行为诊断, 只落盘 diag.log 不打聊天) scoop 激活期间打印
+         * "掉落物为什么没回册"的逐项分解。本仓 EntityTracker 的掉落物登记要过
+         * "已落地" + 距离≤64 + (FOV 豁免≤6格 或 视锥内) + 物品可见距离≤32 +
+         * LOS 无遮挡 多道门, 现有日志无法区分卡在哪一道。1s 节流。
+         * 判读: drop 行存在且 onGround=true 而 visible=false → LOS/距离门
+         * (树叶/树干遮挡); onGround=false 且 solidBelow 全 false → 落地门
+         * (悬在树叶/空中, 永不入册); itemEntitiesNearby=0 → 实体已被吸入或
+         * 从未出现在客户端侧。
+         */
+        private long _lastSelfDropDiagMs = 0;
+
+        private void logSelfDropDiag(AltoClef mod) {
+            long now = System.currentTimeMillis();
+            if (now - _lastSelfDropDiagMs < 1000) return;
+            _lastSelfDropDiagMs = now;
+            if (_lastSelfBrokenPos == null || mod.getPlayer() == null || mod.getWorld() == null) return;
+            Vec3d eye = mod.getPlayer().getCameraPosVec(1.0f);
+            StringBuilder sb = new StringBuilder();
+            sb.append("[DropDiag] broken=").append(_lastSelfBrokenPos.toShortString())
+                    .append(" age=").append(now - _miningTargetBrokenMs).append("ms")
+                    .append(" itemDropped=").append(mod.getEntityTracker().itemDropped(_targets));
+            int found = 0;
+            for (net.minecraft.entity.Entity e : mod.getWorld().getEntities()) {
+                if (!(e instanceof ItemEntity ie)) continue;
+                if (ie.squaredDistanceTo(eye) > 32 * 32) continue;
+                found++;
+                Item item = ie.getStack().getItem();
+                boolean matches = false;
+                for (ItemTarget t : _targets) {
+                    if (t.matches(item)) {
+                        matches = true;
+                        break;
+                    }
+                }
+                sb.append("\n  drop ").append(item)
+                        .append(" at ").append(ie.getBlockPos().toShortString())
+                        .append(" matchTarget=").append(matches)
+                        .append(" onGround=").append(ie.isOnGround())
+                        .append(" inWater=").append(ie.isTouchingWater())
+                        .append(" solidBelow2=").append(WorldHelper.isSolid(mod, ie.getBlockPos().down(2)))
+                        .append(" solidBelow3=").append(WorldHelper.isSolid(mod, ie.getBlockPos().down(3)))
+                        .append(" dEye=").append(String.format("%.1f", Math.sqrt(ie.squaredDistanceTo(eye))))
+                        .append(" visible=").append(VisibilityHelper.isEntityVisible(mod, ie));
+            }
+            sb.append("\n  itemEntitiesNearby=").append(found);
+            Debug.logToFile("altoclef_diag.log", sb.toString());
+        }
         private BlockPos _scoopTaskPos = null;
         private boolean _scoopStage2 = false;
         private Task _scoopTask = null;
@@ -1889,9 +1956,20 @@ public class MineAndCollectTask extends ResourceTask {
             return _scoopTask != null && _scoopTaskPos != null && _mod != null && !_scoopTask.isFinished(_mod);
         }
 
+        // (2026-09-17) 无限介质目标 (木头/石头类) 的自挖掉落物 scoop 宽限, 比贪婪
+        // 挖矿的 2.5s 长。理由: 这类目标常踩"挖掉后附近没有下一块、也没进拾取阶段"
+        // 的空档, 且掉落物可能落在树叶层里/贴在壁里, 要走到跟前才被吸入
+        // (20260917-135722: 树顶那格掉落后 bot 就在 4 格外, 36 秒没拾取)。
+        private static final long SELF_DROP_SCOOP_MS = 5000;
+
+        /** scoop 宽限 (ms): 无限介质目标 5s, 其余沿用贪婪挖矿的 2.5s (行为不变)。 */
+        private long selfDropGraceMs() {
+            return isBatchTarget() ? SELF_DROP_SCOOP_MS : GREEDY_DROP_GRACE_MS;
+        }
+
         /** 宽限窗口内的自挖掉落物 scoop 任务; 窗口外/无因果位置返回 null。 */
         private Task getScoopSelfDropTask(AltoClef mod) {            if (_miningTargetBrokenMs == 0 || _lastSelfBrokenPos == null) return null;
-            if (System.currentTimeMillis() - _miningTargetBrokenMs >= GREEDY_DROP_GRACE_MS) return null;
+            if (System.currentTimeMillis() - _miningTargetBrokenMs >= selfDropGraceMs()) return null;
             if (_scoopTaskPos == null || !_scoopTaskPos.equals(_lastSelfBrokenPos)) {
                 // 新破坏事件: 重置两段拾取, 先转头看。
                 _scoopTaskPos = _lastSelfBrokenPos;
@@ -1912,24 +1990,40 @@ public class MineAndCollectTask extends ResourceTask {
 
         @Override
         protected Task getWanderTask(AltoClef mod) {
+            // (2026-09-11 自挖掉落物因果记忆, 用户"他压根没去拾取") 机理: 掉落物
+            // 弹出时 bot 正脸挖下一块 → 掉落物落在视野外 → EntityTracker 人类
+            // 感知过滤(FOV+LOS)永不回册 → itemDropped 恒 false → getClosestTo
+            // 认为"没活"落到这里 → 原实现返回 null 原地空转, 宽限 2.5s 到期整链
+            // 释放, 掉落物永远留在地上 (09:07 场次实锤: 47.3 唯一一次 Pickup 派发后
+            // 49.7-52.2 全 null, 52.2 宽限到期放人, 3 个掉落物用户人工捡)。
+            // "我自己挖掉的矿, 我知道掉落物在哪"属结构推断线索 (线索优先级
+            // 视觉>听觉>结构推断), 非透视。宽限窗口内两段 scoop:
+            // ①转头看向破坏位置 → 掉落物进视锥 → 正常感知回册 → closestDrop 接管;
+            // ②看完仍无回册 → 走到破坏位置, 拾取半径自动吸入。
+            // 宽限到期仍未捡到 → 返回 null 照常释放(掉岩浆/被炸飞等)。
+            //
+            // (2026-09-17 提到两模式共用, 用户"掉落物滞空那 1 tick 里附近没原木,
+            // 所以整个父任务都换了, 没等到它落地") 用户对"没等落地"的判断正确,
+            // 但经 tasks.log 核对父任务并未被换 (单实例、clean 结束、无抢占者)。
+            // 真正缺的是这段等待本身 —— 原先它只挂在贪婪分支, 非贪婪的木头/石头
+            // 目标踩到"批采未满 (1/3) + 附近没有下一块 + 掉落物仍在滞空/未过感知
+            // 门控"时, 四个等待机制全部落空:
+            //   holdGreedyForDrop      : 仅 _greedy (MineAndCollectTask.isFinished)
+            //   batchFullPendingPickup : 仅 _woodBatchBroken >= WOOD_BATCH_MAX
+            //   getScoopSelfDropTask   : 原先仅贪婪分支 (本处)
+            //   _lastDropPickupMs 冷却 : 需先有过一次拾取派发才起算
+            // ⇒ getClosestTo 返回空 → 立刻 wander/BiasedExplore, 之后再没有任何人
+            // 回头等那件掉落物。20260917-135722 实锤: 树顶挖掉 12,74,-39 一格, 掉落物
+            // 躺在 4 格宽 36 秒无人捡, MineAndCollectTask 全程 (clean) 运行 53.3s 到
+            // 用户手动停, 每 tick getClosestTo 都是空, [Diag-blind] 每 5s 刷到底。
+            Task scoop = getScoopSelfDropTask(mod);
+            if (scoop != null) {
+                logSelfDropDiag(mod);
+                return scoop;
+            }
             // (2026-08-28 贪心=纯贴身) 贪心没有紧贴矿就收手, 绝不挖隧道/探索
             // (否则会"看不到矿就挖通道", 还可能在远处发现透视的矿)。
             if (_greedy) {
-                // (2026-09-11 自挖掉落物因果记忆, 用户"他压根没去拾取") 机理: 掉落物
-                // 弹出时 bot 正脸挖下一块 → 掉落物落在视野外 → EntityTracker 人类
-                // 感知过滤(FOV+LOS)永不回册 → itemDropped 恒 false → getClosestTo
-                // 贪婪分支认为"没活"落到这里 → 原实现返回 null 原地空转, 宽限 2.5s
-                // 到期整链释放, 掉落物永远留在地上 (09:07 场次实锤: 47.3 唯一一次
-                // Pickup 派发后 49.7-52.2 全 null, 52.2 宽限到期放人, 3 个掉落物
-                // 用户人工捡)。"我自己挖掉的矿, 我知道掉落物在哪"属结构推断线索
-                // (线索优先级 视觉>听觉>结构推断), 非透视。宽限窗口内两段 scoop:
-                // ①转头看向破坏位置 → 掉落物进视锥 → 正常感知回册 → closestDrop
-                // 接管; ②看完仍无回册 → 走到破坏位置, 拾取半径自动吸入。
-                // 宽限到期仍未捡到 → 返回 null 照常释放(掉岩浆/被炸飞等)。
-                Task scoop = getScoopSelfDropTask(mod);
-                if (scoop != null) {
-                    return scoop;
-                }
                 logBlindnessDiag(mod);
                 return null;
             }
