@@ -56,16 +56,23 @@ import net.minecraft.util.math.Vec3d;
  *   防重拾低风险实现: 洞口目标 ≥2 格远 + 洞底比脚低 1 格 (原版拾取够不着),
  *   万一仍被重拾, 既有弹回熔断 (走开 ≥4 格 / 60s 冷却) 接管。
  *
+ * (2026-09-17 用户钦定【丢坑三档废除】, 213247 场实锤: 三连 pit 丢弃全部低头
+ * 下砸且 7s 内弹回 —— 坑方案与"最远距离不被拾取"根本矛盾: ① 向下丢距离短;
+ * ② 物品落洞口在拾取半径内; ③ bot 事后走回坑边照样重拾。唯一丢弃流程改为:
+ *   方向选定 (弹回场景=落点→当前位置的离开方向, 其余=最开阔方向)
+ *   → ensureFrontHeadTunnel: 面前与头同高的两格 (d=1,d=2) 实心就挖穿
+ *   → pitch=0 严格【水平】平抛, 禁止任何仰角/俯角 (用户: "肯定要水平扔")。
+ *   走开完成后的强制朝向 pitch 也从 -15° 改 0。)
+ *
  * (2026-09-15 方向纪律, 用户现场观察: "bot 走开后丢东西, 理应面朝离开方向丢,
  * 却总是突然转过头来, 结果又丢在要去的路上"。根因: 走开后方向选择交回
  * TurnToOpenAreaTask (挑"最开阔"方向, 可以正好回头), 坑选择只看距离不看方向,
  * 坑还可能就在工作台/必经之路旁边 (112,10,-323 距合成台 111,11,-322 仅 1.4 格)):
  *   - 弹回场景记录离开方向 _preferredDir (上次落点→当前位置, 水平单位向量);
- *   - 走开完成后不再交给 TurnToOpenAreaTask, 强制面朝离开方向 (pitch -15° 略仰
- *     增程) 直接丢 —— 刚走过来的方向必然开阔;
- *   - 坑选择: 3 格内是上次落点 → 跳过 (不丢回原地); 有离开方向时只收前向半球
- *     (dot ≥ 0.2), 全无才退回全向; 同级 (深/浅) 内偏好更远 (≥5 格封顶, 太远丢不进);
- *   - 现挖一格: 方向优先级 离开方向 > 当前朝向 > 四向兜底。
+ *   - 走开完成后不再交给 TurnToOpenAreaTask, 强制面朝离开方向直接丢 ——
+ *     刚走过来的方向必然开阔;
+ *   - (2026-09-17 坑选择两条随丢坑三档一并废除, 走开完成时用落点→当前位置
+ *     重算 yaw, 不再维护 _preferredDir 向量。)
  *
  * (2026-09-15 丢弃会话 static 继承, 用户"又是我介入才进行下去", 095835 会话实锤:
  *   ThrowCursor 平均每 2s 被抢断/整树重建一次, 09:58:59-10:00:05 几十轮零丢出。
@@ -105,24 +112,15 @@ public class ThrowCursorTask extends Task {
     // static: 被抢断重建后不重复记录 (recordCursorThrown 时间戳必须是真实丢出)。
     // 会话按物品划分 (_sessionItem), 新物品 onStart 自然重置 _throwRecorded。
     private static boolean _throwRecorded = false;
-    // (2026-09-15 丢坑优先) 现成坑/现挖洞的瞄准目标。
-    private static BlockPos _pitHole;
-    private static int _pitAimStartTick = -1;
-    // 现成坑每会话只扫一次 (扫描是全半径方块循环, 不每 tick 做)。
-    private static boolean _pitScanned = false;
-    // (2026-09-15 现挖一格) 封闭且无现成坑 → 挖脚前一格地板成洞。
-    private static BlockPos _digFloor;
-    private static int _digFloorStartTick = -1;
-    // 现挖一格超时: 有 8s 豁免后空手一格 7.5s 足够, 30s 已是极端冗余 → 兜底照丢。
-    private static final int DIG_FLOOR_TIMEOUT_TICKS = 20 * 30;
-    // 现成坑扫描半径 / 最小水平距离 (太近丢进去也可能被拾取半径够到)。
-    private static final int PIT_SCAN_RADIUS = 6;
-    private static final int PIT_MIN_DIST = 2;
-    // (2026-09-15) 豁免标记: 挖坑/隧道进行中, PlayerInteractionFixChain 不收回光标。
+    // (2026-09-17 用户钦定, 废除 09-15 丢坑三档) 现成坑/脚前洞全部移除:
+    // 坑是【向下】丢 (低头), 物品落洞口在拾取半径内, bot 事后走回坑边照样
+    // 重拾 (213247 场实锤: 三连 pit 丢出全部弹回, oak_sapling 7s 内回笼)。
+    // 唯一丢弃方式 = 【水平】丢: 方向选定 → 面前与头同高两格 (d=1,d=2) 实心
+    // 就挖穿 → 平抛出隧道, 最远距离。
+    // (2026-09-15) 豁免标记: 挖隧道进行中, PlayerInteractionFixChain 不收回光标。
     private static ThrowCursorTask _activeInstance;
-    // (2026-09-15 方向纪律) 弹回场景: 离开方向 (落点→当前位置, 水平单位向量)、
-    // 上次落点、强制朝向 (背对落点, pitch -15° 略仰增程)。static 同上 (会话继承)。
-    private static Vec3d _preferredDir = null;
+    // (2026-09-15 方向纪律) 弹回场景: 上次落点、强制朝向 (背对落点, pitch 0
+    // 【水平】—— 2026-09-17 用户纠正: 禁止任何仰角/俯角, 仰角会砸近处)。
     private static BlockPos _lastDropPos = null;
     private static Rotation _forcedYaw = null;
     private static int _forceYawStartTick = -1;
@@ -133,8 +131,6 @@ public class ThrowCursorTask extends Task {
     private static RunAwayFromPositionTask _runAwayTask;
     private static int _runAwayStartTick = -1;
     // 会话活性: 每 tick 刷新; onStart 以 "同物品 + 距上次活动 <2.5s" 判定继承。
-    // (按物品而非纯时间: 连续丢多件时间隔 <2.5s, 新物品必须重开新会话重扫坑,
-    //  不能继承上一件的 _pitScanned=true 直接裸丢。)
     private static Item _sessionItem = null;
     private static long _lastActiveMs = 0;
     private static final long SESSION_GAP_MS = 2500;
@@ -144,8 +140,8 @@ public class ThrowCursorTask extends Task {
     // ── (2026-09-17 丢垃圾升级阶梯, 用户钦定) ─────────────────────────────
     // 同一件垃圾被扔出后短时间内又回到光标 (被原版拾取吸回) = "又触发丢垃圾"。
     // 每级给 2 次尝试, 之后再触发就升级:
-    //   L0: 原地正常丢 (封闭→现成坑/挖脚前洞/头高两格隧道)
-    //   L1: 究极丢垃圾 — 走开 ≥5 格 + 强制面朝"落点→当前位置"的离开方向丢
+    //   L0: 原地正常丢 (方向选定 → 面前头高两格挖穿 → 水平平抛)
+    //   L1: 究极丢垃圾 — 走开 ≥5 格 + 强制面朝"落点→当前位置"的离开方向水平丢
     //   L2: 大招 — 走开 ≥10 格, 其余同 L1
     //   L3: 终极大招 — 不扔了, 就近放箱子, 垃圾全进箱 (EnsureFreeInventorySlotTask
     //       路由到 GarbageChestDisposalTask; 木料不足落回 L2)
@@ -170,11 +166,11 @@ public class ThrowCursorTask extends Task {
         return level >= 2 ? 10 : level == 1 ? 5 : 4;
     }
 
-    /** 挖坑/隧道进行中 → 8s 光标滞留超时豁免 (7.5s/格 vs 8s 超时死循环, 见类注释)。
+    /** 挖隧道进行中 → 8s 光标滞留超时豁免 (7.5s/格 vs 8s 超时死循环, 见类注释)。
      *  (2026-09-15) 阶段状态已 static 化, 不依赖实例存活 —— 实例被抢断重建的
      *  间隙里豁免同样成立 (否则 8s 超时会在间隙误触)。 */
     public static boolean isDiggingForThrow() {
-        return _tunnelNear != null || _digFloor != null || _pitHole != null;
+        return _tunnelNear != null;
     }
 
     /**
@@ -211,12 +207,6 @@ public class ThrowCursorTask extends Task {
             _aimFar = null;
             _tunnelStartTick = -1;
             _aimStartTick = -1;
-            _pitHole = null;
-            _pitAimStartTick = -1;
-            _pitScanned = false;
-            _digFloor = null;
-            _digFloorStartTick = -1;
-            _preferredDir = null;
             _lastDropPos = null;
             _forcedYaw = null;
             _forceYawStartTick = -1;
@@ -285,9 +275,6 @@ public class ThrowCursorTask extends Task {
             // 继承: 瞄准起点若已在计时, 只留 5 tick 余量 (不"继承即丢", 也不给
             // 抢断拖延收益); 挖掘/走开进度原样保留。
             _digTask = null;
-            if (_pitAimStartTick >= 0) {
-                _pitAimStartTick = WorldHelper.getTicks() - AIM_TIMEOUT_TICKS + INHERIT_AIM_GRACE_TICKS;
-            }
             if (_aimStartTick >= 0) {
                 _aimStartTick = WorldHelper.getTicks() - AIM_TIMEOUT_TICKS + INHERIT_AIM_GRACE_TICKS;
             }
@@ -314,15 +301,14 @@ public class ThrowCursorTask extends Task {
             // (2026-09-17 朝向加固, 用户实测"bot 很容易自己选择一个相反错误的方向")
             // 走开完成时用【落点→当前位置】现算离开方向并强制面朝它, 拒绝
             // TurnToOpenAreaTask 乱挑"最开阔"(可能正好回头朝工作台)。
+            // (2026-09-17 用户钦定) pitch=0 严格水平, 禁止任何仰角/俯角。
             if (_lastDropPos != null && mod.getPlayer() != null) {
                 double dx = mod.getPlayer().getX() - (_lastDropPos.getX() + 0.5);
                 double dz = mod.getPlayer().getZ() - (_lastDropPos.getZ() + 0.5);
                 double len = Math.sqrt(dx * dx + dz * dz);
                 if (len > 0.5) {
-                    _preferredDir = new Vec3d(dx / len, 0, dz / len);
-                    float yaw = (float) Math.toDegrees(
-                            Math.atan2(-_preferredDir.x, _preferredDir.z));
-                    _forcedYaw = new Rotation(yaw, -15f);
+                    float yaw = (float) Math.toDegrees(Math.atan2(-dx / len, dz / len));
+                    _forcedYaw = new Rotation(yaw, 0f);
                     _turnTask = null;
                 } else {
                     _turnTask = new TurnToOpenAreaTask();
@@ -331,112 +317,7 @@ public class ThrowCursorTask extends Task {
                 _turnTask = (_forcedYaw != null) ? null : new TurnToOpenAreaTask();
             }
         }
-        // 0.5) (2026-09-15 丢坑优先档 1) 一次性扫描现成坑: 脚下(-1层)半径 6 格内,
-        //      开口/上方无盖/非液体即合格, 优先 ≥2 格深 (路过不会踩进去重拾)。
-        //      找到就不挖任何方块, 直接对准坑底中心丢。
-        //      (2026-09-17) 完全封闭空间跳过: 四面都是墙时扫到的"坑"必然在墙后
-        //      (扫描无 LOS), 对准它丢=丢墙上弹回, 直接走头高两格隧道。
-        if (!_pitScanned && mod.getPlayer() != null) {
-            _pitScanned = true;
-            if (!isFullyEnclosed(mod)) {
-                BlockPos pit = findNearbyPit(mod);
-                if (pit != null) {
-                    _pitHole = pit;
-                    Debug.logMessage("(ThrowCursorTask) [ThrowPit] using pit " + pit.toShortString()
-                            + " depth=" + getPitDepth(mod, pit));
-                }
-            } else {
-                Debug.logMessage("(ThrowCursorTask) [ThrowPit] fully enclosed, skip pit scan (head-height tunnel only)");
-            }
-        }
-        // 1) (2026-09-15) 有洞口目标 (现成坑 / 现挖脚前洞) → 对准洞底中心, 命中即丢。
-        if (_pitHole != null) {
-            // (2026-09-17 朝向加固) 走开完成后已定强制离开方向: 坑若在离开方向
-            // 的后半球 (会把垃圾丢回工作台方向), 弃用该坑走强制朝向流程。
-            if (_forcedYaw != null && _preferredDir != null && mod.getPlayer() != null) {
-                double pdx = _pitHole.getX() + 0.5 - mod.getPlayer().getX();
-                double pdz = _pitHole.getZ() + 0.5 - mod.getPlayer().getZ();
-                double plen = Math.sqrt(pdx * pdx + pdz * pdz);
-                if (plen > 0.5
-                        && (pdx / plen) * _preferredDir.x + (pdz / plen) * _preferredDir.z < 0) {
-                    Debug.logMessage("(ThrowCursorTask) [ThrowLadder] pit " + _pitHole.toShortString()
-                            + " is behind escape direction, discarding");
-                    _pitHole = null;
-                }
-            }
-        }
-        if (_pitHole != null) {
-            if (_pitAimStartTick < 0) _pitAimStartTick = WorldHelper.getTicks();
-            LookHelper.lookAt(mod, new Vec3d(_pitHole.getX() + 0.5, _pitHole.getY() + 0.2,
-                    _pitHole.getZ() + 0.5));
-            if (LookHelper.isLookingAt(mod, _pitHole)
-                    || WorldHelper.getTicks() - _pitAimStartTick > AIM_TIMEOUT_TICKS) {
-                _pitHole = null;
-                return throwNow(mod);
-            }
-            setDebugState("Throw: aiming into pit " + _pitHole.toShortString());
-            return null;
-        }
-        // 1.2) (2026-09-15 方向纪律) 弹回且没有前向的现成坑 → 面朝离开方向 (背对
-        //      上次落点, pitch -15° 略仰增程) 直接丢。刚走过来的方向必然开阔,
-        //      物品飞向前进侧, 不再"突然转头把垃圾丢回要走的路上"。
-        if (_forcedYaw != null) {
-            if (_forceYawStartTick < 0) _forceYawStartTick = WorldHelper.getTicks();
-            LookHelper.lookAt(mod, _forcedYaw);
-            if (LookHelper.isLookingAt(mod, _forcedYaw)
-                    || WorldHelper.getTicks() - _forceYawStartTick > FORCE_YAW_TIMEOUT_TICKS) {
-                // (2026-09-17 空旷闸门, 用户"朝着…空旷（可以挖开两格，逻辑同上）")
-                // 强制方向也必须空旷: 该方向脚层/头顶层连通纵深不足时, 不硬丢
-                // (会撞墙弹回), 改沿该方向挖两格头高隧道 (复用隧道流程)。
-                Rotation dir = _forcedYaw;
-                _forcedYaw = null;
-                if (!isDirectionOpenEnough(mod, dir)) {
-                    double rad = Math.toRadians(dir.getYaw());
-                    int dx = (int) Math.round(-Math.sin(rad));
-                    int dz = (int) Math.round(Math.cos(rad));
-                    BlockPos p = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
-                    if (p != null) {
-                        _tunnelNear = p.add(dx, 1, dz);
-                        _aimFar = p.add(dx * 2, 1, dz * 2);
-                        _tunnelStartTick = WorldHelper.getTicks();
-                        _aimStartTick = -1;
-                        Debug.logMessage("(ThrowCursorTask) [ThrowLadder] escape direction not open, digging head-height tunnel along it");
-                        return null;
-                    }
-                }
-                return throwNow(mod);
-            }
-            setDebugState("Throw: facing away from last drop");
-            return null;
-        }
-        // 1.5) (2026-09-15 丢坑优先档 2) 现挖一格: 封闭且无现成坑 → 挖脚前一格地板
-        //      成洞 (选点时已排除岩浆正上方) → 转 1) 丢洞里。30s 挖不动兜底照丢。
-        if (_digFloor != null) {
-            if (WorldHelper.getTicks() - _digFloorStartTick > DIG_FLOOR_TIMEOUT_TICKS) {
-                Debug.logMessage("(ThrowCursorTask) [ThrowDigFloor] timeout, throwing anyway");
-                _digFloor = null;
-                return throwNow(mod);
-            }
-            if (!WorldHelper.isSolid(mod, _digFloor)) {
-                // 挖穿了 → 洞口即目标, 下一 tick 走瞄准。
-                _pitHole = _digFloor;
-                _pitAimStartTick = -1;
-                _digFloor = null;
-                return null;
-            }
-            if (!WorldHelper.canBreak(mod, _digFloor)) {
-                // 选点时已查过 canBreak, 这里只是防御: 直接兜底照丢。
-                _digFloor = null;
-                return throwNow(mod);
-            }
-            _digTask = new DestroyBlockTask(_digFloor);
-            setDebugState("Throw: digging floor pit " + _digFloor.toShortString());
-            return _digTask;
-        }
-        // 1) (2026-09-12 用户钦定流程) 隧道丢弃: 挖面前两个头高方块 (d=1,d=2)
-        //    → 对准洞中心 (远格中心) → 丢。顺序: 近格→远格→瞄准→丢。
-        //    洞打穿后物品沿视线飞进隧道落在 ≥2 格外, 满背包拾取半径够不着,
-        //    不再"丢在脚边→立刻吸回"。
+        // 0.8) (2026-09-17) 隧道挖掘进行中 → 优先继续 (挖近格→远格→水平瞄准→丢)。
         if (_aimFar != null) {
             // 总超时兜底: 空手 7.5s/格 × 2 + 瞄准富余。超时就照丢 (光标必须清空)。
             if (WorldHelper.getTicks() - _tunnelStartTick > TUNNEL_TIMEOUT_TICKS) {
@@ -465,7 +346,7 @@ public class ThrowCursorTask extends Task {
                 setDebugState("Throw: digging tunnel far " + _aimFar);
                 return _digTask;
             }
-            // 洞已打穿 (两格都空) → 每 tick 对准远格中心, 准星命中即丢。
+            // 洞已打穿 (两格都空) → 每 tick 对准远格中心 (与头同高 ≈ 水平), 命中即丢。
             if (_aimStartTick < 0) _aimStartTick = WorldHelper.getTicks();
             LookHelper.lookAt(mod, new Vec3d(_aimFar.getX() + 0.5, _aimFar.getY() + 0.5,
                     _aimFar.getZ() + 0.5));
@@ -477,43 +358,76 @@ public class ThrowCursorTask extends Task {
             setDebugState("Throw: aiming at tunnel center");
             return null;
         }
+        // 1) (2026-09-15 方向纪律 / 2026-09-17 用户钦定水平丢) 弹回场景: 面朝离开
+        //    方向 (背对上次落点, pitch=0 严格水平) → 确认面前头高两格清空 → 平抛。
+        if (_forcedYaw != null) {
+            if (_forceYawStartTick < 0) _forceYawStartTick = WorldHelper.getTicks();
+            LookHelper.lookAt(mod, _forcedYaw);
+            if (LookHelper.isLookingAt(mod, _forcedYaw)
+                    || WorldHelper.getTicks() - _forceYawStartTick > FORCE_YAW_TIMEOUT_TICKS) {
+                float yaw = _forcedYaw.getYaw();
+                _forcedYaw = null;
+                // (2026-09-17 用户钦定) 丢前必须保证面前与头同高两格清空,
+                // 物品沿头高平抛出最远距离, 不被拾取半径够到。
+                if (ensureFrontHeadTunnel(mod, yaw, "escape direction")) {
+                    return null; // 隧道已立项, 下一 tick 进入 0.8) 挖近格。
+                }
+                return throwNow(mod);
+            }
+            setDebugState("Throw: facing away from last drop (horizontal)");
+            return null;
+        }
         // 2) 转向中: 完成前持续转向。
         if (_turnTask != null && !_turnTask.isFinished(mod)) {
             return _turnTask;
         }
-        // 3) 转向完成。判定封闭 → 建立隧道目标 (近/远两格头高), 交给上面流程。
+        // 3) 转向完成 → 同一口径: 面前与头同高两格实心就挖穿 (完全封闭空间走到这里
+        //    必然两格全实心 → 隧道), 开阔则通常两格本就空 → 直接水平丢。
         if (_turnTask != null) {
-            boolean enclosed = _turnTask.isEnclosed();
             float bestYaw = _turnTask.getBestYaw();
             _turnTask = null;
-            if (enclosed && mod.getPlayer() != null) {
-                // (2026-09-15 丢坑优先档 2 先于档 3) 封闭 → 先试挖脚前一格地板成洞,
-                // 没有可挖地板 (全是基岩/岩浆正上方) 才退到两格隧道兜底。
-                // (2026-09-17 用户钦定) 完全封闭空间跳过脚前洞: 洞在脚下, 物品落
-                // 在身侧 1 格内会被满背包立刻吸回; 只有"身体所在 y 层有空间、四面
-                // 都是墙"时直接挖【与头同高的前面两格】丢隧道。
-                BlockPos floor = isFullyEnclosed(mod) ? null : findFloorPitCandidate(mod);
-                if (floor != null) {
-                    _digFloor = floor;
-                    _digFloorStartTick = WorldHelper.getTicks();
-                    return null; // 下一 tick 进入 1.5) 挖地板。
-                }
-                double rad = Math.toRadians(bestYaw);
-                int dx = (int) Math.round(-Math.sin(rad));
-                int dz = (int) Math.round(Math.cos(rad));
-                BlockPos p = mod.getPlayer().getBlockPos();
-                // 头高层 = 脚下 +1: 丢弃物品沿胸前 (y=+1) 飞行, 挡路的正是这层。
-                _tunnelNear = p.add(dx, 1, dz);
-                _aimFar = p.add(dx * 2, 1, dz * 2);
-                _tunnelStartTick = WorldHelper.getTicks();
-                _aimStartTick = -1;
-                return null; // 下一 tick 进入隧道流程 (挖近格)。
+            if (ensureFrontHeadTunnel(mod, bestYaw, "open direction")) {
+                return null;
             }
-            // 开阔 → 直接丢。
             return throwNow(mod);
         }
         // 4) 兜底: 无转向任务 → 直接丢。
         return throwNow(mod);
+    }
+
+    /**
+     * (2026-09-17 用户钦定) 丢弃前检查所选方向面前与头同高的两格 (d=1,d=2):
+     * 有实心 → 立项隧道 (挖穿后水平平抛), 返回 true; 两格本就清空 / 不可挖
+     * (基岩/保护方块, 兜底照丢) → 返回 false。
+     */
+    private boolean ensureFrontHeadTunnel(AltoClef mod, float yaw, String scene) {
+        if (mod.getPlayer() == null) {
+            return false;
+        }
+        double rad = Math.toRadians(yaw);
+        int dx = (int) Math.round(-Math.sin(rad));
+        int dz = (int) Math.round(Math.cos(rad));
+        BlockPos p = mod.getPlayer().getBlockPos();
+        BlockPos near = p.add(dx, 1, dz);
+        BlockPos far = p.add(dx * 2, 1, dz * 2);
+        boolean nearSolid = WorldHelper.isSolid(mod, near);
+        boolean farSolid = WorldHelper.isSolid(mod, far);
+        if (!nearSolid && !farSolid) {
+            return false; // 头高两格已清空 → 直接水平丢。
+        }
+        BlockPos blocking = nearSolid ? near : far;
+        if (!WorldHelper.canBreak(mod, blocking)) {
+            Debug.logMessage("(ThrowCursorTask) [ThrowTunnel] front head block unbreakable at "
+                    + blocking.toShortString() + ", throwing anyway (" + scene + ")");
+            return false; // 兜底照丢 (光标必须清空), 弹回熔断接管。
+        }
+        _tunnelNear = near;
+        _aimFar = far;
+        _tunnelStartTick = WorldHelper.getTicks();
+        _aimStartTick = -1;
+        Debug.logMessage("(ThrowCursorTask) [ThrowTunnel] digging head-height front two blocks ("
+                + scene + "): near=" + near.toShortString() + " far=" + far.toShortString());
+        return true;
     }
 
     /** 清掉隧道状态 (超时/不可挖/已丢弃), 回到普通直接丢路径。 */
@@ -538,134 +452,13 @@ public class ThrowCursorTask extends Task {
         return _throwTask;
     }
 
-    /**
-     * (2026-09-17) 强制离开方向是否足够空旷 (TurnToOpenAreaTask.clearLen 同口径):
-     * 脚层/头顶层连通纵深 ≥3 才允许直接丢 (物品要飞出原版拾取半径), 不足则
-     * 挖两格头高隧道兜底。
-     */
-    private static boolean isDirectionOpenEnough(AltoClef mod, Rotation dir) {
-        if (mod.getPlayer() == null) return true;
-        double rad = Math.toRadians(dir.getYaw());
-        int dx = (int) Math.round(-Math.sin(rad));
-        int dz = (int) Math.round(Math.cos(rad));
-        BlockPos p = mod.getPlayer().getBlockPos();
-        int foot = adris.altoclef.tasks.movement.TurnToOpenAreaTask.clearLen(mod, p, dx, dz, 0);
-        int head = adris.altoclef.tasks.movement.TurnToOpenAreaTask.clearLen(mod, p, dx, dz, 1);
-        return Math.min(foot, head) >= 3;
-    }
-
-    /**
-     * (2026-09-17 用户钦定"完全封闭空间") 只有身体所在 y 层有空间, 四面 (脚层+
-     * 头顶层) 都是墙。此时不试现成坑/脚前洞 (坑在墙后、脚前洞会被自己站在边上
-     * 重拾), 直接走"头高两格隧道"流程。
-     */
-    private static boolean isFullyEnclosed(AltoClef mod) {
-        if (mod.getPlayer() == null) return false;
-        BlockPos p = mod.getPlayer().getBlockPos();
-        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-        for (int[] d : dirs) {
-            if (!WorldHelper.isSolid(mod, p.add(d[0], 0, d[1]))) return false;
-            if (!WorldHelper.isSolid(mod, p.add(d[0], 1, d[1]))) return false;
-        }
-        return true;
-    }
+    // (2026-09-17 用户钦定) 丢坑三档整体废除: isDirectionOpenEnough / isFullyEnclosed
+    // / findNearbyPit / scanPits / getPitDepth / findFloorPitCandidate 随之删除。
+    // 唯一丢弃流程 = 方向选定 → ensureFrontHeadTunnel (面前头高两格挖穿) → 水平平抛。
 
     // (2026-09-12 挖墙选点逻辑废弃: findFirstWallInBestDir 删除, 改为用户钦定的
     //  "挖面前两个头高方块 → 对准洞中心 → 丢" 隧道流程, 见 onTick 分支 1/3。)
 
-    /**
-     * (2026-09-15) 找脚下(-1层)的现成坑: 开口、上方无盖、非液体; 优先 ≥2 格深的。
-     * (2026-09-15 方向纪律) 弹回场景: 上次落点 3 格内的坑跳过 (不丢回原地);
-     * 有离开方向时只收前向半球 (dot ≥ 0.2), 全无才退回全向重扫; 同级内偏好更远
-     * (5 格封顶 —— 太远丢不进, 太近容易被路过重拾)。
-     */
-    private BlockPos findNearbyPit(AltoClef mod) {
-        BlockPos best = scanPits(mod, true);
-        if (best == null && _preferredDir != null) {
-            best = scanPits(mod, false); // 前向半球没有 → 退回全向 (仍避开落点)。
-        }
-        return best;
-    }
-
-    private BlockPos scanPits(AltoClef mod, boolean requireForward) {
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        BlockPos bestShallow = null, bestDeep = null;
-        double bestShallowScore = -1, bestDeepScore = -1;
-        for (int dx = -PIT_SCAN_RADIUS; dx <= PIT_SCAN_RADIUS; dx++) {
-            for (int dz = -PIT_SCAN_RADIUS; dz <= PIT_SCAN_RADIUS; dz++) {
-                double distSq = dx * dx + dz * dz;
-                if (distSq < PIT_MIN_DIST * (double) PIT_MIN_DIST) continue;
-                BlockPos h = feet.add(dx, -1, dz);
-                if (WorldHelper.isSolid(mod, h)) continue;          // 不是开口
-                if (WorldHelper.isSolid(mod, h.up())) continue;     // 上方有盖, 丢不进
-                if (!mod.getWorld().getBlockState(h).getFluidState().isEmpty()) continue;
-                if (!mod.getWorld().getBlockState(h.up()).getFluidState().isEmpty()) continue;
-                // 方向纪律: 不丢回上次落点附近。
-                if (_lastDropPos != null && h.isWithinDistance(_lastDropPos, 3)) continue;
-                // 方向纪律: 只收前向半球 (第一遍)。
-                if (requireForward && _preferredDir != null) {
-                    double len = Math.sqrt(distSq);
-                    double dot = (dx / len) * _preferredDir.x + (dz / len) * _preferredDir.z;
-                    if (dot < 0.2) continue;
-                }
-                // 同级偏好更远: 5 格 (25 格距平方) 封顶, 越接近 5 格越好。
-                double score = Math.min(distSq, 25.0);
-                // (2026-09-17 浅坑口径收紧, 212108 场实锤 depth=0 的坑也被选中:
-                // 1 格深的洞丢进去物品就在洞口, 原版拾取半径照样够到 → 弹回。
-                // 浅坑档要求至少 2 格深 (depth>=1), 只有 1 格深的洞不如走挖脚前
-                // 洞/头高隧道流程。)
-                int depth = getPitDepth(mod, h);
-                if (depth >= 2) {
-                    if (score > bestDeepScore) {
-                        bestDeepScore = score;
-                        bestDeep = h;
-                    }
-                } else if (depth >= 1 && score > bestShallowScore) {
-                    bestShallowScore = score;
-                    bestShallow = h;
-                }
-            }
-        }
-        return bestDeep != null ? bestDeep : bestShallow;
-    }
-
-    /** (2026-09-15) 坑深: 从洞口向下数连续非固体格数 (上限 4, 只为排序用)。 */
-    private int getPitDepth(AltoClef mod, BlockPos h) {
-        int depth = 0;
-        BlockPos cur = h.down();
-        while (depth < 4 && !WorldHelper.isSolid(mod, cur)) {
-            depth++;
-            cur = cur.down();
-        }
-        return depth;
-    }
-
-    /**
-     * (2026-09-15 现挖一格) 脚前一格地板候选: 方向优先级 离开方向 (弹回场景)
-     * > 当前朝向 > 四向兜底。要求可挖、正下方非液体 (防挖开岩浆地板掉自己进去)。
-     */
-    private BlockPos findFloorPitCandidate(AltoClef mod) {
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        double rad = Math.toRadians(mod.getPlayer().getYaw());
-        int fx = (int) Math.round(-Math.sin(rad));
-        int fz = (int) Math.round(Math.cos(rad));
-        int[][] dirs;
-        if (_preferredDir != null) {
-            int px = (int) Math.round(_preferredDir.x);
-            int pz = (int) Math.round(_preferredDir.z);
-            dirs = new int[][] { {px, pz}, {fx, fz}, {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
-        } else {
-            dirs = new int[][] { {fx, fz}, {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
-        }
-        for (int[] d : dirs) {
-            BlockPos f = feet.add(d[0], -1, d[1]);
-            if (!WorldHelper.isSolid(mod, f)) continue;   // 已是洞
-            if (!WorldHelper.canBreak(mod, f)) continue;
-            if (!mod.getWorld().getBlockState(f.down()).getFluidState().isEmpty()) continue;
-            return f;
-        }
-        return null;
-    }
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
