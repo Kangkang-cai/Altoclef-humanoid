@@ -341,6 +341,13 @@ public class BeatMinecraft2Task extends Task {
     private Task _foodTask;
     private Task _gearTask;
     private Task _lootTask;
+    // (2026-09-17 钻石件合成粘性) "钻石即做"分支每 tick 重入必须返回同一实例直到
+    // 它结束。旧代码每 tick TaskCatalogue.getItemTask 新开链, 而 shouldForce(_gearTask)
+    // 会在 craftBusy=true 的瞬间抢断它 (填格→抢断→排格→craftBusy 清零→再填格),
+    // 2s 死循环 —— 213247/214954 两场实锤: 钻石甲从未做成, MineDown 每轮爬回
+    // y=-54 都被掐断, 用户看到的就是"一直爬高但啥也不干"。
+    private Task _diamondPieceTask = null;
+    private Item _diamondPieceItem = null;
     // (2026-09-03 钻石收集时间上限, 用户确认以 5 分钟为准; 早期注释写 15 分钟与常量不符已修正)
     // 钻石探索/收集(挖钻石矿换剑/镐)耗尽太久时, 累积活跃 5 分钟(DIAMOND_COLLECT_LIMIT_MS)后
     // 永久放弃钻石收集,
@@ -721,6 +728,10 @@ public class BeatMinecraft2Task extends Task {
         mod.getBehaviour().push();
         mod.getBehaviour().addProtectedItems(Items.ENDER_EYE, Items.BLAZE_ROD, Items.ENDER_PEARL, Items.CRAFTING_TABLE);
         mod.getBehaviour().addProtectedItems(ItemHelper.BED);
+        // (2026-09-17) 钻石甲永不进丢弃级联: 203154 场实锤刚做好的钻石甲被腾位链
+        // 当垃圾丢进坑又捡回 (装备从未穿戴成功的一部分根因)。保护后满包腾位会
+        // 找别的垃圾, 不会动盔甲。
+        mod.getBehaviour().addProtectedItems(ItemHelper.DIAMOND_ARMORS);
         // Allow walking on end portal
         mod.getBehaviour().allowWalkingOn(blockPos -> _enterindEndPortal && mod.getChunkTracker().isChunkLoaded(blockPos) && mod.getWorld().getBlockState(blockPos).getBlock() == Blocks.END_PORTAL);
 
@@ -1729,6 +1740,25 @@ public class BeatMinecraft2Task extends Task {
                 // (用户实测: 材料够了迟迟不做装备)。顺序胸甲(8)>护腿(7)>
                 // 头盔(5), 金靴不耗钻石不在列; 做完由上方 EquipArmorTask 穿上。
                 {
+                    // (2026-09-03 时间上限语义) 钻石收集已 give up → 钻石件保持
+                    // 放弃态, 不再开合成 (否则与金靴分支互抢工作台, 203154 场实锤:
+                    // chestplate↔golden_boots 每 2s 互抢 8 轮)。
+                    if (!_diamondCollectGivenUp) {
+                    // (2026-09-17 合成粘性) 当前件的合成链未结束前每 tick 返回同一
+                    // 实例, 杜绝 shouldForce(_gearTask) 趁 craftBusy 间隙抢断
+                    // (214954 场: 合成链 50ms 就被 Get catalogued 掐断, have=0)。
+                    if (_diamondPieceTask != null) {
+                        if (_diamondPieceTask.isFinished(mod)) {
+                            Debug.logMessage("(DiamondPiece) sticky craft task finished: "
+                                    + ItemHelper.stripItemName(_diamondPieceItem));
+                            _diamondPieceTask = null;
+                            _diamondPieceItem = null;
+                        } else {
+                            setDebugState("Crafting diamond gear immediately (sticky): "
+                                    + ItemHelper.stripItemName(_diamondPieceItem));
+                            return _diamondPieceTask;
+                        }
+                    }
                     // (2026-09-10 合成在飞不开火, 19:52 场次 t=311 实锤) 有合成占据
                     // 台格 (如镐正在做) 时本分支不开火: accessible 口径含台格槽位,
                     // 镐的 3 颗钻在格子里会被算成 5+3=8"够做胸甲" → 开出胸甲任务
@@ -1746,9 +1776,12 @@ public class BeatMinecraft2Task extends Task {
                         // (18:28 场次 [Diag-flow] 实锤)。含台格口径后阈值判定稳定,
                         // 当前件做完(或钻石真被消耗)才轮到下一件。
                         if (!owned && StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.DIAMOND) >= diamondCosts[i]) {
+                            _diamondPieceItem = piece;
+                            _diamondPieceTask = TaskCatalogue.getItemTask(piece, 1);
                             setDebugState("Crafting diamond gear immediately: " + ItemHelper.stripItemName(piece));
-                            return TaskCatalogue.getItemTask(piece, 1);
+                            return _diamondPieceTask;
                         }
+                    }
                     }
                 }
                 if(shouldForce(mod, _lootTask)) {
