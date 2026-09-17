@@ -68,6 +68,16 @@ public final class RecordManager {
     private static int _errors = 0;
     private static long _framesQueued = 0;
 
+    /**
+     * (2026-09-17 停 bot 不再自动重开) 停 bot (Alt+U / {@code @stop} → TaskRunner.disable)
+     * 是"一次 bot 运行"的终点, 但它【不离开世界】—— 若下一 tick 又因 {@code _frames == null}
+     * 自动 startSession, 就把"停 bot"变成了一次会话切分。实测 20260917-155653: 16:12:14.233
+     * 正常收尾, 41ms 后 (16:12:14.274) 自动开了 -r2, 用户站在世界里没动却又录了 13 分钟。
+     * 加闩后: 要重开需 {@code @record on} (clearDisabled) 或离开世界再进来 (见 tick 的
+     * {@code !inGame()} 分支)。
+     */
+    private static boolean _pausedAfterStop = false;
+
     // (2026-09-17) 同 tick 事件去重集合 (只对 eventThrottled 生效)。每 tick 清空。
     private static final java.util.HashSet<String> _tickEventKeys = new java.util.HashSet<>();
 
@@ -127,10 +137,13 @@ public final class RecordManager {
                 // 4 个只有 10 字节 gzip 头的残片); ②再进世界 (或换世界) 会往同一个
                 // 会话里继续写, 而新世界的 tick 从 0 重算、种子/维度都变了, seq↔t
                 // 的对应关系直接作废。再进世界时 startSession 会开一个新目录 (-rN)。
+                // 顺带清掉"停 bot"闩: 离开过世界 = 上一次运行已彻底结束。
+                _pausedAfterStop = false;
                 onSessionEnd();
                 return;
             }
             ensureShutdownHook();
+            if (_pausedAfterStop) return; // 停 bot 收尾后不自动重开 (见 _pausedAfterStop)
             if (_frames == null && !startSession(mod)) return;
             if (_frames.getError() != null) return; // 写盘线程已挂, 别再堆队列
 
@@ -276,6 +289,15 @@ public final class RecordManager {
         } catch (Throwable ignored) {
             // 装不上钩子不影响正常收尾路径 (@record off / 离开世界 / 停 bot 都还会收)
         }
+    }
+
+    /**
+     * (2026-09-17) 停 bot 收尾入口: 由 {@code TaskRunner.disable()} 调用 (Alt+U / {@code @stop}
+     * 的用户任务是唯一出口)。收尾 + 上闩, 让本世界内不再自动开新会话。
+     */
+    public static void onBotStopped() {
+        _pausedAfterStop = true;
+        onSessionEnd();
     }
 
     /** 会话收尾: 排空队列、补齐 gzip 尾部、写 meta 的结束统计。幂等。 */
@@ -495,11 +517,15 @@ public final class RecordManager {
 
     // ===== (2026-09-17) 聊天命令支持 (@record) =====
 
-    /** 清除"出错自禁用"状态, 让 {@code @record on} 能在下一 tick 重新开始一次会话。 */
+    /**
+     * 清除"出错自禁用"状态与"停 bot"闩, 让 {@code @record on} 能在下一 tick 重新开始
+     * 一次会话 (两者都是"录制为什么没在跑"的原因, 由同一条命令统一解除)。
+     */
     public static void clearDisabled() {
         _disabled = false;
         _disabledReason = null;
         _errors = 0;
+        _pausedAfterStop = false;
     }
 
     /** 当前是否有活跃录制会话 (与"设置开关是否 ON" 是两回事)。 */
@@ -521,9 +547,13 @@ public final class RecordManager {
         }
         out.add("[Record] 设置开关=" + (enabled ? "ON" : "OFF")
                 + "  活跃会话=" + (_frames != null ? "YES" : "NO")
-                + (_disabled ? "  (已自禁用: " + _disabledReason + ")" : ""));
+                + (_disabled ? "  (已自禁用: " + _disabledReason + ")" : "")
+                + (_pausedAfterStop ? "  (停 bot 后已暂停)" : ""));
         if (_frames == null) {
             out.add("[Record] 当前未录制。@record on 开始。输出目录: <游戏运行目录>/record/<会话时间戳>/");
+            if (_pausedAfterStop) {
+                out.add("[Record] 原因: 停 bot 已收尾本世界的会话 (不自动重开) —— @record on 或离开世界再进可开新会话。");
+            }
             out.add("[Record] 四个通道: frames(每帧) / perception(每帧) / memory(变化时) / events(稀疏); meta.json 记录口径与配置。");
             return out;
         }

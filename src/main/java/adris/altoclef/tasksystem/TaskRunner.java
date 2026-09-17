@@ -168,10 +168,11 @@ public class TaskRunner {
         } catch (Throwable ignored) {
         }
 
-        // (2026-09-17 数据集录制) 会话收尾: 停队列、刷盘、写 meta.json 的结束统计。
-        // 放在与 AnomalyWatchdog 同一收尾点 —— 这是"一次 bot 运行"的唯一明确终点。
+        // (2026-09-17 数据集录制) 会话收尾 + 上"停 bot"闩: 停 bot 不离开世界, 若下一
+        // tick 又自动 startSession 就会把"用户停 bot"变成一次会话切分 (实测 155653 场次
+        // 收尾 41ms 后自动开了 -r2)。要重开需 @record on 或离开世界再进。
         try {
-            adris.altoclef.record.RecordManager.onSessionEnd();
+            adris.altoclef.record.RecordManager.onBotStopped();
         } catch (Throwable ignored) {
         }
 
