@@ -152,11 +152,22 @@ public class TraceFlowingWaterToSourceTask extends Task {
         // 也就站在了能看见/够得着源的位置。
         BlockPos standable = WorldHelper.findStandableNearLiquid(mod, higherLevel);
         if (standable == null) {
-            Debug.logMessage("TraceFlowingWater: no dry standable spot beside water "
+            // (2026-09-17 v2 水柱过渡格) 水格四周【没有干燥落脚点】≠ 走不通 —— 现场
+            // 20260917-231306 的起点全部是 `lvl=8 still=false aboveLiquid=true
+            // standableNear=false`, 即水柱/多层水体【内部】格: 它上一格是水、左右也是水,
+            // 当然没有落脚点。旧行为在这里直接 gaveUp, 于是每一处水柱都在 50ms 内判死。
+            //     改为把它当【过渡格】: 不派接近任务 (本来也没地方站), 直接推进到它的
+            // 上游, 沿水柱一路判到源头; 最终能不能舀交给父任务的可达性 + LOS 判据
+            // (源头若够不着, 父任务自然转去别处, 不会卡死)。_visited + MAX_TRACE_ATTEMPTS
+            // 保证不会无限向上。
+            _currentTracePos = higherLevel;
+            _traceAttempts++;
+            _lastProgressTick = WorldHelper.getTicks();
+            _visited.add(higherLevel);
+            Debug.logMessage("TraceFlowingWater: no standable spot beside water "
                     + higherLevel.toShortString() + " (" + describeLiquid(mod, higherLevel)
-                    + ") → giving up | " + diagnose(mod));
-            _gaveUp = true;
-            return new TimeoutWanderTask(5f);
+                    + ") → water-column transit, continue upstream (attempt " + _traceAttempts + ")");
+            return null; // 本 tick 不派子任务, 下一 tick 继续沿链向上
         }
 
         // (2026-09-13 v26) 目标不可达 / 跨层太远 → 这条水流链到不了源头, 放弃
@@ -252,8 +263,26 @@ public class TraceFlowingWaterToSourceTask extends Task {
     }
 
     private BlockPos findHigherLevelNeighbor(AltoClef mod, BlockPos pos) {
-        var currentState = MinecraftClient.getInstance().world.getBlockState(pos);
+        var world = MinecraftClient.getInstance().world;
+        var currentState = world.getBlockState(pos);
         int currentLevel = currentState.getFluidState().getLevel();
+
+        // (2026-09-17 v2 水柱/下落水上游, 20260917-231306 实锤)
+        // MC 里【下落水】(FallingFluid) 的 level 也是 8, 与源方块同级 —— 于是
+        // "只选 level 更高的邻居"这条判据在水柱/多层水体里永远找不到上游:
+        // 起点 lvl=8 still=false aboveLiquid=true, 上方那格水同样是 8 → 不满足
+        // `neighborLevel > currentLevel` → 返回 null → 本任务 3ms 内 gaveUp,
+        // tasks.log 实测 `START <Tracing...>` → 50ms 后 STOP, attempt 恒 0,
+        // 每 15s 冷却后重来一次, 永远走不出探索分支 (用户: "压根没往水那边去")。
+        //     垂直上游优先: 上方是水 → 水就是从上面来的 (瀑布/水柱/多层水体),
+        // 顺着它往上就是朝源头走。人类找源也是先抬头看水从哪下来的。
+        BlockPos above = pos.up();
+        if (!_visited.contains(above)) {
+            var aboveState = world.getBlockState(above);
+            if (aboveState.getBlock() == Blocks.WATER) {
+                return above;
+            }
+        }
 
         BlockPos best = null;
         int bestLevel = currentLevel;
@@ -263,7 +292,7 @@ public class TraceFlowingWaterToSourceTask extends Task {
             BlockPos neighbor = pos.offset(dir);
             if (_visited.contains(neighbor)) continue;
 
-            var neighborState = MinecraftClient.getInstance().world.getBlockState(neighbor);
+            var neighborState = world.getBlockState(neighbor);
             if (neighborState.getBlock() != Blocks.WATER) continue;
 
             int neighborLevel = neighborState.getFluidState().getLevel();
