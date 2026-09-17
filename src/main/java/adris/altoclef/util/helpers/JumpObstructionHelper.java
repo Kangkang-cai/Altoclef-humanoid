@@ -24,11 +24,14 @@ import java.util.List;
  *   - {@code IPathingBehavior.getCurrent().getPosition()} 给出当前执行到的路径
  *     节点索引, {@code IPath.positions()} 给出整条路径的格子序列 → 索引 +1 就是
  *     baritone **下一个想站的格子** (next)。
- *   - 结合玩家当前格 P, 一次跳跃真正需要的通行空间只有 4 格:
+ *   - 结合玩家当前格 P, 一次跳跃真正需要的通行空间原本只算 4 格:
  *       P.up(1) / P.up(2)  —— 起跳空间 (身高 1.8, 跳跃净升 ~1.25 格)
  *       next / next.up(1)  —— 落点空间 (站人 + 头顶)
  *     这 4 格里第一个"实心且可挖"的就是挡路的那块。顺序即优先级: 起跳空间被封
  *     时后面全都白搭。
+ *   - **(2026-09-17 P0-a) 补第 5、6 格: next.up(2) / ahead.up(2)** —— 「斜上台阶的
+ *     落点头顶」。详见 {@link #candidates} 注释: 这是 09-11 建文件时就带的盲区,
+ *     不是新引入的。
  *
  * 候选格由 {@link #candidates} 统一给出: 路径 next 节点拿不到时, 朝向前方两格
  * 本身就是兜底候选, 无需在 nextPathNode 里再做一层退化。
@@ -76,13 +79,56 @@ public final class JumpObstructionHelper {
     }
 
     /**
-     * 候选格 (按优先级): 起跳空间 → 落点空间 → 朝向前方 (2026-09-12 增补)。
+     * 候选格 (按优先级): 起跳空间 → 落点空间 → 朝向前方 → 两个"落点头顶"(最后兜底)。
      * 起跳空间优先 —— 它被封时无论落点多宽敞都跳不上去。
      * 朝向前方两格兜底: 会话 20260912-110137 实锤 baritone 规划的 next 节点可能
      * 落在障碍之后 (真正顶住玩家的是朝向前方那格 azalea), 不看朝向就漏挖。
+     *
+     * <h3>(2026-09-17 P0-a) 补 {@code next.up(2)} / {@code ahead.up(2)}</h3>
+     *
+     * <b>缺口</b>: 玩家高 1.8, 站进一格要占【脚 + 头】两层。水平走过去时脚在
+     * {@code ahead}、头在 {@code ahead.up(1)} —— 有查; 但**斜上一步(上台阶)**的落点是
+     * {@code ahead.up(1)}, 此时脚在 {@code ahead.up(1)}、**头在 {@code ahead.up(2)}** ——
+     * 没人查。next 节点同理 ({@code next.up(2)})。于是"台阶正上方那格实心"这种卡死,
+     * 本函数永远返回 null → 调用方只能走 forceCancel 换路那条弱处置 (baritone 没有路径级
+     * 黑名单, 换路往往又选回同一条)。
+     *
+     * <b>是老的还是新引入的: 老 bug, 09-11 建文件时就带进来的。</b> 取证三件套:
+     * <ol>
+     *   <li>{@code git log -S "ahead.up(2)"} / {@code -S "next.up(2)"} 在本文件上
+     *       <b>0 命中</b> —— 从 {@code 7fe0bdf5} (2026-09-11 新建) 至今从未出现过,
+     *       不是哪次改动删掉的。</li>
+     *   <li>但它一直没暴露: 09-11 的调用方 {@code CustomBaritoneGoalTask.tickJumpStuck}
+     *       要求"连续 20 tick ({@code JUMP_STUCK_TICKS}) 强制按住跳跃键"
+     *       ({@code isJumpStuck} 里 {@code isInputForcedDown(JUMP)} 必须当拍为 true)。
+     *       而 baritone 只在**起跳那一瞬**按跳、人在空中即释放 → streak 永远凑不满,
+     *       整条检测是<u>死代码</u>, 本函数根本没被执行过几次。</li>
+     *   <li>09-12 {@code 00bbdc82} 补上"贴地顶墙 (强制前进、不跳)"这第三条证据 +
+     *       hSpeed 阈值 0.05→0.1 —— <b>而地道/台阶里的卡死正是这一条形态</b>。
+     *       从这一刻起本函数才第一次被真正高频执行, 盲区才变成活 bug。</li>
+     * </ol>
+     * 所以"以前一直没遇到"= 这条代码路径以前跑不到, 不是以前没有这个 bug。
+     *
+     * <b>实证 (会话 20260917-120830)</b>: 33 条 {@code [JumpStuck]} 现场快照里
+     * <b>15 条</b>的候选集合内唯一实心块恰好只在 {@code aheadUp2}
+     * (形如 {@code pos=(-46,64,106) facing=east blocks[ahead=air aheadUp1=air
+     * aheadUp2=stone]}, 1 格宽阶梯地道), 而同一份 diag 里
+     * {@code [JumpStuck] clearing obstruction} <b>0 次</b>、
+     * {@code no obstruction -> forceCancel} <b>65 次</b> —— 候选表的盲区被实证。
+     *
+     * <b>为什么追加在表尾</b>: 两个新候选排在所有既有候选之后, **不改动既有候选的
+     * 优先级** —— 起跳/落点/朝向这三类仍是第一顺位, 新增格只在"前面的都没找到"时才
+     * 生效。这样本次改动是严格增量: 原本返回非 null 的场景结果完全不变, 只把原本
+     * 返回 null 的一部分救回"挖障"分支。挖障闸门 (可挖/够得着/不挖脚下/重力方块/
+     * BlockEntity/avoidBreaking) 对它们一视同仁。
+     *
+     * <b>诚实边界</b>: 日志只打印 {@code ahead*} 六格, 看不到 {@code next}/{@code next.up(1)}
+     * 的实际取值, 所以<b>无法断言每一条 no obstruction 都是因为缺 up(2)</b>; 能证明的
+     * 是"候选表在这 15/33 条上是盲的"。挖掉那一格是否真能解卡仍需实跑验证 —— 次要
+     * 理由是"改世界本身就会逼 baritone 重算"(见类注释的两个杠杆)。
      */
     private static List<BlockPos> candidates(AltoClef mod, BlockPos feet) {
-        List<BlockPos> list = new ArrayList<>(6);
+        List<BlockPos> list = new ArrayList<>(8);
         addUnique(list, feet.up(1));
         addUnique(list, feet.up(2));
         BlockPos next = nextPathNode(mod, feet);
@@ -90,11 +136,18 @@ public final class JumpObstructionHelper {
             addUnique(list, next);
             addUnique(list, next.up(1));
         }
-        try {
-            BlockPos ahead = feet.offset(mod.getPlayer().getHorizontalFacing());
+        // null = 朝向读不到 (addUnique 对 null 直接跳过, 与旧版的 try 包围同效)。
+        BlockPos ahead = fallbackAhead(mod, feet);
+        if (ahead != null) {
             addUnique(list, ahead);
             addUnique(list, ahead.up(1));
-        } catch (Throwable ignored) {
+        }
+        // (2026-09-17 P0-a) 两个"落点头顶": 追加在最后, 不影响上面任何一条的优先级。
+        if (next != null) {
+            addUnique(list, next.up(2));
+        }
+        if (ahead != null) {
+            addUnique(list, ahead.up(2));
         }
         return list;
     }
