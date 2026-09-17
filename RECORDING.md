@@ -75,11 +75,22 @@ AltoClef.onClientTick()
 |---|---|
 | `@record off` / 配置改回 false | `RecordManager.tick()` 检测开关变 false |
 | 离开世界 / 断线 / 死亡菜单 | `RecordManager.tick()` 检测 `!AltoClef.inGame()` |
-| 停 bot | `TaskRunner.disable()` |
+| 停 bot | `TaskRunner.disable()` → `onBotStopped()` (收尾 + 上闩, 见下) |
 | 直接退出游戏 | JVM shutdown hook (`ensureShutdownHook`, 短超时 1200ms) |
 
 代价: 关掉录制后 `tick()` 每帧仍会调一次 `onSessionEnd()`(内部 `_frames == null` 早退),
 可以忽略。
+
+### 会话边界的一条硬规则: 停 bot ≠ 离开世界 (2026-09-17)
+停 bot (`TaskRunner.disable()`) 是收尾出口, 但它**不离开世界**。若收尾后下一 tick 又因
+`_frames == null` 自动 `startSession`, "用户停下 bot" 就被切成了两段会话 —— 实测
+20260917-155653: 16:12:14.233 收尾, **41ms 后**自动开了 `-r2`, 用户站着没动却被录了
+13 分钟空任务 (16183 帧全是 `User Tasks` 无叶子)。
+
+所以收尾与自动开录是解耦的: `TaskRunner.disable()` 走 `RecordManager.onBotStopped()`
+(= 收尾 + 上 `_pausedAfterStop` 闩), 闩着时 `tick()` 直接返回。解除闩只有两条路:
+`@record on` (`clearDisabled`) 或离开世界再进 (`!inGame()` 分支会清闩) —— 后者语义不变:
+**一个世界访问 = 一个会话**。
 
 ---
 
@@ -244,6 +255,12 @@ gzip 头是构造时立刻写的 (10 字节), 尾部要 `close()` 才补。所�
 
 这也是为什么 `onSessionEnd` 挂在 **4 个**出口 (见 §3), 并且有 JVM shutdown hook。
 
+(2026-09-17 兜底) `JsonlSink` 线程一启动就先落一个 **20 字节的合法空 gzip** (头 10 +
+空 deflate 终块 `03 00` + CRC/ISIZE 全 0) 当占位, 首行真正出队时才开流式成员覆盖它。
+这样"会话刚建立就被硬杀"留下的也是能正常读出 0 行的文件, 而不是只有 gzip 头的残片。
+不走"多成员 gzip (空成员 + 追加真成员)"的写法: 规范允许串接、Java/Python 都读得全,
+但 **Windows PowerShell 的 `GZipStream` 只读第一个成员** —— 会把整份语料读成 0 行 (已实测)。
+
 ### 6.3 LOS 缓存 = 400ms 感知延迟, 不是瞬时真值
 `perceiveSource` 内部的 `isBlockVisible` 复用 `VisibilityHelper._losCache` (400ms TTL +
 玩家位移 >2 格失效)。meta.json 里写明了这一点 —— **训练时不要把 perception 当作精确到
@@ -366,6 +383,9 @@ Copy-Item "d:\Project\life01\altoclef\build\libs\altoclef-0.4.0.jar" "D:\minecra
 | 2026-09-17 | `memory` 的 animal 键会是 `class_1479` | 同上 (Minecraft 类的 Class) | EntityType 反查注册名 (§6.1) |
 | 2026-09-17 | `-r2` 会话 4 个 `.gz` 全是 10 字节 | `!inGame()` 时直接 return 不收尾 + 退游戏无钩子 | 会话边界收尾 + JVM shutdown hook (§6.2) |
 | 2026-09-17 | `memory` 第 2 行 `rev.knowledge=1` 但 `knowledge={}` | `ensureCentersLoaded` 无条件推进版本号 | 只在真读进内容时推进 (§5.6) |
+| 2026-09-17 | `perception.blocks` 71.6% 帧为 0, 且自 seq≈5200 起**永久**空; `stats.sightCache` 精确卡死 60000 达 1.6 万帧 | ①剪枝用 `Long.MIN_VALUE` 当哨兵 → `now - 哨兵` 溢出为负 → `pruneSight` 一次没跑; ②满上限时静默拒收新坐标 → 记忆彻底冻死 | 剪枝改单调计数 `_slicesSincePrune`; `_sight` 改 accessOrder LRU, 满上限自动淘汰最久未确认条目 (PerceptionSampler) |
+| 2026-09-17 | 停 bot 后 41ms 自动开 `-r2`, 站着录了 13 分钟空任务 | 停 bot 是收尾出口但不离开世界, 下一 tick 又自动 `startSession` | `onBotStopped()` 上 `_pausedAfterStop`  (§3 会话边界硬规则) |
+| 2026-09-17 | 会话刚建立即被硬杀 → `.gz` 只有 gzip 头 (10 字节), 读取器报错 | 开流即建文件, 尾部只有 `close()` 才补 | 先落 20 字节合法空 gzip 占位, 首行才开真流覆盖 (§6.2) |
 
 ---
 
