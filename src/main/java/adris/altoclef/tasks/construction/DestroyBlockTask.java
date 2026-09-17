@@ -611,10 +611,12 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _occluderTarget;
 
     // (2026-09-16 藤蔓裹木) 当前挡块是否为无碰撞方块 (藤蔓/花/雪片一类 climbable
-    // 或装饰块)。这类方块 COLLIDER 射线必穿透 → LookHelper.getReach (同样 COLLIDER
-    // 口径) 必 miss → 不能走常规 rotation 瞄准, 改瞄准星口径 (VISUAL) 命中点。
+    // 或装饰块)。这类方块 COLLIDER 射线必穿透 → LookHelper.getReach 必 miss (该
+    // 方法走 baritone `RotationUtils.reachable` → `RayTraceUtils.rayTraceTowards`,
+    // 20260917 反编译实锤用的是 **OUTLINE**, 不是 COLLIDER) → 不能走常规 rotation
+    // 瞄准, 改瞄准星口径 (OUTLINE) 命中点。
     private boolean _occNoCollision = false;
-    /** 无碰撞挡块的本 tick 瞄准点 (VISUAL 射线命中位置), 每 tick 刷新。 */
+    /** 无碰撞挡块的本 tick 瞄准点 (OUTLINE 射线命中位置), 每 tick 刷新。 */
     private Vec3d _occAim = null;
 
     /**
@@ -671,16 +673,31 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     }
                 }
             }
-            // (2026-09-16 藤蔓裹木) COLLIDER 射线对藤蔓穿透 (藤蔓无碰撞箱) → 判
-            // "无遮挡", 撸藤分支永不触发。现场 20260916-140459: 目标 (-55,73,28)
-            // 被 vine 包裹, 整场零 [OccluderClear], 左键一次没按 (准星被藤挡,
-            // isLookingAt 恒 false), 1 分钟打不满黑名单 4 次。补一条准星口径
-            // (VISUAL=outline 形状, 与游戏准星同源) 的射线: COLLIDER 说"畅通"而
-            // 准星实际被挡的 climbable/装饰可挖方块 (藤/花/雪片) 按挡块处理。
+            // (2026-09-16 藤蔓裹木 / 2026-09-17 重写) COLLIDER 射线对藤蔓穿透 (藤蔓无
+            // 碰撞箱) → 判 "无遮挡", 撸藤分支永不触发。现场 20260916-140459: 目标
+            // (-55,73,28) 被 vine 包裹, 整场零 [OccluderClear], 左键一次没按 (准星被
+            // 藤挡, isLookingAt 恒 false), 1 分钟打不满黑名单 4 次。补一条准星口径的
+            // 射线: COLLIDER 说"畅通"而准星实际被挡的 climbable/装饰可挖方块 (藤/花/
+            // 雪片) 按挡块处理。
+            //
+            // ⚠ (2026-09-17 修正 — 09-16 那版挑错了枚举, 补丁是死代码) 原版写
+            // `ShapeType.VISUAL` 并注释 "VISUAL=outline 形状, 与游戏准星同源" ——
+            // **语义正好写反了**。反编译实锤 (MC 1.18.2):
+            //   COLLIDER → AbstractBlockState.getCollisionShape (= collidable ? outline : empty)
+            //   OUTLINE  → AbstractBlockState.getOutlineShape   ← 准星口径
+            //   VISUAL   → AbstractBlockState.getCameraCollisionShape, 而 AbstractBlock
+            //              的该方法是 `return getCollisionShape(...)` —— 直接转发碰撞箱
+            // 即: 对任何 collidable=false 的软方块 (藤/草/花/作物/雪片), **VISUAL 与
+            // COLLIDER 完全等价, 都是 VoxelShapes.empty(), 射线照旧穿透**。证据: 修复
+            // 上线后 `visual/no-collision` 这个唯一命中标记在全部历史日志中出现 0 次 =
+            // 该分支从未选中过任何方块。藤蔓有 outline、无碰撞箱, 只有 OUTLINE 看得见。
+            // 现场 20260917-101125 复核: 藤蔓挡在 bot 与目标原木之间, 两条射线双双穿透
+            // → occ 恒 null → 本方法恒 false → 左键永不按下, 而外层 reach(OUTLINE)
+            // 恒空 → 每 4s 白交接一次 baritone 顺藤爬 ("抱着藤蔓上下爬")。
             // 严格增量: COLLIDER 已命中的实心挡块 (树叶等) 走原路径, 行为不变。
             if (occ == null) {
                 BlockHitResult vhit = mod.getWorld().raycast(new RaycastContext(eye, center,
-                        RaycastContext.ShapeType.VISUAL, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+                        RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
                 if (vhit.getType() == HitResult.Type.BLOCK) {
                     BlockPos vfound = vhit.getBlockPos();
                     if (!vfound.equals(_pos)) {
@@ -697,12 +714,15 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             if (occ == null) return false;
         }
         // 无碰撞挡块 (藤蔓类): COLLIDER 口径的 getReach 必 miss (射线穿它而过),
-        // 不能因 rotation 缺失放弃; 瞄准点每 tick 用 VISUAL 射线刷新 (藤蔓断面
-        // 随附着面变化, 固定旧点可能脱靶)。VISUAL 现在命中的已不是 latched 挡块
+        // 不能因 rotation 缺失放弃; 瞄准点每 tick 用 OUTLINE 射线刷新 (藤蔓断面
+        // 随附着面变化, 固定旧点可能脱靶)。OUTLINE 现在命中的已不是 latched 挡块
         // (挡块还在但被更近的东西挡住等罕见情形) → 退回挡块中心, latch 仍锁原块。
+        // ⚠ 这里同样必须是 OUTLINE —— 与准星 (crosshairTarget) 同口径, 也是
+        // `isLookingAt(occ)` 用来判"能不能出刀"的那条; 09-16 的 VISUAL 版对软方块
+        // 等于碰撞箱口径 → 恒 miss, 目标点只能退化到方块中心 (见上方 2026-09-17 修正)。
         if (_occNoCollision) {
             BlockHitResult vhit = mod.getWorld().raycast(new RaycastContext(eye, center,
-                    RaycastContext.ShapeType.VISUAL, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+                    RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
             _occAim = (vhit.getType() == HitResult.Type.BLOCK && vhit.getBlockPos().equals(occ))
                     ? vhit.getPos()
                     : Vec3d.ofCenter(occ);
@@ -734,7 +754,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             _lastOccluderLogged = occ;
             Debug.logToFile("altoclef_diag.log", "[OccluderClear] clearing " + occ.toShortString()
                     + " (" + mod.getWorld().getBlockState(occ).getBlock()
-                    + (_occNoCollision ? ", visual/no-collision" : "") + ") blocking target="
+                    + (_occNoCollision ? ", outline/no-collision" : "") + ") blocking target="
                     + _pos.toShortString());
         }
         setDebugState("Clearing occluder " + occ.toShortString() + " in front of " + _pos.toShortString());
