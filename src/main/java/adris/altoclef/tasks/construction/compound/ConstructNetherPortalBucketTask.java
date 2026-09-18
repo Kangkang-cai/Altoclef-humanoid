@@ -24,7 +24,11 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3i;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Build a nether portal by casting each piece with water + lava.
@@ -65,6 +69,17 @@ public class ConstructNetherPortalBucketTask extends Task {
     // This can only really be explained visually, sorry!
     private static final Vec3i PORTALABLE_REGION_SIZE = new Vec3i(4, 6, 6);
     private static final Vec3i PORTAL_ORIGIN_RELATIVE_TO_REGION = new Vec3i(1, 0, 2);
+
+    // (2026-09-18 复用已有门结构) 见 findReusablePortalStructure 头注。
+    //   PORTAL_REUSE_RADIUS     = 水平搜索半径 (格); 现场旧门距玩家 ~6 格, 16 足够。
+    //   PORTAL_REUSE_VERTICAL   = 垂直搜索半径 (格); 门常与玩家同层, ±8 覆盖台阶差。
+    //   PORTAL_REUSE_MIN_FRAMES = 认定阈值: 门框 10 格中至少已存在几块黑曜石。
+    //     4 = "搭到 40% 以上"即认; 再小会把岩浆湖边天然/残留黑曜石误当门框。
+    //   扫描量 ≈ (2*16+1) * (2*8+1) * (2*16+1) ≈ 1.85 万格, 与
+    //   findNearestLavaSourceAround(16, 8) 同量级 (该处注释已认定开销可接受)。
+    private static final int PORTAL_REUSE_RADIUS = 16;
+    private static final int PORTAL_REUSE_VERTICAL = 8;
+    private static final int PORTAL_REUSE_MIN_FRAMES = 4;
     private final TimerGame _lavaSearchTimer = new TimerGame(5);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
@@ -75,6 +90,14 @@ public class ConstructNetherPortalBucketTask extends Task {
     private final Task _collectLavaTask = TaskCatalogue.getItemTask(Items.LAVA_BUCKET, 1);
     private final TimerGame _refreshTimer = new TimerGame(11);
     private BlockPos _portalOrigin = null;
+    // (2026-09-18 复用已有门结构) 门的朝向: 0..3 = 绕 y 轴转 0/90/180/270 度。
+    // 模板 PORTAL_FRAME / PORTAL_INTERIOR 是硬编码"法线 = x 轴"的那一个朝向;
+    // 复用到 worldgen 废弃门时朝向可能不同, 故所有模板消费点都要过 rotateY()。
+    private int _portalRotation = 0;
+    // 原点来源: true = 复用附近已有框架 (框可能已齐, 不必浇铸), false = 全新建造。
+    // 唯一行为差异 = 跳过"先囤 2 个桶"的预检 (见 onTick), 因为复用场景很可能
+    // 一块都不需要浇铸; 真缺框时 PlaceObsidianBucketTask 内部自会去拿桶 (它自给自足)。
+    private boolean _reuseMode = false;
 
     //private BlockPos _currentLavaTarget = null;
     private boolean _firstSearch = false;
@@ -92,7 +115,7 @@ public class ConstructNetherPortalBucketTask extends Task {
             if (_portalOrigin != null) {
                 // Don't break frame
                 for (Vec3i framePosRelative : PORTAL_FRAME) {
-                    BlockPos framePos = _portalOrigin.add(framePosRelative);
+                    BlockPos framePos = _portalOrigin.add(rotateY(framePosRelative, _portalRotation));
                     if (block.equals(framePos)) {
                         return mod.getWorld().getBlockState(framePos).getBlock() == Blocks.OBSIDIAN;
                     }
@@ -122,6 +145,9 @@ public class ConstructNetherPortalBucketTask extends Task {
         // 在 317,34,84, 相距 400+ 格)。改成 100 格, bot 远离原点后重新就近选点。
         if (_portalOrigin != null && !_portalOrigin.isWithinDistance(mod.getPlayer().getPos(), 100)) {
             _portalOrigin = null;
+            // 原点作废 => 复用判定与朝向一并作废, 下轮重新决定。
+            _reuseMode = false;
+            _portalRotation = 0;
         }
 
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
@@ -132,8 +158,11 @@ public class ConstructNetherPortalBucketTask extends Task {
 
 
         // Get bucket if we don't have one.
+        // (2026-09-18 复用模式豁免) 复用到的框架可能已完整 —— 那就一块都不用浇铸,
+        // 却仍要跑去挖铁做两个桶, 纯白跑。复用模式下跳过这道预检; 真缺框时
+        // PlaceObsidianBucketTask 内部自己会去拿桶 (自给自足, 见其 onTick L77-83/L146-149)。
         int bucketCount = mod.getItemStorage().getItemCount(Items.BUCKET, Items.LAVA_BUCKET, Items.WATER_BUCKET);
-        if (bucketCount < 2) {
+        if (!_reuseMode && bucketCount < 2) {
             setDebugState("Getting buckets");
             _progressChecker.reset();
             // If we have lava/water, get the inverse. Otherwise we dropped a bucket, just get a bucket.
@@ -159,7 +188,9 @@ public class ConstructNetherPortalBucketTask extends Task {
         if (needsToLookForPortal) {
             _progressChecker.reset();
             // Get water before searching, just for convenience.
-            if (!mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
+            // (2026-09-18 复用模式豁免) 复用到的框架已完整时一滴水都用不上;
+            // 真缺框时 PlaceObsidianBucketTask 内部自己会去拿水 (其 onTick L146-149)。
+            if (!_reuseMode && !mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
                 setDebugState("Getting water");
                 _progressChecker.reset();
                 return TaskCatalogue.getItemTask(Items.WATER_BUCKET, 1);
@@ -170,22 +201,48 @@ public class ConstructNetherPortalBucketTask extends Task {
             if (_firstSearch || _lavaSearchTimer.elapsed()) {
                 _firstSearch = false;
                 _lavaSearchTimer.reset();
-                Debug.logMessage("(Searching for lava lake with portalable spot nearby...)");
-                BlockPos lavaPos = findLavaLake(mod, mod.getPlayer().getBlockPos());
-                if (lavaPos != null) {
-                    // We have a lava lake, set our portal origin!
-                    // (2026-08-23) timeoutRange 20 → 8: 就近原则, 传送门应在岩浆
-                    // 旁 5-6 格, 不在岩浆上 (用户设计)。20 会外推到很远的可放置点,
-                    // 让传送门远离刚收集的岩浆。
-                    BlockPos foundPortalRegion = getPortalableRegion(mod, lavaPos, mod.getPlayer().getBlockPos(), new Vec3i(-1, 0, 0), PORTALABLE_REGION_SIZE, 8);
-                    if (foundPortalRegion == null) {
-                        Debug.logWarning("Failed to find portalable region nearby. Consider increasing the search timeout range");
+
+                // (2026-09-18 复用已有门结构) 先看附近有没有可补全的框架, 再考虑新建。
+                //
+                // 背景 (现场 20260918-113247 实锤): bot 上一场在 -123,77,260 把门框整个搭好、
+                // 只差清内部+点燃, 会话重启后 _portalOrigin 归零, 而本类**完全不查任何门记忆**
+                // (WorldMemory.getPortalLocations 只认已激活的紫块, 半成品不在内), 于是在 6 格
+                // 外的 -121,74,264 又浇了一座 —— 同一个岩浆湖边并排两座门。
+                // 更讽刺的是它 11:33:06 刚把旧门框记成 RUINED_PORTAL 地标 (landmark = 黑曜石),
+                // 即"看见了那 10 块黑曜石, 但语义上认成了世界生成的废弃门"。
+                //
+                // 命中后只做一件事: 把 _portalOrigin / _portalRotation 对齐上去。
+                // 下游三条逻辑天然接管 —— 框循环对"已是黑曜石"的框位本就 continue, 内部清理
+                // 与点燃也只看原点, 与"这扇门是谁搭的"无关。框全齐时连岩浆都不需要。
+                BlockPos reusable = findReusablePortalStructure(mod);
+                if (reusable != null) {
+                    Debug.logMessage("(Reusing existing portal frame, origin=" + reusable.toShortString()
+                            + " rot=" + _portalRotation + ")");
+                    _portalOrigin = reusable;
+                    _reuseMode = true;
+                    foundSpot = true;
+                }
+
+                if (!foundSpot) {
+                    Debug.logMessage("(Searching for lava lake with portalable spot nearby...)");
+                    BlockPos lavaPos = findLavaLake(mod, mod.getPlayer().getBlockPos());
+                    if (lavaPos != null) {
+                        // We have a lava lake, set our portal origin!
+                        // (2026-08-23) timeoutRange 20 → 8: 就近原则, 传送门应在岩浆
+                        // 旁 5-6 格, 不在岩浆上 (用户设计)。20 会外推到很远的可放置点,
+                        // 让传送门远离刚收集的岩浆。
+                        BlockPos foundPortalRegion = getPortalableRegion(mod, lavaPos, mod.getPlayer().getBlockPos(), new Vec3i(-1, 0, 0), PORTALABLE_REGION_SIZE, 8);
+                        if (foundPortalRegion == null) {
+                            Debug.logWarning("Failed to find portalable region nearby. Consider increasing the search timeout range");
+                        } else {
+                            _portalOrigin = foundPortalRegion.add(PORTAL_ORIGIN_RELATIVE_TO_REGION);
+                            _reuseMode = false;
+                            _portalRotation = 0;
+                            foundSpot = true;
+                        }
                     } else {
-                        _portalOrigin = foundPortalRegion.add(PORTAL_ORIGIN_RELATIVE_TO_REGION);
-                        foundSpot = true;
+                        Debug.logMessage("(lava lake not found)");
                     }
-                } else {
-                    Debug.logMessage("(lava lake not found)");
                 }
             }
 
@@ -202,7 +259,7 @@ public class ConstructNetherPortalBucketTask extends Task {
 
         // We have a portal, now build it.
         for (Vec3i framePosRelative : PORTAL_FRAME) {
-            BlockPos framePos = _portalOrigin.add(framePosRelative);
+            BlockPos framePos = _portalOrigin.add(rotateY(framePosRelative, _portalRotation));
             Block frameBlock = mod.getWorld().getBlockState(framePos).getBlock();
             if (frameBlock == Blocks.OBSIDIAN) {
                 // Already satisfied, clear water above if need be.
@@ -247,10 +304,20 @@ public class ConstructNetherPortalBucketTask extends Task {
         // 已知缺口: ClearRegionTask 无可达/失败兜底 (见其文件头 TODO), 若 baritone
         // 因站位问题清不动, 会停在"重派 clearArea"循环 —— 实跑请盯 [NAV-STUCK] 与
         // 任务栈是否长期停在 Clearing inside of portal。
-        BlockPos interiorMin = _portalOrigin;
-        BlockPos interiorMax = _portalOrigin.add(0, 2, 1);
+        // 清除区域 = 旋转后 PORTAL_INTERIOR 的轴对齐包围盒。rot=0 时恰为
+        // origin .. origin+(0,2,1) (1×3×2); 其余朝向不手写 4 套常量, 逐格取 min/max 推出。
+        int iMinX = Integer.MAX_VALUE, iMinY = Integer.MAX_VALUE, iMinZ = Integer.MAX_VALUE;
+        int iMaxX = Integer.MIN_VALUE, iMaxY = Integer.MIN_VALUE, iMaxZ = Integer.MIN_VALUE;
         for (Vec3i offs : PORTAL_INTERIOR) {
-            BlockPos p = _portalOrigin.add(offs);
+            Vec3i r = rotateY(offs, _portalRotation);
+            iMinX = Math.min(iMinX, r.getX()); iMaxX = Math.max(iMaxX, r.getX());
+            iMinY = Math.min(iMinY, r.getY()); iMaxY = Math.max(iMaxY, r.getY());
+            iMinZ = Math.min(iMinZ, r.getZ()); iMaxZ = Math.max(iMaxZ, r.getZ());
+        }
+        BlockPos interiorMin = _portalOrigin.add(iMinX, iMinY, iMinZ);
+        BlockPos interiorMax = _portalOrigin.add(iMaxX, iMaxY, iMaxZ);
+        for (Vec3i offs : PORTAL_INTERIOR) {
+            BlockPos p = _portalOrigin.add(rotateY(offs, _portalRotation));
             assert MinecraftClient.getInstance().world != null;
             if (!MinecraftClient.getInstance().world.getBlockState(p).isAir()) {
                 setDebugState("Clearing inside of portal");
@@ -439,5 +506,158 @@ public class ConstructNetherPortalBucketTask extends Task {
         }
 
         return bestPos;
+    }
+
+    // ==================== (2026-09-18) 复用已有门结构 ====================
+
+    /**
+     * 绕 y 轴把模板偏移旋转 quarterTurns × 90°。
+     *
+     * 模板 (PORTAL_FRAME / PORTAL_INTERIOR) 只描述了**一个**朝向: 门平面法线 = x 轴,
+     * 门宽 2 沿 z, 门高 3 沿 y。复用到 worldgen 废弃传送门时朝向可能不同, 故所有
+     * 模板消费点 (框循环 / 内部循环 / onStart 的框保护谓词) 都必须过本函数。
+     *
+     * 旋转公式 (右手系, y 向上, θ=90°): (x, y, z) -> (z, y, -x)。
+     * 自检: rot=1 时内部 (0,0,1) -> (1,0,0), 门宽由"沿 z"变"沿 x", 法线随之转 90° ✓
+     */
+    private static Vec3i rotateY(Vec3i v, int quarterTurns) {
+        switch (((quarterTurns % 4) + 4) % 4) {
+            case 1:  return new Vec3i(v.getZ(), v.getY(), -v.getX());
+            case 2:  return new Vec3i(-v.getX(), v.getY(), -v.getZ());
+            case 3:  return new Vec3i(-v.getZ(), v.getY(), v.getX());
+            default: return v;
+        }
+    }
+
+    /**
+     * (2026-09-18) 在玩家附近找一座"可补全的门"—— 自己上一场留下的半成品, 或
+     * worldgen 的废弃传送门。命中即把 {@link #_portalRotation} 设为该朝向并返回门
+     * 内部左下角 ({@code _portalOrigin} 口径); 无命中返回 null (调用方照旧新建)。
+     *
+     * 判据 = 用刚性门框模板做拟合。门框 10 格的相对位置是固定的, 所以任取一块黑曜石
+     * 假设它对应模板中的某一格、再枚举 4 个朝向, 就能反推出候选原点:
+     *   {@code origin = 黑曜石 - rotateY(某个框偏移, rot)}
+     * 对每个 (原点, 朝向) 组合统计**该朝向下**真正命中的框数, 取最高分且 &gt;= 阈值者。
+     *
+     * 为什么不用 WorldMemory.getPortalLocations(): 那套只保留 Blocks.NETHER_PORTAL
+     * (已激活的紫块), 半成品门根本不在其列 —— 这正是本函数存在的理由。
+     *
+     * 开销 ≈ 1.85 万格 getBlockState (仅"重新决定门位置"时调用, 5s 节流) + 黑曜石数×40
+     * 次打分; 黑曜石通常几十块, 可忽略。
+     */
+    private BlockPos findReusablePortalStructure(AltoClef mod) {
+        // ① 收集附近黑曜石 (门框的两种材质)
+        List<BlockPos> obsidians = new ArrayList<>();
+        BlockPos center = mod.getPlayer().getBlockPos();
+        for (int dx = -PORTAL_REUSE_RADIUS; dx <= PORTAL_REUSE_RADIUS; dx++) {
+            for (int dz = -PORTAL_REUSE_RADIUS; dz <= PORTAL_REUSE_RADIUS; dz++) {
+                for (int dy = -PORTAL_REUSE_VERTICAL; dy <= PORTAL_REUSE_VERTICAL; dy++) {
+                    BlockPos p = center.add(dx, dy, dz);
+                    Block b = mod.getWorld().getBlockState(p).getBlock();
+                    if (b == Blocks.OBSIDIAN || b == Blocks.CRYING_OBSIDIAN) {
+                        obsidians.add(p.toImmutable());
+                    }
+                }
+            }
+        }
+        if (obsidians.isEmpty()) return null;
+
+        // ② 逐朝向拟合。分朝向跑的原因是 score 必须"单朝向"统计: 若把 4 个朝向的候选
+        //    混进同一个 map, 同一原点的命中数会被跨朝向累加而虚高。
+        //    同分候选按"内部盒子最小角"归并 —— 同一组位置的不同参数化会落到同一个角。
+        int bestHits = 0;
+        Map<BlockPos, PortalCandidate> bestByCorner = new HashMap<>();
+        for (int rot = 0; rot < 4; rot++) {
+            Map<BlockPos, Integer> hits = new HashMap<>();
+            for (BlockPos obs : obsidians) {
+                for (Vec3i frameOff : PORTAL_FRAME) {
+                    Vec3i r = rotateY(frameOff, rot);
+                    BlockPos origin = obs.add(-r.getX(), -r.getY(), -r.getZ());
+                    hits.merge(origin, 1, Integer::sum);
+                }
+            }
+            for (Map.Entry<BlockPos, Integer> e : hits.entrySet()) {
+                int hit = e.getValue();
+                if (hit < PORTAL_REUSE_MIN_FRAMES) continue;
+                BlockPos origin = e.getKey();
+                if (!isPortalShapeUsable(mod, origin, rot)) continue;
+                if (hit > bestHits) {
+                    bestHits = hit;
+                    bestByCorner.clear();
+                }
+                if (hit == bestHits) {
+                    bestByCorner.putIfAbsent(interiorMinCorner(origin, rot),
+                            new PortalCandidate(origin, rot));
+                }
+            }
+        }
+        if (bestHits == 0) return null;
+
+        // ③ 歧义闸门 (2026-09-18 穷举验证后加)。
+        //    "两根侧柱各有相邻 2 格"这类半成品 (恰好 4 块框) 存在**本质歧义**: 它既满足
+        //    "门 = 当前高度", 也满足"门 = 下移一格", 两者得分相同、内部又都空 —— 信息量
+        //    不足, 任何局部判据都消不掉。穷举 4 朝向的全部框子集: 恰好 4 块时 8/840 会分裂,
+        //    >=5 块时 0。选错的后果是把门补到错位一格 (等于拆错方块), 所以保守放弃:
+        //    宁可走新建, 也不赌。代价仅 ~1% 的"4 块框"场景不复用。
+        //    已知局限: 附近若恰好有两座**框数相同**的门, 也会落到这里不复用 —— 同样偏保守。
+        if (bestByCorner.size() > 1) {
+            Debug.logMessage("(Portal reuse ambiguous: " + bestByCorner.size()
+                    + " distinct positions @" + bestHits + " frames — skip reuse, build new)");
+            return null;
+        }
+
+        // ④ 落定朝向与原点 (同角候选互为等价参数化, 取任一, 对下游完全等价)
+        PortalCandidate winner = bestByCorner.values().iterator().next();
+        _portalRotation = winner.rotation;
+        return winner.origin;
+    }
+
+    /**
+     * (2026-09-18) 候选原点是否"像一座值得接手补全的门"。排除四类:
+     *   ① 门内已有 NETHER_PORTAL 紫块 —— 那是**已激活**的门, 不该由建造任务碰
+     *      (紫块硬度 -1 挖不动, 走"清内部"会当场卡死);
+     *   ② 门内有岩浆 —— 浇铸前得先当障碍处理, 且会被持续回填, 不值得接手;
+     *   ③ 门内有基岩 —— 挖不动, 永远清不掉, 接手就是无底洞;
+     *   ④ 门内已是黑曜石 —— 框不可能长在门里面。这条是**消歧主力**: 半成品门被
+     *      误解释成"下移一格/上移一格"时, 错解的"内部"必然压住真门已建成的框
+     *      (穷举验证: 加上这条后, 门框 >=5 块时同分候选全部等价, 0 误判)。
+     * 泥土/石头/水等一律放行: 清内部本来就是本任务的既定步骤。
+     */
+    private boolean isPortalShapeUsable(AltoClef mod, BlockPos origin, int rot) {
+        for (Vec3i offs : PORTAL_INTERIOR) {
+            Vec3i r = rotateY(offs, rot);
+            Block b = mod.getWorld().getBlockState(origin.add(r.getX(), r.getY(), r.getZ())).getBlock();
+            if (b == Blocks.NETHER_PORTAL || b == Blocks.LAVA || b == Blocks.BEDROCK
+                    || b == Blocks.OBSIDIAN || b == Blocks.CRYING_OBSIDIAN) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * (2026-09-18) 门内部包围盒的最小角, 用作"这扇门占哪儿"的规范化指纹。
+     * 同一组位置的不同参数化 (rot=0/origin=X 与 rot=2/origin=X+某偏移) 会得到
+     * 同一个角 —— 正是靠它把"等价描述"合并、把"真歧义"识别出来 (见调用方)。
+     */
+    private static BlockPos interiorMinCorner(BlockPos origin, int rot) {
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        for (Vec3i offs : PORTAL_INTERIOR) {
+            Vec3i r = rotateY(offs, rot);
+            minX = Math.min(minX, r.getX());
+            minY = Math.min(minY, r.getY());
+            minZ = Math.min(minZ, r.getZ());
+        }
+        return origin.add(minX, minY, minZ);
+    }
+
+    /** 拟合出的一个候选门: 原点 + 朝向。 */
+    private static final class PortalCandidate {
+        final BlockPos origin;
+        final int rotation;
+        PortalCandidate(BlockPos origin, int rotation) {
+            this.origin = origin;
+            this.rotation = rotation;
+        }
     }
 }
