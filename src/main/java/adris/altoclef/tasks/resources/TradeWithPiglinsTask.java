@@ -33,6 +33,7 @@ import net.minecraft.util.math.BlockPos;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 
 public class TradeWithPiglinsTask extends ResourceTask {
@@ -217,7 +218,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
         }
 
         // If we have no piglin nearby, explore until we find piglin.
-        if (!mod.getEntityTracker().entityFound(PiglinEntity.class)) {
+        // (2026-09-18) 幼年猪灵不算"发现": 堡垒 (bastion) 里大多是幼年猪灵 +
+        // 蛮兵, 幼年不能交易但会让 entityFound 恒真 → bot 被钉死在堡垒里
+        // wander, 永不切回探索找成年猪灵 (173821 会话 17:54~17:56 no-target
+        // 洪流 + 偶发单笔成功, 与此完全吻合)。
+        if (!mod.getEntityTracker().entityFound(
+                e -> !(e instanceof LivingEntity le && le.isBaby()), PiglinEntity.class)) {
             // (2026-09-18 追最后已知位置) 20s 感知记忆过期但仍在 30s 宽限期内
             // → 继续交易子任务 (其内部会走向最后已知位置), 而不是掉回探索。
             // 场景: bot 在猪灵头顶下挖接近, 视线/声音断流满 20s 被判丢失
@@ -288,6 +294,8 @@ public class TradeWithPiglinsTask extends ResourceTask {
         // 的蛮兵过滤原先是静默 return false, 实跑完全无法验证。落盘不进聊天
         // ([Diag-creeper] 先例), 2s 节流。
         private long _lastBruteGuardLogMs = 0;
+        // (2026-09-18 空池取证) 5s 节流。
+        private long _lastEmptyPoolDiagMs = 0;
         // (2026-09-14 212757 场次 误拉黑宽限窗) 上一次"猪灵丢出战利品"边沿的
         // 墙钟时间。丢战利品 = 上一笔交易成功的铁证; 之后即使 2s barterTimeout
         // 因任务切换延迟 (见 notifyBarterLootCycle 注释) 到期, 也不该拉黑刚
@@ -591,6 +599,34 @@ public class TradeWithPiglinsTask extends ResourceTask {
                     _currentlyBartering = null;
                 }
                 found = Optional.ofNullable(_currentlyBartering);
+            }
+            // (2026-09-18 空池取证) no-target 的分类原因此前完全不可见 (黑名单/
+            // 蛮兵两轮排查都靠"猜测+排除法")。空池时按过滤链顺序给每个猪灵
+            // 归因, 5s 节流落盘。
+            if (found.isEmpty()) {
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - _lastEmptyPoolDiagMs > 5000) {
+                    _lastEmptyPoolDiagMs = nowMs;
+                    List<Entity> all = mod.getEntityTracker().getTrackedEntities(PiglinEntity.class);
+                    int admiring = 0, baby = 0, blacklisted = 0, farFromBartering = 0, hoglinBlocked = 0, bruteHard = 0;
+                    for (Entity p : all) {
+                        if (isBlacklisted(p)) { blacklisted++; continue; }
+                        if (EntityHelper.isTradingPiglin(p)) { admiring++; continue; }
+                        if (p instanceof LivingEntity le && le.isBaby()) { baby++; continue; }
+                        if (_currentlyBartering != null && !p.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS)) { farFromBartering++; continue; }
+                        Optional<Entity> hoglin = AVOID_HOGLINS
+                                ? mod.getEntityTracker().getClosestEntity(p.getPos(), HoglinEntity.class) : Optional.empty();
+                        if (hoglin.isPresent() && hoglin.get().isInRange(p, HOGLIN_AVOID_TRADE_RADIUS)) { hoglinBlocked++; continue; }
+                        if (bruteNear(mod, p, BRUTE_HARD_TRADE_RADIUS)) { bruteHard++; continue; }
+                        // 走到这里 = 只被 32 格软偏好挡的 (两层池都有它才算"可用")
+                    }
+                    Debug.logToFile("altoclef_diag.log", "[PiglinTrade-DIAG]\tno target: tracked=" + all.size()
+                            + " admiring=" + admiring + " baby=" + baby + " blacklisted=" + blacklisted
+                            + " farFromBartering=" + farFromBartering + " hoglinBlocked=" + hoglinBlocked
+                            + " bruteHard=" + bruteHard
+                            + " currentlyBartering=" + (_currentlyBartering == null ? "null" : _currentlyBartering.getBlockPos().toShortString())
+                            + " player=" + mod.getPlayer().getBlockPos().toShortString());
+                }
             }
             return found;
         }
