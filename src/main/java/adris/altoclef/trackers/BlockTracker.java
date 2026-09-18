@@ -429,6 +429,53 @@ public class BlockTracker extends Tracker {
         }
     }
 
+    /**
+     * (2026-09-18 统一"看见某类方块"口径) 全项目唯一入口 —— 别再各处各写一份
+     * (本项目已有"地表判据 7 份口径各自漂移"的教训, 见 detail/03-consistency.md)。
+     *
+     * <p>三段式, 逐段收紧、越贵越靠后:
+     * <ol>
+     *   <li><b>候选</b> = 近区/远区扫描喂进来的缓存 ({@code getKnownLocations}),
+     *       且不超过 {@code maxRange} —— 缓存里没有 = bot 压根没"探到"过;</li>
+     *   <li><b>FOV 锥</b> ({@code VisibilityHelper.isBlockInView}): 背对的不算看见。
+     *       纯向量点积, 极便宜, 放在射线之前能砍掉绝大多数候选;</li>
+     *   <li><b>LOS 射线</b> ({@code VisibilityHelper.isBlockPerceivable}): 最贵,
+     *       只对最近的 {@code maxChecks} 个做 —— 缓存动辄上万条, 全量射线扛不住。</li>
+     * </ol>
+     *
+     * <p>与 {@link #getPerceivedLocations} 的关系: 那个只做全量 LOS、不做 FOV 也不限量
+     * (老口径, 有调用方依赖其语义, 不动); 需要"拟人地看见"请用本方法。
+     *
+     * @return 最近的一个通过 FOV + LOS 的位置, 没有则 empty。
+     */
+    public Optional<BlockPos> getNearestPerceivedInView(double maxRange, int maxChecks, Block... blocks) {
+        updateState();
+        if (_mod.getPlayer() == null) return Optional.empty();
+        BlockPos player = _mod.getPlayer().getBlockPos();
+        double maxRangeSq = maxRange * maxRange;
+        List<BlockPos> candidates = new ArrayList<>();
+        synchronized (_scanMutex) {
+            for (BlockPos pos : currentCache().getKnownLocations(blocks)) {
+                if (pos.getSquaredDistance(player) <= maxRangeSq) {
+                    candidates.add(pos);
+                }
+            }
+        }
+        if (candidates.isEmpty()) return Optional.empty();
+        // FOV 锥先筛 (便宜): 背后的不算"看见"。
+        candidates.removeIf(pos -> !VisibilityHelper.isBlockInView(_mod, pos));
+        if (candidates.isEmpty()) return Optional.empty();
+        candidates.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(player)));
+        int limit = Math.min(maxChecks, candidates.size());
+        for (int i = 0; i < limit; ++i) {
+            BlockPos check = candidates.get(i);
+            if (VisibilityHelper.isBlockPerceivable(_mod, check)) {
+                return Optional.of(check);
+            }
+        }
+        return Optional.empty();
+    }
+
     public Optional<BlockPos> getNearestWithinRange(BlockPos pos, double range, Block... blocks) {
         return getNearestWithinRange(new Vec3d(pos.getX(), pos.getY(), pos.getZ()), range, blocks);
     }

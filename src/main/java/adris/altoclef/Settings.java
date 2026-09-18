@@ -718,8 +718,11 @@ public class Settings implements IFailableConfigFile {
     /** 总开关: 主线 (烈焰棒/防火药水) 进行中是否允许顺手进林子刷珍珠。 */
     private boolean opportunisticWarpedForestPearls = true;
 
-    /** 多远以内的"林子信号方块"算看见森林 (只取 LOS+FOV 通过的, 即 bot 自己的视力)。 */
-    private double opportunisticPearlSightRange = 48;
+    /**
+     * "看见森林"的最远距离。与 {@code VisibilityHelper.MAX_VIEW_DISTANCE} (人类视距 64)
+     * 同口径 —— 不另起一套常量。候选还必须过 FOV 锥 + LOS 射线才算真看见。
+     */
+    private double opportunisticPearlSightRange = 64;
 
     /** 烈焰棒优先半径: 感知到这个距离内有烈焰人 / 地上有烈焰棒(粉) → 不打珍珠, 让位主线。 */
     private double opportunisticPearlBlazePriorityRange = 32;

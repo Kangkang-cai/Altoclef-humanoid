@@ -62,7 +62,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
-import net.minecraft.world.biome.BiomeKeys;
 import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.*;
@@ -2882,44 +2881,18 @@ public class BeatMinecraft2Task extends Task {
     /**
      * (2026-09-18) bot 用"自己的视力"找诡异森林, 返回锚点 (没有则 null)。
      *
-     * <p>两级判据:
-     * <ol>
-     *   <li>脚下生物群系就是诡异森林 —— 身处林中是最强证据, O(1)。</li>
-     *   <li>否则取附近"林子信号方块"(菌岩/菌菇/菌索/疣块)里最近的若干个做
-     *       LOS+FOV 判定, 第一个真正看得见的作为锚点。刻意【不】用 chunk 透视
-     *       (SearchChunkForBlockTask 那套), 保持拟人。</li>
-     * </ol>
+     * <p>口径全项目统一 (不再自造): 走 {@code BlockTracker.getNearestPerceivedInView}
+     * —— 候选来自 BlockTracker 的近区(5Hz/半径16/全采样)+远区(4s/半径128/稀疏采样)
+     * 扫描缓存, 再依次过 <b>FOV 锥</b> 与 <b>LOS 射线</b>。刻意【不】用 chunk 透视
+     * (SearchChunkForBlockTask 那套), 保持拟人。
      */
     private BlockPos findPerceivedWarpedForest(AltoClef mod) {
-        BlockPos playerPos = mod.getPlayer().getBlockPos();
-        var biome = mod.getWorld().getBiome(playerPos);
-        if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
-            return playerPos;
-        }
-        // 取候选: 先用"记忆位置 + 距离过滤"收敛, 再只对最近的几个做 LOS。
-        // 没有直接用 BlockTracker.getPerceivedLocations() 是因为它对全部缓存位置逐
-        // 个射线, 诡异森林里菌岩缓存动辄上万条, 每秒一次也扛不住 (该类注释本身
-        // 就警告"不要对海量方块全量过滤")。效果等价: 都是"必须 LOS+FOV 通过"。
         Block[] signals = CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS;
         mod.getBlockTracker().trackBlock(signals);
-        double range = mod.getModSettings().getOpportunisticPearlSightRange();
-        double rangeSq = range * range;
-        List<BlockPos> candidates = new ArrayList<>();
-        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(signals)) {
-            if (pos.getSquaredDistance(playerPos) <= rangeSq) {
-                candidates.add(pos);
-            }
-        }
-        if (candidates.isEmpty()) return null;
-        candidates.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos)));
-        int limit = Math.min(PEARL_FOREST_LOS_CANDIDATES, candidates.size());
-        for (int i = 0; i < limit; ++i) {
-            BlockPos check = candidates.get(i);
-            if (VisibilityHelper.isBlockPerceivable(mod, check)) {
-                return check;
-            }
-        }
-        return null;
+        return mod.getBlockTracker().getNearestPerceivedInView(
+                        mod.getModSettings().getOpportunisticPearlSightRange(),
+                        PEARL_FOREST_LOS_CANDIDATES, signals)
+                .orElse(null);
     }
 
     private int getTargetBeds(AltoClef mod) {
