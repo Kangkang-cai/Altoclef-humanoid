@@ -36,7 +36,9 @@ public class AltoClefCommands {
                 // (2026-09-11 P2) 异常看门狗状态查询。
                 new AnomalyCommand(),
                 // (2026-09-17) 训练数据集录制开关/状态。
-                new RecordCommand()
+                new RecordCommand(),
+                // (2026-09-18) 永久夜视开关 (录屏画面在暗处可读, 光影下也适用)。
+                new NightVisionCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

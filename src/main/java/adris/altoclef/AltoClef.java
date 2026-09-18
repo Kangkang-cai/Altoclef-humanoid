@@ -36,6 +36,8 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
@@ -244,6 +246,9 @@ public class AltoClef implements ModInitializer {
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
             adris.altoclef.trackers.WorldStateGuard.tick(this);
+            // (2026-09-18 永久夜视) 客户端常挂夜视, 纯视觉: 录屏画面在暗处可读。
+            // 用夜视而非 gamma, 是因为 gamma 在光影下会被覆盖 (详见方法注释)。
+            tickPermanentNightVision();
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)
@@ -586,6 +591,48 @@ public class AltoClef implements ModInitializer {
         if (_lavaNavSuppressActive) {
             getClientBaritoneSettings().blockPlacementPenalty.value =
                     Math.min(getClientBaritoneSettings().blockPlacementPenalty.value, LAVA_NAV_PLACE_PENALTY_CAP);
+        }
+    }
+
+    // ==== 永久夜视 (2026-09-18) ====
+    // 挂多久: 30 分钟一份。不用 Integer.MAX_VALUE 是怕极端时长在 HUD 上显示成
+    // "**:**" 之类的怪东西, 反正下面会按剩余时间自动续。
+    private static final int NIGHT_VISION_DURATION_TICKS = 20 * 60 * 30;
+
+    // 只在我们自己挂过之后才知道"关开关时要撤掉谁": 如果是服务器给的夜视(喝了药水),
+    // 不该由这个开关来撤 —— 否则关一次开关就把 bot 的药水效果也清了。
+    private boolean _nightVisionAppliedByUs = false;
+
+    /**
+     * 客户端侧常挂夜视, 保证录屏/采集画面在夜晚/矿洞/下界能看清。
+     *
+     * <p>【为什么用夜视而不是 gamma】光影 (Iris/OptiFine) 接管画面亮暗后, 原版 gamma
+     * 会被忽略; 而 1.18.2 的夜视是融进 lightmap 纹理的, 光影普遍要采样 lightmap,
+     * 所以夜视在光影下依然生效。这是"装了光影也适用"的关键。
+     *
+     * <p>纯视觉改动: 不碰任何任务/寻路判据 (bot 读世界靠方块与实体数据, 不看亮度)。
+     * 效果只在客户端添加, 服务器不知情, 无服务端副作用。
+     */
+    private void tickPermanentNightVision() {
+        ClientPlayerEntity player = getPlayer();
+        if (player == null || _settings == null) return;
+
+        if (!_settings.isForceNightVisionEnabled()) {
+            if (_nightVisionAppliedByUs) {
+                player.removeStatusEffect(StatusEffects.NIGHT_VISION);
+                _nightVisionAppliedByUs = false;
+                Debug.logMessage("[NightVision] 开关关闭, 已移除客户端夜视");
+            }
+            return;
+        }
+
+        StatusEffectInstance current = player.getStatusEffect(StatusEffects.NIGHT_VISION);
+        int refreshTicks = (int) (_settings.getNightVisionRefreshBelowSeconds() * 20);
+        if (current == null || current.getDuration() < refreshTicks) {
+            // 无粒子 + 无 HUD 图标: 录屏画面不该出现效果图标和粒子。
+            player.addStatusEffect(new StatusEffectInstance(StatusEffects.NIGHT_VISION,
+                    NIGHT_VISION_DURATION_TICKS, 0, false, false, false));
+            _nightVisionAppliedByUs = true;
         }
     }
 

@@ -726,6 +726,28 @@ public class Settings implements IFailableConfigFile {
     private boolean recordDatasetEnabled = true;
 
     /**
+     * (2026-09-18) 客户端侧永久夜视: 常挂一份无图标/无粒子的夜视效果, 让录屏画面
+     * 在夜晚/矿洞/下界不至于全黑。
+     *
+     * <p>【为什么不是 gamma】: 项目里的 {@code @gamma} 命令改的是 {@code options.gamma},
+     * 那是原版渲染管线的亮度; 装了 Iris/OptiFine 光影后, 画面亮暗由光影自己的曝光与
+     * 色调映射决定, gamma 会被直接忽略。而 1.18.2 的夜视是写进 lightmap 纹理的
+     * ({@code LightmapTextureManager}), 绝大多数光影都要采样 lightmap, 所以夜视在
+     * 光影下仍然生效 —— 这是本开关选夜视而非拉 gamma 的唯一原因。
+     *
+     * <p>纯视觉改动: bot 读世界状态走的是方块/实体数据, 不依赖画面亮度, 因此不影响
+     * 任何任务逻辑。效果只加在客户端, 服务器不知道, 不产生任何服务端副作用。
+     * 默认开启 (用途是录制可读画面)。{@code @nightvision off} 可运行时关掉。
+     */
+    private boolean forceNightVision = true;
+
+    /**
+     * (2026-09-18) 夜视剩余时间低于该秒数就补挂一次。用来兜住"牛奶/死亡/服务器同步"
+     * 把客户端效果清掉的情况 —— 补挂最快下一 tick 生效, 录屏最多丢一帧两帧。
+     */
+    private double nightVisionRefreshBelowSeconds = 300;
+
+    /**
      * (2026-09-17) 每帧导出的可见方块上限 (按距离由近到远截断)。
      * 防"海洋群系 24 万格水"这类极端场景撑爆单帧 (见 VisibilityHelper 的水体过滤约定)。
      * 设为 0 表示完全不导出方块通道 (D)。
@@ -836,6 +858,25 @@ public class Settings implements IFailableConfigFile {
      */
     public void setRecordDatasetEnabled(boolean value) {
         recordDatasetEnabled = value;
+    }
+
+    // ==== 永久夜视 (2026-09-18) ====
+
+    public boolean isForceNightVisionEnabled() {
+        return forceNightVision;
+    }
+
+    /**
+     * (2026-09-18) 运行时开关 ({@code @nightvision on/off})。跟录制开关一样, 只改内存
+     * 字段, 【不】回写 altoclef_settings.json; 想默认关掉请直接改配置文件的
+     * {@code forceNightVision}。
+     */
+    public void setForceNightVisionEnabled(boolean value) {
+        forceNightVision = value;
+    }
+
+    public double getNightVisionRefreshBelowSeconds() {
+        return nightVisionRefreshBelowSeconds;
     }
 
     public int getRecordPerceptionMaxBlocks() {
