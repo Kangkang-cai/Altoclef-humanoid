@@ -3,11 +3,15 @@ package adris.altoclef.util.helpers;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.Dimension;
+import net.minecraft.tag.BlockTags;
+import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.Heightmap;
+import net.minecraft.world.World;
 
 /**
- * (2026-09-17 判据统一 → 2026-09-17 二次重构·多判据) 「bot 是否在地下」的全项目唯一判据。
+ * (2026-09-17 判据统一 → 0917 二次重构·多判据 → 0918 三次重构·弃高度图改逐块扫描)
+ * 「bot 是否在地下」的全项目唯一判据。
  *
  * <h3>要回答的问题, 不是"看不看得见天"</h3>
  * 消费方要的是: <b>"我现在处在【露天活动层】吗?"</b>——能不能就地干地表活(砍树/收食物/做床),
@@ -23,48 +27,36 @@ import net.minecraft.world.Heightmap;
  * <pre>
  *   判据0 维度退化    非主世界 → 退回 y &lt; 58 (下界有基岩顶、末地有穹顶, 海拔法无意义)
  *   判据1 地形埋深    5 点采样(自身列 + 4 水平邻柱同高)的【头顶地形格数中位数】≤ 4 → 地表
- *   判据2 植被不算地板 判据1 的"地形"用排除树叶的高度图 → 树冠/藤蔓/水面不构成"埋"
+ *   判据2 植被不算地板 取值时跳过树叶/原木/植物 → 树冠/藤蔓不构成"埋"
  *   判据3 水平近邻露天 埋深在 5..8 的临界带时, 半径 3 的水平环内有列埋深 ≤ 4 → 地表
  *        (语义: "头顶被岩檐遮住, 但一步之外就是露天" → 仍在活动层)
  *   判据4 时间迟滞    结论翻面须距上次翻面 ≥ 5s (抹平地形过渡/边界抖动)
+ *   判据5 未知不翻面  采样列区块未加载 → 该列记 UNKNOWN; 有效点 &lt; 3 时维持现状, 不许翻面
  * </pre>
- * 判据1 的取值语义: {@code topNoLeaves(x,z) - (玩家脚 y + 1)} = "<b>该列头顶之上压着几格地层</b>"。
- * ≤0 表示头顶之上无地层(露天或只有植被) → 一定在地表; 数值越大越深。
- * 取 5 点的<b>中位数</b>而不是最小/最大, 是因为两种极端都会翻车:
- * <ul>
- *   <li>取最小 → 深竖井(自己挖的、上方直通露天)会被判"地表", 上层会以为在地表而不去爬出来
- *       (20260917-120830 场次: bot 在 1 格宽竖井里拿洞外 y=79 的原木当目标, 35 分钟上不去);</li>
- *   <li>取最大 → 站在地表但旁边有高墙/树干, 一格之差就判"深地下"。</li>
- * </ul>
- * 中位数 = "多数采样点看到的世界": 竖井里 4 个邻柱都深 → 判地下; 树冠里 5 个点都浅 → 判地表。
+ * 判据1 的取值语义: "该列从头顶往上要挖穿几格【非植被地层】才能见天"。≤4 浅 → 地表; 越大越深。
+ * 取 5 点的<b>中位数</b>而不是最小/最大: 取最小 → 深竖井被判地表(20260917-120830 35 分钟上不去);
+ * 取最大 → 站地表旁边有高墙就判深地下。中位数 = "多数采样点看到的世界"。
  *
- * <h3>为什么必须是"排除树叶"的高度图</h3>
- * {@code MOTION_BLOCKING_NO_LEAVES} = 阻挡移动且非树叶的方块(含流体)的顶 + 1。
- * 树叶在 vanilla 里 <b>没有碰撞体积</b>(材料 LEAVES 的 blocksMovement=false), 它挡光、挡视线,
- * 但从来不挡"我脚下有几格地层"。用 {@code WORLD_SURFACE}(什么都算) 或
- * {@code world.isSkyVisible}(走 WORLD_SURFACE 高度图) 都会把"树冠"读成"天花板"—— 这正是
- * 20260917-143636 事故的直接成因, 见下。
+ * <h3>为什么不能再用高度图 (20260918 定案, 反编译实锤)</h3>
+ * <ul>
+ *   <li>20260918-083636: bot 在 y=-41..-47 的超大洞穴, 23 条 {@code [Diag-water] surfaceGate}
+ *       清一色 {@code topY=-64}(世界底哨兵) → 埋深恒为负 → 恒判"地表"。洞有多大、附近有没有树
+ *       都无关 —— 高度图压根没给真值。</li>
+ *   <li>反编译 {@code Chunk.sampleHeightmap}: 高度图缺失时 {@code populateHeightmaps(EnumSet.of(type))}
+ *       <b>现场新建一张全空高度图</b>, 全空 = 恒返回世界底。{@code MOTION_BLOCKING_NO_LEAVES}
+ *       在客户端 WorldChunk 上正是这种"缺失后建出来但无人维护"的状态 (服务端 serialize 虽然写了它,
+ *       客户端侧从未被跟踪更新; {@code WORLD_SURFACE}/{@code MOTION_BLOCKING} 则正常 ——
+ *       旧版 {@code isSkyVisible} 走 WORLD_SURFACE 一直给真值)。</li>
+ *   <li>结论: <b>本类不再查询任何 Heightmap</b>, 埋深一律用 {@link #SCAN_UP_MAX} 内的逐块扫描
+ *       (块状态是权威数据, 客户端永远有值)。WORLD_SURFACE 高度图只用来给扫描封顶和做诊断对照。</li>
+ * </ul>
  *
  * <h3>翻车史（这些都是实测事故, 别再回去）</h3>
- * 纯 y 阈值:
- * <ul>
- *   <li>露天山谷 y=57 在地表却被判"深地下" → bot 反复爬向山顶。</li>
- *   <li>20260917-120830: {@code MineAndCollectTask} 的"先爬回海平面再找树"锚点用
- *       {@code y < 63-2}, bot 恰在 y=62 → 锚点不注入 → 在 1 格宽阶梯地道里拿洞外
- *       y=79 的原木当目标, 35 分钟上不去。</li>
- * </ul>
- * 单点天空采样: {@code isSkyVisible(pos.up())} 在水面漂浮 bobbing 时交替水/空气, 高度图把水算遮挡
- * → 每 tick 抖一次 (20260916-1146 场次 rejectedFlaps 90+/5s)。
- *
- * <b>5 点 isSkyVisible 多数投票（本类上一版, 已废弃）</b>: 把"树叶遮挡"当"地下"——
- * <ul>
- *   <li>20260917-143636 (用户现场确认"bot 站在橡树树冠里自上而下砍树干"): 14:38:02
- *       {@code [Surface] mode -> below(under cover) (y=66, covered=4/5)}, 4 个水平邻柱
- *       全是 {@code minecraft:oak_leaves}, 判成地下 → 囤木门控(地下必须先把原木攒到 4 以上)
- *       当 tick 把整条床链顶成 {@code GoToSurfaceTask} —— 3 羊毛已到手、只差 3 块木板,
- *       就此整夜再没做成床。树冠 = 地表, 这里判反了。</li>
- *   <li>同类: 自挖 1 格宽竖井/树坑(水平邻柱全是同高的土石壁)也被判地下, 尽管头顶直通露天。</li>
- * </ul>
+ * 纯 y 阈值: 露天山谷 y=57 被判深地下反复爬山; 20260917-120830 y&lt;61 锚点失效 35 分钟上不去。
+ * 单点天空采样: bobbing 每 tick 抖一次 (20260916-1146 rejectedFlaps 90+/5s)。
+ * <b>5 点 isSkyVisible 投票</b>: 树叶算遮挡 → 树冠判地下, 床链被 GoToSurfaceTask 顶碎
+ * (20260917-143636, 3 羊毛在手整夜没做成床)。
+ * <b>NO_LEAVES 高度图</b>: 客户端恒哨兵 -64 → 一切洞穴判地表 (20260918-083636, 本类上一版)。
  *
  * <h3>与统一前 7 种口径的映射（名字保留, 实现在本类）</h3>
  * <pre>
@@ -81,13 +73,13 @@ import net.minecraft.world.Heightmap;
  * <ul>
  *   <li>{@code BeatMinecraft2Task.isBelowSeaLevelDebounced}（y&lt;55）: 判"潜到水下熬夜继续挖"的深度。</li>
  *   <li>{@code WorldHelper.getPitEscapeY}（十字 4 向 × 4/8/12/16 扫对向高墙）: 判"被困峡谷低洼"。</li>
- *   <li>{@code GoToSurfaceTask.inShaft}: 判"站在自挖竖井底部"。与判据1 互补——竖井里"多数点看到的地层"
- *       已经把竖井判对, 但井底若是露天(5 点全浅)则靠它补"四面实心出不去"。</li>
+ *   <li>{@code GoToSurfaceTask.inShaft}: 判"站在自挖竖井底部"。与判据1 互补, 删不得。</li>
  * </ul>
  *
  * <h3>成本</h3>
- * 判据1 = 5 次高度图查询 (O(1) 数组读); 判据3 仅在中位数 5..8 时执行 16 次查询, 且带 500ms 缓存。
- * 迟滞与缓存的 static 状态已接入 {@code WorldStateGuard.registerAll()} 的
+ * 每列最多扫 {@link #SCAN_UP_MAX}(128) 格; 5 点采样带 {@link #SAMPLE_CACHE_MS}(200ms) 缓存,
+ * 每秒最多 ~3200 次块状态读 (远低于 MC 自身光照更新的量级)。判据3 仅在中位数 5..8 时执行,
+ * 带 500ms 缓存。static 状态已接入 {@code WorldStateGuard.registerAll()} 的
  * {@code SurfaceHelper::onWorldBoundary} 复位。
  */
 public final class SurfaceHelper {
@@ -117,6 +109,22 @@ public final class SurfaceHelper {
     /** 判据3 的缓存时长 (16 次查询没必要每 tick 做; 5s 迟滞下 0.5s 陈旧看不出来)。 */
     private static final long RING_CACHE_MS = 500;
 
+    /**
+     * 逐块扫描的向上封顶: 头顶 128 格内没有任何非植被实心 → 判"露天"
+     * (地表任意点离最近的实心地层不会超过 128; 真洞穴顶板必然在 128 内)。
+     */
+    private static final int SCAN_UP_MAX = 128;
+
+    /** 5 点采样缓存时长 (逐块扫描比高度图贵一个量级, 200ms 内复用同一结论)。 */
+    private static final long SAMPLE_CACHE_MS = 200;
+
+    /**
+     * 采样列"不可判定"哨兵 (区块未加载 / 世界未就绪)。
+     * 参与中位数的只有有效点; 有效点 &lt; 3 时整轮判未知 → 维持现状不翻面 (判据5)。
+     * <b>任何比较都必须先判 UNKNOWN</b> —— 它是 Integer.MIN_VALUE, 会被 "≤ NEAR_SURFACE_MAX" 命中。
+     */
+    public static final int UNKNOWN = Integer.MIN_VALUE;
+
     // ===== 迟滞状态 (static: 结论必须跨任务实例存活, 且全局唯一) =====
     // 放 static 的理由与语义: "bot 现在在不在表面"是【全局事实】, 所有调用方
     // 理应看到同一个答案。若各调用方各持一份迟滞, 就会出现 A 说在地表、B 说
@@ -130,6 +138,11 @@ public final class SurfaceHelper {
     private static boolean _ringOpen = false;
     private static long _ringAt = 0;
 
+    // 5 点采样缓存 (pos 相同且未过期时复用; 逐块扫描每秒全量做 5 次没必要)
+    private static int[] _sampleCache = null;
+    private static long _sampleAt = 0;
+    private static BlockPos _samplePos = null;
+
     /**
      * 换存档时复位 (接入 {@code WorldStateGuard})。迟滞状态属于"上个存档的结论",
      * 留着会让新存档的首个判定被旧结论拖 5s。
@@ -141,6 +154,9 @@ public final class SurfaceHelper {
         _flapRejected = 0;
         _ringOpen = false;
         _ringAt = 0;
+        _sampleCache = null;
+        _sampleAt = 0;
+        _samplePos = null;
     }
 
     // ==================================================================
@@ -148,44 +164,106 @@ public final class SurfaceHelper {
     // ==================================================================
 
     /**
-     * 某列"头顶之上的地层格数" = {@code topNoLeaves(x,z) - (y+1)}。
+     * 该列是否是植被/空气类"不算地层"的方块 (判据2 的实体)。
+     * 树叶在 vanilla 里没有碰撞体积; 原木/竹子有碰撞但属于"树", 不是"压在我头顶的地层"
+     * (不然站任何树旁都被判深埋)。植物/雪层本来就不挡移动。水/岩浆<b>算</b>地层 ——
+     * 与旧 {@code MOTION_BLOCKING_NO_LEAVES} 语义(含流体)保持一致。
+     */
+    private static boolean isNotTerrain(World w, int x, int y, int z) {
+        var state = w.getBlockState(new BlockPos(x, y, z));
+        if (state.isAir()) return true;
+        if (state.isIn(BlockTags.LEAVES)) return true;
+        if (state.isIn(BlockTags.LOGS)) return true;
+        if (state.isOf(Blocks.BAMBOO) || state.isOf(Blocks.BAMBOO_SAPLING)) return true;
+        // 不挡移动且非流体的 → 植物/雪层之类, 不算地层
+        return !state.getMaterial().blocksMovement() && !state.getMaterial().isLiquid();
+    }
+
+    /**
+     * 向上扫描一列: 从 {@code yFrom+1} 扫到 {@code capTop}(不含), 返回第一个【地层】方块的 y。
      *
-     * <p>≤0 = 该列头顶之上没有地层(露天, 或只被树叶/藤蔓/水遮住) → 一定在露天活动层。
-     * 数值 = 该列从头顶往上要挖穿几格地层才能见天。
+     * @return 第一个非植被实心(或流体)方块的 y; {@code -1} = 扫到顶都是空的(露天);
+     *         {@link #UNKNOWN} = 区块未加载/世界未就绪。
+     */
+    private static int scanUpForCover(World w, int x, int z, int yFrom, int capTop) {
+        if (w == null) return UNKNOWN;
+        // 区块未加载 → 明确"不可判定", 绝不静默当露天 (20260918: 未加载哨兵 -64 被误读成露天是直接死因)
+        if (!w.isChunkLoaded(x >> 4, z >> 4)) return UNKNOWN;
+        // WORLD_SURFACE 高度图客户端有真值 (isSkyVisible 历来靠它), 拿来封顶 + 哨兵自检
+        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
+        if (wsTop <= w.getBottomY() + 1) return UNKNOWN; // 高度图哨兵 → 不可判定
+        int top = Math.min(capTop, wsTop - 1);
+        for (int y = yFrom + 1; y <= top; y++) {
+            if (!isNotTerrain(w, x, y, z)) return y;
+        }
+        return -1;
+    }
+
+    /**
+     * 某列"头顶之上的地层格数" = 第一个非植被实心方块的 y − (y+1)。
      *
-     * <p>用 {@code MOTION_BLOCKING_NO_LEAVES} 而非 {@code WORLD_SURFACE}/
-     * {@code isSkyVisible}: 树叶没有碰撞体积、不该被当成"压在我头顶的地层"
-     * (这才是"站在树冠里不算地下"的实现方式)。
+     * <p>≤{@link #NEAR_SURFACE_MAX} 浅 → 一定在露天活动层; 数值 = 该列头顶往上要挖穿几格地层才能见天。
+     * 头顶 {@link #SCAN_UP_MAX} 格内无地层 → 返回 0 (露天)。
+     *
+     * <p><b>不再查询 MOTION_BLOCKING_NO_LEAVES 高度图</b> —— 客户端上它恒返回世界底哨兵
+     * (20260918-083636 反编译定案), 见类注释"为什么不能再用高度图"。
+     *
+     * @return 埋深格数; 0 = 露天(或头顶 128 格内无地层); {@link #UNKNOWN} = 区块未加载/世界未就绪。
      */
     public static int overheadTerrain(AltoClef mod, int x, int y, int z) {
-        if (mod.getWorld() == null) return 0;
-        return mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - (y + 1);
+        World w = mod.getWorld();
+        if (w == null) return UNKNOWN;
+        int cover = scanUpForCover(w, x, z, y, y + SCAN_UP_MAX);
+        if (cover == UNKNOWN || cover < 0) return cover == UNKNOWN ? UNKNOWN : 0;
+        return cover - (y + 1);
     }
 
     /**
      * 判据1 的 5 点采样: 下标 0 = 玩家自身列, 1..4 = 东/西/南/北邻柱(<b>同高</b>采样)。
+     * 不可判定的列为 {@link #UNKNOWN}。带 {@link #SAMPLE_CACHE_MS} 缓存。
      *
      * <p>邻柱取"同高"而不是"邻柱顶部": 在 1 格宽阶梯地道/竖井里邻柱整列都是实心, 取顶部会
      * 得到远处山体的高度而失去"我这一格被压了多少地层"的信息。
      */
     public static int[] overheadSamples(AltoClef mod) {
+        BlockPos pos = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
+        long now = System.currentTimeMillis();
+        if (pos != null && _sampleCache != null && _samplePos != null
+                && _samplePos.equals(pos) && now - _sampleAt < SAMPLE_CACHE_MS) {
+            return _sampleCache;
+        }
         int[] out = new int[5];
-        if (mod.getPlayer() == null) return out;
-        BlockPos pos = mod.getPlayer().getBlockPos();
+        if (pos == null || mod.getWorld() == null) {
+            for (int i = 0; i < 5; i++) out[i] = UNKNOWN;
+            _sampleCache = out;
+            _samplePos = pos;
+            _sampleAt = now;
+            return out;
+        }
         int[][] dirs = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
         for (int i = 0; i < 5; i++) {
             out[i] = overheadTerrain(mod, pos.getX() + dirs[i][0], pos.getY(), pos.getZ() + dirs[i][1]);
         }
+        _sampleCache = out;
+        _samplePos = pos;
+        _sampleAt = now;
         return out;
     }
 
     /**
-     * 判据1 的判定值: 5 点头顶地层格数的【中位数】。见类注释"为什么取中位数"。
+     * 判据1 的判定值: 5 点头顶地层格数的【中位数】(只取有效点; 有效点 &lt; 3 → {@link #UNKNOWN})。
+     * 见类注释"为什么取中位数"。
      */
     public static int buriedDepth(AltoClef mod) {
         int[] s = overheadSamples(mod);
-        java.util.Arrays.sort(s);
-        return s[2];
+        int[] valid = new int[s.length];
+        int n = 0;
+        for (int v : s) {
+            if (v != UNKNOWN) valid[n++] = v;
+        }
+        if (n < 3) return UNKNOWN; // 判据5: 采样不可信, 交上层"维持现状"
+        java.util.Arrays.sort(valid, 0, n);
+        return valid[n / 2];
     }
 
     /**
@@ -206,15 +284,21 @@ public final class SurfaceHelper {
     }
 
     /**
-     * 诊断用: 玩家所在列"顶部植被层厚度" = WORLD_SURFACE 顶 − 排除树叶的顶。
-     * >0 说明头上那层是树叶/草/藤蔓之类"挡视线不挡路"的东西 —— 判据2 生效的地方。
+     * 诊断用: 玩家自身列"头顶植被层厚度" = 从头顶向上扫描时跳过的树叶/原木/植物格数
+     * (直到第一个地层或封顶)。>0 说明正处在树冠/植被之下 —— 判据2 生效的地方。
      */
     public static int vegetationCapThickness(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return 0;
         BlockPos pos = mod.getPlayer().getBlockPos();
-        int worldTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ());
-        int terrainTop = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, pos.getX(), pos.getZ());
-        return Math.max(0, worldTop - terrainTop);
+        World w = mod.getWorld();
+        int veg = 0;
+        int top = Math.min(pos.getY() + SCAN_UP_MAX,
+                w.getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ()) - 1);
+        for (int y = pos.getY() + 1; y <= top; y++) {
+            if (isNotTerrain(w, pos.getX(), y, pos.getZ())) veg++;
+            else break;
+        }
+        return veg;
     }
 
     // ==================================================================
@@ -231,13 +315,17 @@ public final class SurfaceHelper {
         if (mod.getPlayer() == null || mod.getWorld() == null) return false;
         BlockPos pos = mod.getPlayer().getBlockPos();
 
-        // 判据0: 非主世界 → 海拔退化 (下界基岩顶/末地穹顶会让高度图恒判"地下")
+        // 判据0: 非主世界 → 海拔退化 (下界基岩顶/末地穹顶会让埋深法失真)
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD) {
             return pos.getY() < NON_OVERWORLD_DEEP_Y;
         }
 
         // 判据1(+判据2 内建): 5 点头顶地层格数中位数
         int buried = buriedDepth(mod);
+        // 判据5: 采样不可信 (区块未加载等) → 维持现状, 绝不许把 UNKNOWN 误读成露天
+        // (UNKNOWN = Integer.MIN_VALUE, 不挡这条就等价于 "埋深极小 → 恒判地表", 20260918 死因同款)
+        if (buried == UNKNOWN) return _init && _below;
+
         if (buried <= NEAR_SURFACE_MAX) return false;
 
         // 判据3: 临界带 (5..8) 再做一次水平环探测 —— "头顶被压住, 但一步之外就是露天"
@@ -252,8 +340,8 @@ public final class SurfaceHelper {
      *
      * <p>语义: 站在岩檐/薄顶棚下面时判据1 会给出中等埋深, 但人其实一步就能走到露天 ——
      * 这种位置干"回地表"的活代价是零, 不该被当成必须挖上去的深地下。
-     * 距离 1 不重复扫 (已含在判据1 的邻柱里); 未加载区块的列一律跳过 ——
-     * 未加载列的高度图会返回世界底部, 被误读成"露天"。结果缓存 {@link #RING_CACHE_MS}。
+     * 距离 1 不重复扫 (已含在判据1 的邻柱里); 不可判定({@link #UNKNOWN})的列一律跳过 ——
+     * 未加载列既不能当"露天"也不能当"深埋"。结果缓存 {@link #RING_CACHE_MS}。
      */
     private static boolean nearbyOpenColumn(AltoClef mod, BlockPos pos) {
         long now = System.currentTimeMillis();
@@ -265,7 +353,8 @@ public final class SurfaceHelper {
                 if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue; // 距离 1 已含在判据1
                 m.set(pos.getX() + dx, pos.getY(), pos.getZ() + dz);
                 if (!mod.getChunkTracker().isChunkLoaded(m)) continue;
-                if (overheadTerrain(mod, m.getX(), pos.getY(), m.getZ()) <= NEAR_SURFACE_MAX) {
+                int buried = overheadTerrain(mod, m.getX(), pos.getY(), m.getZ());
+                if (buried != UNKNOWN && buried <= NEAR_SURFACE_MAX) {
                     _ringOpen = true;
                     return true;
                 }
@@ -312,25 +401,33 @@ public final class SurfaceHelper {
      * 翻面日志。字段固定为可 grep 的形状 {@code [Surface] mode -> ...}:
      * <ul>
      *   <li>{@code y}      玩家脚所在 y;</li>
-     *   <li>{@code buried} 判据1 的中位数 = 头顶压着几格地层 (拍板判据);</li>
-     *   <li>{@code oh=[..]} 5 点原始采样, 下标 0 = 自身列, 其余为 东/西/南/北;</li>
-     *   <li>{@code vegCap} 自身列顶部植被层厚度 (>0 = 判据2 正在起作用, 头顶那层是树叶/草);</li>
+     *   <li>{@code buried} 判据1 的中位数 = 头顶压着几格地层 (拍板判据; "unk"=有效点不足3);</li>
+     *   <li>{@code oh=[..]} 5 点原始采样, 下标 0 = 自身列, 其余为 东/西/南/北; "?"=该列不可判定;</li>
+     *   <li>{@code vegCap} 自身列头顶植被厚度 (>0 = 判据2 正在起作用, 头顶那层是树叶/原木/植物);</li>
      *   <li>{@code covered} 旧口径 (isSkyVisible) 票数 —— 仅用于对照"判据换了结论差在哪"。</li>
      * </ul>
      */
     private static void logTransition(AltoClef mod, boolean raw) {
         int[] oh = overheadSamples(mod);
         StringBuilder sb = new StringBuilder();
+        int unkCount = 0;
         for (int i = 0; i < oh.length; i++) {
             if (i > 0) sb.append(',');
-            sb.append(oh[i]);
+            if (oh[i] == UNKNOWN) {
+                sb.append('?');
+                unkCount++;
+            } else {
+                sb.append(oh[i]);
+            }
         }
         int y = mod.getPlayer() != null ? mod.getPlayer().getBlockPos().getY() : -1;
+        int buried = buriedDepth(mod);
         Debug.logMessage("[Surface] mode -> "
                 + (raw ? "below(terrain)" : "surface(open)")
                 + " (y=" + y
-                + ", buried=" + buriedDepth(mod)
+                + ", buried=" + (buried == UNKNOWN ? "unk" : String.valueOf(buried))
                 + ", oh=[" + sb + "]"
+                + ", unk=" + unkCount
                 + ", vegCap=" + vegetationCapThickness(mod)
                 + ", covered=" + skyCoveredCount(mod) + "/5"
                 + ", dim=" + WorldHelper.getCurrentDimension()
