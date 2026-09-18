@@ -40,7 +40,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
     // TODO: Settings? Custom parameter?
     private static final boolean AVOID_HOGLINS = true;
+    // (2026-09-18 18:10 语义对齐蛮兵两层) hoglin 64 格硬禁 = 同构问题: 一只
+    // 游荡疣猪兽就把 64 格内所有猪灵全灭 (173821 会话 17:54+ 洪流, 18:06:53
+    // 防御链 "Block path from hoglin" 实锤 hoglin 在场)。改为 8 格硬禁 +
+    // 64 格软偏好 (优先无 hoglin 辐射的猪灵, 全被辐射照常交易)。
     private static final double HOGLIN_AVOID_TRADE_RADIUS = 64;
+    private static final double HOGLIN_HARD_TRADE_RADIUS = 8;
     // (2026-09-18 蛮兵攻击范围内不交易, 用户"蛮兵攻击范围内的猪灵不能选为交易
     // 目标") 32 = 原版 mob follow_range 默认仇恨半径: 贴近该猪灵必撞进蛮兵
     // 视野, 蛮兵见玩家即敌对且不受安抚 (12:02:56 实锤被蛮兵打死)。与 hoglin
@@ -429,7 +434,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
             if (AVOID_HOGLINS && _currentlyBartering != null && !EntityHelper.isTradingPiglin(_currentlyBartering)) {
                 Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(_currentlyBartering.getPos(), HoglinEntity.class);
-                if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
+                if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_HARD_TRADE_RADIUS)) {
                     Debug.logMessage("Aborting further trading because a hoglin showed up");
                     blacklist(_currentlyBartering);
                     _barterTimeout.reset();
@@ -527,6 +532,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
             return closestBrute.isPresent() && closestBrute.get().isInRange(entity, radius);
         }
 
+        /** hoglin 是否在 entity 的 radius 内 (两层 hoglin 语义的公共判定)。 */
+        private boolean hoglinNear(AltoClef mod, Entity entity, double radius) {
+            Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(entity.getPos(), HoglinEntity.class);
+            return closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, radius);
+        }
+
         @Override
         protected Optional<Entity> getEntityTarget(AltoClef mod) {
             // (2026-09-15 111618 场次 approach 期误拉黑) "猪灵欣赏中重置
@@ -565,27 +576,25 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         || (_currentlyBartering != null && !entity.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS))) {
                     return false;
                 }
-                if (AVOID_HOGLINS) {
-                    // Avoid trading if hoglin is anywhere remotely nearby.
-                    Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(entity.getPos(), HoglinEntity.class);
-                    if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
-                        return false;
-                    }
-                }
                 return true;
             };
+            // 第一层: 蛮兵 32 / hoglin 64 双软偏好池。
             Optional<Entity> found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
-                    baseFilter.and(entity -> !bruteNear(mod, entity, BRUTE_AVOID_TRADE_RADIUS)),
+                    baseFilter
+                            .and(entity -> !bruteNear(mod, entity, BRUTE_AVOID_TRADE_RADIUS))
+                            .and(entity -> !hoglinNear(mod, entity, HOGLIN_AVOID_TRADE_RADIUS)),
                     PiglinEntity.class);
+            // 第二层 (硬底线): 蛮兵 / hoglin 均贴近 8 格内才排除。
             if (found.isEmpty()) {
                 found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
                         baseFilter.and(entity -> {
-                            if (bruteNear(mod, entity, BRUTE_HARD_TRADE_RADIUS)) {
+                            if (bruteNear(mod, entity, BRUTE_HARD_TRADE_RADIUS)
+                                    || hoglinNear(mod, entity, HOGLIN_HARD_TRADE_RADIUS)) {
                                 long nowMs = System.currentTimeMillis();
                                 if (nowMs - _lastBruteGuardLogMs > 2000) {
                                     _lastBruteGuardLogMs = nowMs;
                                     Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tskip piglin "
-                                            + entity.getBlockPos().toShortString() + " — brute within hard radius "
+                                            + entity.getBlockPos().toShortString() + " — brute/hoglin within hard radius "
                                             + (int) BRUTE_HARD_TRADE_RADIUS);
                                 }
                                 return false;
@@ -616,7 +625,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         if (_currentlyBartering != null && !p.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS)) { farFromBartering++; continue; }
                         Optional<Entity> hoglin = AVOID_HOGLINS
                                 ? mod.getEntityTracker().getClosestEntity(p.getPos(), HoglinEntity.class) : Optional.empty();
-                        if (hoglin.isPresent() && hoglin.get().isInRange(p, HOGLIN_AVOID_TRADE_RADIUS)) { hoglinBlocked++; continue; }
+                        if (hoglin.isPresent() && hoglin.get().isInRange(p, HOGLIN_HARD_TRADE_RADIUS)) { hoglinBlocked++; continue; }
                         if (bruteNear(mod, p, BRUTE_HARD_TRADE_RADIUS)) { bruteHard++; continue; }
                         // 走到这里 = 只被 32 格软偏好挡的 (两层池都有它才算"可用")
                     }
