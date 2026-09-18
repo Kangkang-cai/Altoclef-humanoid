@@ -55,26 +55,60 @@ public final class KnowledgeMemory {
     public enum StructureType {
         VILLAGE(
                 new Block[]{Blocks.DIRT_PATH, Blocks.OAK_LOG, Blocks.FARMLAND},
-                8, 32, 4),
+                8, 32, 4, true),
         RUINED_PORTAL(
                 new Block[]{Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN},
-                4, 16, 3),
+                4, 16, 3, true),
         NETHER_FORTRESS(
                 new Block[]{Blocks.NETHER_BRICKS, Blocks.NETHER_BRICK_FENCE},
-                16, 48, 5);
+                16, 48, 5, true),
+        // (2026-09-18 烈焰刷怪笼记忆, 用户"刷怪笼是像堡垒那样的关键位置")
+        // 记你【亲眼看见过】的刷怪笼坐标, 供下次刷烈焰棒时直接奔过去, 不再靠
+        // 走廊巡逻重新碰运气 (CollectBlazeRodsTask 负责消费)。
+        // ⚠ 消费前必须到现场用 WorldHelper.getSpawnerEntity 验明 BlazeEntity
+        //   —— 主世界废弃矿井的蜘蛛笼/僵尸笼方块完全相同, 按坐标远程认亲会把
+        //   bot 骗过去。
+        // ⚠ inference=false: 不参与"随机候选区偏置"与"结构邻近推理可见"两种
+        //   结构级消费, 理由见 INFERENCE_TYPES 注释。
+        BLAZE_SPAWNER(
+                new Block[]{Blocks.SPAWNER},
+                0, 2, 1, false);
 
         final Block[] landmarks;
         final double minCandidateRadius;
         final double maxCandidateRadius;
         final int candidatesPerCenter;
+        /**
+         * 是否参与【结构级推理消费】: {@link #getCandidateAreas(Vec3d)} 无参版
+         * (随机偏置候选) 与 {@link #isNearRememberedStructure} (推理可见)。
+         */
+        final boolean inference;
 
-        StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter) {
+        StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
+                      boolean inference) {
             this.landmarks = landmarks;
             this.minCandidateRadius = minRadius;
             this.maxCandidateRadius = maxRadius;
             this.candidatesPerCenter = candidatesPerCenter;
+            this.inference = inference;
         }
     }
+
+    // =========================================================================
+    // (2026-09-18 inference 隔离) 加 BLAZE_SPAWNER 后必须把它从两处结构级
+    // 消费里摘出去, 否则会顺着两条路偷渡成错误行为:
+    //   ① MineAndCollectTask:2297 用 getCandidateAreas(pos) 无参版当探索偏置 —
+    //      地下刷怪笼会变成"这里有矿"的假线索, 把挖矿探索拉偏;
+    //   ② VisibilityHelper:405 用 isNearRememberedStructure 做【推理可见】—
+    //      认过一个刷怪笼 = 它周围整片的箱子/容器都被判成"看得见", 无需真正望
+    //      见。而地下结构本就刻意不进这类记忆 (见本类原注释), 用意正是"埋着的
+    //      容器不透视"。
+    // 二者都只关心【成片结构】, 单点刷怪笼不是这个语义, 故按 inference 标志过滤。
+    // =========================================================================
+    private static final StructureType[] INFERENCE_TYPES =
+            java.util.Arrays.stream(StructureType.values())
+                    .filter(t -> t.inference)
+                    .toArray(StructureType[]::new);
 
     private final AltoClef _mod;
     private final Map<StructureType, Set<BlockPos>> _knownStructures = new EnumMap<>(StructureType.class);
@@ -129,7 +163,7 @@ public final class KnowledgeMemory {
      * These are guesses, not observations.
      */
     public List<BlockPos> getCandidateAreas(Vec3d fromPos) {
-        return getCandidateAreas(fromPos, StructureType.values());
+        return getCandidateAreas(fromPos, INFERENCE_TYPES);
     }
 
     /**
@@ -171,7 +205,8 @@ public final class KnowledgeMemory {
      * containers stay invisible until the bot walks in and sees them.
      */
     public boolean isNearRememberedStructure(BlockPos pos, double radius) {
-        for (StructureType type : StructureType.values()) {
+        // (2026-09-18) 只按 INFERENCE_TYPES 推理 —— 单点刷怪笼不在此列, 见该字段注释。
+        for (StructureType type : INFERENCE_TYPES) {
             for (BlockPos center : _knownStructures.getOrDefault(type, Collections.emptySet())) {
                 if (center.isWithinDistance(pos, radius)) return true;
             }

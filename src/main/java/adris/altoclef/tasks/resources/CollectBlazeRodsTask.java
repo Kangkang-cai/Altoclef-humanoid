@@ -12,10 +12,12 @@ import adris.altoclef.tasks.movement.SearchChunkForBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
+import adris.altoclef.util.helpers.WorldIdentity;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
@@ -27,7 +29,13 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public class CollectBlazeRodsTask extends ResourceTask {
 
@@ -35,6 +43,33 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     private static final int TOO_MANY_BLAZES = 5;
     private static final double TOO_LITTLE_HEALTH_BLAZE = 5;
+
+    // =========================================================================
+    // (2026-09-18 烈焰刷怪笼记忆, 用户"刷怪笼是像堡垒那样的关键位置, 记住后
+    // 直接去那边刷, 不用再找") 原实现只把刷怪笼存【实例字段】(第 54 行附近),
+    // 任务实例一重建就清零, 于是每次都得靠走廊巡逻重新"亲眼看见"才能确立目标。
+    // 两层记忆补上:
+    //   ① 会话内: 按 存档:维度 隔离的 static map —— 覆盖"任务实例重建"这一类
+    //      最高频丢失 (_liveInstance 缓存只在 isFinished / 停泊超 8s / 重开游戏
+    //      时才重建, 但下界战斗频繁让位, 8s 宽限很容易被击穿)。
+    //   ② 跨会话: KnowledgeMemory.StructureType.BLAZE_SPAWNER (亲眼看见过就
+    //      记、落盘 knowledge.log), 下次直接从记忆点导航过去。
+    // ⚠ 安全底线: 记忆点只是【候选】, 必须走到现场用 getSpawnerEntity 验明是
+    //   烈焰实体才确立。蜘蛛笼/僵尸笼方块完全相同, 按坐标远程认亲会骗到主世界去。
+    // =========================================================================
+    // 记忆点召回的最大距离 (下界格)。1024 = 与 FortressExploreTask 的
+    // REMEMBERED_CENTER_MAX_DISTANCE 同口径: 人类"记得那边有座堡垒"就该直接去。
+    private static final double SPAWNER_RECALL_RANGE = 1024;
+    // 走到候选点多近才够验明 (需 chunk 已加载才能读实体)。
+    private static final double SPAWNER_RECALL_ARRIVE = 12;
+    // 前往候选点的超时 (秒)。超时 = 够不着, 登记排除, 换下一个候选。
+    private static final double SPAWNER_RECALL_TIMEOUT = 90;
+    // 排除表的容量/判定半径 (与 FortressExploreTask 记忆查讫同款思路)。
+    private static final double REJECT_RADIUS = 8;
+    private static final int MAX_REJECTED_SPAWNERS = 64;
+
+    private static final Map<String, BlockPos> _confirmedSpawnerByKey = new HashMap<>();
+    private static final Map<String, Set<BlockPos>> _rejectedSpawnerByKey = new HashMap<>();
 
     // (2026-09-06 药水门槛, 用户) 喝防火药水的最低烈焰人数: 落单烈焰人走盾战, 不喝药。
     private static final int POTION_MIN_BLAZES = 2;
@@ -52,6 +87,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // Why was this here???
     //private Entity _toKill;
     private BlockPos _foundBlazeSpawner = null;
+
+    // (2026-09-18 刷怪笼记忆召回) 当前 存档:维度 key / 正在前往的候选点 / 前往计时。
+    private String _worldKey = null;
+    private BlockPos _recallTarget = null;
+    private final TimerGame _recallTimer = new TimerGame(SPAWNER_RECALL_TIMEOUT);
 
     public CollectBlazeRodsTask(int count) {
         super(Items.BLAZE_ROD, count);
@@ -73,6 +113,20 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // (2026-09-04) 人类式找要塞: 计时器从进下界找要塞开始算, 触发超时兜底。
         _searchTimer.reset();
         _fallbackEngaged = false;
+        // (2026-09-18 刷怪笼记忆) 实例即便被重建也要把上一段确认过的刷怪笼接回来,
+        // key 与 FortressExploreTask / KnowledgeMemory 同口径 (WorldIdentity)。
+        _worldKey = WorldIdentity.key(mod);
+        _recallTarget = null;
+        _recallTimer.reset();
+        BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
+        if (remembered != null) {
+            _foundBlazeSpawner = remembered;
+            Debug.logMessage("[BLAZE-SPAWNER] 沿用已确认刷怪笼 " + remembered.toShortString()
+                    + " (实例重建, key=" + _worldKey + ")");
+        } else {
+            // Session-static 里也没有 → 交给每层 tick 走"亲眼看见 / 记忆召回"两条路。
+            _foundBlazeSpawner = null;
+        }
     }
 
     @Override
@@ -137,6 +191,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // If the blaze spawner somehow isn't valid
         if (_foundBlazeSpawner != null && mod.getChunkTracker().isChunkLoaded(_foundBlazeSpawner) && !isValidBlazeSpawner(mod, _foundBlazeSpawner)) {
             Debug.logMessage("Blaze spawner at " + _foundBlazeSpawner + " too far away or invalid. Re-searching.");
+            // (2026-09-18) 失效要连记忆一起废掉: 否则下次实例重建/记忆召回又把
+            // bot 送回这个已经不是烈焰笼的地方, 形成来回拉扯。
+            invalidateSpawner(_foundBlazeSpawner, "invalidated (not a blaze spawner / despawned)");
             _foundBlazeSpawner = null;
         }
 
@@ -165,8 +222,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
             for (BlockPos pos : mod.getBlockTracker().getPerceivedLocations(Blocks.SPAWNER)) {
                 if (isValidBlazeSpawner(mod, pos)) {
                     _foundBlazeSpawner = pos;
+                    // (2026-09-18) 亲眼确认 → 写 static, 后续实例重建能直接接回。
+                    if (_worldKey != null) {
+                        if (_confirmedSpawnerByKey.put(_worldKey, pos.toImmutable()) == null) {
+                            Debug.logMessage("[BLAZE-SPAWNER] 亲眼确认刷怪笼并记住 " + pos.toShortString());
+                        }
+                    }
                     break;
                 }
+            }
+            // (2026-09-18) 亲眼也没看见 → 从跨会话记忆里召回一个候选点直接过去。
+            if (_foundBlazeSpawner == null) {
+                Task recall = recallSpawnerFromMemory(mod);
+                if (recall != null) return recall;
             }
         }
 
@@ -185,6 +253,109 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
         setDebugState("Searching for fortress (human-like explore)");
         return _fortressSearcher;
+    }
+
+    // ------------------------------------------------------------------ //
+    // (2026-09-18 刷怪笼记忆) 召回 / 排除 / 失效
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 从跨会话记忆 ({@link KnowledgeMemory.StructureType#BLAZE_SPAWNER}) 取最近
+     * 的、未被排除过的刷怪笼候选点, 直接导航过去。返回 null = 没有候选, 交由
+     * 下面的走廊探索。
+     *
+     * 三段确认串起来才是"人记得并直接去": ① 记忆里有坐标 (跨会话落盘); ② 走到
+     * 现场 (成功导航, 不是远程猜); ③ 现场验明确实是烈焰笼。
+     */
+    private Task recallSpawnerFromMemory(AltoClef mod) {
+        if (_worldKey == null || mod.getPlayer() == null) return null;
+        Vec3d pos = mod.getPlayer().getPos();
+        List<BlockPos> candidates = new ArrayList<>(mod.getKnowledgeMemory()
+                .getRememberedCenters(KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
+        candidates.removeIf(this::isRejectedSpawner);
+        if (candidates.isEmpty()) return null;
+
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (BlockPos c : candidates) {
+            double sq = c.getSquaredDistance(pos);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = c;
+            }
+        }
+        if (best == null) return null;
+
+        if (_recallTarget == null || !_recallTarget.equals(best)) {
+            _recallTarget = best;
+            _recallTimer.reset();
+            Debug.logMessage("[BLAZE-SPAWNER] 记忆召回候选 " + best.toShortString()
+                    + " (距离 " + String.format(java.util.Locale.ROOT, "%.0f", Math.sqrt(bestSq)) + ", 候选数 " + candidates.size() + ")");
+        }
+
+        // 走到现场且区块可读 → 验明正身。
+        if (mod.getChunkTracker().isChunkLoaded(best) && best.isWithinDistance(pos, SPAWNER_RECALL_ARRIVE)) {
+            if (isValidBlazeSpawner(mod, best)) {
+                _foundBlazeSpawner = best;
+                _confirmedSpawnerByKey.put(_worldKey, best.toImmutable());
+                Debug.logMessage("[BLAZE-SPAWNER] 现场验明通过, 确立刷怪笼 " + best.toShortString());
+            } else {
+                // 记得这里有刷怪笼, 但它不是烈焰人的 (主世界蜘蛛笼之类)。
+                rejectSpawner(best, "记忆点不是烈焰刷怪笼");
+            }
+            _recallTarget = null;
+            return null;
+        }
+
+        // 太久没走到 = 够不着/被地形挡死, 排除后换下一个候选。
+        if (_recallTimer.getDuration() > SPAWNER_RECALL_TIMEOUT) {
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-SPAWNER] 召回前往超时 " + SPAWNER_RECALL_TIMEOUT
+                    + "s (停在 " + mod.getPlayer().getBlockPos().toShortString() + ", 目标 " + best.toShortString() + ")");
+            rejectSpawner(best, "前往超时");
+            _recallTarget = null;
+            return null;
+        }
+
+        setDebugState("Going to remembered blaze spawner");
+        return new GetToBlockTask(best.up(), false);
+    }
+
+    /** 该候选是否已被标记排除 (记忆点与实际不符 / 够不着)。 */
+    private boolean isRejectedSpawner(BlockPos candidate) {
+        Set<BlockPos> rejected = _rejectedSpawnerByKey.get(_worldKey);
+        if (rejected == null || rejected.isEmpty()) return false;
+        for (BlockPos p : rejected) {
+            if (p.isWithinDistance(candidate, REJECT_RADIUS)) return true;
+        }
+        return false;
+    }
+
+    private void rejectSpawner(BlockPos pos, String reason) {
+        if (_worldKey == null || pos == null) return;
+        Set<BlockPos> rejected = _rejectedSpawnerByKey.computeIfAbsent(_worldKey, k -> new HashSet<>());
+        if (rejected.size() >= MAX_REJECTED_SPAWNERS) {
+            // 容量兜底: 整体作废重来, 宁可偶尔重试一次旧的错误点, 也不要无限增长。
+            rejected.clear();
+        }
+        rejected.add(pos.toImmutable());
+        Debug.logToFile("altoclef_diag.log", "[BLAZE-SPAWNER] 登记排除 " + pos.toShortString() + " — " + reason);
+    }
+
+    /** 已确认的刷怪笼失效: 清 static 记忆并登记排除, 免得下次又被召回。 */
+    private void invalidateSpawner(BlockPos pos, String reason) {
+        if (_worldKey != null) {
+            _confirmedSpawnerByKey.remove(_worldKey, pos);
+        }
+        rejectSpawner(pos, reason);
+    }
+
+    /**
+     * (2026-09-18) 换存档时清空本任务的全部 static 状态 —— 这类【坐标】残留 =
+     * 上个世界的刷怪笼被当成这个世界的导航目标, 与 FortressExploreTask 锚点同例。
+     */
+    public static void onWorldBoundary() {
+        _confirmedSpawnerByKey.clear();
+        _rejectedSpawnerByKey.clear();
     }
 
     private boolean isValidBlazeSpawner(AltoClef mod, BlockPos pos) {

@@ -10,6 +10,7 @@ import adris.altoclef.tasks.movement.BearingExpeditionTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
+import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -96,6 +97,7 @@ public final class WorldStateGuard {
     private static void registerAll() {
         // ---- 记忆类(丢弃: 清内存, 保持 _loaded=true 以阻止磁盘重载) ----
         register("KnowledgeMemory(地标中心)", KnowledgeMemory::onWorldBoundary);
+        register("CollectBlazeRodsTask(烈焰刷怪笼确认/排除)", CollectBlazeRodsTask::onWorldBoundary);
         register("FortressExploreTask(走廊/远征锚点)", FortressExploreTask::onWorldBoundary);
         register("MineDownExploreTask(矿洞/自挖)", MineDownExploreTask::onWorldBoundary);
         register("BearingExpeditionTask(方位/锚点)", BearingExpeditionTask::onWorldBoundary);
