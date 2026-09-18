@@ -26,13 +26,14 @@ import net.minecraft.world.World;
  * <h3>口径 = 判据流水线 (任一判据成立即"地表"; 全部不成立才"地下"; 20260918 裁撤判据3 环探, 判据8 升主判据)</h3>
  * <pre>
  *   判据0 维度退化    非主世界 → 退回 y &lt; 58 (下界有基岩顶、末地有穹顶, 海拔法无意义)
- *   判据8 地表签名【主判据, 最先表决】 脚下踩着/身旁 (半径≤2, 脚+头两高度) 长着只在露天生成的方块
- *        (草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦; 草/蕨/花/仙人掌/枯灌木/甘蔗) → 判地表。
- *        = 人判地表的"脚下质感 + 身旁景物"通道; 只读脚下与身旁, 不依赖头顶柱数据,
- *          所以爬升临破土/刚破土场景它先说话 (用户拍板 20260918 "他是主要判据"); 液体护栏防湖底误判
+ *   判据8 地表签名【主判据, 最先表决】 脚下踩着/身旁长着只在露天生成的方块 → 判地表。
+ *        两级: 近扫(脚下+半径2 脚/头两高度) 与 远扫(自身高度 ±3、水平半径 12, 岩石山地/恶地坡面
+ *        脚下是石头时靠它) = 人判地表的"脚下质感 + 身旁景物"通道; 只读脚下与身旁, 不依赖头顶柱
+ *        数据, 爬升临破土场景它先说话 (用户拍板 20260918 "他是主要判据"); 液体护栏防湖底误判
  *   判据1 地形埋深    5 点采样(自身列 + 4 水平邻柱同高)的【头顶地形格数中位数】≤ 4 → 地表
  *   判据2 植被不算地板 取值时跳过树叶/原木/植物 → 树冠/藤蔓不构成"埋" (内建于扫描, 非独立判据)
- *   判据4 时间迟滞    结论翻面须距上次翻面 ≥ 5s (抹平地形过渡/边界抖动)
+ *   判据4 确认窗      非对称: 判"地下"须【持续】≥5s 才提交 (用户"一秒离开不许触发回升");
+ *                     判"地表"只须 0.5s (临破土/出洞快确认)
  *   判据5 未知不翻面  采样列区块未加载 → 该列记 UNKNOWN; 有效点 &lt; 3 时维持现状, 不许翻面
  *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
  *        (依据: 天然地形不存在这么深的通天露天柱; 深处客户端头顶柱视图有整体缺失的异常,
@@ -103,8 +104,15 @@ public final class SurfaceHelper {
      */
     private static final int NEAR_SURFACE_MAX = 4;
 
-    /** 迟滞: 结论翻面后至少驻留这么久才允许再翻。 */
-    private static final long MIN_DWELL_MS = 5000;
+    /**
+     * 判"地下"的确认窗 (20260918 用户"肯定不能一秒钟离开地表就触发地表回升"):
+     * raw 判地下须【持续】满此时长才提交翻面/触发回升链 —— 瞬间低头、跳下浅坑、
+     * 单 tick 数据抖动都不会打响 GoToSurface。
+     */
+    private static final long CONFIRM_BELOW_MS = 5000;
+
+    /** 判"地表"的确认窗 (短): 临破土/出洞要快确认, 与"回升须谨慎"非对称。 */
+    private static final long CONFIRM_SURFACE_MS = 500;
 
     /**
      * 逐块扫描的向上封顶: 头顶 128 格内没有任何非植被实心 → 判"露天"
@@ -148,6 +156,10 @@ public final class SurfaceHelper {
     private static long _setAt = 0;
     private static boolean _init = false;
     private static long _flapRejected = 0;
+    // 确认窗状态: raw 最近一次变化的时刻 (候选翻面已持续多久)
+    private static boolean _lastRaw = false;
+    private static long _rawChangedAt = 0;
+    private static boolean _flapCounted = false;
 
     // 5 点采样缓存 (pos 相同且未过期时复用; 逐块扫描每秒全量做 5 次没必要)
     private static int[] _sampleCache = null;
@@ -163,6 +175,9 @@ public final class SurfaceHelper {
         _setAt = 0;
         _init = false;
         _flapRejected = 0;
+        _lastRaw = false;
+        _rawChangedAt = 0;
+        _flapCounted = false;
         _sampleCache = null;
         _sampleAt = 0;
         _samplePos = null;
@@ -398,33 +413,47 @@ public final class SurfaceHelper {
                 || s.isIn(BlockTags.FLOWERS);
     }
 
-    /** 判据8 结果缓存时长 ( Signature 检查约 50 次块读, 不必每 tick 全做)。 */
+    /** 判据8 结果缓存时长 (近扫 ~50 次块读; 远扫最坏 ~4400 次, 靠 500ms 缓存 + 2 格网格键摊平)。 */
     private static final long SIGNATURE_CACHE_MS = 500;
+
+    /**
+     * 判据8 远扫的水平半径 (20260918 用户"岩石地貌脚下是石头, 远处一定范围内看到特殊方块也算地表"):
+     * 石山/恶地坡面上脚下方块是石头, 但 ±12 格、自身高度 ±3 内必有草/花/红沙等露天签名。
+     */
+    private static final int SIGNATURE_FAR_RADIUS = 12;
+
+    /** 判据8 远扫的纵向容差 (自身高度 ±3: 覆盖缓坡与 2 格高花草; 再大会把浅层洞穴顶上方的草地误认)。 */
+    private static final int SIGNATURE_FAR_Y_TOLERANCE = 3;
+
     private static boolean _sigYes = false;
     private static long _sigAt = 0;
     private static BlockPos _sigPos = null;
 
     /**
-     * 判据8 主体: 脚下方块是地表地形块, 或脚/头高度半径 ≤2 的环内有地表植被 → true。
-     * 结果缓存; 浸在液体里时恒 false (水下沙/粘土不是露天活动层)。
+     * 判据8 主体 (两级): ①近扫 —— 脚下地形块 + 脚/头高度半径 ≤2 环内植被;
+     * ②远扫 —— 自身高度 ±3、水平半径 ≤12 内任意露天签名块 (岩石山地/恶地坡面正例)。
+     * 结果缓存 (键按 2 格网格取整, 走动时不必每 tick 全量重扫); 浸在液体里时恒 false
+     * (水下沙/粘土不是露天活动层)。
      */
     private static boolean nearbySurfaceSignature(AltoClef mod, BlockPos pos) {
+        // 2 格网格键: 移动中最多每 2 格重扫一次, 而不是每 tick
+        BlockPos key = new BlockPos(pos.getX() & ~1, pos.getY(), pos.getZ() & ~1);
         long now = System.currentTimeMillis();
-        if (_sigPos != null && _sigPos.equals(pos) && now - _sigAt < SIGNATURE_CACHE_MS) return _sigYes;
+        if (_sigPos != null && _sigPos.equals(key) && now - _sigAt < SIGNATURE_CACHE_MS) return _sigYes;
         _sigAt = now;
-        _sigPos = pos;
+        _sigPos = key;
         _sigYes = false;
         World w = mod.getWorld();
         if (w == null) return false;
         // 液体护栏: 头或脚浸在液体里 → 不认签名
         if (w.getBlockState(pos).getMaterial().isLiquid()
                 || w.getBlockState(pos.up()).getMaterial().isLiquid()) return false;
-        // 脚下地形块
+        // ①近扫: 脚下地形块
         if (isSurfaceSignature(w.getBlockState(pos.down()))) {
             _sigYes = true;
             return true;
         }
-        // 脚/头高度, 半径 ≤2 的水平环内找植被 (25 格 × 2 高度 ≈ 50 次块读)
+        // ①近扫: 脚/头高度, 半径 ≤2 (25 格 × 2 高度 ≈ 50 次块读)
         BlockPos.Mutable m = new BlockPos.Mutable();
         for (int dy = 0; dy <= 1; dy++) {
             for (int dx = -2; dx <= 2; dx++) {
@@ -437,19 +466,31 @@ public final class SurfaceHelper {
                 }
             }
         }
+        // ②远扫: 自身高度 ±3, 水平半径 ≤12 (最坏 ~4400 次块读, 500ms 缓存 + 命中早退)
+        for (int dy = -SIGNATURE_FAR_Y_TOLERANCE; dy <= SIGNATURE_FAR_Y_TOLERANCE; dy++) {
+            for (int dx = -SIGNATURE_FAR_RADIUS; dx <= SIGNATURE_FAR_RADIUS; dx++) {
+                for (int dz = -SIGNATURE_FAR_RADIUS; dz <= SIGNATURE_FAR_RADIUS; dz++) {
+                    m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
+                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))) {
+                        _sigYes = true;
+                        return true;
+                    }
+                }
+            }
+        }
         return false;
     }
 
     /**
-     * 判"在地下"的迟滞版 (5s 最短驻留): 全项目应当优先用这个。
+     * 判"在地下"的确认窗版 (非对称): 全项目应当优先用这个。
      *
-     * <p>迟滞的存在理由: 判据1 的空间聚合已经抹平"单列"抖动, 但整片地形过渡
-     * (走出洞口/跳下坑/走进树冠) 仍会让中位数在当前 tick 翻面; 5s 驻留把这类过渡
-     * 收敛成一次, 避免上层门控(囤木/收食物/回地表)在边界上来回抢链。
+     * <p>存在理由 (20260918 用户定调): 判"地下"必须【持续】满 {@link #CONFIRM_BELOW_MS} 才提交 ——
+     * "一秒钟离开地表就触发回升"被明确禁止; 判"地表"只须 {@link #CONFIRM_SURFACE_MS} 快速确认
+     * (临破土/出洞不卡)。旧"距上次翻面 ≥5s"口径的问题: 驻留期一过, 一次瞬时翻面立即生效,
+     * 正是"浅坑一秒触发回升"的根源。
      *
-     * <p>翻面被拒时累计 {@code _flapRejected}, 翻面成功时打一行日志并清零 ——
-     * 这个计数是判断"阈值定得对不对"的唯一观测量 (20260916 场次靠 rejectedFlaps
-     * 90+/5s 定位到单点抖动的)。
+     * <p>翻面候选被窗拦下时计一次 {@code _flapRejected} (每个候选期只计一次, 不按 tick 刷),
+     * 提交翻面时打日志并清零 —— 判断"阈值定得对不对"的观测量。
      */
     public static boolean isBelowSurfaceDebounced(AltoClef mod) {
         boolean raw = isBelowSurface(mod);
@@ -457,18 +498,27 @@ public final class SurfaceHelper {
         if (!_init) {
             _init = true;
             _below = raw;
-            _setAt = now;
+            _lastRaw = raw;
+            _rawChangedAt = now;
             return raw;
         }
+        if (raw != _lastRaw) {
+            _lastRaw = raw;
+            _rawChangedAt = now;
+            _flapCounted = false; // 新的翻面候选期
+        }
         if (raw != _below) {
-            if (now - _setAt < MIN_DWELL_MS) {
-                _flapRejected++;
+            long required = raw ? CONFIRM_BELOW_MS : CONFIRM_SURFACE_MS;
+            if (now - _rawChangedAt < required) {
+                if (!_flapCounted) {
+                    _flapCounted = true;
+                    _flapRejected++;
+                }
                 return _below;
             }
             logTransition(mod, raw);
             _flapRejected = 0;
             _below = raw;
-            _setAt = now;
         }
         return _below;
     }
