@@ -3055,11 +3055,22 @@ public class BeatMinecraft2Task extends Task {
      * 可见非透视) 且 装备达标(eyeGear 齐或钻石已超时放弃) → 马上要进下界,
      * 夜里不再睡觉/找床: 下界没有昼夜循环, 睡觉对主线纯属延误。
      */
+    /**
+     * (2026-09-18 已停用, 用户改判) 原 (2026-09-05 低风险改善, 用户"有传送门且装备
+     * 齐全要进地狱时跳过睡觉") 逻辑现恒返回 false: 不应因去传送门跳过睡觉。
+     */
     private boolean shouldSkipSleepForNether(AltoClef mod) {
+        // (2026-09-18 用户改判) "不应该因为去传送门跳过睡觉" —— 先睡满再进下界,
+        // 入口不差这一夜。2026-09-05 的跳过逻辑停用, 代码保留备查。当日实锤:
+        // 12:03:00 拿到床后 canSleep=true 却 1 秒内切去 Going to Nether, 夜间
+        // 直接裸奔 (death #3 正是被围殴死在去传送门路上)。
+        return false;
+        /*
         if (mod.getBlockTracker().getKnownLocations(Blocks.NETHER_PORTAL).isEmpty()) return false;
         boolean eyeGearSatisfied = StorageHelper.itemTargetsMet(mod, COLLECT_EYE_GEAR_MIN)
                 && StorageHelper.isArmorEquippedAll(mod, COLLECT_EYE_ARMOR);
         return eyeGearSatisfied || _diamondCollectGivenUp;
+        */
     }
 
     /**
