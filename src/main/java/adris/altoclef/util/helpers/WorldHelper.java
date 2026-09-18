@@ -73,9 +73,16 @@ public interface WorldHelper {
             // Only accept still fluids.
             if (!s.getFluidState().isStill() && onlyAcceptStill) return false;
             int level = s.getFluidState().getLevel();
-            // Ignore if there's liquid above, we can't tell if it's a source block or not.
             BlockState above = mod.getWorld().getBlockState(pos.up());
-            if (above.getBlock() instanceof FluidBlock) return false;
+            if (above.getBlock() instanceof FluidBlock) {
+                // (2026-09-18 上方淌水的水源) "上方是液体 → 不算源"原为排除【下落水】
+                // (FallingFluid 的 getLevel() 同样返回 8) 的粗糙代理 —— 但真源与下落水
+                // 可以用 isStill() 精确区分: 源 = level 8 + still(true); 下落水 =
+                // level 8 + still(false)。一刀切拒绝会把"上方淌着流水/压着水"的真
+                // 水源全部排除, 而这正是洞穴渗水最常见的形态 (用户: "水源被流水挡住
+                // 的情况 bot 能直接收集吗" —— 当时答案是不能, 现在能)。
+                return level == 8 && s.getFluidState().isStill();
+            }
             return level == 8;
         }
         return false;
