@@ -32,6 +32,9 @@ import net.minecraft.world.World;
  *        (语义: "头顶被岩檐遮住, 但一步之外就是露天" → 仍在活动层)
  *   判据4 时间迟滞    结论翻面须距上次翻面 ≥ 5s (抹平地形过渡/边界抖动)
  *   判据5 未知不翻面  采样列区块未加载 → 该列记 UNKNOWN; 有效点 &lt; 3 时维持现状, 不许翻面
+ *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
+ *        (依据: 天然地形不存在这么深的通天露天柱; 深处客户端头顶柱视图有整体缺失的异常,
+ *         20260918-092740: 超大洞穴 y=-44 五列同时 buried=0 稳定 40s+, 深度物理事实兜底)
  * </pre>
  * 判据1 的取值语义: "该列从头顶往上要挖穿几格【非植被地层】才能见天"。≤4 浅 → 地表; 越大越深。
  * 取 5 点的<b>中位数</b>而不是最小/最大: 取最小 → 深竖井被判地表(20260917-120830 35 分钟上不去);
@@ -117,6 +120,16 @@ public final class SurfaceHelper {
 
     /** 5 点采样缓存时长 (逐块扫描比高度图贵一个量级, 200ms 内复用同一结论)。 */
     private static final long SAMPLE_CACHE_MS = 200;
+
+    /**
+     * 判据6 深度拦截: 主世界 y 低于本值 → 无条件判"地下"。
+     * 依据: 负 Y 是深板岩层, <b>天然地形里不存在通天的露天柱</b> (最低的天然露天是海床 ~y=25-45)。
+     * 所以"扫描说露天"在这个深度带必然是异常 (20260918-092740 实锤: 超大洞穴 y=-44, 客户端对
+     * 头顶柱的视图整体缺失 40s+, rejectedFlaps=236, 五列同时 buried=0), 深度物理事实优先于扫描。
+     * 已知代价: 1.18 峡谷(ravine)底可到 y&lt;0 且通天, 在那里会被判"地下" → GoToSurface 会尝试爬出去
+     * —— 行为上等价于"走出峡谷", 可接受。
+     */
+    private static final int DEEP_CRUST_Y = 0;
 
     /**
      * 采样列"不可判定"哨兵 (区块未加载 / 世界未就绪)。
@@ -326,6 +339,10 @@ public final class SurfaceHelper {
         // (UNKNOWN = Integer.MIN_VALUE, 不挡这条就等价于 "埋深极小 → 恒判地表", 20260918 死因同款)
         if (buried == UNKNOWN) return _init && _below;
 
+        // 判据6: 深度拦截 —— 负 Y 深板岩层不存在天然露天, 扫描在这里的"露天"结论不可信
+        // (20260918-092740: 超大洞穴 y=-44, 客户端头顶柱视图整体缺失, 五列 buried=0 稳定 40s+)
+        if (pos.getY() < DEEP_CRUST_Y) return true;
+
         if (buried <= NEAR_SURFACE_MAX) return false;
 
         // 判据3: 临界带 (5..8) 再做一次水平环探测 —— "头顶被压住, 但一步之外就是露天"
@@ -422,12 +439,20 @@ public final class SurfaceHelper {
         }
         int y = mod.getPlayer() != null ? mod.getPlayer().getBlockPos().getY() : -1;
         int buried = buriedDepth(mod);
+        // 诊断: 自身列 WORLD_SURFACE 高度图 (扫描封顶用)。正常应≈真实地形顶; 若出现
+        // 与 y 相近的怪值 → 客户端头顶柱数据异常 (20260918-092740 的深部判地表疑似此因)
+        int wsTop = -999999;
+        if (mod.getPlayer() != null && mod.getWorld() != null) {
+            BlockPos p = mod.getPlayer().getBlockPos();
+            wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, p.getX(), p.getZ());
+        }
         Debug.logMessage("[Surface] mode -> "
                 + (raw ? "below(terrain)" : "surface(open)")
                 + " (y=" + y
                 + ", buried=" + (buried == UNKNOWN ? "unk" : String.valueOf(buried))
                 + ", oh=[" + sb + "]"
                 + ", unk=" + unkCount
+                + ", wsTop=" + wsTop
                 + ", vegCap=" + vegetationCapThickness(mod)
                 + ", covered=" + skyCoveredCount(mod) + "/5"
                 + ", dim=" + WorldHelper.getCurrentDimension()
