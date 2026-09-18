@@ -37,6 +37,34 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
         return new TimeoutWanderTask(true);
     }
 
+    /**
+     * (2026-09-18 战斗近距优先, 用户"必须要优化, 击打目标优先靠的近的")
+     * 返回 true 时允许"显著更近"的新目标打破下面两层粘滞
+     * (closingIn / Sticking with current pursuit)。
+     *
+     * 背景: 20260918-115412 场次 death #3 — bot 锁定远处骷髅 (must-kill) 后,
+     * 僵尸已贴脸 0.8 格仍 "Sticking with current pursuit" 31.5 秒不切换,
+     * 期间被僵尸+骷髅围殴致死 (enemies=4)。该粘滞本是 2026-08-25/08-27 为
+     * 挖矿/寻路防横跳设计的, 对战斗是灾难。
+     *
+     * 默认 false (保持原防横跳语义); 杀怪族 (KillEntitiesTask) 覆写开启,
+     * 挖矿/寻路族不受影响。
+     */
+    protected boolean closerTargetMayBreakSticky(AltoClef mod) {
+        return false;
+    }
+
+    /**
+     * 新目标显著更近判定: 平方距离 < 当前目标的 0.85 倍。系数留余量,
+     * 防两目标距离接近时来回横跳 (切过去又满足不了系数就稳定不再切)。
+     */
+    private boolean isSignificantlyCloser(AltoClef mod, T newClosest) {
+        if (_currentlyPursuing == null) return false;
+        double newSqr = getPos(mod, newClosest).squaredDistanceTo(mod.getPlayer().getPos());
+        double curSqr = getPos(mod, _currentlyPursuing).squaredDistanceTo(mod.getPlayer().getPos());
+        return newSqr < curSqr * 0.85;
+    }
+
     public void resetSearch() {
         _currentlyPursuing = null;
         _heuristicMap.clear();
@@ -108,7 +136,12 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
                     h.updateHeuristic(currentHeuristic);
                     h.updateDistance(closestDistanceSqr);
                     h.setTickAttempted(lastTick);
-                    if (closingIn) {
+                    // (2026-09-18 战斗近距优先) 先于 closingIn / Sticking 判定:
+                    // 钩子开放的杀怪族任务, 新目标显著更近时立即切换。
+                    if (closerTargetMayBreakSticky(mod) && isSignificantlyCloser(mod, newClosest)) {
+                        setDebugState("Switching to significantly closer target");
+                        _currentlyPursuing = newClosest;
+                    } else if (closingIn) {
                         // 正在接近当前目标: 保持不动, 不因新目标打断
                         setDebugState("Closing in on target, keeping pursuit");
                     } else if (_heuristicMap.containsKey(newClosest)) {
