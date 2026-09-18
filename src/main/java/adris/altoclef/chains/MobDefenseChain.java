@@ -494,22 +494,32 @@ public class MobDefenseChain extends SingleTaskChain {
         // 墙后/没看见的不算, 与 GOLD-GATE 挖金闸同口径)。激怒猪灵已在敌对
         // 名单里 (ANGRY_AT/被打记忆), 走到这里的本身就是"激怒了"。
         int piglinSwarm = 0;
+        // (2026-09-18 用户) 猪灵蛮兵单只也必须跑: 蛮兵 40 血金斧打不过, 见玩家即
+        // 敌对且不受金锭/金甲安抚。piglinSwarm>2 的门槛只对可安抚的普通猪灵有意义,
+        // 蛮兵混在里面会被"近战 1 只直接打"的分支吃掉 (12:02:44 实锤)。蛮兵在
+        // getUniversallyDangerousMob 的 6 格保留圈之外时由这里兜底。
+        int bruteCount = 0;
         for (Entity h : hostiles) {
             if (h == null || !h.isAlive()) continue;
             if (h instanceof CreeperEntity) { anyCreeper = true; continue; }
             if (isRangedThreat(h)) { anyRanged = true; continue; }
+            if (h instanceof PiglinBruteEntity) {
+                bruteCount++;
+                continue;
+            }
             if ((h instanceof PiglinEntity || h instanceof PiglinBruteEntity)
                     && VisibilityHelper.isEntityVisible(mod, h)) {
                 piglinSwarm++;
             }
             meleeCount++;
         }
-        boolean retreat = piglinSwarm > 2 || anyRanged || anyCreeper || meleeCount >= RETREAT_MELEE_THRESHOLD;
+        boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged || anyCreeper || meleeCount >= RETREAT_MELEE_THRESHOLD;
         long nowMs = System.currentTimeMillis();
         if (nowMs - _lastRetreatDecLogMs > 500) {
             _lastRetreatDecLogMs = nowMs;
             String m = "[RETREAT-DEC] meleeCount=" + meleeCount
                     + " piglinSwarm=" + piglinSwarm
+                    + " bruteCount=" + bruteCount
                     + " isRanged=" + anyRanged
                     + " isCreeper=" + anyCreeper
                     + " decide=" + (retreat ? "retreat" : "fight");
@@ -1771,6 +1781,22 @@ public class MobDefenseChain extends SingleTaskChain {
                     if (entity.get().squaredDistanceTo(mod.getPlayer()) < range * range && EntityHelper.isAngryAtPlayer(mod, entity.get())) {
                         return entity;
                     }
+                }
+            }
+        }
+        // (2026-09-18 猪灵蛮兵绝对回避, 用户"太危险了, 不应该靠近猪灵蛮兵")
+        // 蛮兵 40 血金斧、不接受金锭安抚、无视金甲中立, 单只也打不过 —— 20260918-115412
+        // 场次实锤: 12:02:44 CONFIDENT FIGHT(1 只蛮兵) 7 秒血量见底, 12:02:56 被蛮兵
+        // 打进下界岩浆海 (cause=lava, death #2)。蛮兵无 anger 概念 (见 EntityHelper
+        // 注释: 见玩家即敌对), 故这里不查 isAngryAtPlayer, 只要可见且在保留距离内
+        // 就立即脱离, 优先于一切战斗决策 (与凋零骷髅同待遇)。范围外的蛮兵由
+        // shouldRetreatMelee 的 bruteCount 兜底。
+        if (mod.getEntityTracker().entityFound(PiglinBruteEntity.class)) {
+            Optional<Entity> entity = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), PiglinBruteEntity.class);
+            if (entity.isPresent()) {
+                double range = SAFE_KEEP_DISTANCE - 2;
+                if (entity.get().squaredDistanceTo(mod.getPlayer()) < range * range) {
+                    return entity;
                 }
             }
         }
