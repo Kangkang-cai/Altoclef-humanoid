@@ -132,8 +132,10 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             // (2026-09-14 诊断) 目标从感知/候选里消失 (被拉黑/超感知窗口/死亡)。
             // 232015 场次: hoglin 规则拉黑唯一猪灵 → 无目标 wander 循环, 被
             // 随机方向累计带离 30+ 格。节流 5s。
+            // (2026-09-18 修) 初值 Long.MIN_VALUE 时 nowTicks - MIN_VALUE 溢出
+            // 为负 → 首条日志被抑制 (165136 会话实锤: 无任何 APPROACH-FAIL 落盘)。
             long nowTicks = WorldHelper.getTicks();
-            if (nowTicks - _lastNoTargetLogTick > 100) {
+            if (_lastNoTargetLogTick == Long.MIN_VALUE || nowTicks - _lastNoTargetLogTick > 100) {
                 _lastNoTargetLogTick = nowTicks;
                 Debug.logToFile("altoclef_diag.log", "[APPROACH-FAIL]\tno target (lost/blacklisted), player="
                         + mod.getPlayer().getBlockPos().toShortString()
@@ -242,8 +244,9 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 // enter(2.0) 边界 2.1-2.5 晃, 5s 进不去 → wander 10 格随机方向,
                 // 反复累积带离目标 30+ 格。节流 5s。若日志显示 dist 恒 ~2.1,
                 // 即"enter 边界徘徊"而非寻路失败, 修法另议 (放宽 enter 容差)。
+                // (2026-09-18 修) 同 _lastNoTargetLogTick 的溢出抑制问题。
                 long nowTicks = WorldHelper.getTicks();
-                if (nowTicks - _lastProgressFailLogTick > 100) {
+                if (_lastProgressFailLogTick == Long.MIN_VALUE || nowTicks - _lastProgressFailLogTick > 100) {
                     _lastProgressFailLogTick = nowTicks;
                     Debug.logToFile("altoclef_diag.log", "[APPROACH-FAIL]\tprogress stall, target="
                             + entity.getType().toString()

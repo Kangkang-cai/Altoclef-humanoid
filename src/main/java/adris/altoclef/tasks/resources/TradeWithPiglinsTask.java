@@ -43,7 +43,13 @@ public class TradeWithPiglinsTask extends ResourceTask {
     // 目标") 32 = 原版 mob follow_range 默认仇恨半径: 贴近该猪灵必撞进蛮兵
     // 视野, 蛮兵见玩家即敌对且不受安抚 (12:02:56 实锤被蛮兵打死)。与 hoglin
     // 同款模式: 目标过滤 + 交易中途入场即停。
+    // (2026-09-18 17:05 语义修改, 用户拍板"32格太严格") 蛮兵 32 格 (原版仇恨
+    // 半径) 不再硬禁交易 —— 堡垒区蛮兵常驻, 32 格硬禁 = 变相禁交易 (165136
+    // 会话 16:53:58 实锤: 交易成功出货后目标池被清空, 贴脸猪灵也不交易)。
+    // 改为两层: 8 格内硬禁 (交易一笔约 6s, 8 格内蛮兵必撞脸, 打断=白丢金锭);
+    // 8~32 格降级为软偏好 —— 优先选无蛮兵辐射的猪灵, 全被辐射时照常交易。
     private static final double BRUTE_AVOID_TRADE_RADIUS = 32;
+    private static final double BRUTE_HARD_TRADE_RADIUS = 8;
     // If we're too far away from a trading piglin, we risk deloading them and losing the trade.
     private static final double TRADING_PIGLIN_TOO_FAR_AWAY = 64 + 8;
     private final int _goldBuffer;
@@ -391,13 +397,17 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 }
             }
 
-            // (2026-09-18 蛮兵入场即停, 用户) 交易中途蛮兵摸进当前猪灵 32 格 →
-            // 立即拉黑终止, 不赌它没看见我们。不查猪灵交易状态 (与 hoglin 分支
-            // 不同): 蛮兵在场时任何交易都不该继续。
+            // (2026-09-18 蛮兵入场即停, 用户) 交易中途蛮兵摸进【8 格】→ 立即拉黑
+            // 终止 (原 32 格, 17:05 用户拍板缩小: 32 格硬禁导致堡垒区变相禁交易)。
+            // 不查猪灵交易状态 (与 hoglin 分支不同): 蛮兵贴脸时任何交易都不该继续。
+            // 8~32 格不打断: 交易战利品已在路上, 打断 = 白丢金锭。
             if (_currentlyBartering != null) {
                 Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(_currentlyBartering.getPos(), PiglinBruteEntity.class);
-                if (closestBrute.isPresent() && closestBrute.get().isInRange(_currentlyBartering, BRUTE_AVOID_TRADE_RADIUS)) {
-                    Debug.logMessage("Aborting trade: piglin brute within " + (int) BRUTE_AVOID_TRADE_RADIUS + " blocks");
+                boolean bruteHardClose = closestBrute.isPresent()
+                        && (closestBrute.get().isInRange(_currentlyBartering, BRUTE_HARD_TRADE_RADIUS)
+                            || closestBrute.get().isInRange(mod.getPlayer(), BRUTE_HARD_TRADE_RADIUS));
+                if (closestBrute.isPresent() && bruteHardClose) {
+                    Debug.logMessage("Aborting trade: piglin brute within " + (int) BRUTE_HARD_TRADE_RADIUS + " blocks");
                     _blacklisted.add(_currentlyBartering);
                     _barterTimeout.reset();
                     _currentlyBartering = null;
@@ -471,6 +481,12 @@ public class TradeWithPiglinsTask extends ResourceTask {
             return true;
         }
 
+        /** 蛮兵是否在 entity 的 radius 内 (两层蛮兵语义的公共判定)。 */
+        private boolean bruteNear(AltoClef mod, Entity entity, double radius) {
+            Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(entity.getPos(), PiglinBruteEntity.class);
+            return closestBrute.isPresent() && closestBrute.get().isInRange(entity, radius);
+        }
+
         @Override
         protected Optional<Entity> getEntityTarget(AltoClef mod) {
             // (2026-09-15 111618 场次 approach 期误拉黑) "猪灵欣赏中重置
@@ -499,39 +515,45 @@ public class TradeWithPiglinsTask extends ResourceTask {
             }
 
             // Ignore trading piglins
+            // (2026-09-18 17:05 两层蛮兵语义, 用户拍板) 先在"蛮兵 32 格无辐射"
+            // 的猪灵里选; 全被辐射才退到"8 格内无蛮兵"的池子 (硬底线)。堡垒区
+            // 蛮兵常驻, 单层 32 格硬禁 = 贴脸也无猪灵可交易 (165136 会话 16:53:58 实锤)。
+            java.util.function.Predicate<Entity> baseFilter = entity -> {
+                if (_blacklisted.contains(entity)
+                        || EntityHelper.isTradingPiglin(entity)
+                        || (entity instanceof LivingEntity && ((LivingEntity) entity).isBaby())
+                        || (_currentlyBartering != null && !entity.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS))) {
+                    return false;
+                }
+                if (AVOID_HOGLINS) {
+                    // Avoid trading if hoglin is anywhere remotely nearby.
+                    Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(entity.getPos(), HoglinEntity.class);
+                    if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
             Optional<Entity> found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
-                    entity -> {
-                        if (_blacklisted.contains(entity)
-                                || EntityHelper.isTradingPiglin(entity)
-                                || (entity instanceof LivingEntity && ((LivingEntity) entity).isBaby())
-                                || (_currentlyBartering != null && !entity.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS))) {
-                            return false;
-                        }
-
-                        if (AVOID_HOGLINS) {
-                            // Avoid trading if hoglin is anywhere remotely nearby.
-                            Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(entity.getPos(), HoglinEntity.class);
-                            if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
+                    baseFilter.and(entity -> !bruteNear(mod, entity, BRUTE_AVOID_TRADE_RADIUS)),
+                    PiglinEntity.class);
+            if (found.isEmpty()) {
+                found = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(),
+                        baseFilter.and(entity -> {
+                            if (bruteNear(mod, entity, BRUTE_HARD_TRADE_RADIUS)) {
+                                long nowMs = System.currentTimeMillis();
+                                if (nowMs - _lastBruteGuardLogMs > 2000) {
+                                    _lastBruteGuardLogMs = nowMs;
+                                    Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tskip piglin "
+                                            + entity.getBlockPos().toShortString() + " — brute within hard radius "
+                                            + (int) BRUTE_HARD_TRADE_RADIUS);
+                                }
                                 return false;
                             }
-                        }
-                        // (2026-09-18 蛮兵攻击范围内不交易, 用户) 蛮兵 32 格内
-                        // (原版仇恨半径)的猪灵不选 —— 贴近它必撞进蛮兵视野。
-                        Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(entity.getPos(), PiglinBruteEntity.class);
-                        if (closestBrute.isPresent() && closestBrute.get().isInRange(entity, BRUTE_AVOID_TRADE_RADIUS)) {
-                            long nowMs = System.currentTimeMillis();
-                            if (nowMs - _lastBruteGuardLogMs > 2000) {
-                                _lastBruteGuardLogMs = nowMs;
-                                Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tskip piglin "
-                                        + entity.getBlockPos().toShortString() + " — brute "
-                                        + closestBrute.get().getBlockPos().toShortString()
-                                        + " within " + String.format("%.1f", Math.sqrt(closestBrute.get().squaredDistanceTo(entity))) + " blocks");
-                            }
-                            return false;
-                        }
-                        return true;
-                    }, PiglinEntity.class
-            );
+                            return true;
+                        }),
+                        PiglinEntity.class);
+            }
             if (found.isEmpty()) {
                 if (_currentlyBartering != null && (_blacklisted.contains(_currentlyBartering) || !_currentlyBartering.isAlive())) {
                     _currentlyBartering = null;
