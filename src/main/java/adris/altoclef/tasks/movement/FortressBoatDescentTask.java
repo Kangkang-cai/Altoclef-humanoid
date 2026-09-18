@@ -159,7 +159,7 @@ public class FortressBoatDescentTask extends Task implements ITaskRequiresGround
         _placeAttempts = 0;
         _done = false;
         _abortReason = null;
-        Debug.logMessage("[BOAT-DROP] 启动船降: 落点 " + _landing.toShortString()
+        Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 启动船降: 落点 " + _landing.toShortString()
                 + " (落差 " + (mod.getPlayer() != null ? (mod.getPlayer().getBlockPos().getY() - _landing.getY()) : "?") + ")");
     }
 
@@ -349,7 +349,7 @@ public class FortressBoatDescentTask extends Task implements ITaskRequiresGround
             return null;
         }
         if (secondsInState(now) > TIMEOUT_COLLECT_SECONDS) {
-            Debug.logMessage("[BOAT-DROP] 弃船 (收船超时 " + TIMEOUT_COLLECT_SECONDS + "s, 船只值 5 块木板)");
+            Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 弃船 (收船超时 " + TIMEOUT_COLLECT_SECONDS + "s, 船只值 5 块木板)");
             finish("下船完成 (弃船)");
             return null;
         }
@@ -394,13 +394,13 @@ public class FortressBoatDescentTask extends Task implements ITaskRequiresGround
     private Task abort(AltoClef mod, String reason) {
         _abortReason = reason;
         mod.getInputControls().release(Input.MOVE_FORWARD);
-        Debug.logWarning("[BOAT-DROP] 放弃船降: " + reason);
+        Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 放弃船降: " + reason);
         return null;
     }
 
     private void finish(String note) {
         _done = true;
-        Debug.logMessage("[BOAT-DROP] " + note + " (落点 " + _landing.toShortString() + ")");
+        Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] " + note + " (落点 " + _landing.toShortString() + ")");
     }
 
     private Optional<Entity> findNearbyBoat(AltoClef mod, double range) {

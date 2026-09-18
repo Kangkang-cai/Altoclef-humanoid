@@ -663,7 +663,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (_boatDescentFails >= s.getFortressBoatDescentMaxFailures()) {
             if (!_boatDescentDisabledLogged) {
                 _boatDescentDisabledLogged = true;
-                Debug.logWarning("[BOAT-DROP] 连续失败 " + _boatDescentFails
+                Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 连续失败 " + _boatDescentFails
                         + " 次, 本探索任务实例内停用船降");
             }
             return null;
@@ -688,12 +688,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             }
             boolean success = player.getY() <= _boatDescentCell.getY() + 2;
             if (success) {
-                Debug.logMessage("[BOAT-DROP] 船降成功, bot 现在位于 "
+                Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 船降成功, bot 现在位于 "
                         + player.toShortString());
                 _boatDescentCooldownUntilTick = _tickId + 15 * 20;
             } else {
                 _boatDescentFails++;
-                Debug.logWarning("[BOAT-DROP] 船降失败 (" + _boatDescentFails
+                Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 船降失败 (" + _boatDescentFails
                         + "/" + s.getFortressBoatDescentMaxFailures() + "), 冷却 60s 后再试");
                 _boatDescentCooldownUntilTick = _tickId + 60 * 20;
             }
@@ -719,13 +719,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             // 但找不到落点"。首次 + 之后每 30s 一条。
             _boatScanMissCount++;
             if (_boatScanMissCount == 1 || _boatScanMissCount % 6 == 0) {
-                Debug.logMessage("[BOAT-DROP] 卡死已过阈值, 落点扫描第 " + _boatScanMissCount
+                Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 卡死已过阈值, 落点扫描第 " + _boatScanMissCount
                         + " 次无果 (落差≥" + s.getFortressBoatDescentMinDropBlocks()
                         + " 且水平 2~5 格内无几何可行的走廊格)");
             }
             return null;
         }
-        Debug.logMessage("[BOAT-DROP] 触发船降: 玩家 y=" + player.getY()
+        Debug.logToFile("altoclef_diag.log", "[BOAT-DROP] 触发船降: 玩家 y=" + player.getY()
                 + ", 落点 " + landing.toShortString()
                 + " (落差 " + (player.getY() - landing.getY()) + ")");
         _boatDescentCell = landing;
