@@ -23,6 +23,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HoglinEntity;
+import net.minecraft.entity.mob.PiglinBruteEntity;
 import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -38,6 +39,11 @@ public class TradeWithPiglinsTask extends ResourceTask {
     // TODO: Settings? Custom parameter?
     private static final boolean AVOID_HOGLINS = true;
     private static final double HOGLIN_AVOID_TRADE_RADIUS = 64;
+    // (2026-09-18 蛮兵攻击范围内不交易, 用户"蛮兵攻击范围内的猪灵不能选为交易
+    // 目标") 32 = 原版 mob follow_range 默认仇恨半径: 贴近该猪灵必撞进蛮兵
+    // 视野, 蛮兵见玩家即敌对且不受安抚 (12:02:56 实锤被蛮兵打死)。与 hoglin
+    // 同款模式: 目标过滤 + 交易中途入场即停。
+    private static final double BRUTE_AVOID_TRADE_RADIUS = 32;
     // If we're too far away from a trading piglin, we risk deloading them and losing the trade.
     private static final double TRADING_PIGLIN_TOO_FAR_AWAY = 64 + 8;
     private final int _goldBuffer;
@@ -372,6 +378,19 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 }
             }
 
+            // (2026-09-18 蛮兵入场即停, 用户) 交易中途蛮兵摸进当前猪灵 32 格 →
+            // 立即拉黑终止, 不赌它没看见我们。不查猪灵交易状态 (与 hoglin 分支
+            // 不同): 蛮兵在场时任何交易都不该继续。
+            if (_currentlyBartering != null) {
+                Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(_currentlyBartering.getPos(), PiglinBruteEntity.class);
+                if (closestBrute.isPresent() && closestBrute.get().isInRange(_currentlyBartering, BRUTE_AVOID_TRADE_RADIUS)) {
+                    Debug.logMessage("Aborting trade: piglin brute within " + (int) BRUTE_AVOID_TRADE_RADIUS + " blocks");
+                    _blacklisted.add(_currentlyBartering);
+                    _barterTimeout.reset();
+                    _currentlyBartering = null;
+                }
+            }
+
             // (2026-09-09 交易拟人化, 用户"必须准心指向猪灵无遮挡才允许交易,
             // 使用通用的自动瞄准") 通用自动瞄准 = 战斗出刀同款: 先 LookHelper.lookAt
             // 猪灵身体中心, 再用客户端 crosshairTarget 校验准心真的落在猪灵身上
@@ -479,9 +498,14 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         if (AVOID_HOGLINS) {
                             // Avoid trading if hoglin is anywhere remotely nearby.
                             Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(entity.getPos(), HoglinEntity.class);
-                            return closestHoglin.isEmpty() || !closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS);
+                            if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
+                                return false;
+                            }
                         }
-                        return true;
+                        // (2026-09-18 蛮兵攻击范围内不交易, 用户) 蛮兵 32 格内
+                        // (原版仇恨半径)的猪灵不选 —— 贴近它必撞进蛮兵视野。
+                        Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(entity.getPos(), PiglinBruteEntity.class);
+                        return closestBrute.isEmpty() || !closestBrute.get().isInRange(entity, BRUTE_AVOID_TRADE_RADIUS);
                     }, PiglinEntity.class
             );
             if (found.isEmpty()) {
