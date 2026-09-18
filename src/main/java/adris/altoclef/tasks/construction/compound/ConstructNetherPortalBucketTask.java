@@ -80,6 +80,13 @@ public class ConstructNetherPortalBucketTask extends Task {
     private static final int PORTAL_REUSE_RADIUS = 16;
     private static final int PORTAL_REUSE_VERTICAL = 8;
     private static final int PORTAL_REUSE_MIN_FRAMES = 4;
+    // (2026-09-18 用户"必须保证是岩浆湖附近的框") 复用候选门**缺框时**的岩浆可及半径。
+    // 缺 k 块 = 要浇 k 次 = 每次都得有可舀岩浆源。PlaceObsidianBucketTask 在缺桶时会走
+    // TaskCatalogue.getItemTask(LAVA_BUCKET) 全域找岩浆 —— 门若远离岩浆湖, 这条路会让
+    // bot 跑很远搬岩浆, 比就地新建还贵。8 的依据: getPortalableRegion 的 timeoutRange
+    // 同为 8, 即"门应在岩浆旁 5-6 格"的既有设计。
+    private static final int PORTAL_REUSE_LAVA_RADIUS = 8;
+    private static final int PORTAL_REUSE_LAVA_VERTICAL = 8;
     private final TimerGame _lavaSearchTimer = new TimerGame(5);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
@@ -216,8 +223,7 @@ public class ConstructNetherPortalBucketTask extends Task {
                 // 与点燃也只看原点, 与"这扇门是谁搭的"无关。框全齐时连岩浆都不需要。
                 BlockPos reusable = findReusablePortalStructure(mod);
                 if (reusable != null) {
-                    Debug.logMessage("(Reusing existing portal frame, origin=" + reusable.toShortString()
-                            + " rot=" + _portalRotation + ")");
+                    // 判定明细 (frames/missing) 已由 findReusablePortalStructure 打点
                     _portalOrigin = reusable;
                     _reuseMode = true;
                     foundSpot = true;
@@ -395,6 +401,32 @@ public class ConstructNetherPortalBucketTask extends Task {
      * 记忆, 直接查世界)。只认 still 源 (level 8), 与 getNumberOfBlocksAdjacent
      * 的源判定一致。扫描量 ~1.9 万格, 仅锚点搜索 (每 5s 一次) 时调用, 开销可接受。
      */
+    /**
+     * (2026-09-18 用户"必须保证是岩浆湖附近的框") 统计 center 附近**可舀**的岩浆源方块数。
+     * 判据与 {@link #findNearestLavaSourceAround} 完全一致 (isStill + level 8) —— 那就是
+     * "能不能舀起来"的口径; 流动岩浆舀不起, 不计入。
+     *
+     * 用途 = 判定"这扇门是不是岩浆湖边的", 并把数量写进日志供实跑核对。
+     * 为什么返回**数量**而不是布尔: 数量是诊断信息 —— 看到 `lavaNearby=1` 就知道这扇门
+     * 旁边只有孤零零一个源, 值得警惕; 但**不**拿它去跟缺框数硬比 (理由见调用方 ⑤)。
+     *
+     * 开销 = (2h+1)^2 * (2v+1) 次 getBlockState, 与 findNearestLavaSourceAround 同量级。
+     */
+    private int countLavaSourcesNearby(AltoClef mod, BlockPos center, int hRadius, int vRadius) {
+        int count = 0;
+        for (int dx = -hRadius; dx <= hRadius; dx++) {
+            for (int dz = -hRadius; dz <= hRadius; dz++) {
+                for (int dy = -vRadius; dy <= vRadius; dy++) {
+                    BlockState s = MinecraftClient.getInstance().world.getBlockState(center.add(dx, dy, dz));
+                    if (s.getBlock() != Blocks.LAVA) continue;
+                    if (!s.getFluidState().isStill() || s.getFluidState().getLevel() != 8) continue;
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
     private BlockPos findNearestLavaSourceAround(AltoClef mod, BlockPos center, int hRadius, int vRadius) {
         BlockPos best = null;
         double bestSq = Double.POSITIVE_INFINITY;
@@ -542,6 +574,11 @@ public class ConstructNetherPortalBucketTask extends Task {
      * 为什么不用 WorldMemory.getPortalLocations(): 那套只保留 Blocks.NETHER_PORTAL
      * (已激活的紫块), 半成品门根本不在其列 —— 这正是本函数存在的理由。
      *
+     * 另有两道闸门, 都偏保守 (宁可放弃复用去新建):
+     *   · 歧义闸门 —— 最高分候选若落在**不同的位置**, 说明信息量不足以区分, 放弃 (见 ③);
+     *   · 岩浆可及闸门 —— 缺框时必须就近有可舀岩浆源, 否则复用等于把 bot 支使到远处
+     *     搬岩浆, 反而比就地新建贵 (见 ⑤)。
+     *
      * 开销 ≈ 1.85 万格 getBlockState (仅"重新决定门位置"时调用, 5s 节流) + 黑曜石数×40
      * 次打分; 黑曜石通常几十块, 可忽略。
      */
@@ -608,7 +645,37 @@ public class ConstructNetherPortalBucketTask extends Task {
 
         // ④ 落定朝向与原点 (同角候选互为等价参数化, 取任一, 对下游完全等价)
         PortalCandidate winner = bestByCorner.values().iterator().next();
+
+        // ⑤ 缺框 -> 必须"岩浆就在手边" (2026-09-18 用户: "就算有完成一半的框, 也必须保证
+        //    是岩浆湖附近的框, 不然没有多余岩浆补齐门框")。
+        //    复用与新建的**根本差别**: 新建的落点可选 (getPortalableRegion 会挑岩浆湖边的
+        //    空地, 浇铸时岩浆就在脚边); 而复用的门位置是**人家给定的**, 可能远离岩浆 ——
+        //    那样 bot 会被支使着来回搬岩浆。所以复用前必须确认"这扇门够得着岩浆"。
+        //    放行条件 (缺框时, 满足其一): ① 背包里有岩浆桶; ② 就近(±8/±8)有可舀岩浆源。
+        //    刻意**不**卡"源数量 >= 缺框数": ±8 的计数会低估 (岩浆湖常延伸到半径外, bot
+        //    走几步就能舀), 硬卡会误拒掉本来划算的复用; 而且拒绝的后果是退回新建 (要浇满
+        //    10 块, 需求**更大**), 反而更费岩浆。
+        //    框全齐 (missing == 0) 时**不设此限**: 一块都不用浇, 复用是纯赚, 与位置远近无关。
+        int missing = PORTAL_FRAME.length - bestHits;
+        int lavaBuckets = mod.getItemStorage().getItemCount(Items.LAVA_BUCKET);
+        int nearbySources = -1;
+        if (missing > 0 && lavaBuckets == 0) {
+            nearbySources = countLavaSourcesNearby(mod, winner.origin,
+                    PORTAL_REUSE_LAVA_RADIUS, PORTAL_REUSE_LAVA_VERTICAL);
+            if (nearbySources == 0) {
+                Debug.logMessage("(Portal reuse rejected: needs " + missing + " casts but no lava "
+                        + "bucket and no lava source within " + PORTAL_REUSE_LAVA_RADIUS
+                        + " of " + winner.origin.toShortString()
+                        + " — frame is not lava-lake-side, build new beside one)");
+                return null;
+            }
+        }
+
         _portalRotation = winner.rotation;
+        Debug.logMessage("(Portal reuse accepted: origin=" + winner.origin.toShortString()
+                + " rot=" + winner.rotation + " frames=" + bestHits + "/" + PORTAL_FRAME.length
+                + " missing=" + missing + " lavaBuckets=" + lavaBuckets
+                + " lavaNearby=" + (nearbySources < 0 ? "n/a" : String.valueOf(nearbySources)) + ")");
         return winner.origin;
     }
 
