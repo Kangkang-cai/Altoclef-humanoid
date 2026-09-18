@@ -44,6 +44,8 @@ import net.minecraft.client.gui.screen.CreditsScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.EndermanEntity;
+import net.minecraft.entity.mob.PiglinBruteEntity;
+import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.entity.mob.SilverfishEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.entity.vehicle.ChestMinecartEntity;
@@ -2187,6 +2189,24 @@ public class BeatMinecraft2Task extends Task {
                         BlockPos playerPos = mod.getPlayer().getBlockPos();
                         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.BARREL)) {
                             if (_sweptContainers.contains(pos)) continue;
+                            // (2026-09-18 堡垒箱子让位, 用户"猪灵城堡的宝箱不该开, 回报有限")
+                            // 猪灵堡垒的箱子/木桶旁必有守卫, 开箱瞬间围殴: 20260918-115412
+                            // 场次实锤, 12:02:36 Sweeping nether loot (-339,35,20) → 12:02:44
+                            // CONFIDENT FIGHT → 12:02:56 被蛮兵打进岩浆海 (death #2)。守卫
+                            // 撤走前把该容器拉黑 (_sweptContainers), 避免 retreat 结束后
+                            // 立刻又跑回去开 → 再被打 → 死循环。可见口径与 GOLD-GATE 同源
+                            // (模仿人类, 隔墙看不见的不算); 蛮兵不受金甲安抚, 普通猪灵
+                            // 开箱也会被激怒, 两者都算守卫。
+                            boolean piglinGuarded = false;
+                            Entity guard = mod.getEntityTracker()
+                                    .getClosestEntity(Vec3d.ofCenter(pos), PiglinBruteEntity.class, PiglinEntity.class)
+                                    .orElse(null);
+                            if (guard != null && guard.isAlive()
+                                    && guard.squaredDistanceTo(Vec3d.ofCenter(pos)) <= 12 * 12) {
+                                piglinGuarded = true;
+                                _sweptContainers.add(pos);
+                            }
+                            if (piglinGuarded) continue;
                             if (!VisibilityHelper.isBlockPerceivable(mod, pos)) continue;
                             double sq = pos.getSquaredDistance(playerPos);
                             if (sq < bestSq) {
