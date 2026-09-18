@@ -56,6 +56,23 @@ public class EntityTracker extends Tracker {
     // Last game tick we perceived each entity (seen or heard).
     private final HashMap<Entity, Long> _lastPerceivedTick = new HashMap<>();
 
+    // =========================================================================
+    // (2026-09-18 追最后已知位置) 感知过期 ≠ 失忆: 20s 记忆到期后实体转入
+    // "最后已知"层 —— 位置冻结在最后一次直接感知处, 宽限期 (30s) 内供
+    // ①追击任务继续走向该位置 ②录制系统记录 bot 的信念状态。到点或重新
+    // 直接感知才彻底遗忘/回归活跃层。
+    // 反透视边界: 冻结坐标绝不沿用过期后的实时位置 (实体仍加载时 pos 会
+    // 继续刷新, 直接透传 = 变相透视); hp/速度等鲜活字段同样不对外暴露。
+    // =========================================================================
+    /** 最后已知宽限期: 30s (20s 感知记忆到期后再记 30s)。 */
+    public static final long STALE_KNOWN_GRACE_TICKS = 30 * 20;
+    /** 每个实体最后一次【直接感知】(看见/听见) 时的位置。 */
+    private final HashMap<Entity, Vec3d> _lastPerceivedPos = new HashMap<>();
+    /** 感知过期后的最后已知位置 (冻结)。 */
+    private final HashMap<Entity, Vec3d> _staleKnownPos = new HashMap<>();
+    /** 最后已知层的到期 tick。 */
+    private final HashMap<Entity, Long> _staleKnownDeadlineTick = new HashMap<>();
+
     private final HashMap<PlayerEntity, List<Entity>> _entitiesCollidingWithPlayerAccumulator = new HashMap<>();
     private final HashMap<PlayerEntity, HashSet<Entity>> _entitiesCollidingWithPlayer = new HashMap<>();
 
@@ -259,6 +276,52 @@ public class EntityTracker extends Tracker {
         return out;
     }
 
+    // =========================================================================
+    // (2026-09-18 追最后已知位置) 公开查询: 感知过期但仍在宽限期内的实体。
+    // 供 ①追击任务 (AbstractDoToEntityTask / TradeWithPiglinsTask) 继续走向
+    // 最后已知位置 ②录制系统记录 bot 的信念状态。注意: 位置是最后一次直接
+    // 感知时冻结的, 不是实体当前实时坐标 (反透视)。
+    // =========================================================================
+
+    /** 该实体是否处于"最后已知"宽限期 (20s 感知记忆已过期但还没到 30s)。 */
+    public boolean isStaleKnown(Entity entity) {
+        ensureUpdated();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            return entity != null && _staleKnownPos.containsKey(entity);
+        }
+    }
+
+    /**
+     * 实体的最后已知位置 (冻结在最后一次直接感知处); 不在宽限期内返回 null。
+     * 活跃感知实体的实时位置请走 getTrackedEntities / getAllPerceivedEntities。
+     */
+    public Vec3d getLastKnownPos(Entity entity) {
+        ensureUpdated();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            return entity == null ? null : _staleKnownPos.get(entity);
+        }
+    }
+
+    /** 宽限期内所有最后已知实体 (无序)。 */
+    public List<Entity> getStaleKnownEntities() {
+        ensureUpdated();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            return new ArrayList<>(_staleKnownPos.keySet());
+        }
+    }
+
+    /** 宽限期内第一个匹配类型的最后已知实体; 没有返回 null。 */
+    @SuppressWarnings("unchecked")
+    public <T extends Entity> T getStaleKnownEntity(Class<T> type) {
+        ensureUpdated();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            for (Entity e : _staleKnownPos.keySet()) {
+                if (type.isInstance(e)) return (T) e;
+            }
+        }
+        return null;
+    }
+
     /**
      * Gets all entities that are within our interact range
      */
@@ -357,6 +420,13 @@ public class EntityTracker extends Tracker {
             // Currently-loaded entities, so we can forget unloaded ones from our memory.
             Set<Entity> loadedEntities = new HashSet<>();
 
+            // (2026-09-18) 清理最后已知层: 到期或已死亡的条目移除。
+            long nowTickPrune = WorldHelper.getTicks();
+            _staleKnownDeadlineTick.entrySet().removeIf(e -> nowTickPrune > e.getValue()
+                    || !e.getKey().isAlive());
+            _staleKnownPos.keySet().removeIf(e -> !_staleKnownDeadlineTick.containsKey(e));
+            _lastPerceivedPos.keySet().removeIf(e -> !e.isAlive());
+
             // Loop through all entities and track 'em
             for (Entity entity : MinecraftClient.getInstance().world.getEntities()) {
                 loadedEntities.add(entity);
@@ -396,9 +466,22 @@ public class EntityTracker extends Tracker {
                             // otherwise a loaded-but-unseen entity would be remembered forever.
                             if (directlyPerceived) {
                                 _lastPerceivedTick.put(entity, nowTick);
+                                // (2026-09-18) 记录最后直接感知位置 (最后已知层的冻结源),
+                                // 同时清除可能存在的旧最后已知条目 (实体回到活跃感知)。
+                                _lastPerceivedPos.put(entity, entity.getPos());
+                                _staleKnownPos.remove(entity);
+                                _staleKnownDeadlineTick.remove(entity);
                             }
                         } else {
                             _lastPerceivedTick.remove(entity);
+                            // (2026-09-18 追最后已知位置) 20s 记忆到期不清零: 转入
+                            // 最后已知层, 位置冻结在最后一次直接感知处, 宽限期满
+                            // (或重新直接感知) 才彻底遗忘。
+                            Vec3d lastPos = _lastPerceivedPos.remove(entity);
+                            if (lastPos != null) {
+                                _staleKnownPos.put(entity, lastPos);
+                                _staleKnownDeadlineTick.put(entity, nowTick + STALE_KNOWN_GRACE_TICKS);
+                            }
                             continue;
                         }
                     }

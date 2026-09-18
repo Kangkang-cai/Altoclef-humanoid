@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.GetToEntityTask;
+import adris.altoclef.tasks.movement.GetToXZTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
@@ -60,6 +61,11 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     private long _lastNoTargetLogTick = Long.MIN_VALUE;
     private long _lastProgressFailLogTick = Long.MIN_VALUE;
 
+    // (2026-09-18 追最后已知位置) 上一次追击的目标实体。目标从活跃感知消失
+    // (20s 记忆过期) 但仍在最后已知宽限期 (30s) 内时, 继续走向冻结的最后
+    // 位置, 到了还没重新感知到才真放弃。下挖/绕障途中视线断流丢目标的主修。
+    private Entity _lastChaseTarget = null;
+
     public AbstractDoToEntityTask(double maintainDistance, double combatGuardLowerRange, double combatGuardLowerFieldRadius) {
         _maintainDistance = maintainDistance;
         _combatGuardLowerRange = combatGuardLowerRange;
@@ -100,6 +106,29 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         if (checkEntity.isEmpty()) {
             mod.getMobDefenseChain().resetTargetEntity();
             mod.getMobDefenseChain().resetForceField();
+            // (2026-09-18 追最后已知位置) 目标从感知消失但处于最后已知宽限期
+            // → 走向冻结的最后位置 (XZ 导航, 允许下挖接近); 到达 2 格内还没
+            // 重新感知到才真放弃进 wander。
+            if (_lastChaseTarget != null) {
+                Vec3d lastKnown = mod.getEntityTracker().getLastKnownPos(_lastChaseTarget);
+                if (lastKnown != null) {
+                    double dxz = Math.hypot(mod.getPlayer().getX() - lastKnown.x,
+                            mod.getPlayer().getZ() - lastKnown.z);
+                    if (dxz > 2.0) {
+                        long nowTk = WorldHelper.getTicks();
+                        if (nowTk - _lastNoTargetLogTick > 100) {
+                            _lastNoTargetLogTick = nowTk;
+                            Debug.logToFile("altoclef_diag.log", "[LAST-KNOWN-CHASE]\tchasing last known pos of "
+                                    + _lastChaseTarget.getType().toString()
+                                    + " at (" + String.format("%.1f,%.1f,%.1f", lastKnown.x, lastKnown.y, lastKnown.z)
+                                    + ") dxz=" + String.format("%.1f", dxz));
+                        }
+                        setDebugState("Chasing last known position of target");
+                        return new GetToXZTask((int) Math.floor(lastKnown.x), (int) Math.floor(lastKnown.z));
+                    }
+                }
+            }
+            _lastChaseTarget = null;
             // (2026-09-14 诊断) 目标从感知/候选里消失 (被拉黑/超感知窗口/死亡)。
             // 232015 场次: hoglin 规则拉黑唯一猪灵 → 无目标 wander 循环, 被
             // 随机方向累计带离 30+ 格。节流 5s。
@@ -115,6 +144,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             mod.getMobDefenseChain().setTargetEntity(checkEntity.get());
         }
         Entity entity = checkEntity.get();
+        _lastChaseTarget = entity;
 
         double playerReach = mod.getModSettings().getEntityReachRange();
 
@@ -382,6 +412,9 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         _repositionTarget = null; // (2026-08-31) 长任务停止时清掉绕位记忆, 避免遗留下次误用
         _losBlockedSinceTick = Long.MIN_VALUE; // (2026-09-09) 遮挡计时一并清掉
         _visibleAimPoint = null; // (2026-09-12) 可见瞄准点一并清掉
+        // (2026-09-18) _lastChaseTarget 故意不清: 任务实例长期复用 (如 _tradeTask),
+        // 进食抢占等打断恢复后还能续上最后已知追击; 残留无风险 —— 追击仅在
+        // tracker 判定该实体仍处 30s 宽限期时触发, 且只在无活跃目标时走到。
     }
 
     protected abstract Optional<Entity> getEntityTarget(AltoClef mod);

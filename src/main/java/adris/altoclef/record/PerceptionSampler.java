@@ -319,6 +319,33 @@ public final class PerceptionSampler {
             Json.str(sb, "remembered".equals(src) ? "remembered" : "observed");
             sb.append('}');
         }
+        // (2026-09-18 追最后已知位置) 最后已知层: 20s 感知记忆已过期、但仍在
+        // 30s 宽限期内的实体 —— bot 的信念状态延伸, 录制系统与追击逻辑同源
+        // (EntityTracker._staleKnownPos)。位置冻结在最后一次直接感知处,
+        // 刻意不含实时速度/hp/物品 (实体当前状态对 bot 不可知, 录了就是透视)。
+        try {
+            for (Entity e : mod.getEntityTracker().getStaleKnownEntities()) {
+                if (e == null || e == p || shownEntities >= maxEntities) continue;
+                net.minecraft.util.math.Vec3d lkp = mod.getEntityTracker().getLastKnownPos(e);
+                if (lkp == null) continue;
+                if (lkp.squaredDistanceTo(eye) > rangeSq) continue;
+                if (!first) sb.append(',');
+                first = false;
+                shownEntities++;
+                sb.append("{\"id\":").append(e.getId());
+                sb.append(",\"type\":");
+                Json.str(sb, entityTypeId(e));
+                sb.append(",\"p\":");
+                Json.vec(sb, lkp.x, lkp.y, lkp.z);
+                sb.append(",\"d\":").append(Json.f(Math.sqrt(lkp.squaredDistanceTo(eye))));
+                sb.append(",\"src\":");
+                Json.str(sb, "lastKnown");
+                sb.append(",\"g\":");
+                Json.str(sb, "remembered");
+                sb.append('}');
+            }
+        } catch (Throwable ignored) {
+        }
         sb.append(']');
 
         // ---- 声音 (听觉通道, 独立于视觉) ----

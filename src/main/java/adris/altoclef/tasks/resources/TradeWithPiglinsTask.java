@@ -211,6 +211,15 @@ public class TradeWithPiglinsTask extends ResourceTask {
 
         // If we have no piglin nearby, explore until we find piglin.
         if (!mod.getEntityTracker().entityFound(PiglinEntity.class)) {
+            // (2026-09-18 追最后已知位置) 20s 感知记忆过期但仍在 30s 宽限期内
+            // → 继续交易子任务 (其内部会走向最后已知位置), 而不是掉回探索。
+            // 场景: bot 在猪灵头顶下挖接近, 视线/声音断流满 20s 被判丢失
+            // (20260918-154845 会话 15:52:22 实锤), 其实 bot 一直知道它在哪。
+            Entity stalePiglin = mod.getEntityTracker().getStaleKnownEntity(PiglinEntity.class);
+            if (stalePiglin != null) {
+                setDebugState("Chasing piglin last-known position");
+                return _tradeTask;
+            }
             setDebugState("Exploring for piglins (human-like)");
             return _piglinSearcher;
         }
