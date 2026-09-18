@@ -2,8 +2,10 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.Settings;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.trackers.KnowledgeMemory;
@@ -289,6 +291,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (_corridorEnabled) {
             seedVisitedCellsFromDisk(_persistKey);
         }
+        // 船降触发状态复位 (2026-09-18): 任务实例重建即重新武装。
+        _noFloorSinceTick = 0;
+        _boatScanNextTick = 0;
+        _boatDescentCell = null;
+        _boatDescentCooldownUntilTick = 0;
+        _boatDescentFails = 0;
+        _boatDescentDisabledLogged = false;
     }
 
     @Override
@@ -343,7 +352,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             _currentTarget = pickCorridorTarget(mod, player);
             if (_currentTarget == null) {
                 setDebugState("On fortress but no walkable floor found yet");
-                return null;
+                // (2026-09-18 船降) 卡死持续 ≥ 阈值后尝试"船免摔落"下降到下方走廊。
+                return maybeBoatDescent(mod, player);
             }
             _progress.reset();
             mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(_currentTarget, 1));
@@ -614,6 +624,124 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 || ground == Blocks.NETHER_BRICK_SLAB)
                 && mod.getWorld().getBlockState(pos).isAir()
                 && mod.getWorld().getBlockState(pos.up()).isAir();
+    }
+
+    // ------------------------------------------------------------------ //
+    // 船降触发 (2026-09-18): 走廊模式"下不去"兜底
+    // ------------------------------------------------------------------ //
+
+    /** 走廊模式找不到可走格子的起始 tick (0 = 未在卡死状态)。 */
+    private long _noFloorSinceTick = 0;
+    /** 下次落点深扫描的 tick (每 5s 一次)。 */
+    private long _boatScanNextTick = 0;
+    /** 非 null = 船降子任务已启动 (进行中)。 */
+    private BlockPos _boatDescentCell = null;
+    /** 船降结算后的冷却截止 tick。 */
+    private long _boatDescentCooldownUntilTick = 0;
+    /** 船降连续失败计数 (≥ Settings 上限 → 本实例停用)。 */
+    private int _boatDescentFails = 0;
+    private boolean _boatDescentDisabledLogged = false;
+
+    /**
+     * 卡死判定: _currentTarget == null 持续 ≥ fortressBoatDescentStuckSeconds
+     * (用户拍板 15s)。此时 bot 在走廊模式完全 idle (无寻路无按键), 无需再查
+     * "是否在忙正当动作"。触发后深扫描下方要塞地面找落点, 几何可行才启动
+     * FortressBoatDescentTask; 结算 (按玩家 Y)/冷却/失败计数都在这里收口。
+     */
+    private Task maybeBoatDescent(AltoClef mod, BlockPos player) {
+        Settings s = mod.getModSettings();
+        if (!s.isFortressBoatDescentEnabled()) return null;
+        if (_boatDescentFails >= s.getFortressBoatDescentMaxFailures()) {
+            if (!_boatDescentDisabledLogged) {
+                _boatDescentDisabledLogged = true;
+                Debug.logWarning("[BOAT-DROP] 连续失败 " + _boatDescentFails
+                        + " 次, 本探索任务实例内停用船降");
+            }
+            return null;
+        }
+        if (_tickId < _boatDescentCooldownUntilTick) return null;
+
+        // 子任务进行中: 任务栈里还有它 → 继续喂同一落点 (isEqual 幂等去重);
+        // 栈里没了 → 结算: 玩家是否真的降到了落点附近。
+        if (_boatDescentCell != null) {
+            boolean stillActive = false;
+            TaskChain chain = mod.getTaskRunner().getCurrentTaskChain();
+            if (chain != null) {
+                for (Task t : chain.getTasks()) {
+                    if (t instanceof FortressBoatDescentTask) {
+                        stillActive = true;
+                        break;
+                    }
+                }
+            }
+            if (stillActive) {
+                return new FortressBoatDescentTask(_boatDescentCell);
+            }
+            boolean success = player.getY() <= _boatDescentCell.getY() + 2;
+            if (success) {
+                Debug.logMessage("[BOAT-DROP] 船降成功, bot 现在位于 "
+                        + player.toShortString());
+                _boatDescentCooldownUntilTick = _tickId + 15 * 20;
+            } else {
+                _boatDescentFails++;
+                Debug.logWarning("[BOAT-DROP] 船降失败 (" + _boatDescentFails
+                        + "/" + s.getFortressBoatDescentMaxFailures() + "), 冷却 60s 后再试");
+                _boatDescentCooldownUntilTick = _tickId + 60 * 20;
+            }
+            _boatDescentCell = null;
+            _currentTarget = null;
+            return null;
+        }
+
+        // 卡死计时 (首次进入该分支置起点)。
+        if (_noFloorSinceTick == 0) {
+            _noFloorSinceTick = _tickId;
+            return null;
+        }
+        if (_tickId - _noFloorSinceTick < (long) s.getFortressBoatDescentStuckSeconds() * 20) {
+            return null;
+        }
+        // 每 5s 扫一次落点 (深扫描有开销, 节流)。
+        if (_tickId < _boatScanNextTick) return null;
+        _boatScanNextTick = _tickId + 100;
+        BlockPos landing = findBoatDescentLanding(mod, player);
+        if (landing == null) return null;
+        Debug.logMessage("[BOAT-DROP] 触发船降: 玩家 y=" + player.getY()
+                + ", 落点 " + landing.toShortString()
+                + " (落差 " + (player.getY() - landing.getY()) + ")");
+        _boatDescentCell = landing;
+        return new FortressBoatDescentTask(landing);
+    }
+
+    /**
+     * 深扫描下方要塞地面走廊格: 落差 ≥ minDrop、水平距 2~5 格 (船从边缘滑落
+     * 是直落的, 落点列离得太远船到不了; 贴脚下列放船会和 bot 碰撞), 再过
+     * FortressBoatDescentTask.isLandingViable 的几何校验。浅 + 近优先。
+     */
+    private BlockPos findBoatDescentLanding(AltoClef mod, BlockPos player) {
+        final int RADIUS = 8;
+        final int MAX_DEPTH = 48;
+        int minDrop = mod.getModSettings().getFortressBoatDescentMinDropBlocks();
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            for (int dz = -RADIUS; dz <= RADIUS; dz++) {
+                double dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist < 2 || dist > 5) continue;
+                for (int y = player.getY() - minDrop; y >= player.getY() - MAX_DEPTH; y--) {
+                    BlockPos pos = new BlockPos(player.getX() + dx, y, player.getZ() + dz);
+                    if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
+                    if (!isFortressFloorCell(mod, pos)) continue;
+                    if (!FortressBoatDescentTask.isLandingViable(mod, player, pos)) continue;
+                    double score = (player.getY() - y) + dist;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = pos;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------ //

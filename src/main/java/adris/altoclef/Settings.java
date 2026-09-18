@@ -678,6 +678,26 @@ public class Settings implements IFailableConfigFile {
     private boolean anomalyWatchdogEnabled = true;
 
     //////////////////////////////////////////////////////////////////////////////////////////
+    ////////** 要塞船降 (2026-09-18) **////////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * (2026-09-18 船降) 要塞走廊模式"下不去"兜底: bot 站在要塞上部但可行走
+     * 地面都在下方大落差处 (baritone 拒绝跳), 卡死持续超阈值后用"船免摔落"
+     * 方案下降。机制依据: Java 版船完全抵消自身与骑乘者的摔落伤害。
+     */
+    private boolean fortressBoatDescentEnabled = true;
+
+    /** 走廊模式"找不到可走格子"持续多少秒后才触发船降 (用户拍板: ≤15s)。 */
+    private int fortressBoatDescentStuckSeconds = 15;
+
+    /** 只对落差 ≥ 此值的落点触发船降 (更浅的落差交给正常寻路)。 */
+    private int fortressBoatDescentMinDropBlocks = 8;
+
+    /** 连续失败这么多次后, 本任务实例内停用船降 (防反复折腾)。 */
+    private int fortressBoatDescentMaxFailures = 3;
+
+    //////////////////////////////////////////////////////////////////////////////////////////
     ////////** 数据集录制 (2026-09-17) **//////////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////////////////////////////
     // 为层次化 MBPN 训练做逐帧全量快照导出 (不录像素画面, 只录结构化世界 + 结构化记忆)。
@@ -773,6 +793,24 @@ public class Settings implements IFailableConfigFile {
 
     public boolean isAnomalyWatchdogEnabled() {
         return anomalyWatchdogEnabled;
+    }
+
+    // ==== 要塞船降 (2026-09-18) ====
+
+    public boolean isFortressBoatDescentEnabled() {
+        return fortressBoatDescentEnabled;
+    }
+
+    public int getFortressBoatDescentStuckSeconds() {
+        return fortressBoatDescentStuckSeconds;
+    }
+
+    public int getFortressBoatDescentMinDropBlocks() {
+        return fortressBoatDescentMinDropBlocks;
+    }
+
+    public int getFortressBoatDescentMaxFailures() {
+        return fortressBoatDescentMaxFailures;
     }
 
     // ==== 数据集录制 (2026-09-17) ====
