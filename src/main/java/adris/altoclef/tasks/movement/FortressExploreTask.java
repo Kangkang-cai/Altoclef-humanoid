@@ -298,6 +298,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _boatDescentCooldownUntilTick = 0;
         _boatDescentFails = 0;
         _boatDescentDisabledLogged = false;
+        _boatScanMissCount = 0;
     }
 
     @Override
@@ -347,6 +348,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
     private Task tickCorridor(AltoClef mod) {
         BlockPos player = mod.getPlayer().getBlockPos();
+
+        // (2026-09-18 修) 有目标 = 没卡死, 复位船降卡死计时 —— 否则首次卡死
+        // 后计时戳残留, 之后每次卡死都跳过 15s 等待直接触发。
+        if (_currentTarget != null) {
+            _noFloorSinceTick = 0;
+        }
 
         if (_currentTarget == null) {
             _currentTarget = pickCorridorTarget(mod, player);
@@ -641,6 +648,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     /** 船降连续失败计数 (≥ Settings 上限 → 本实例停用)。 */
     private int _boatDescentFails = 0;
     private boolean _boatDescentDisabledLogged = false;
+    /** 落点扫描无果计数 (诊断日志用)。 */
+    private int _boatScanMissCount = 0;
 
     /**
      * 卡死判定: _currentTarget == null 持续 ≥ fortressBoatDescentStuckSeconds
@@ -705,7 +714,17 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (_tickId < _boatScanNextTick) return null;
         _boatScanNextTick = _tickId + 100;
         BlockPos landing = findBoatDescentLanding(mod, player);
-        if (landing == null) return null;
+        if (landing == null) {
+            // (2026-09-18 补) 扫描无果此前零日志 —— 无法区分"没触发"和"触发了
+            // 但找不到落点"。首次 + 之后每 30s 一条。
+            _boatScanMissCount++;
+            if (_boatScanMissCount == 1 || _boatScanMissCount % 6 == 0) {
+                Debug.logMessage("[BOAT-DROP] 卡死已过阈值, 落点扫描第 " + _boatScanMissCount
+                        + " 次无果 (落差≥" + s.getFortressBoatDescentMinDropBlocks()
+                        + " 且水平 2~5 格内无几何可行的走廊格)");
+            }
+            return null;
+        }
         Debug.logMessage("[BOAT-DROP] 触发船降: 玩家 y=" + player.getY()
                 + ", 落点 " + landing.toShortString()
                 + " (落差 " + (player.getY() - landing.getY()) + ")");
