@@ -405,6 +405,13 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 } else {
                     // We failed bartering.
                     Debug.logMessage("Failed bartering with current piglin, blacklisting.");
+                    // (2026-09-18 补取证) 上面这条只进聊天 HUD 不落盘, 连环拉黑
+                    // 在文件里全盲 (171546 会话: 无 loot 记录却 no-target 洪流,
+                    // 疑"丢金锭失败 → 2s 超时连环拉黑", 无法确证)。
+                    Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tbarter timeout -> blacklist piglin "
+                            + _currentlyBartering.getBlockPos().toShortString()
+                            + " isTradingPiglin=" + EntityHelper.isTradingPiglin(_currentlyBartering)
+                            + " dist=" + String.format("%.1f", Math.sqrt(_currentlyBartering.squaredDistanceTo(mod.getPlayer()))));
                     blacklist(_currentlyBartering);
                     _barterTimeout.reset();
                     _currentlyBartering = null;

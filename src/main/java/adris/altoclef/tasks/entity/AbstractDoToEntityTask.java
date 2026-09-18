@@ -93,13 +93,20 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     @Override
     protected Task onTick(AltoClef mod) {
 
-        if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
-            _progress.reset();
-            setDebugState("Failed to get to target, wandering for a bit.");
-            return _wanderTask;
-        }
-
+        // (2026-09-18 wander 中重评目标) 原先本分支先于目标重评——随机走完
+        // 10 格之前即使出现新的可用猪灵也不追 (171546 会话用户实测 "wander
+        // 中遇到别的猪灵还是 wander")。改为: 先重评目标, 有目标立即中断
+        // wander 进入正常流程, 没有才继续随机走。
         Optional<Entity> checkEntity = getEntityTarget(mod);
+
+        if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
+            if (checkEntity.isEmpty()) {
+                _progress.reset();
+                setDebugState("Failed to get to target, wandering for a bit.");
+                return _wanderTask;
+            }
+            setDebugState("New target spotted during wander, aborting it.");
+        }
 
 
         // Oof
