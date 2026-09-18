@@ -645,7 +645,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                         _occNoCollision = false;
                         _occAim = null;
                     } else if (neverOccluder(mod, found)) {
-                        logRefusedContainer(mod, found);
+                        logRefusedOccluder(mod, found);
                     }
                 }
             }
@@ -685,7 +685,7 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                             _occNoCollision = true;
                             _occAim = vhit.getPos();
                         } else if (neverOccluder(mod, vfound)) {
-                            logRefusedContainer(mod, vfound);
+                            logRefusedOccluder(mod, vfound);
                         }
                     }
                 }
@@ -761,17 +761,46 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      *   见 `[SmeltOrphan]` 家族 —— 炉内资产直接丢失。
      */
     private boolean neverOccluder(AltoClef mod, BlockPos pos) {
-        return mod.getWorld().getBlockEntity(pos) != null;
+        // ① (2026-09-17 拆自己熔炉修复) 带 BlockEntity 的方块一律跳过。
+        if (mod.getWorld().getBlockEntity(pos) != null) return true;
+        // ② (2026-09-18 门框被当挡块清掉) 被 Behaviour 声明"禁止破坏"的方块一律跳过。
+        //
+        // 缺陷属性: **预先存在**。tryClearOccluder 自 2026-09-15 引入时, 挡块入选
+        // 判据就只有 hardness>=0 (L641/L681), 09-17 补 neverOccluder 时也只覆盖了
+        // "容器"一类 —— "受保护方块"这一类从未收口。同时 refuseIfProtected 只复查
+        // _pos (任务目标格), 而本方法与 occ (射线命中的挡块坐标) 是两个不同的位,
+        // 于是门体一旦当挡块就完全绕过守卫。
+        //
+        // 现场 20260918-111256 (搭下界门清门内) 实锤:
+        //   11:19:51.961 `<Placing obsidian at -123, 77, 260 with a cast>` (刚浇铸出的门框)
+        //   11:19:53.311 `<Construct Nether Portal> Clearing inside of portal`
+        //   11:19:53.361 `[OccluderClear] clearing -123, 77, 260 (obsidian) blocking target=-123, 76, 259`
+        //   → 门框被自己当"挡在门内目标前面的挡块"撸掉, 全程 `[PortalGuard]` 零命中。
+        //
+        // 为什么全局门保护 isPortalBodyBlock 在这里也失效: 它要求"自身是门方块"或
+        // "6 面相邻有 NETHER_PORTAL", 而门**尚未点燃** (点燃是建造流程最后一步) →
+        // 判定 false。但本任务 onStart (ConstructNetherPortalBucketTask L94-105)
+        // 注册的 avoidBlockBreaking 谓词按 _portalOrigin+PORTAL_FRAME 判定, 认得
+        // 建造中的门框, 且经 BotBehaviour.applyState() 同步进 baritone 侧
+        // shouldAvoidBreaking —— 所以这里消费它是唯一能在"未点燃期"生效的判据。
+        // 判据源与 WorldHelper.canBreak / JumpObstructionHelper 同款, 不再各写一套。
+        return mod.getExtraBaritoneSettings().shouldAvoidBreaking(pos);
     }
 
-    /** (2026-09-17) 拒拆容器挡块的打点, 2s 节流, 只落盘不进聊天。 */
-    private void logRefusedContainer(AltoClef mod, BlockPos pos) {
+    /**
+     * (2026-09-17 容器 / 2026-09-18 受保护方块) 拒拆挡块的打点, 2s 节流, 只落盘不进聊天。
+     * 两类原因分开标注: `container` = 带 BlockEntity (熔炉/箱子), `protected` = 被
+     * Behaviour 声明禁止破坏 (门体/建造期门框) —— 排查时一眼分辨是哪条判据挡下的。
+     */
+    private void logRefusedOccluder(AltoClef mod, BlockPos pos) {
         long now = System.currentTimeMillis();
         if (now - _lastRefuseContainerLogMs <= 2000) return;
         _lastRefuseContainerLogMs = now;
-        Debug.logToFile("altoclef_diag.log", "[OccluderClear] refused container "
+        String why = mod.getWorld().getBlockEntity(pos) != null ? "container" : "protected";
+        Debug.logToFile("altoclef_diag.log", "[OccluderClear] refused " + why + " "
                 + pos.toShortString() + " (" + mod.getWorld().getBlockState(pos).getBlock()
-                + ") blocking target=" + _pos.toShortString() + " — 不拆容器, 交回常规瞄准/放弃路径");
+                + ") blocking target=" + _pos.toShortString()
+                + " — 不拆容器/受保护方块, 交回常规瞄准/放弃路径");
     }
 
     /**

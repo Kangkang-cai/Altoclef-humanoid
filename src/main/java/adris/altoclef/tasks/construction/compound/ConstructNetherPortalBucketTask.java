@@ -5,7 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.ClearLiquidTask;
-import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.construction.ClearRegionTask;
 import adris.altoclef.tasks.construction.PlaceObsidianBucketTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -77,13 +77,10 @@ public class ConstructNetherPortalBucketTask extends Task {
     private BlockPos _portalOrigin = null;
 
     //private BlockPos _currentLavaTarget = null;
-    private BlockPos _currentDestroyTarget = null;
     private boolean _firstSearch = false;
 
     @Override
     protected void onStart(AltoClef mod) {
-
-        _currentDestroyTarget = null;
 
         mod.getBlockTracker().trackBlock(Blocks.LAVA);
         mod.getBehaviour().push();
@@ -125,17 +122,7 @@ public class ConstructNetherPortalBucketTask extends Task {
         // 在 317,34,84, 相距 400+ 格)。改成 100 格, bot 远离原点后重新就近选点。
         if (_portalOrigin != null && !_portalOrigin.isWithinDistance(mod.getPlayer().getPos(), 100)) {
             _portalOrigin = null;
-            _currentDestroyTarget = null;
         }
-
-        if (_currentDestroyTarget != null) {
-            if (!WorldHelper.isSolid(mod, _currentDestroyTarget)) {
-                _currentDestroyTarget = null;
-            } else {
-                return new DestroyBlockTask(_currentDestroyTarget);
-            }
-        }
-
 
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
             setDebugState("Wandering before retrying...");
@@ -240,14 +227,34 @@ public class ConstructNetherPortalBucketTask extends Task {
         }
 
         // Now, clear the inside.
+        // (2026-09-18 门内清障改 baritone clearArea) 原实现走 `_currentDestroyTarget = p`
+        // 逐格派 DestroyBlockTask 手动挖。但门是 1×3×2 空腔、四周是刚浇铸的门框黑曜石,
+        // bot 站门侧看内部格时视线必经门框 → LookHelper.getReach 恒缺 → DestroyBlockTask
+        // 落进 tryClearOccluder, 把门框当"挡在目标前面的挡块"清掉。
+        // 现场 20260918-111256 11:19:53.361:
+        //   [OccluderClear] clearing -123, 77, 260 (obsidian) blocking target=-123, 76, 259
+        //   —— 那正是 1.4s 前 11:19:51.961 刚 cast 出来的门框, 门当场被挖塌。
+        // 这不是偶发: 门内任何非空气格都会触发同一条"视线必经门框"的路径。
+        //
+        // 改法 = 整块交 baritone 的 clearArea (ClearRegionTask):
+        //   ① 它消费 avoidBlockBreaking 谓词 (本任务 onStart 已注册"别挖 PORTAL_FRAME
+        //      的黑曜石"), 且门框本就在清除区域之外 —— 双重保险;
+        //   ② 站位与挖穿顺序由 baritone 规划, 不走"视线被挡 → 挖挡块"这条手动路径。
+        //
+        // 清除区域严格 = PORTAL_INTERIOR 的轴对齐包围盒 (origin .. origin+(0,2,1),
+        // 即 1×3×2 = 6 格)。门框位于 (0,-1,*)/(0,3,*)/(0,*,-1)/(0,*,2), 全在盒外。
+        //
+        // 已知缺口: ClearRegionTask 无可达/失败兜底 (见其文件头 TODO), 若 baritone
+        // 因站位问题清不动, 会停在"重派 clearArea"循环 —— 实跑请盯 [NAV-STUCK] 与
+        // 任务栈是否长期停在 Clearing inside of portal。
+        BlockPos interiorMin = _portalOrigin;
+        BlockPos interiorMax = _portalOrigin.add(0, 2, 1);
         for (Vec3i offs : PORTAL_INTERIOR) {
             BlockPos p = _portalOrigin.add(offs);
             assert MinecraftClient.getInstance().world != null;
             if (!MinecraftClient.getInstance().world.getBlockState(p).isAir()) {
                 setDebugState("Clearing inside of portal");
-                _currentDestroyTarget = p;
-                return null;
-                //return new DestroyBlockTask(p);
+                return new ClearRegionTask(interiorMin, interiorMax);
             }
         }
 
