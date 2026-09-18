@@ -88,6 +88,16 @@ public class Settings implements IFailableConfigFile {
     private boolean useCraftingBookToCraft = true;
 
     /**
+     * (2026-09-18 批量收货允许的有界超量) 批量填充后合成格可做批次 K 超过还差
+     * 数量 W 时，一键 shift 全收会多做 (K-W) 批。对"金粒→金锭/铁粒→铁锭"这类
+     * 纯转化配方（原料唯一去向就是成品，多做的成品仍是等值资源），超量不超过
+     * 此批数时允许一次 shift 全收（否则退化成逐个拾取，0.6s/件）。
+     * 0 = 严格不超量（退回逐个拾取）。仅对金粒/铁粒→锭生效，剑/工具等
+     * 原料另有他用的配方永远精确。
+     */
+    private int maxBulkCraftOvershoot = 8;
+
+    /**
      * If a dropped resource item is further than this from the player, don't pick it up.
      * <p>
      * -1 (or less than 0) to disable.
@@ -889,6 +899,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean shouldUseCraftingBookToCraft() {
         return useCraftingBookToCraft;
+    }
+
+    public int getMaxBulkCraftOvershoot() {
+        return maxBulkCraftOvershoot;
     }
 
     public int getFoodUnitsToCollect() {

@@ -12,7 +12,10 @@ import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.tag.ItemTags;
+import net.minecraft.tag.TagKey;
 
 import java.util.Optional;
 
@@ -142,7 +145,24 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
 
         int craftCount = inOutput.getCount() * getCraftMultipleCount(mod);
         int weWantToAddToInventory = _toTake - mod.getItemStorage().getItemCountInventoryOnly(inOutput.getItem());
-        boolean takeAll = weWantToAddToInventory >= craftCount;
+        // (2026-09-18 有界超量一键全收) 上面 takeAll 严格要求"格内可做总量 ≤ 还差
+        // 数量"——批量填充后格内容量 K 通常远超 W（原料富余），于是永远走不到
+        // QUICK_MOVE，退化成逐个拾取（20260918-154845 实锤：4 锭 4 次 PICKUP，
+        // 用户复现"还是一个一个拿"）。对【金粒→金锭/铁粒→铁锭/小麦→面包】这类
+        // 纯转化配方（原料的唯一去向就是成品，多做的成品仍是等值资源：金锭直接
+        // 喂猪灵交易、面包是食物储备），超量在 Settings.maxBulkCraftOvershoot
+        // 批内时放开一键全收。剑/工具/盔甲等"原料另有他用"的配方不在白名单，
+        // 维持严格不超量（老铁剑超量事故口径）。超量上限 0 = 完全恢复旧行为。
+        boolean takeAll = weWantToAddToInventory >= craftCount
+                || (mod.getModSettings().getMaxBulkCraftOvershoot() > 0
+                && _toTake != Integer.MAX_VALUE
+                && weWantToAddToInventory > 0
+                && isPureConversionWhitelisted(inOutput.getItem(), mod)
+                // 上限按【批】计: (craftCount - weWant) 是成品件数, 除以每批产出
+                // 得超量批数 (木板 4 件/批、金锭 1 件/批, 同一上限对两类配方
+                // 语义一致——都是"多做几批"而不是"多拿几件")。
+                && craftCount - weWantToAddToInventory
+                        <= (long) mod.getModSettings().getMaxBulkCraftOvershoot() * inOutput.getCount());
         // (2026-08-27 输出拾取防抖) ...
         long now = System.currentTimeMillis();
         if (takeAll) {
@@ -214,6 +234,64 @@ public class ReceiveCraftingOutputSlotTask extends Task implements ITaskUsesCraf
     @Override
     protected String toDebugString() {
         return "Receiving output";
+    }
+
+    /**
+     * (2026-09-18) 入口：合成格所有非空格是【同一种原料】才放行（两种以上原料
+     * 如金胡萝卜/工具一律 false），再查 {@link #isWhitelistedConversion}。
+     */
+    private static boolean isPureConversionWhitelisted(Item outputItem, AltoClef mod) {
+        Item gridItem = null;
+        for (Slot check : (StorageHelper.isBigCraftingOpen() ? CraftingTableSlot.INPUT_SLOTS : PlayerSlot.CRAFT_INPUT_SLOTS)) {
+            ItemStack stack = StorageHelper.getItemStackInSlot(check);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            Item inGrid = stack.getItem();
+            if (gridItem == null) {
+                gridItem = inGrid;
+            } else if (gridItem != inGrid) {
+                return false;
+            }
+        }
+        return gridItem != null && isWhitelistedConversion(outputItem, gridItem);
+    }
+
+    /**
+     * (2026-09-18) "纯转化配方"白名单：输出是原料的等值下游产物 —— 多做的成品
+     * 仍是等值资源、会被 bot 自己的管线消费掉：
+     *   金粒→金锭 / 铁粒→铁锭（锭直接喂猪灵交易/工具）
+     *   小麦→面包（食物储备）
+     *   干草块→小麦（食物链上游，9 小麦/块，可逆）
+     *   原木→木板（万能中间品：木棍/工作台/船[要塞船降]/燃料）
+     *   木板→木棍（万能中间品：火把/工具）
+     * 剑/工具/盔甲等"原料另有他用"的配方不在白名单（老铁剑超量事故口径）。
+     */
+    private static boolean isWhitelistedConversion(Item outputItem, Item gridItem) {
+        if (gridItem == Items.GOLD_NUGGET) {
+            return outputItem == Items.GOLD_INGOT;
+        }
+        if (gridItem == Items.IRON_NUGGET) {
+            return outputItem == Items.IRON_INGOT;
+        }
+        if (gridItem == Items.WHEAT) {
+            return outputItem == Items.BREAD;
+        }
+        if (gridItem == Items.HAY_BLOCK) {
+            return outputItem == Items.WHEAT;
+        }
+        if (isInItemTag(gridItem, ItemTags.LOGS)) {
+            return isInItemTag(outputItem, ItemTags.PLANKS);
+        }
+        if (isInItemTag(gridItem, ItemTags.PLANKS)) {
+            return outputItem == Items.STICK;
+        }
+        return false;
+    }
+
+    /** (2026-09-18) 1.18.2 的 TagKey 归属判定走 ItemStack.isIn。 */
+    private static boolean isInItemTag(Item item, TagKey<Item> tag) {
+        return new ItemStack(item).isIn(tag);
     }
 
     // How many multiples of the current crafting recipe can we craft?
