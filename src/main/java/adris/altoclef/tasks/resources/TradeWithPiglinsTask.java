@@ -244,6 +244,10 @@ public class TradeWithPiglinsTask extends ResourceTask {
         private final TimerGame _intervalTimeout = new TimerGame(10);
         private final HashSet<Entity> _blacklisted = new HashSet<>();
         private Entity _currentlyBartering = null;
+        // (2026-09-18 蛮兵拒选节流日志, 用户"没有日志吗, 注意节流") getEntityTarget
+        // 的蛮兵过滤原先是静默 return false, 实跑完全无法验证。落盘不进聊天
+        // ([Diag-creeper] 先例), 2s 节流。
+        private long _lastBruteGuardLogMs = 0;
         // (2026-09-14 212757 场次 误拉黑宽限窗) 上一次"猪灵丢出战利品"边沿的
         // 墙钟时间。丢战利品 = 上一笔交易成功的铁证; 之后即使 2s barterTimeout
         // 因任务切换延迟 (见 notifyBarterLootCycle 注释) 到期, 也不该拉黑刚
@@ -505,7 +509,18 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         // (2026-09-18 蛮兵攻击范围内不交易, 用户) 蛮兵 32 格内
                         // (原版仇恨半径)的猪灵不选 —— 贴近它必撞进蛮兵视野。
                         Optional<Entity> closestBrute = mod.getEntityTracker().getClosestEntity(entity.getPos(), PiglinBruteEntity.class);
-                        return closestBrute.isEmpty() || !closestBrute.get().isInRange(entity, BRUTE_AVOID_TRADE_RADIUS);
+                        if (closestBrute.isPresent() && closestBrute.get().isInRange(entity, BRUTE_AVOID_TRADE_RADIUS)) {
+                            long nowMs = System.currentTimeMillis();
+                            if (nowMs - _lastBruteGuardLogMs > 2000) {
+                                _lastBruteGuardLogMs = nowMs;
+                                Debug.logToFile("altoclef_diag.log", "[PiglinTrade]\tskip piglin "
+                                        + entity.getBlockPos().toShortString() + " — brute "
+                                        + closestBrute.get().getBlockPos().toShortString()
+                                        + " within " + String.format("%.1f", Math.sqrt(closestBrute.get().squaredDistanceTo(entity))) + " blocks");
+                            }
+                            return false;
+                        }
+                        return true;
                     }, PiglinEntity.class
             );
             if (found.isEmpty()) {
