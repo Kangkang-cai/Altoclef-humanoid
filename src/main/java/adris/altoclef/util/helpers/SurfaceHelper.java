@@ -35,6 +35,11 @@ import net.minecraft.world.World;
  *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
  *        (依据: 天然地形不存在这么深的通天露天柱; 深处客户端头顶柱视图有整体缺失的异常,
  *         20260918-092740: 超大洞穴 y=-44 五列同时 buried=0 稳定 40s+, 深度物理事实兜底)
+ *   判据7 高度图交叉  距最高非空气方块 (WORLD_SURFACE 高度图, 服务端下发、深处稳定) &gt; 32 格
+ *        → 无条件判地下 (094844: y=0..9 判据6 拦不到, 扫描仍报"露天"而 wsTop=63; 深度物理事实兜底)
+ *   判据8 地表签名    脚下踩着/身旁 (半径≤2, 脚+头两高度) 长着只在露天生成的方块
+ *        (草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦; 草/蕨/花/仙人掌/枯灌木/甘蔗) → 判地表。
+ *        = 人判地表的"脚下质感 + 身旁景物"通道; 只在判据6/7 通过的浅带生效, 液体护栏防湖底误判
  * </pre>
  * 判据1 的取值语义: "该列从头顶往上要挖穿几格【非植被地层】才能见天"。≤4 浅 → 地表; 越大越深。
  * 取 5 点的<b>中位数</b>而不是最小/最大: 取最小 → 深竖井被判地表(20260917-120830 35 分钟上不去);
@@ -130,6 +135,14 @@ public final class SurfaceHelper {
      * —— 行为上等价于"走出峡谷", 可接受。
      */
     private static final int DEEP_CRUST_Y = 0;
+
+    /**
+     * 判据7 阈值: 自身列"高度图埋深" (最高非空气方块 y − 脚 y − 1) 超过本值 → 无条件判地下,
+     * 不采信逐块扫描 (该深度带的客户端方块数据已被实测证明会整体缺失/错装空气)。
+     * 取 32: 任意树冠 (含丛林最高 ~30) 以内; 天然洞穴顶板厚度普遍 &gt;32。
+     * 已知代价: 通天峡谷/竖井深处会被判地下 (与判据6 同向, 可接受)。
+     */
+    private static final int SCAN_TRUST_MAX_HEIGHTMAP_BURIAL = 32;
 
     /**
      * 采样列"不可判定"哨兵 (区块未加载 / 世界未就绪)。
@@ -343,12 +356,106 @@ public final class SurfaceHelper {
         // (20260918-092740: 超大洞穴 y=-44, 客户端头顶柱视图整体缺失, 五列 buried=0 稳定 40s+)
         if (pos.getY() < DEEP_CRUST_Y) return true;
 
+        // 判据7: 高度图埋深交叉验证 —— 距"最高非空气方块"超过 32 格时不许判地表。
+        // 依据: WORLD_SURFACE 高度图是服务端随区块下发的, 深处一直稳定 (三次事故里 wsTop 均给真值),
+        // 而客户端方块数据在深处会整体缺失/错装空气 (092740: y=-44 五列 buried=0; 094844: y=0..9
+        // 仍 buried=0/1 而 wsTop=63)。距地形顶这么深的位置不可能是"露天活动层"。
+        // 32 的依据: 任意树冠(含丛林最高 ~30)以内; 洞穴顶板普遍 >32。
+        // 已知代价: 通天峡谷/竖井底部 (深 >32) 会被判地下 → GoToSurface 爬出 = 等价"走出峡谷"。
+        World w = mod.getWorld();
+        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ());
+        if (wsTop > w.getBottomY() + 1 // 哨兵 (未加载/空高度图) → 跳过本判据, 交后续判据兜底
+                && wsTop - (pos.getY() + 1) > SCAN_TRUST_MAX_HEIGHTMAP_BURIAL) {
+            return true;
+        }
+
+        // 判据8: 地表签名 (人判地表的"脚下质感/身旁景物"通道) —— 扫描判深, 但脚下踩着/身旁长着
+        // 只在露天生成的方块 → 推翻"地下" (天然悬岩下草地上/表面凹坑等场景)
+        if (nearbySurfaceSignature(mod, pos)) return false;
+
         if (buried <= NEAR_SURFACE_MAX) return false;
 
         // 判据3: 临界带 (5..8) 再做一次水平环探测 —— "头顶被压住, 但一步之外就是露天"
         if (buried <= RING_PROBE_MAX && nearbyOpenColumn(mod, pos)) return false;
 
         return true;
+    }
+
+    /**
+     * 判据8: 地表签名方块 —— 只在露天表层天然生成的方块。
+     *
+     * <p>地形块 (脚下): 草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦。天然只在露天表层生成
+     * (沙/红沙=沙漠/滩头/恶地, 雪块=雪原表面, 陶瓦=恶地表层)。
+     * 植被 (脚/头高度, 半径 ≤2): 草/高草/蕨/大蕨、花(整族)、仙人掌、枯灌木、甘蔗 ——
+     * 草和花需要天光才能存活, 仙人掌/枯灌木只在沙漠/恶地表层。
+     *
+     * <p>刻意<b>不纳入</b>: 树叶 (繁茂洞穴的杜鹃树也有, 且"跳过不算遮挡"已等价利用)、
+     * 原木 (废弃矿井橡木柱干扰)、粘土 (湖底/河底水下 + 繁茂洞穴, 两处都不是露天活动层)、
+     * 苔藓/杜鹃 (繁茂洞穴)、沙砾 (水下/地下都生成)、云层 (纯渲染, 无方块数据可查)。
+     *
+     * <p>液体护栏: 脚/头浸在水里时不认签名 (湖底/河底的沙和粘土不是露天活动层)。
+     * 缓存 {@link #SIGNATURE_CACHE_MS}。
+     */
+    private static boolean isSurfaceSignature(net.minecraft.block.BlockState s) {
+        net.minecraft.block.Block b = s.getBlock();
+        return b == net.minecraft.block.Blocks.GRASS_BLOCK
+                || b == net.minecraft.block.Blocks.PODZOL
+                || b == net.minecraft.block.Blocks.MYCELIUM
+                || b == net.minecraft.block.Blocks.SAND
+                || b == net.minecraft.block.Blocks.RED_SAND
+                || b == net.minecraft.block.Blocks.SNOW_BLOCK
+                || b == net.minecraft.block.Blocks.TERRACOTTA
+                // 植被 (只在露天天然生成)
+                || b == net.minecraft.block.Blocks.GRASS
+                || b == net.minecraft.block.Blocks.TALL_GRASS
+                || b == net.minecraft.block.Blocks.FERN
+                || b == net.minecraft.block.Blocks.LARGE_FERN
+                || b == net.minecraft.block.Blocks.CACTUS
+                || b == net.minecraft.block.Blocks.DEAD_BUSH
+                || b == net.minecraft.block.Blocks.SUGAR_CANE
+                || s.isIn(BlockTags.FLOWERS);
+    }
+
+    /** 判据8 结果缓存时长 ( Signature 检查约 50 次块读, 不必每 tick 全做)。 */
+    private static final long SIGNATURE_CACHE_MS = 500;
+    private static boolean _sigYes = false;
+    private static long _sigAt = 0;
+    private static BlockPos _sigPos = null;
+
+    /**
+     * 判据8 主体: 脚下方块是地表地形块, 或脚/头高度半径 ≤2 的环内有地表植被 → true。
+     * 结果缓存; 浸在液体里时恒 false (水下沙/粘土不是露天活动层)。
+     */
+    private static boolean nearbySurfaceSignature(AltoClef mod, BlockPos pos) {
+        long now = System.currentTimeMillis();
+        if (_sigPos != null && _sigPos.equals(pos) && now - _sigAt < SIGNATURE_CACHE_MS) return _sigYes;
+        _sigAt = now;
+        _sigPos = pos;
+        _sigYes = false;
+        World w = mod.getWorld();
+        if (w == null) return false;
+        // 液体护栏: 头或脚浸在液体里 → 不认签名
+        if (w.getBlockState(pos).getMaterial().isLiquid()
+                || w.getBlockState(pos.up()).getMaterial().isLiquid()) return false;
+        // 脚下地形块
+        if (isSurfaceSignature(w.getBlockState(pos.down()))) {
+            _sigYes = true;
+            return true;
+        }
+        // 脚/头高度, 半径 ≤2 的水平环内找植被 (25 格 × 2 高度 ≈ 50 次块读)
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
+                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))) {
+                        _sigYes = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -442,9 +549,11 @@ public final class SurfaceHelper {
         // 诊断: 自身列 WORLD_SURFACE 高度图 (扫描封顶用)。正常应≈真实地形顶; 若出现
         // 与 y 相近的怪值 → 客户端头顶柱数据异常 (20260918-092740 的深部判地表疑似此因)
         int wsTop = -999999;
+        int hb = -999999;
         if (mod.getPlayer() != null && mod.getWorld() != null) {
             BlockPos p = mod.getPlayer().getBlockPos();
             wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, p.getX(), p.getZ());
+            hb = wsTop - (p.getY() + 1); // 判据7 的"高度图埋深"
         }
         Debug.logMessage("[Surface] mode -> "
                 + (raw ? "below(terrain)" : "surface(open)")
@@ -453,6 +562,7 @@ public final class SurfaceHelper {
                 + ", oh=[" + sb + "]"
                 + ", unk=" + unkCount
                 + ", wsTop=" + wsTop
+                + ", hb=" + hb
                 + ", vegCap=" + vegetationCapThickness(mod)
                 + ", covered=" + skyCoveredCount(mod) + "/5"
                 + ", dim=" + WorldHelper.getCurrentDimension()
