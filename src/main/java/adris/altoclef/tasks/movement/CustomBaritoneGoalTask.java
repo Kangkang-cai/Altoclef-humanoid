@@ -308,6 +308,23 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         _climbWatchBestY = Integer.MIN_VALUE;
                         Debug.logMessage("Climb stalled (no Y gain in 20s), wandering to unstick.");
                     }
+                    // (2026-09-18 用户"还没挖到就 wander 了一下浪费十几秒", 111256 会话实锤)
+                    // Mob Defense 拆遮挡的 Instant break 进行 501ms 被进度检查器判"无进展"
+                    // 插进 10 格 wander, 698ms 后又被重定位顶掉 —— 两个豁免:
+                    // ① 正在挖方块 = 合法零速 (站桩拆遮挡/破树叶), 不计失败
+                    //   (同 59645038 在 AscentHandoffHelper 的先例);
+                    // ② 已在终点 ≤2 格: 补位交给上层重定位, 10 格 wander 纯浪费。
+                    if (mod.getControllerExtras().isBreakingBlock()) {
+                        _checker.reset();
+                        setDebugState("Completing goal (breaking, holding)");
+                        return null;
+                    }
+                    BlockPos nearGoal = goalXZ();
+                    if (nearGoal != null && mod.getPlayer().getBlockPos().isWithinDistance(nearGoal, 2)) {
+                        _checker.reset();
+                        setDebugState("At goal vicinity, holding (skip wander)");
+                        return null;
+                    }
                     _failCount++;
                     Debug.logMessage("Failed to make progress on goal, wandering.");
                     onWander(mod);
