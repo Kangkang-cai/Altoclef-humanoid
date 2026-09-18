@@ -96,9 +96,27 @@ public class FoodChain extends SingleTaskChain {
                     + " bestFood=" + (_cachedPerfectFood.isPresent()
                             ? _cachedPerfectFood.get().toString() : "none")
                     + " action=" + action
-                    + (blocked == null || blocked.isEmpty() ? "" : " blocked=" + blocked);
+                    + (blocked == null || blocked.isEmpty() ? "" : " blocked=" + blocked)
+                    // (2026-09-18 背包食物明细) hasFood=0 但用户肉眼看见背包有
+                    // 食物时, 靠这一行定位到底哪一摞被当成了"不可吃"。
+                    + " inv=" + describeFoodInventory(mod);
             Debug.logToFile("altoclef_diag.log", m);
         } catch (Exception ignored) { /* 诊断日志绝不影响主逻辑 */ }
+    }
+
+    /**
+     * (2026-09-18 背包食物明细诊断) 列出背包里所有 isFood 的物品与数量,
+     * 受保护(被判"不可吃")的打 [PROT] 标记。只读, 不影响任何决策。
+     */
+    private String describeFoodInventory(AltoClef mod) {
+        StringBuilder sb = new StringBuilder();
+        for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
+            if (!stack.isFood()) continue;
+            if (sb.length() > 0) sb.append('|');
+            sb.append(stack.getItem().toString()).append('x').append(stack.getCount());
+            if (!ItemHelper.canThrowAwayStack(mod, stack)) sb.append("[PROT]");
+        }
+        return sb.length() == 0 ? "empty" : sb.toString();
     }
 
     public FoodChain(TaskRunner runner) {
@@ -240,7 +258,13 @@ public class FoodChain extends SingleTaskChain {
             }
         }
         boolean wantCollectFood = s_foodPeakReached
-                ? inventoryFoodScore < settings.getMinimumFoodAllowed()
+                // (2026-09-18 断粮兜底恒假修复) minimumFoodAllowed 默认 0,
+                // 而食物分数最低就是 0 —— 原式 inventoryFoodScore < 0 恒为
+                // false, 一旦峰值锁存, 哪怕背包被清空也永远不再触发收集。
+                // 0918 会话实测: 20:34:29 锁存后, 20:38:23 起 hasFood=0 持续
+                // 7 分半, Food 链再没拿到过 owner (bot 在下界饿着跑烈焰棒)。
+                // 改成 <= 0: 库存分数归零 = 真断粮, 该补货。
+                ? inventoryFoodScore <= 0
                 : (_needsFood || _cachedFoodScore < settings.getMinimumFoodAllowed())
                     && inventoryFoodScore < collectTarget;
         if (wantCollectFood) {
@@ -447,8 +471,22 @@ public class FoodChain extends SingleTaskChain {
         // Get best food item + calculate food total
         for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
             if (stack.isFood()) {
-                // Ignore protected items
-                if (!ItemHelper.canThrowAwayStack(mod, stack)) continue;
+                // (2026-09-18 受保护食物兜底进食, 用户"背包有食物但他不吃")
+                // 旧代码把受保护物品整条 continue —— 保护(protect)的语义是
+                // 【别当垃圾丢掉】, 不等于【别吃】。而 CollectFoodTask.onStart
+                // 恰好把自己要收集的熟食全加进 protectedItems
+                // (CollectFoodTask:276 金苹果/面包/烤马铃薯, :302-303 各
+                // raw/cooked 肉), 于是刚收集回来的牛排猪排被判"不可吃":
+                // calculateFood 返回 foodTotal=0 / bestFood=none → FoodChain 走
+                // no-food 分支, 一口不吃; 而 StorageHelper
+                // .calculateInventoryFoodScore 不排除受保护物品, 库存分数 > 0
+                // 又让"去补货"永不触发 —— 双向死锁, bot 背包有食物却活活饿死
+                // (0918 会话实测: hunger 6、health 20→8.7, 7 分半 hasFood=0
+                // bestFood=none 全程不动)。
+                // 修法: 受保护食物不再跳过, 而是加"最后兜底"惩罚 —— 有普通食物
+                // 时优先吃普通的; 只剩受保护食物时才轮到它。foodTotal 照常计入,
+                // 这样 hasFood 与 calculateInventoryFoodScore 口径也重新对齐。
+                boolean protectedFood = !ItemHelper.canThrowAwayStack(mod, stack);
 
                 // Ignore spider eyes
                 if (stack.getItem() == Items.SPIDER_EYE) {
@@ -493,6 +531,11 @@ public class FoodChain extends SingleTaskChain {
                 if (stack.getItem() == Items.ROTTEN_FLESH) {
                     score -= _config.foodPickRottenFleshPenalty;
                 }
+                // (2026-09-18 受保护食物兜底进食) 见上方 protectedFood 注释:
+                // 重罚到普通食物之后, 只剩受保护食物时才轮到它 (防饿死)。
+                if (protectedFood) {
+                    score -= _config.foodPickProtectedPenalty;
+                }
                 if (score > bestFoodScore) {
                     bestFoodScore = score;
                     bestFood = stack.getItem();
@@ -516,6 +559,10 @@ public class FoodChain extends SingleTaskChain {
         public float foodPickHungerWastePenaltyMultiplier = 2;
         public float foodPickHungerNotFilledPenaltyMultiplier = 1;
         public float foodPickRottenFleshPenalty = 100;
+        // (2026-09-18 受保护食物兜底进食) 受保护食物的排序惩罚: 保护语义是
+        // "别当垃圾丢", 不是"别吃"。重罚让它排在普通食物之后 —— 背包只剩
+        // 受保护食物时仍会被选中, 不至于饿死。
+        public float foodPickProtectedPenalty = 1000;
         public float runDontEatMaxHealth = 3;
         public int runDontEatMaxHunger = 3;
         public int canTankHitsAndEatArmor = 15;
