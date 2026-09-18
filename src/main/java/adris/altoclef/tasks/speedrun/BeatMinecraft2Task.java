@@ -43,6 +43,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.CreditsScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.entity.mob.PiglinBruteEntity;
 import net.minecraft.entity.mob.PiglinEntity;
@@ -61,6 +62,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
+import net.minecraft.world.biome.BiomeKeys;
 import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.*;
@@ -309,6 +311,20 @@ public class BeatMinecraft2Task extends Task {
     private long _lastSpawnerBlockScanMs = 0;
     private boolean _spawnerBlockedCached = false;
     private static final double NEARBY_LOOT_RANGE = 48;
+
+    // ==== 顺手收珍珠 (2026-09-18 用户拍板) ====
+    // 下界三大任务里只有末影珍珠【不需要前置】—— 不用像进要塞打烈焰人那样等防火
+    // 药水齐备。所以执行"7 根烈焰棒 / 2 瓶防火药水"期间, 只要 bot 亲眼看见诡异森林
+    // 就驻留刷珍珠; 烈焰棒优先级始终高一点 (见 blazeWorkInReach)。
+    private Task _opportunisticPearlTask = null;
+    // "看见林子"扫描的节流时间戳与缓存锚点 (扫描要过 LOS 射线, 不能每 tick 跑)。
+    private long _pearlForestScanMs = 0;
+    private BlockPos _pearlForestAnchor = null;
+    // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
+    private long _pearlCampBlockedUntilMs = 0;
+    private static final long PEARL_FOREST_SCAN_INTERVAL_MS = 1000;
+    // 一次扫描最多对最近的这么多候选做 LOS 判定 (射线贵, 只验最可能的几个)。
+    private static final int PEARL_FOREST_LOS_CANDIDATES = 8;
 
     // ==== Craft table pickup 限额 (2026-08-21 修复: "while we're at it" 死循环) ====
     // 日志实锤 (22:42-22:46): 缓存里唯一的工作台在几十格外, 任务反复派发
@@ -2237,6 +2253,21 @@ public class BeatMinecraft2Task extends Task {
                     return netherBoots;
                 }
                 if (needsBlazeRods) {
+                    // (2026-09-18 顺手收珍珠, 用户拍板) 末影珍珠不需要任何前置
+                    // (不像进要塞打烈焰人那样要等防火药水齐备), 所以主线进行中就
+                    // 可以顺手开刷: 亲眼看见诡异森林 → 驻留刷珍珠。烈焰棒优先级
+                    // 始终高一点 (blazeWorkInReach: 有棒可捡/有烈焰人可打 → 让位)。
+                    // 位置放在金靴之后、防火药水/烈焰棒之前 —— 金靴是猪灵交易与
+                    // 下界生存的硬前置, 不该被蹲守挤掉。
+                    Task oppPearl = getOpportunisticPearlTask(mod, enderPearlTarget);
+                    if (oppPearl != null) {
+                        // 蹲守期间不烧防火药水阶段的计时 —— 否则会出现"药一瓶没收
+                        // 到, 阶段先超时"的裸奔进要塞 (09-14 事故的同类风险)。
+                        if (_fireResPhaseActive) {
+                            _fireResPhaseTimer.reset();
+                        }
+                        return oppPearl;
+                    }
                     // (2026-08-23 防火药水保命) 打烈焰人前先搞防火药水
                     // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。
                     // (2026-09-06 用户) 目标提为 2 瓶 (FIRE_RES_POTION_TARGET); 花不花由
@@ -2768,6 +2799,123 @@ public class BeatMinecraft2Task extends Task {
             // Search for warped forests this way...
             return new SearchChunkForBlockTask(Blocks.WARPED_NYLIUM);
         }
+    }
+
+    /**
+     * (2026-09-18 顺手收珍珠, 用户拍板) 主线 (烈焰棒 / 防火药水) 进行中的"顺手"珍珠任务。
+     *
+     * <p>语义: 末影珍珠不需要任何前置, 所以不必排在两个主线任务之后; 只要 bot
+     * 【亲眼看见】诡异森林就驻留开刷。但烈焰棒优先级始终高一点 —— 见
+     * {@link #blazeWorkInReach}: 地上有烈焰棒/粉、或感知范围内有烈焰人时,
+     * 直接返回 null 让主线继续。
+     *
+     * @return 蹲守任务, 或 null (不该顺手 / 珍珠已够 / 冷却中 / 烈焰棒更急 / 没看见林子)
+     */
+    private Task getOpportunisticPearlTask(AltoClef mod, int enderPearlTarget) {
+        if (!mod.getModSettings().isOpportunisticWarpedForestPearlsEnabled()) return null;
+        // 珍珠走猪灵交易流 (堡垒) 时不适用: 那是"等金锭+金靴"的另一条路。
+        if (_config.barterPearlsInsteadOfEndermanHunt) return null;
+        if (enderPearlTarget <= 0) return null;
+        if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) >= enderPearlTarget) return null;
+
+        long now = System.currentTimeMillis();
+        // 上次蹲守枯竭/超时 → 冷却内不再起 (防"放弃→立刻又看见林子→再放弃"横跳)。
+        if (now < _pearlCampBlockedUntilMs) return null;
+
+        // 烈焰棒始终比珍珠高一点。
+        if (blazeWorkInReach(mod)) return null;
+
+        // 已在蹲守: 粘住同一实例 (每 tick new 会把计时器/巡逻状态清零, 见 _stoneAxeTask 教训)。
+        if (_opportunisticPearlTask != null) {
+            if (_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp && camp.hasGivenUp()) {
+                long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
+                _pearlCampBlockedUntilMs = now + cooldownMs;
+                _opportunisticPearlTask = null;
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
+                        + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
+            } else if (shouldForce(mod, _opportunisticPearlTask)) {
+                return _opportunisticPearlTask;
+            }
+        }
+
+        // 找林子: 扫描带节流 (要过 LOS 射线)。
+        if (now - _pearlForestScanMs >= PEARL_FOREST_SCAN_INTERVAL_MS) {
+            _pearlForestScanMs = now;
+            _pearlForestAnchor = findPerceivedWarpedForest(mod);
+        }
+        if (_pearlForestAnchor == null) return null;
+
+        setDebugState("Opportunistic: camping warped forest for ender pearls");
+        _opportunisticPearlTask = new CollectEnderPearlsInForestTask(enderPearlTarget, _pearlForestAnchor);
+        return _opportunisticPearlTask;
+    }
+
+    /**
+     * (2026-09-18) 烈焰棒是否"此刻就能推进" —— 是则珍珠让位。
+     * 判据只用 bot 自己的感知/记忆:
+     * <ol>
+     *   <li>地上掉了烈焰棒 / 烈焰粉 (走过去就能捡);</li>
+     *   <li>优先半径内感知到烈焰人 (走过去就能打);</li>
+     *   <li>人就站在【记忆中的烈焰人刷怪笼】旁 —— 这是"在刷怪笼房等刷新"的
+     *       主线状态, 为了珍珠巡逻走开等于放弃刚占好的刷怪位。</li>
+     * </ol>
+     */
+    private boolean blazeWorkInReach(AltoClef mod) {
+        if (mod.getEntityTracker().itemDropped(Items.BLAZE_ROD, Items.BLAZE_POWDER)) return true;
+        Optional<Entity> blaze = mod.getEntityTracker().getClosestEntity(BlazeEntity.class);
+        if (blaze.isPresent()
+                && blaze.get().isInRange(mod.getPlayer(), mod.getModSettings().getOpportunisticPearlBlazePriorityRange())) {
+            return true;
+        }
+        // 刷怪笼旁守株待兔 (用 BlockTracker 缓存的记忆位置, 不额外开 chunk 扫描)。
+        BlockPos playerPos = mod.getPlayer().getBlockPos();
+        double spawnerRange = mod.getModSettings().getOpportunisticPearlBlazePriorityRange();
+        double spawnerRangeSq = spawnerRange * spawnerRange;
+        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.SPAWNER)) {
+            if (pos.getSquaredDistance(playerPos) > spawnerRangeSq) continue;
+            if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
+            if (WorldHelper.getSpawnerEntity(mod, pos) instanceof BlazeEntity) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-18) bot 用"自己的视力"找诡异森林, 返回锚点 (没有则 null)。
+     *
+     * <p>两级判据:
+     * <ol>
+     *   <li>脚下生物群系就是诡异森林 —— 身处林中是最强证据, O(1)。</li>
+     *   <li>否则取附近"林子信号方块"(菌岩/菌菇/菌索/疣块)里最近的若干个做
+     *       LOS+FOV 判定, 第一个真正看得见的作为锚点。刻意【不】用 chunk 透视
+     *       (SearchChunkForBlockTask 那套), 保持拟人。</li>
+     * </ol>
+     */
+    private BlockPos findPerceivedWarpedForest(AltoClef mod) {
+        BlockPos playerPos = mod.getPlayer().getBlockPos();
+        var biome = mod.getWorld().getBiome(playerPos);
+        if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
+            return playerPos;
+        }
+        Block[] signals = CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS;
+        mod.getBlockTracker().trackBlock(signals);
+        double range = mod.getModSettings().getOpportunisticPearlSightRange();
+        double rangeSq = range * range;
+        List<BlockPos> candidates = new ArrayList<>();
+        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(signals)) {
+            if (pos.getSquaredDistance(playerPos) <= rangeSq) {
+                candidates.add(pos);
+            }
+        }
+        if (candidates.isEmpty()) return null;
+        candidates.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos)));
+        int limit = Math.min(PEARL_FOREST_LOS_CANDIDATES, candidates.size());
+        for (int i = 0; i < limit; ++i) {
+            BlockPos check = candidates.get(i);
+            if (VisibilityHelper.isBlockPerceivable(mod, check)) {
+                return check;
+            }
+        }
+        return null;
     }
 
     private int getTargetBeds(AltoClef mod) {

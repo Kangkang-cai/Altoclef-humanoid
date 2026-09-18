@@ -708,6 +708,32 @@ public class Settings implements IFailableConfigFile {
     private int fortressBoatDescentMaxFailures = 3;
 
     //////////////////////////////////////////////////////////////////////////////////////////
+    ////////** 顺手收珍珠 (2026-09-18) **////////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////////////////////////
+    // 下界三大任务里, 末影珍珠【不需要任何前置】—— 它不像进要塞打烈焰人那样必须
+    // 等防火药水齐备。所以执行"7 根烈焰棒 / 2 瓶防火药水"两件主线事的过程中, 只要
+    // 亲眼看见诡异森林, 就驻留下来把珍珠刷够 (用户拍板)。烈焰棒的优先级始终比珍珠
+    // 高一点, 由 opportunisticPearlBlazePriorityRange 管。
+
+    /** 总开关: 主线 (烈焰棒/防火药水) 进行中是否允许顺手进林子刷珍珠。 */
+    private boolean opportunisticWarpedForestPearls = true;
+
+    /** 多远以内的"林子信号方块"算看见森林 (只取 LOS+FOV 通过的, 即 bot 自己的视力)。 */
+    private double opportunisticPearlSightRange = 48;
+
+    /** 烈焰棒优先半径: 感知到这个距离内有烈焰人 / 地上有烈焰棒(粉) → 不打珍珠, 让位主线。 */
+    private double opportunisticPearlBlazePriorityRange = 32;
+
+    /** 单次蹲守总时长上限 (秒)。到点无条件交还主线, 防蹲守吃掉整局。 */
+    private double opportunisticPearlCampMaxSeconds = 300;
+
+    /** 蹲守中这么久一只末影人都没感知到 → 判这片林子没货, 放弃并进冷却。 */
+    private double opportunisticPearlDrySeconds = 60;
+
+    /** 放弃蹲守后的冷却 (秒), 防止"放弃→立刻又看见林子→再放弃"来回横跳。 */
+    private double opportunisticPearlRetryCooldownSeconds = 120;
+
+    //////////////////////////////////////////////////////////////////////////////////////////
     ////////** 数据集录制 (2026-09-17) **//////////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////////////////////////////
     // 为层次化 MBPN 训练做逐帧全量快照导出 (不录像素画面, 只录结构化世界 + 结构化记忆)。
@@ -843,6 +869,32 @@ public class Settings implements IFailableConfigFile {
 
     public int getFortressBoatDescentMaxFailures() {
         return fortressBoatDescentMaxFailures;
+    }
+
+    // ==== 顺手收珍珠 (2026-09-18) ====
+
+    public boolean isOpportunisticWarpedForestPearlsEnabled() {
+        return opportunisticWarpedForestPearls;
+    }
+
+    public double getOpportunisticPearlSightRange() {
+        return opportunisticPearlSightRange;
+    }
+
+    public double getOpportunisticPearlBlazePriorityRange() {
+        return opportunisticPearlBlazePriorityRange;
+    }
+
+    public double getOpportunisticPearlCampMaxSeconds() {
+        return opportunisticPearlCampMaxSeconds;
+    }
+
+    public double getOpportunisticPearlDrySeconds() {
+        return opportunisticPearlDrySeconds;
+    }
+
+    public double getOpportunisticPearlRetryCooldownSeconds() {
+        return opportunisticPearlRetryCooldownSeconds;
     }
 
     // ==== 数据集录制 (2026-09-17) ====
