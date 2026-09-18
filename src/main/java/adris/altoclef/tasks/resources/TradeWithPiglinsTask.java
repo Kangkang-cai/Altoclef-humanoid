@@ -607,7 +607,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 long nowMs = System.currentTimeMillis();
                 if (nowMs - _lastEmptyPoolDiagMs > 5000) {
                     _lastEmptyPoolDiagMs = nowMs;
-                    List<Entity> all = mod.getEntityTracker().getTrackedEntities(PiglinEntity.class);
+                    List<PiglinEntity> all = mod.getEntityTracker().getTrackedEntities(PiglinEntity.class);
                     int admiring = 0, baby = 0, blacklisted = 0, farFromBartering = 0, hoglinBlocked = 0, bruteHard = 0;
                     for (Entity p : all) {
                         if (isBlacklisted(p)) { blacklisted++; continue; }
