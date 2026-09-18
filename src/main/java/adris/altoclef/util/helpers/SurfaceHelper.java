@@ -38,8 +38,8 @@ import net.minecraft.world.World;
  *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
  *        (依据: 天然地形不存在这么深的通天露天柱; 深处客户端头顶柱视图有整体缺失的异常,
  *         20260918-092740: 超大洞穴 y=-44 五列同时 buried=0 稳定 40s+, 深度物理事实兜底)
- *   判据7 高度图交叉  距最高非空气方块 (WORLD_SURFACE 高度图, 服务端下发、深处稳定) &gt; 32 格
- *        → 无条件判地下 (094844: y=0..9 判据6 拦不到, 扫描仍报"露天"而 wsTop=63; 深度物理事实兜底)
+ *   判据7 (已并入判据1) 20260918-1050: 判据1 换轴为"从 wsTop 向下拨植被到真实地形"后,
+ *        服务端高度图本身就是埋深的锚, 数据洞走保守分支 —— 独立的 hb&gt;32 判据不再需要
  * </pre>
  * 判据1 的取值语义: "该列从头顶往上要挖穿几格【非植被地层】才能见天"。≤4 浅 → 地表; 越大越深。
  * 取 5 点的<b>中位数</b>而不是最小/最大: 取最小 → 深竖井被判地表(20260917-120830 35 分钟上不去);
@@ -115,10 +115,10 @@ public final class SurfaceHelper {
     private static final long CONFIRM_SURFACE_MS = 500;
 
     /**
-     * 逐块扫描的向上封顶: 头顶 128 格内没有任何非植被实心 → 判"露天"
-     * (地表任意点离最近的实心地层不会超过 128; 真洞穴顶板必然在 128 内)。
+     * 判据1 向下走时允许跳过的最大植被/树冠厚度 (48: 丛林最高树 ~30 + 余量)。
+     * 超过视为数据异常 → 保守按整柱实心算 (宁可判地下, 不把数据洞读成露天)。
      */
-    private static final int SCAN_UP_MAX = 128;
+    private static final int MAX_CANOPY_WALK = 48;
 
     /** 5 点采样缓存时长 (逐块扫描比高度图贵一个量级, 200ms 内复用同一结论)。 */
     private static final long SAMPLE_CACHE_MS = 200;
@@ -132,14 +132,6 @@ public final class SurfaceHelper {
      * —— 行为上等价于"走出峡谷", 可接受。
      */
     private static final int DEEP_CRUST_Y = 0;
-
-    /**
-     * 判据7 阈值: 自身列"高度图埋深" (最高非空气方块 y − 脚 y − 1) 超过本值 → 无条件判地下,
-     * 不采信逐块扫描 (该深度带的客户端方块数据已被实测证明会整体缺失/错装空气)。
-     * 取 32: 任意树冠 (含丛林最高 ~30) 以内; 天然洞穴顶板厚度普遍 &gt;32。
-     * 已知代价: 通天峡谷/竖井深处会被判地下 (与判据6 同向, 可接受)。
-     */
-    private static final int SCAN_TRUST_MAX_HEIGHTMAP_BURIAL = 32;
 
     /**
      * 采样列"不可判定"哨兵 (区块未加载 / 世界未就绪)。
@@ -204,42 +196,50 @@ public final class SurfaceHelper {
     }
 
     /**
-     * 向上扫描一列: 从 {@code yFrom+1} 扫到 {@code capTop}(不含), 返回第一个【地层】方块的 y。
+     * 判据1【20260918 10:50 三次换轴后的最终语义】某列的"地表埋深" =
+     * <b>拨开头顶植被后, 距地表地形的格数</b>。
      *
-     * @return 第一个非植被实心(或流体)方块的 y; {@code -1} = 扫到顶都是空的(露天);
-     *         {@link #UNKNOWN} = 区块未加载/世界未就绪。
-     */
-    private static int scanUpForCover(World w, int x, int z, int yFrom, int capTop) {
-        if (w == null) return UNKNOWN;
-        // 区块未加载 → 明确"不可判定", 绝不静默当露天 (20260918: 未加载哨兵 -64 被误读成露天是直接死因)
-        if (!w.isChunkLoaded(x >> 4, z >> 4)) return UNKNOWN;
-        // WORLD_SURFACE 高度图客户端有真值 (isSkyVisible 历来靠它), 拿来封顶 + 哨兵自检
-        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
-        if (wsTop <= w.getBottomY() + 1) return UNKNOWN; // 高度图哨兵 → 不可判定
-        int top = Math.min(capTop, wsTop - 1);
-        for (int y = yFrom + 1; y <= top; y++) {
-            if (!isNotTerrain(w, x, y, z)) return y;
-        }
-        return -1;
-    }
-
-    /**
-     * 某列"头顶之上的地层格数" = 第一个非植被实心方块的 y − (y+1)。
+     * <p>实现: 从服务端 WORLD_SURFACE 高度图顶 ({@code wsTop-1}) 向下走, 跳过树叶/原木/植物
+     * (树冠不算地层), 遇到的第一块真实地形即"地表"; 埋深 = 地表 y − 脚 y。
      *
-     * <p>≤{@link #NEAR_SURFACE_MAX} 浅 → 一定在露天活动层; 数值 = 该列头顶往上要挖穿几格地层才能见天。
-     * 头顶 {@link #SCAN_UP_MAX} 格内无地层 → 返回 0 (露天)。
+     * <p><b>为什么必须这样量</b> (20260918-105034 实锤): 旧"向上扫第一个遮挡"量的是
+     * <b>洞顶厚度</b> —— bot 在 y=38 的矿洞里, 洞顶 2 格 → buried=2 → 误判"浅坑=地表",
+     * 而真实距地表 32 格石层。"压在头顶的地层"必须追溯到天空, 一个薄洞顶不算数。
+     *
+     * <p>数据洞护栏: 若 {@code wsTop-1} 处客户端说是空气 (高度图≠方块数据, 092740/094844 的
+     * 错装空气形态) → 不向下落, 直接按保守口径记埋深 = hb−1 (即整柱视为实心) —— 宁可判地下,
+     * 不会把数据洞读成露天。
      *
      * <p><b>不再查询 MOTION_BLOCKING_NO_LEAVES 高度图</b> —— 客户端上它恒返回世界底哨兵
-     * (20260918-083636 反编译定案), 见类注释"为什么不能再用高度图"。
+     * (20260918-083636 反编译定案)。WORLD_SURFACE 有真值 (三次事故定案), 植被由向下走跳过。
      *
-     * @return 埋深格数; 0 = 露天(或头顶 128 格内无地层); {@link #UNKNOWN} = 区块未加载/世界未就绪。
+     * @return 埋深格数 (负数 = 就站在地表上); {@link #UNKNOWN} = 区块未加载/世界未就绪。
      */
     public static int overheadTerrain(AltoClef mod, int x, int y, int z) {
         World w = mod.getWorld();
         if (w == null) return UNKNOWN;
-        int cover = scanUpForCover(w, x, z, y, y + SCAN_UP_MAX);
-        if (cover == UNKNOWN || cover < 0) return cover == UNKNOWN ? UNKNOWN : 0;
-        return cover - (y + 1);
+        if (!w.isChunkLoaded(x >> 4, z >> 4)) return UNKNOWN;
+        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
+        if (wsTop <= w.getBottomY() + 1) return UNKNOWN; // 高度图哨兵 → 不可判定
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        int top = wsTop - 1;
+        m.set(x, top, z);
+        if (w.getBlockState(m.toImmutable()).isAir()) {
+            // 高度图说这里非空气, 客户端方块却说是空气 → 数据洞 (092740/094844 形态)。
+            // 保守: 整柱按实心算, 埋深 = hb − 1。绝不向下落 —— 落下去就会把洞穴顶当地表。
+            return (wsTop - 1) - y;
+        }
+        int skipped = 0;
+        int yy = top;
+        while (yy > y) {
+            m.set(x, yy, z);
+            if (!isNotTerrain(w, x, yy, z)) break; // 第一块真实地形 = 地表
+            if (++skipped > MAX_CANOPY_WALK) {     // 树冠不可能这么厚 → 数据异常, 保守处理
+                return (wsTop - 1) - y;
+            }
+            yy--;
+        }
+        return yy - y;
     }
 
     /**
@@ -308,18 +308,18 @@ public final class SurfaceHelper {
     }
 
     /**
-     * 诊断用: 玩家自身列"头顶植被层厚度" = 从头顶向上扫描时跳过的树叶/原木/植物格数
-     * (直到第一个地层或封顶)。>0 说明正处在树冠/植被之下 —— 判据2 生效的地方。
+     * 诊断用: 自身列"头顶植被层厚度" = 从高度图顶向下走到第一块真实地形之间跳过的
+     * 树叶/原木/植物格数 (>0 = 判据2 在起作用, 头顶那层是树冠)。
      */
     public static int vegetationCapThickness(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return 0;
         BlockPos pos = mod.getPlayer().getBlockPos();
         World w = mod.getWorld();
+        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ());
+        if (wsTop <= w.getBottomY() + 1) return 0;
         int veg = 0;
-        int top = Math.min(pos.getY() + SCAN_UP_MAX,
-                w.getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ()) - 1);
-        for (int y = pos.getY() + 1; y <= top; y++) {
-            if (isNotTerrain(w, pos.getX(), y, pos.getZ())) veg++;
+        for (int yy = wsTop - 1; yy > pos.getY() && veg < MAX_CANOPY_WALK; yy--) {
+            if (isNotTerrain(w, pos.getX(), yy, pos.getZ())) veg++;
             else break;
         }
         return veg;
@@ -350,28 +350,23 @@ public final class SurfaceHelper {
         // 不会被深部数据异常或迟滞拖住。 lush 洞穴的苔藓/杜鹃/粘土已刻意排除, 井下不会误触发。
         if (nearbySurfaceSignature(mod, pos)) return false;
 
-        // 判据1(+判据2 内建): 5 点头顶地层格数中位数
+        // 判据8【主判据, 最先表决】: 地表签名 —— 脚下踩着/身旁/远扫范围内长着只在露天生成的
+        // 方块, 且【透视门 LOS】射线可达 (隔墙的草地不算, 20260918 用户点破)。
+        // 人判地表的第一反应就是"我看到草和花了" (用户拍板 20260918: "他是主要判据")。
+        if (nearbySurfaceSignature(mod, pos)) return false;
+
+        // 判据1【三次换轴后的最终语义】: 拨开头顶植被后, 距地表地形的格数 (中位数)。
+        // 量的是"离地表还有多深"而不是"洞顶多薄" —— 105034 实锤: 矿洞 y=38 洞顶 2 格,
+        // 旧"向上扫第一个遮挡"量出 buried=2 误判"浅坑=地表", 真实距地表 32 格石层。
+        // 判据2 (植被不算地层) 内建于向下走的跳过集; 判据7 (hb>32) 已并入:
+        // 从 wsTop 向下走本身就以服务端高度图为锚, 数据洞走保守分支, 不再需要独立判据。
         int buried = buriedDepth(mod);
-        // 判据5: 采样不可信 (区块未加载等) → 维持现状, 绝不许把 UNKNOWN 误读成露天
+        // 判据5: 采样不可信 (区块未加载/高度图哨兵) → 维持现状, 绝不许把 UNKNOWN 误读成露天
         // (UNKNOWN = Integer.MIN_VALUE, 不挡这条就等价于 "埋深极小 → 恒判地表", 20260918 死因同款)
         if (buried == UNKNOWN) return _init && _below;
 
-        // 判据6: 深度拦截 —— 负 Y 深板岩层不存在天然露天, 扫描在这里的"露天"结论不可信
-        // (20260918-092740: 超大洞穴 y=-44, 客户端头顶柱视图整体缺失, 五列 buried=0 稳定 40s+)
+        // 判据6: 深度拦截 —— 负 Y 深板岩层不存在天然露天 (物理锚; wsTop 哨兵时的兜底)
         if (pos.getY() < DEEP_CRUST_Y) return true;
-
-        // 判据7: 高度图埋深交叉验证 —— 距"最高非空气方块"超过 32 格时不许判地表。
-        // 依据: WORLD_SURFACE 高度图是服务端随区块下发的, 深处一直稳定 (三次事故里 wsTop 均给真值),
-        // 而客户端方块数据在深处会整体缺失/错装空气 (092740: y=-44 五列 buried=0; 094844: y=0..9
-        // 仍 buried=0/1 而 wsTop=63)。距地形顶这么深的位置不可能是"露天活动层"。
-        // 32 的依据: 任意树冠(含丛林最高 ~30)以内; 洞穴顶板普遍 >32。
-        // 已知代价: 通天峡谷/竖井底部 (深 >32) 会被判地下 → GoToSurface 爬出 = 等价"走出峡谷"。
-        World w = mod.getWorld();
-        int wsTop = w.getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ());
-        if (wsTop > w.getBottomY() + 1 // 哨兵 (未加载/空高度图) → 跳过本判据, 交后续判据兜底
-                && wsTop - (pos.getY() + 1) > SCAN_TRUST_MAX_HEIGHTMAP_BURIAL) {
-            return true;
-        }
 
         if (buried <= NEAR_SURFACE_MAX) return false;
 
@@ -453,25 +448,28 @@ public final class SurfaceHelper {
             _sigYes = true;
             return true;
         }
-        // ①近扫: 脚/头高度, 半径 ≤2 (25 格 × 2 高度 ≈ 50 次块读)
+        // ①近扫: 脚/头高度, 半径 ≤2 (25 格 × 2 高度 ≈ 50 次块读); 命中需过透视门
         BlockPos.Mutable m = new BlockPos.Mutable();
         for (int dy = 0; dy <= 1; dy++) {
             for (int dx = -2; dx <= 2; dx++) {
                 for (int dz = -2; dz <= 2; dz++) {
                     m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
-                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))) {
+                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))
+                            && losToSignature(mod, m.toImmutable(), 6)) {
                         _sigYes = true;
                         return true;
                     }
                 }
             }
         }
-        // ②远扫: 自身高度 ±3, 水平半径 ≤12 (最坏 ~4400 次块读, 500ms 缓存 + 命中早退)
+        // ②远扫: 自身高度 ±3, 水平半径 ≤12 (最坏 ~4400 次块读, 500ms 缓存 + 命中早退);
+        // 每个命中都过透视门 LOS —— 隔着岩壁的草地不是"我看到地表" (20260918 用户点破)
         for (int dy = -SIGNATURE_FAR_Y_TOLERANCE; dy <= SIGNATURE_FAR_Y_TOLERANCE; dy++) {
             for (int dx = -SIGNATURE_FAR_RADIUS; dx <= SIGNATURE_FAR_RADIUS; dx++) {
                 for (int dz = -SIGNATURE_FAR_RADIUS; dz <= SIGNATURE_FAR_RADIUS; dz++) {
                     m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
-                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))) {
+                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))
+                            && losToSignature(mod, m.toImmutable(), SIGNATURE_FAR_RADIUS + 3)) {
                         _sigYes = true;
                         return true;
                     }
@@ -479,6 +477,17 @@ public final class SurfaceHelper {
             }
         }
         return false;
+    }
+
+    /**
+     * 透视门: bot 眼睛到签名方块是否有不被遮挡的视线。
+     * 用 {@link LookHelper#cleanLineOfSight(Entity, BlockPos, double)} (DDA 射线, 6 面判定,
+     * MISS=无遮挡=可见)。没有这道门, 隔着洞壁/岩层的高度图内草地会被远扫误认成地表
+     * (20260918-1050 会话用户点破"没有给特殊方块加透视限制")。
+     */
+    private static boolean losToSignature(AltoClef mod, BlockPos block, double maxRange) {
+        if (mod.getPlayer() == null) return false;
+        return LookHelper.cleanLineOfSight(mod.getPlayer(), block, maxRange);
     }
 
     /**
@@ -555,7 +564,7 @@ public final class SurfaceHelper {
         if (mod.getPlayer() != null && mod.getWorld() != null) {
             BlockPos p = mod.getPlayer().getBlockPos();
             wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, p.getX(), p.getZ());
-            hb = wsTop - (p.getY() + 1); // 判据7 的"高度图埋深"
+            hb = wsTop - (p.getY() + 1); // 高度图埋深 (判据7 已并入判据1, 此字段留作诊断对照)
         }
         Debug.logMessage("[Surface] mode -> "
                 + (raw ? "below(terrain)" : "surface(open)")
