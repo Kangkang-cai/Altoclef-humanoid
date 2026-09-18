@@ -4,7 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
-import adris.altoclef.tasks.movement.GetToBlockTask;
+import adris.altoclef.tasks.movement.GetWithinRangeOfBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -54,6 +54,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
 
     // 蹲守半径: 离锚点超过这个距离就先走回林子, 防止巡逻把 bot 带出林子。
     private static final double CAMP_RADIUS = 24;
+    // 走回林子的"到位"判据: 进到锚点这么多格内就算回到林子, 交给巡逻接管。
+    // 必须 < CAMP_RADIUS, 否则会出现"到位后仍在拉回半径外"的自相矛盾。
+    private static final int RETURN_RADIUS = 8;
     // 单步巡逻距离: TimeoutWanderTask 走够这个距离即结束, 由本任务重新起算。
     private static final float PATROL_STEP = 10;
 
@@ -136,8 +139,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                         + String.format("%.0f", Math.sqrt(mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor))))
                         + " anchor=" + _anchor.toShortString() + " (巡逻走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回)");
             }
+            // 回林子用现成的 GetWithinRangeOfBlockTask (GoalNear, 进到 RETURN_RADIUS 内
+            // 即算到), 而不是 GetToBlockTask (GoalBlock, 必须精确站到 _anchor.up()
+            // 那一格): 锚点可能是菌菇/菌索这类非实体植被, "它上面那一格"未必站得住,
+            // GoalBlock 够不着就永不 finished, 会把整段蹲守耗在绕圈上。顺带复用
+            // CustomBaritoneGoalTask 的进度失败两豁免 (8d570054)。
             if (_goToAnchor == null || _goToAnchor.isFinished(mod)) {
-                _goToAnchor = new GetToBlockTask(_anchor.up(), false);
+                _goToAnchor = new GetWithinRangeOfBlockTask(_anchor, RETURN_RADIUS);
             }
             return _goToAnchor;
         }

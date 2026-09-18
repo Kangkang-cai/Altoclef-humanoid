@@ -2896,6 +2896,10 @@ public class BeatMinecraft2Task extends Task {
         if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
             return playerPos;
         }
+        // 取候选: 先用"记忆位置 + 距离过滤"收敛, 再只对最近的几个做 LOS。
+        // 没有直接用 BlockTracker.getPerceivedLocations() 是因为它对全部缓存位置逐
+        // 个射线, 诡异森林里菌岩缓存动辄上万条, 每秒一次也扛不住 (该类注释本身
+        // 就警告"不要对海量方块全量过滤")。效果等价: 都是"必须 LOS+FOV 通过"。
         Block[] signals = CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS;
         mod.getBlockTracker().trackBlock(signals);
         double range = mod.getModSettings().getOpportunisticPearlSightRange();
