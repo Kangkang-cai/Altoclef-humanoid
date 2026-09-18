@@ -237,6 +237,9 @@ public class AltoClef implements ModInitializer {
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
             tickInteractionPauseWatchdog();
+            // (2026-09-18 下界岩浆邻域导航保险) 旋转跳 (斜向升格) 失败率>50%, 岩浆
+            // 邻域动态禁跳 + 压低垫块惩罚, 详见 tickNetherLavaNavGuard 注释。
+            tickNetherLavaNavGuard();
             // (2026-09-17 跨世界残留状态) 换存档(不重启游戏)时 static 字段全部存活
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
@@ -515,6 +518,74 @@ public class AltoClef implements ModInitializer {
                     + "ms) — 它掐着 baritone 的放置总闸 hasThrowaway, 泄漏期间 bot 只能跳不能放方块";
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
+        }
+    }
+
+    // ==== (2026-09-18 下界岩浆邻域导航保险) ====
+    // 背景: baritone 的斜向升格 (allowDiagonalAscend, 俗称"旋转跳") 执行失败率
+    // 实测 >50% —— 从 (1,0,0) 斜跳 (0,1,1) 且头顶 (1,2,1) 有顶棚时需要空中转向,
+    // baritone 的执行模型做不好这一跳, 掉下去落岩浆直接死 (123145 场次 12:37 /
+    // 12:48 / 13:10 三次, 死前均为纯赶路)。initializeBaritoneSettings 的原注释
+    // 早就写了 "minor risk EXCEPT in the nether, where it is a huge risk"。
+    // 处理: 下界且玩家周围有岩浆时, 动态 ① 关斜向升格 ② 把垫块惩罚压到上限 2
+    // (A* 改选"垫一格绕行", 执行成功率≈100%)。没有 baritone 放得下去的垫块时
+    // 保持原行为: 硬禁跳可能把 bot 冻在原地, 跳总比冻死强 (PillarJumpHelper.
+    // countBaritonePlaceable 判定, 与 baritone 的 hasThrowaway 同口径)。
+    // 扫描每秒一次 (TimerGame 节流, 25x17x25 块立方体); 每 tick 强制写设置,
+    // 防任务栈 applyState 把旧值写回去。惩罚值用 Math.min 收紧、解除时不回写 —
+    // 残留的低惩罚只会"更爱垫路", 无害, 下一次任务栈 applyState 自动恢复。
+    private static final double LAVA_NAV_SCAN_RADIUS = 12;
+    private static final double LAVA_NAV_PLACE_PENALTY_CAP = 2.0;
+    private final adris.altoclef.util.time.TimerGame _lavaNavScanTimer = new adris.altoclef.util.time.TimerGame(1.0);
+    private boolean _lavaNavSuppressActive = false;
+    private boolean _lavaNavNoBlockWarned = false;
+
+    private void tickNetherLavaNavGuard() {
+        if (inGame() && getPlayer() != null && getWorld() != null && _lavaNavScanTimer.elapsed()) {
+            _lavaNavScanTimer.reset();
+            boolean lavaNearby = false;
+            boolean suppress = false;
+            if (adris.altoclef.util.helpers.WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) {
+                BlockPos center = getPlayer().getBlockPos();
+                int r = (int) LAVA_NAV_SCAN_RADIUS;
+                scan:
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dy = -r; dy <= 4; dy++) {
+                        for (int dz = -r; dz <= r; dz++) {
+                            if (getWorld().getBlockState(center.add(dx, dy, dz)).getBlock() == Blocks.LAVA) {
+                                lavaNearby = true;
+                                break scan;
+                            }
+                        }
+                    }
+                }
+                if (lavaNearby) {
+                    suppress = adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0;
+                    if (!suppress && !_lavaNavNoBlockWarned) {
+                        Debug.logToFile("altoclef_diag.log",
+                                "[LavaNav] lava nearby but no baritone-placeable blocks — keeping diagonal ascend ON");
+                        _lavaNavNoBlockWarned = true;
+                    }
+                }
+            }
+            if (!lavaNearby) {
+                _lavaNavNoBlockWarned = false;
+            }
+            if (suppress != _lavaNavSuppressActive) {
+                _lavaNavSuppressActive = suppress;
+                String m = suppress
+                        ? "[LavaNav] 下界岩浆邻域: 关斜向升格(旋转跳), 垫块惩罚压到 " + LAVA_NAV_PLACE_PENALTY_CAP
+                        : "[LavaNav] 岩浆邻域解除: 恢复斜向升格";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+        }
+        // 每 tick 强制写 (applyState 可能随时把任务栈里的旧值写回 baritone settings)。
+        // 未抑制时写回基线 true, 与 initializeBaritoneSettings 的原值一致。
+        getClientBaritoneSettings().allowDiagonalAscend.value = !_lavaNavSuppressActive;
+        if (_lavaNavSuppressActive) {
+            getClientBaritoneSettings().blockPlacementPenalty.value =
+                    Math.min(getClientBaritoneSettings().blockPlacementPenalty.value, LAVA_NAV_PLACE_PENALTY_CAP);
         }
     }
 
