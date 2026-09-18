@@ -70,6 +70,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private boolean _gaveUp = false;
     private String _giveUpReason = null;
 
+    // 巡逻可观测性: 上次见到末影人的时刻 (墙钟), 以及回锚点/心跳两条日志的节流戳。
+    private long _lastEndermanSeenMs = 0;
+    private long _lastReturnLogMs = 0;
+    private long _lastPatrolBeatMs = 0;
+    private static final long RETURN_LOG_INTERVAL_MS = 5000;
+    private static final long PATROL_BEAT_INTERVAL_MS = 30000;
+
     public CollectEnderPearlsInForestTask(int count, BlockPos anchor) {
         super(new ItemTarget(Items.ENDER_PEARL, count));
         _count = count;
@@ -81,6 +88,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         mod.getBlockTracker().trackBlock(WARPED_FOREST_SIGNAL_BLOCKS);
         _campTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlCampMaxSeconds());
         _dryTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlDrySeconds());
+        _lastEndermanSeenMs = System.currentTimeMillis();
         Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tSTART anchor="
                 + (_anchor == null ? "none" : _anchor.toShortString())
                 + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count
@@ -105,6 +113,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 2) 有末影人就打 (KillEntitiesTask 内部含末影人激怒/瞄准的专门处理)
         if (mod.getEntityTracker().entityFound(EndermanEntity.class)) {
             _dryTimer.reset();
+            _lastEndermanSeenMs = System.currentTimeMillis();
             setDebugState("Killing enderman for pearls ("
                     + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
             return _killTask;
@@ -120,19 +129,44 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         if (_anchor != null
                 && mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor)) > CAMP_RADIUS * CAMP_RADIUS) {
             setDebugState("Returning to warped forest camp");
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastReturnLogMs > RETURN_LOG_INTERVAL_MS) {
+                _lastReturnLogMs = nowMs;
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN dist="
+                        + String.format("%.0f", Math.sqrt(mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor))))
+                        + " anchor=" + _anchor.toShortString() + " (巡逻走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回)");
+            }
             if (_goToAnchor == null || _goToAnchor.isFinished(mod)) {
                 _goToAnchor = new GetToBlockTask(_anchor.up(), false);
             }
             return _goToAnchor;
         }
 
+        // 林内巡逻: TimeoutWanderTask 每段走 PATROL_STEP 格换一次方向, 是【无偏置随机
+        // 游荡】—— 刻意没用 BiasedExploreTask (步长 48 且会朝记忆目标连走多步, 本
+        // 项目已有"偏置探索折返、净位移≈0"的前科, 见 detail/04-symptoms.md)。末影人
+        // 在诡异森林刷新率本来就高, 靠小步游荡扫视野足够, 且永远被锚点半径兜住。
         setDebugState("Patrolling warped forest for endermen ("
                 + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
         if (_patrol == null) {
             _patrol = new TimeoutWanderTask(PATROL_STEP);
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL begin anchor="
+                    + (_anchor == null ? "none" : _anchor.toShortString())
+                    + " radius=" + (int) CAMP_RADIUS + " step=" + (int) PATROL_STEP);
         } else if (_patrol.isFinished(mod)) {
             // 实例级任务: 不 reset 的话原点停在上一次的位置, 一开局就"走够了"空转。
             _patrol.resetForReuse(mod);
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL step-done pearls="
+                    + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + " (换方向继续找)");
+        }
+        // 心跳: 证明是在"等刷新 / 找末影人"而不是卡死原地 (30s 一条)。
+        long beatNow = System.currentTimeMillis();
+        if (beatNow - _lastPatrolBeatMs > PATROL_BEAT_INTERVAL_MS) {
+            _lastPatrolBeatMs = beatNow;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL waiting noEndermanFor="
+                    + ((beatNow - _lastEndermanSeenMs) / 1000) + "s pearls="
+                    + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count
+                    + " dryLimit=" + (int) mod.getModSettings().getOpportunisticPearlDrySeconds() + "s");
         }
         return _patrol;
     }
