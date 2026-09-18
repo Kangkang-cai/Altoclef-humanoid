@@ -79,6 +79,9 @@ public class MobDefenseChain extends SingleTaskChain {
     // (2026-09-01 用户) 纯近战怪数量达到此值才逃跑(被围殴), 1~2 只直接打。
     // 远程攻击者(骷髅/烈焰等能射)与苦力怕(爆炸)不受此限制: 永远保留逃跑路径。
     private static final int RETREAT_MELEE_THRESHOLD = 3;
+    // (2026-09-18 用户拍板) 低血量硬闸: 残血时不管"近战少怪直接打"一律撤。
+    // 6 = 3 颗心 —— 末影人/僵尸猪灵一击 4.5, 低于此值再挨一下就死。
+    private static final float LOW_HEALTH_FORCE_RETREAT = 6.0f;
     // (2026-09-02 贴脸近战立即击杀, 用户"僵尸在脸上早该杀了, 快死才反应")
     // 近战怪在此距离内视为"贴脸正在攻击我们" → 立即进击杀清单, 不等
     // killHostileWhenCloseForSeconds(12s) 计时。否则僵尸贴脸 12 秒早把人打残,
@@ -499,8 +502,14 @@ public class MobDefenseChain extends SingleTaskChain {
         // 蛮兵混在里面会被"近战 1 只直接打"的分支吃掉 (12:02:44 实锤)。蛮兵在
         // getUniversallyDangerousMob 的 6 格保留圈之外时由这里兜底。
         int bruteCount = 0;
+        // (2026-09-18 用户拍板) 末影人【跑不掉】, 不要跑: 它瞬移贴脸, retreat 时
+        // bot 从 x=806 跑到 812 而末影人始终贴着 1.2~3.0 格, 逃跑只延长挨打时间
+        // (22:46:50~53 实锤, 且 retreat 还因"威胁短暂离池"被假完成)。用户定: 单只
+        // 末影人 → 战斗到底。两只及以上仍走围殴判定 (打不过)。
+        int endermanCount = 0;
         for (Entity h : hostiles) {
             if (h == null || !h.isAlive()) continue;
+            if (h instanceof EndermanEntity) { endermanCount++; continue; }
             if (h instanceof CreeperEntity) { anyCreeper = true; continue; }
             if (isRangedThreat(h)) { anyRanged = true; continue; }
             if (h instanceof PiglinBruteEntity) {
@@ -513,15 +522,25 @@ public class MobDefenseChain extends SingleTaskChain {
             }
             meleeCount++;
         }
-        boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged || anyCreeper || meleeCount >= RETREAT_MELEE_THRESHOLD;
+        boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged || anyCreeper
+                || meleeCount >= RETREAT_MELEE_THRESHOLD
+                || endermanCount >= 2;
+        // (2026-09-18 用户拍板) 低血量硬闸: 血量 ≤ 6 (3 颗心) 无条件撤 —— 一击必死
+        // 的残血状态不该还在"近战少怪直接打"。末影人场景除外: 它跑不掉, 撤退只是
+        // 把死亡拖长, 按用户拍板战斗到底 (至少能打死它拿珍珠)。
+        if (!retreat && endermanCount == 0 && mod.getPlayer().getHealth() <= LOW_HEALTH_FORCE_RETREAT) {
+            retreat = true;
+        }
         long nowMs = System.currentTimeMillis();
         if (nowMs - _lastRetreatDecLogMs > 500) {
             _lastRetreatDecLogMs = nowMs;
             String m = "[RETREAT-DEC] meleeCount=" + meleeCount
+                    + " endermanCount=" + endermanCount
                     + " piglinSwarm=" + piglinSwarm
                     + " bruteCount=" + bruteCount
                     + " isRanged=" + anyRanged
                     + " isCreeper=" + anyCreeper
+                    + " health=" + String.format("%.1f", mod.getPlayer().getHealth())
                     + " decide=" + (retreat ? "retreat" : "fight");
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);

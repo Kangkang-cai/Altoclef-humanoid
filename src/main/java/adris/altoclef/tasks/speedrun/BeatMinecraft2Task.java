@@ -62,6 +62,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
+import net.minecraft.world.biome.BiomeKeys;
 import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.*;
@@ -2887,8 +2888,25 @@ public class BeatMinecraft2Task extends Task {
      * (SearchChunkForBlockTask 那套), 保持拟人。
      */
     private BlockPos findPerceivedWarpedForest(AltoClef mod) {
+        // 1) 脚下群系就是诡异森林 → "身处林中", O(1) 且零代价。
+        //    (2026-09-18 22:46 卡死事故) 走过这条 O(1) 路径很重要: 见下。
+        BlockPos playerPos = mod.getPlayer().getBlockPos();
+        var biome = mod.getWorld().getBiome(playerPos);
+        if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
+            return playerPos;
+        }
+        // 2) 否则看能不能真的看见一片林子 (远处森林): 走全项目统一口径
+        //    BlockTracker.getNearestPerceivedInView (近远扫缓存 + FOV 锥 + LOS 射线)。
+        //
+        //    ⚠ 这里刻意【不】调 trackBlock(signals): trackBlock 首次加入新方块类型会
+        //    setDirty + forceElapse → BlockTracker.update() → rescanWorld() →
+        //    MineProcess.searchWorld(...) 对【全部已追踪方块】扫三个维度的所有已加载
+        //    区块。2026-09-18 22:46 卡死事故: 我新加 4 类诡异森林方块即触发这次全量
+        //    重扫 ("Rescanning world for 15 blocks" 是日志最后一行), 后台线程 CPU 打满
+        //    → 主线程无响应 → 22:47:18 服务端连接超时把客户端踢掉。
+        //    代价/收益: 不追踪则缓存里没有该类方块 (getKnownLocations 返回空), 只能靠
+        //    "走进林子"触发蹲守 —— 而走进林子正是用户要的"路过顺手刷", 完全够用。
         Block[] signals = CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS;
-        mod.getBlockTracker().trackBlock(signals);
         return mod.getBlockTracker().getNearestPerceivedInView(
                         mod.getModSettings().getOpportunisticPearlSightRange(),
                         PEARL_FOREST_LOS_CANDIDATES, signals)
