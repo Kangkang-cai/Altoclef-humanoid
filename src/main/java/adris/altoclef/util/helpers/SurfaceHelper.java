@@ -23,13 +23,15 @@ import net.minecraft.world.World;
  * </ul>
  * 所以判据必须问的是【地球物理】问题: 我头顶之上有多少【地层】? 而不是【视觉】问题: 天空挡没挡住?
  *
- * <h3>口径 = 判据流水线 (任一判据成立即"地表"; 全部不成立才"地下")</h3>
+ * <h3>口径 = 判据流水线 (任一判据成立即"地表"; 全部不成立才"地下"; 20260918 裁撤判据3 环探, 判据8 升主判据)</h3>
  * <pre>
  *   判据0 维度退化    非主世界 → 退回 y &lt; 58 (下界有基岩顶、末地有穹顶, 海拔法无意义)
+ *   判据8 地表签名【主判据, 最先表决】 脚下踩着/身旁 (半径≤2, 脚+头两高度) 长着只在露天生成的方块
+ *        (草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦; 草/蕨/花/仙人掌/枯灌木/甘蔗) → 判地表。
+ *        = 人判地表的"脚下质感 + 身旁景物"通道; 只读脚下与身旁, 不依赖头顶柱数据,
+ *          所以爬升临破土/刚破土场景它先说话 (用户拍板 20260918 "他是主要判据"); 液体护栏防湖底误判
  *   判据1 地形埋深    5 点采样(自身列 + 4 水平邻柱同高)的【头顶地形格数中位数】≤ 4 → 地表
- *   判据2 植被不算地板 取值时跳过树叶/原木/植物 → 树冠/藤蔓不构成"埋"
- *   判据3 水平近邻露天 埋深在 5..8 的临界带时, 半径 3 的水平环内有列埋深 ≤ 4 → 地表
- *        (语义: "头顶被岩檐遮住, 但一步之外就是露天" → 仍在活动层)
+ *   判据2 植被不算地板 取值时跳过树叶/原木/植物 → 树冠/藤蔓不构成"埋" (内建于扫描, 非独立判据)
  *   判据4 时间迟滞    结论翻面须距上次翻面 ≥ 5s (抹平地形过渡/边界抖动)
  *   判据5 未知不翻面  采样列区块未加载 → 该列记 UNKNOWN; 有效点 &lt; 3 时维持现状, 不许翻面
  *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
@@ -37,9 +39,6 @@ import net.minecraft.world.World;
  *         20260918-092740: 超大洞穴 y=-44 五列同时 buried=0 稳定 40s+, 深度物理事实兜底)
  *   判据7 高度图交叉  距最高非空气方块 (WORLD_SURFACE 高度图, 服务端下发、深处稳定) &gt; 32 格
  *        → 无条件判地下 (094844: y=0..9 判据6 拦不到, 扫描仍报"露天"而 wsTop=63; 深度物理事实兜底)
- *   判据8 地表签名    脚下踩着/身旁 (半径≤2, 脚+头两高度) 长着只在露天生成的方块
- *        (草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦; 草/蕨/花/仙人掌/枯灌木/甘蔗) → 判地表。
- *        = 人判地表的"脚下质感 + 身旁景物"通道; 只在判据6/7 通过的浅带生效, 液体护栏防湖底误判
  * </pre>
  * 判据1 的取值语义: "该列从头顶往上要挖穿几格【非植被地层】才能见天"。≤4 浅 → 地表; 越大越深。
  * 取 5 点的<b>中位数</b>而不是最小/最大: 取最小 → 深竖井被判地表(20260917-120830 35 分钟上不去);
@@ -86,8 +85,7 @@ import net.minecraft.world.World;
  *
  * <h3>成本</h3>
  * 每列最多扫 {@link #SCAN_UP_MAX}(128) 格; 5 点采样带 {@link #SAMPLE_CACHE_MS}(200ms) 缓存,
- * 每秒最多 ~3200 次块状态读 (远低于 MC 自身光照更新的量级)。判据3 仅在中位数 5..8 时执行,
- * 带 500ms 缓存。static 状态已接入 {@code WorldStateGuard.registerAll()} 的
+ * 每秒最多 ~3200 次块状态读 (远低于 MC 自身光照更新的量级)。static 状态已接入 {@code WorldStateGuard.registerAll()} 的
  * {@code SurfaceHelper::onWorldBoundary} 复位。
  */
 public final class SurfaceHelper {
@@ -101,21 +99,12 @@ public final class SurfaceHelper {
     /**
      * 判据1 的阈值: 5 点头顶地形格数中位数 ≤ 本值 → 仍算"露天活动层"。
      * 取 4 的依据: 自挖浅坑/树坑通常 ≤3 格; 而真矿道/洞穴顶板厚度普遍 >8 格。
-     * 4 与 5 之间的边界不敏感——判据3 还会在 5..8 的临界带再做一次水平探测。
+     * (原判据3 水平环探 20260918 裁撤: 场景被判据8 签名 + 判据1 覆盖, 余下误判自愈成本低。)
      */
     private static final int NEAR_SURFACE_MAX = 4;
 
-    /** 判据3 只在"埋深 ≤ 本值"的临界带启用 (再深就没有"一步之外"可言了)。 */
-    private static final int RING_PROBE_MAX = 8;
-
-    /** 判据3 的水平环半径 (距离 1 已含在判据1 的邻柱里, 故从 2 开始扫到本值)。 */
-    private static final int RING_PROBE_RADIUS = 3;
-
     /** 迟滞: 结论翻面后至少驻留这么久才允许再翻。 */
     private static final long MIN_DWELL_MS = 5000;
-
-    /** 判据3 的缓存时长 (16 次查询没必要每 tick 做; 5s 迟滞下 0.5s 陈旧看不出来)。 */
-    private static final long RING_CACHE_MS = 500;
 
     /**
      * 逐块扫描的向上封顶: 头顶 128 格内没有任何非植被实心 → 判"露天"
@@ -160,10 +149,6 @@ public final class SurfaceHelper {
     private static boolean _init = false;
     private static long _flapRejected = 0;
 
-    // 判据3 的缓存 (同样 static: 结论是全局事实, 没必要每个调用方各算一次)
-    private static boolean _ringOpen = false;
-    private static long _ringAt = 0;
-
     // 5 点采样缓存 (pos 相同且未过期时复用; 逐块扫描每秒全量做 5 次没必要)
     private static int[] _sampleCache = null;
     private static long _sampleAt = 0;
@@ -178,8 +163,6 @@ public final class SurfaceHelper {
         _setAt = 0;
         _init = false;
         _flapRejected = 0;
-        _ringOpen = false;
-        _ringAt = 0;
         _sampleCache = null;
         _sampleAt = 0;
         _samplePos = null;
@@ -346,6 +329,12 @@ public final class SurfaceHelper {
             return pos.getY() < NON_OVERWORLD_DEEP_Y;
         }
 
+        // 判据8【主判据, 最先表决】: 地表签名 —— 脚下踩着/身旁长着只在露天生成的方块。
+        // 人判地表的第一反应就是"我看到草和花了" (用户拍板 20260918: "判据8 必须前移, 他是主要判据")。
+        // 快速、不依赖头顶柱数据 (只读脚下与身旁), 所以爬升临破土/刚破土的场景它先说话,
+        // 不会被深部数据异常或迟滞拖住。 lush 洞穴的苔藓/杜鹃/粘土已刻意排除, 井下不会误触发。
+        if (nearbySurfaceSignature(mod, pos)) return false;
+
         // 判据1(+判据2 内建): 5 点头顶地层格数中位数
         int buried = buriedDepth(mod);
         // 判据5: 采样不可信 (区块未加载等) → 维持现状, 绝不许把 UNKNOWN 误读成露天
@@ -369,14 +358,7 @@ public final class SurfaceHelper {
             return true;
         }
 
-        // 判据8: 地表签名 (人判地表的"脚下质感/身旁景物"通道) —— 扫描判深, 但脚下踩着/身旁长着
-        // 只在露天生成的方块 → 推翻"地下" (天然悬岩下草地上/表面凹坑等场景)
-        if (nearbySurfaceSignature(mod, pos)) return false;
-
         if (buried <= NEAR_SURFACE_MAX) return false;
-
-        // 判据3: 临界带 (5..8) 再做一次水平环探测 —— "头顶被压住, 但一步之外就是露天"
-        if (buried <= RING_PROBE_MAX && nearbyOpenColumn(mod, pos)) return false;
 
         return true;
     }
@@ -455,36 +437,6 @@ public final class SurfaceHelper {
                 }
             }
         }
-        return false;
-    }
-
-    /**
-     * 判据3: 以玩家为心、切比雪夫半径 2..{@link #RING_PROBE_RADIUS} 的水平环内, 是否存在
-     * 一列"头顶之上地层 ≤ {@link #NEAR_SURFACE_MAX} 格"(即挪过去就地是露天活动层)。
-     *
-     * <p>语义: 站在岩檐/薄顶棚下面时判据1 会给出中等埋深, 但人其实一步就能走到露天 ——
-     * 这种位置干"回地表"的活代价是零, 不该被当成必须挖上去的深地下。
-     * 距离 1 不重复扫 (已含在判据1 的邻柱里); 不可判定({@link #UNKNOWN})的列一律跳过 ——
-     * 未加载列既不能当"露天"也不能当"深埋"。结果缓存 {@link #RING_CACHE_MS}。
-     */
-    private static boolean nearbyOpenColumn(AltoClef mod, BlockPos pos) {
-        long now = System.currentTimeMillis();
-        if (_ringAt != 0 && now - _ringAt < RING_CACHE_MS) return _ringOpen;
-        _ringAt = now;
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        for (int dx = -RING_PROBE_RADIUS; dx <= RING_PROBE_RADIUS; dx++) {
-            for (int dz = -RING_PROBE_RADIUS; dz <= RING_PROBE_RADIUS; dz++) {
-                if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue; // 距离 1 已含在判据1
-                m.set(pos.getX() + dx, pos.getY(), pos.getZ() + dz);
-                if (!mod.getChunkTracker().isChunkLoaded(m)) continue;
-                int buried = overheadTerrain(mod, m.getX(), pos.getY(), m.getZ());
-                if (buried != UNKNOWN && buried <= NEAR_SURFACE_MAX) {
-                    _ringOpen = true;
-                    return true;
-                }
-            }
-        }
-        _ringOpen = false;
         return false;
     }
 

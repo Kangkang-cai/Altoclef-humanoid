@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.pathing.goals.GoalNear;
@@ -11,6 +12,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -506,6 +508,22 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             int candZ = (int) Math.floor(pos.z + Math.sin(angle) * stepLen);
             int candY = surfaceYAt(mod, candX, candZ, (int) Math.floor(pos.y));
             BlockPos candidate = new BlockPos(candX, candY, candZ);
+            // (20260918 用户"站在地表上后探索不许再导航到地下 —— 导航到空气位置, 非空气拒绝")
+            // bot 自己在地表时, 落点脚+头必须是空气或流体; 实体方块(数据洞落进洞穴底/兜底
+            // fallback 砸进石头/树叶冠里)换方向重采。水面放行 —— 交给下方既有的 过河/下海 判定
+            // (2026-08-21 定案, 不在这里推翻)。
+            if (!SurfaceHelper.isBelowSurface(mod)) {
+                BlockState feet = mod.getWorld().getBlockState(candidate);
+                BlockState head = mod.getWorld().getBlockState(candidate.up());
+                boolean feetOk = feet.isAir() || feet.getMaterial().isLiquid();
+                boolean headOk = head.isAir() || head.getMaterial().isLiquid();
+                if (!feetOk || !headOk) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[AIR-TARGET] reject solid landing " + candidate.toShortString()
+                                    + " (feet=" + feet.getBlock() + " head=" + head.getBlock() + ")");
+                    continue;
+                }
+            }
             // Avoid retrying the exact directions we already failed on.
             // (2026-09-17) 跨实例拉黑目标同样跳过: 它可能恰好落在这个候选点上。
             if (_failedTargets.contains(candidate) || isUnreachable(candidate)) continue;
@@ -694,14 +712,14 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      */
     private int surfaceYAt(AltoClef mod, int x, int z, int fallbackY) {
         if (mod.getWorld() == null) return fallbackY;
-        for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
-            BlockPos check = new BlockPos(x, y, z);
-            if (!mod.getChunkTracker().isChunkLoaded(check)) return fallbackY;
-            BlockState st = mod.getWorld().getBlockState(check);
-            if (st.isAir()) continue;
-            return y + 1;
-        }
-        return fallbackY;
+        if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
+        // (20260918 用户"探索不许再导航到地下") 旧实现自 y=319 逐块向下扫"第一个非空气"——
+        // 深处/数据洞时客户端把头顶柱装成空气, 扫描会一路落到洞穴底, 落点直接进地下
+        // (20260918-094844 实锤)。改用 WORLD_SURFACE 高度图: 服务端随区块下发, 深处稳定
+        // (SurfaceHelper 三次事故定案的"唯一可信锚")。语义等价: 最高非空气方块顶 + 1 = 落脚空气格。
+        int wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
+        if (wsTop <= mod.getWorld().getBottomY() + 1) return fallbackY; // 哨兵 (未加载/空高度图)
+        return wsTop;
     }
 
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
