@@ -567,8 +567,11 @@ public class BeatMinecraft2Task extends Task {
     private int _belowSeaLevelTicks = 0;
     // (2026-08-23 防火药水保命阶段) 打烈焰人前的金锭+猪灵交易阶段状态。
     // _fireResPhaseActive = 正在进行; _fireResPhaseDone = 已尝试过 (达标或
-    // 超时), 不再重试。外层超时 (18 分钟) 比内层 (12 分钟) 长, 内层先放弃
-    // 外层兜底。
+    // 超时), 不再重试。外层超时 (45 分钟) 比内层 (30 分钟) 长, 内层先放弃
+    // 外层兜底。(2026-09-18 放宽, 用户"放弃交易药水太快": 18/12 → 45/30;
+    // 并加死亡刷新 — 阶段内死一次计时器清零, 死亡/跑尸不吃交易预算。
+    // 123145 场次: bot 下界盲找金矿 + 连死岩浆, 13:08 外层到点
+    // "Phase timed out with 0 potions" 放行, 随后 13:10 裸奔又死岩浆。)
     // (2026-09-06 用户) 目标从 1 瓶提到 2 瓶 (落单烈焰人走盾战不喝药,
     // 2 瓶留给刷怪笼房多只场景)。防任务打架: _fireResPhaseDone 是一次性
     // 闩 — 本实例内一旦结束 (达标或超时) 就不再进本阶段, 之后喝掉 1~2 瓶
@@ -577,7 +580,10 @@ public class BeatMinecraft2Task extends Task {
     private static final int FIRE_RES_POTION_TARGET = 2;
     private boolean _fireResPhaseActive = false;
     private boolean _fireResPhaseDone = false;
-    private final TimerGame _fireResPhaseTimer = new TimerGame(18 * 60);
+    private final TimerGame _fireResPhaseTimer = new TimerGame(45 * 60);
+    // (2026-09-18 死亡刷新) 上次刷新计时器时的连续死亡计数; 激活阶段时记基线,
+    // 阶段进行中发现计数前进 → 计时器清零 (死亡/跑尸不该算进交易预算)。
+    private int _fireResPhaseLastDeathCount = -1;
 
     // (2026-09-14 用户"两瓶都喝完就不再重收"要改成允许重收, 但加冷却时间, 不要马上触发)
     // 旧行为: _fireResPhaseDone 一次闩 → 2 瓶喝完后下界后半程全程裸奔, 再也不会去收。
@@ -2272,6 +2278,7 @@ public class BeatMinecraft2Task extends Task {
                                 + (FIRE_RES_REOPEN_COOLDOWN_MS / 1000) + "s elapsed)");
                         _fireResPhaseActive = true;
                         _fireResPhaseTimer.reset();
+                        _fireResPhaseLastDeathCount = mod.getWorldMemory().getConsecutiveDeathCount();
                         _fireResPhaseDone = false;
                     }
                     setDebugState("Getting Blaze Rods");

@@ -33,8 +33,12 @@ import java.util.Optional;
  *   现有 getEnderPearlTask 猪灵交易前置一致, 统一金靴不搞两套)。
  * - 交易概率: 防火药水 ~3.5%/次, 32 锭大概率不够 2 瓶 → 金锭耗尽时
  *   TradeWithPiglinsTask 内部自动续挖, 循环直到达标。
- * - 超时兜底: 交易是随机的, 防极端运气差死循环阻塞主线 — 12 分钟后
+ * - 超时兜底: 交易是随机的, 防极端运气差死循环阻塞主线 — 30 分钟后
  *   放弃 (有几瓶用几瓶, 0 瓶也放行回到原流程)。
+ *   (2026-09-18 放宽+死亡刷新, 用户"放弃太快, 死后应该刷新": 12→30 分钟;
+ *   阶段内每次死亡把计时器清零重来 — 死亡/跑尸本身不该吃掉交易预算。
+ *   123145 场次实锤: bot 下界盲找金矿 + 连死岩浆, 外层 18 分钟到点
+ *   "Phase timed out with 0 potions" 直接放行, 一瓶没换到。)
  */
 public class CollectFireResPotionsTask extends Task {
 
@@ -42,10 +46,14 @@ public class CollectFireResPotionsTask extends Task {
     // 每轮交易的金锭数 (用户设计 32): TradeWithPiglinsTask 金锭耗尽自动续挖
     private static final int GOLD_BUFFER = 32;
     // 整阶段超时 (秒): 兜底防死循环。挖 32 金 + 交易 32 次 ≈ 3-5 分钟/轮,
-    // 期望 2-3 轮达标, 12 分钟足够宽裕。
-    private static final double PHASE_TIMEOUT_SECONDS = 12 * 60;
+    // 期望 2-3 轮达标; 但下界挖金可能长时间盲找 + 死亡重跑, 12 分钟不够
+    // (2026-09-18 用户"放弃太快"→ 放宽到 30 分钟; 死亡时计时器刷新见 onTick)。
+    private static final double PHASE_TIMEOUT_SECONDS = 30 * 60;
     private final TimerGame _phaseTimeout = new TimerGame(PHASE_TIMEOUT_SECONDS);
     private boolean _gaveUp = false;
+    // (2026-09-18 死亡刷新) onStart 记录当时的连续死亡计数, onTick 发现计数
+    // 前进 (= 阶段内死了一次) 就把阶段计时器清零。死亡/跑尸不该算进交易预算。
+    private int _deathsAtStart = -1;
     // 交易子任务 (永不满足的假目标 DRAGON_EGG×999999: 让它一直交易直到外层
     // 检测药水达标。1.18.2 没有统一的 Items.BED — 床是 16 个颜色变体)
     private final Task _tradeTask = new TradeWithPiglinsTask(GOLD_BUFFER, Items.DRAGON_EGG, 999999);
@@ -114,6 +122,13 @@ public class CollectFireResPotionsTask extends Task {
         }
 
         // ② 超时兜底: 放弃本阶段 (不阻塞主线, 打烈焰人回到原流程)
+        // (2026-09-18 死亡刷新) 阶段内死过 → 计时器清零重来。
+        if (mod.getWorldMemory().getConsecutiveDeathCount() != _deathsAtStart) {
+            _deathsAtStart = mod.getWorldMemory().getConsecutiveDeathCount();
+            _phaseTimeout.reset();
+            Debug.logMessage("(FireRes) Died during potion phase — phase timer refreshed.");
+            Debug.logToFile("altoclef_diag.log", "[FireRes] inner phase timer refreshed on death");
+        }
         if (_phaseTimeout.elapsed() && !_gaveUp) {
             _gaveUp = true;
             adris.altoclef.util.helpers.TimeoutLog.hit("CollectFireResPotionsTask.phaseTimeout",
