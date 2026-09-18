@@ -31,6 +31,7 @@ import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Optional;
 
@@ -258,6 +259,30 @@ public class TradeWithPiglinsTask extends ResourceTask {
         private final TimerGame _barterTimeout = new TimerGame(2);
         private final TimerGame _intervalTimeout = new TimerGame(10);
         private final HashSet<Entity> _blacklisted = new HashSet<>();
+        // (2026-09-18 黑名单 TTL) 拉黑原先会话级永久 —— 视野内猪灵全被拉黑后,
+        // entityFound(PiglinEntity) 恒真, 外层永不切回探索模式, bot 无限
+        // "wander→选目标→池空" 再也不找新猪灵 (165136 会话用户实测)。
+        // 改为 60s 过期自动解禁: 短期避开失败对象, 长期不锁死交易能力。
+        private static final long BLACKLIST_TTL_MS = 60_000;
+        private final HashMap<Entity, Long> _blacklistedAtMs = new HashMap<>();
+
+        private void blacklist(Entity entity) {
+            _blacklisted.add(entity);
+            _blacklistedAtMs.put(entity, System.currentTimeMillis());
+        }
+
+        private boolean isBlacklisted(Entity entity) {
+            Long at = _blacklistedAtMs.get(entity);
+            if (at == null) return false;
+            if (System.currentTimeMillis() - at > BLACKLIST_TTL_MS) {
+                _blacklisted.remove(entity);
+                _blacklistedAtMs.remove(entity);
+                Debug.logToFile("altoclef_diag.log",
+                        "[PiglinTrade]\tblacklist expired, retrying piglin " + entity.getBlockPos().toShortString());
+                return false;
+            }
+            return true;
+        }
         private Entity _currentlyBartering = null;
         // (2026-09-18 蛮兵拒选节流日志, 用户"没有日志吗, 注意节流") getEntityTarget
         // 的蛮兵过滤原先是静默 return false, 实跑完全无法验证。落盘不进聊天
@@ -320,7 +345,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
             // Don't attack piglins unless we've blacklisted them.
             mod.getBehaviour().addForceFieldExclusion(entity -> {
                 if (entity instanceof PiglinEntity) {
-                    return !_blacklisted.contains(entity);
+                    return !isBlacklisted(entity);
                 }
                 return false;
             });
@@ -380,7 +405,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 } else {
                     // We failed bartering.
                     Debug.logMessage("Failed bartering with current piglin, blacklisting.");
-                    _blacklisted.add(_currentlyBartering);
+                    blacklist(_currentlyBartering);
                     _barterTimeout.reset();
                     _currentlyBartering = null;
                     return null;
@@ -391,7 +416,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                 Optional<Entity> closestHoglin = mod.getEntityTracker().getClosestEntity(_currentlyBartering.getPos(), HoglinEntity.class);
                 if (closestHoglin.isPresent() && closestHoglin.get().isInRange(entity, HOGLIN_AVOID_TRADE_RADIUS)) {
                     Debug.logMessage("Aborting further trading because a hoglin showed up");
-                    _blacklisted.add(_currentlyBartering);
+                    blacklist(_currentlyBartering);
                     _barterTimeout.reset();
                     _currentlyBartering = null;
                 }
@@ -408,7 +433,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                             || closestBrute.get().isInRange(mod.getPlayer(), BRUTE_HARD_TRADE_RADIUS));
                 if (closestBrute.isPresent() && bruteHardClose) {
                     Debug.logMessage("Aborting trade: piglin brute within " + (int) BRUTE_HARD_TRADE_RADIUS + " blocks");
-                    _blacklisted.add(_currentlyBartering);
+                    blacklist(_currentlyBartering);
                     _barterTimeout.reset();
                     _currentlyBartering = null;
                 }
@@ -519,7 +544,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
             // 的猪灵里选; 全被辐射才退到"8 格内无蛮兵"的池子 (硬底线)。堡垒区
             // 蛮兵常驻, 单层 32 格硬禁 = 贴脸也无猪灵可交易 (165136 会话 16:53:58 实锤)。
             java.util.function.Predicate<Entity> baseFilter = entity -> {
-                if (_blacklisted.contains(entity)
+                if (isBlacklisted(entity)
                         || EntityHelper.isTradingPiglin(entity)
                         || (entity instanceof LivingEntity && ((LivingEntity) entity).isBaby())
                         || (_currentlyBartering != null && !entity.isInRange(_currentlyBartering, PIGLIN_NEARBY_RADIUS))) {
@@ -555,7 +580,7 @@ public class TradeWithPiglinsTask extends ResourceTask {
                         PiglinEntity.class);
             }
             if (found.isEmpty()) {
-                if (_currentlyBartering != null && (_blacklisted.contains(_currentlyBartering) || !_currentlyBartering.isAlive())) {
+                if (_currentlyBartering != null && (isBlacklisted(_currentlyBartering) || !_currentlyBartering.isAlive())) {
                     _currentlyBartering = null;
                 }
                 found = Optional.ofNullable(_currentlyBartering);
