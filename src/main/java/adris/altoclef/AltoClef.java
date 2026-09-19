@@ -249,9 +249,9 @@ public class AltoClef implements ModInitializer {
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
             tickInteractionPauseWatchdog();
-            // (2026-09-18 下界岩浆邻域导航保险) 旋转跳 (斜向升格) 失败率>50%, 岩浆
-            // 邻域动态禁跳 + 压低垫块惩罚, 详见 tickNetherLavaNavGuard 注释。
-            tickNetherLavaNavGuard();
+            // (2026-09-18 岩浆邻域导航保险) 旋转跳 (斜向升格) 失败率>50%, 落地邻域
+            // 有岩浆时动态禁跳 (下界全程 + 主世界深层), 详见 tickLavaNavGuard 注释。
+            tickLavaNavGuard();
             // (2026-09-17 跨世界残留状态) 换存档(不重启游戏)时 static 字段全部存活
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
@@ -567,16 +567,24 @@ public class AltoClef implements ModInitializer {
         }
     }
 
-    // ==== (2026-09-18 下界岩浆邻域导航保险) ====
+    // ==== (2026-09-18 岩浆邻域导航保险) ====
     // 背景: baritone 的斜向升格 (allowDiagonalAscend, 俗称"旋转跳") 执行失败率
     // 实测 >50% —— 从 (1,0,0) 斜跳 (0,1,1) 且头顶 (1,2,1) 有顶棚时需要空中转向,
     // baritone 的执行模型做不好这一跳, 掉下去落岩浆直接死 (123145 场次 12:37 /
     // 12:48 / 13:10 三次, 死前均为纯赶路)。initializeBaritoneSettings 的原注释
     // 早就写了 "minor risk EXCEPT in the nether, where it is a huge risk"。
-    // 处理: 下界且玩家周围有岩浆时, 动态 ① 关斜向升格 ② 把垫块惩罚压到上限 2
-    // (A* 改选"垫一格绕行", 执行成功率≈100%)。没有 baritone 放得下去的垫块时
-    // 保持原行为: 硬禁跳可能把 bot 冻在原地, 跳总比冻死强 (PillarJumpHelper.
-    // countBaritonePlaceable 判定, 与 baritone 的 hasThrowaway 同口径)。
+    //
+    // 处理: 玩家落地邻域有岩浆时, 动态关掉斜向升格 —— **只做这一件事**。
+    //   【不碰 blockPlacementPenalty】(2026-09-19 19:25 用户拍板): 早期版本顺手
+    //   把放置惩罚压到 2.0, 意图是让 A* 改选"垫一格绕行"; 但那是**降低**放置成本
+    //   (鼓励垫块), 不是"抑制垫块", 既非用户意图、解除时又会残留到主世界。已整体
+    //   移除, 本保险只管 allowDiagonalAscend 这一个开关。
+    //   垫块不足时保持原行为: 硬禁跳可能把 bot 冻在原地, 跳总比冻死强
+    //   (PillarJumpHelper.countBaritonePlaceable 判定, 与 baritone 的 hasThrowaway
+    //   同口径; 门槛 LAVA_NAV_MIN_PLACEABLE, 2026-09-19 从 >0 提到 ≥8 —— 1 块撑不
+    //   起替代路线, 却把跳禁了)。
+    // 适用维度 (2026-09-19 19:25 用户补选): 下界全程 + **主世界深层 y ≤ 20**
+    //   (钻石层岩浆湖、深板岩层岩浆海同样致命)。末地无岩浆, 不参与。
     // ===== (2026-09-19 收紧判据, 用户"触发太频繁") =====
     // 旧判据 = "玩家周围 25x17x25 (水平 ±12、垂直 -12..+4) 立方体内存在任意一格
     // LAVA"的布尔存在量, 三个结构性缺陷:
@@ -595,8 +603,7 @@ public class AltoClef implements ModInitializer {
     //      旋转跳 —— 与 09-14 岩浆横跳、SurfaceHelper 判据4 是同一根因。
     //   ③ 扫描补 isChunkLoaded 判定。
     // 扫描节流 0.25s (体积 10625 → 1014, 开销更小、灵敏度更高); 每 tick 强制写
-    // 设置, 防任务栈 applyState 把旧值写回去。惩罚值用 Math.min 收紧、解除时不
-    // 回写 — 残留的低惩罚只会"更爱垫路", 无害, 下一次任务栈 applyState 自动恢复。
+    // allowDiagonalAscend, 防任务栈 applyState 把旧值写回去。
     private static final int LAVA_NAV_TRIGGER_RADIUS = 3;
     private static final int LAVA_NAV_TRIGGER_DOWN = 2;
     private static final int LAVA_NAV_TRIGGER_UP = 1;
@@ -604,19 +611,30 @@ public class AltoClef implements ModInitializer {
     private static final int LAVA_NAV_HOLD_DOWN = 3;
     private static final int LAVA_NAV_HOLD_UP = 2;
     private static final double LAVA_NAV_RELEASE_CONFIRM_SEC = 3.0;
-    private static final double LAVA_NAV_PLACE_PENALTY_CAP = 2.0;
+    /** 主世界参与判据的最大 Y (钻石层/深板岩层岩浆湖; 地表无岩浆, 不参与)。 */
+    private static final int LAVA_NAV_OVERWORLD_MAX_Y = 20;
+    /** 关跳所需的 baritone 可放置垫块数: 太少时垫不出替代路线, 禁跳反把 bot 冻住。 */
+    private static final int LAVA_NAV_MIN_PLACEABLE = 8;
     private final adris.altoclef.util.time.TimerGame _lavaNavScanTimer = new adris.altoclef.util.time.TimerGame(0.25);
     /** 外围连续无岩浆计时 (解除确认窗): 外围任一格有岩浆就重置。 */
     private final adris.altoclef.util.time.TimerGame _lavaNavClearTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_RELEASE_CONFIRM_SEC);
     private boolean _lavaNavSuppressActive = false;
     private boolean _lavaNavNoBlockWarned = false;
 
-    private void tickNetherLavaNavGuard() {
+    /** 本保险是否适用: 下界全程 + 主世界深层 (y ≤ LAVA_NAV_OVERWORLD_MAX_Y); 末地无岩浆。 */
+    private boolean lavaNavApplies() {
+        adris.altoclef.util.Dimension dim = adris.altoclef.util.helpers.WorldHelper.getCurrentDimension();
+        if (dim == adris.altoclef.util.Dimension.NETHER) return true;
+        return dim == adris.altoclef.util.Dimension.OVERWORLD
+                && getPlayer().getY() <= LAVA_NAV_OVERWORLD_MAX_Y;
+    }
+
+    private void tickLavaNavGuard() {
         if (inGame() && getPlayer() != null && getWorld() != null && _lavaNavScanTimer.elapsed()) {
             _lavaNavScanTimer.reset();
             boolean triggerHit = false; // 落地邻域 (内圈) 有岩浆
             boolean holdHit = false;    // 外围警戒环有岩浆
-            if (adris.altoclef.util.helpers.WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) {
+            if (lavaNavApplies()) {
                 BlockPos center = getPlayer().getBlockPos();
                 int r = LAVA_NAV_HOLD_RADIUS;
                 scan:
@@ -655,13 +673,14 @@ public class AltoClef implements ModInitializer {
             boolean exempt = fireRes || building;
             if (!suppress) {
                 if (triggerHit && !exempt) {
-                    if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0) {
+                    if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) >= LAVA_NAV_MIN_PLACEABLE) {
                         suppress = true;
                         _lavaNavClearTimer.reset();
                     } else if (!_lavaNavNoBlockWarned) {
                         _lavaNavNoBlockWarned = true;
                         Debug.logToFile("altoclef_diag.log",
-                                "[LavaNav] lava in landing range but no baritone-placeable blocks — keeping diagonal ascend ON");
+                                "[LavaNav] lava in landing range but fewer than " + LAVA_NAV_MIN_PLACEABLE
+                                        + " baritone-placeable blocks — keeping diagonal ascend ON");
                     }
                 }
             } else if (exempt) {
@@ -678,8 +697,7 @@ public class AltoClef implements ModInitializer {
                 String m = suppress
                         ? "[LavaNav] 触发: 落地邻域岩浆 (水平<=" + LAVA_NAV_TRIGGER_RADIUS
                                 + "/下" + LAVA_NAV_TRIGGER_DOWN + "/上" + LAVA_NAV_TRIGGER_UP
-                                + "), 关斜向升格(旋转跳), 垫块惩罚压到 " + LAVA_NAV_PLACE_PENALTY_CAP
-                                + " pos=" + pos
+                                + "), 关斜向升格(旋转跳) pos=" + pos
                         : "[LavaNav] 解除: 外围(<=" + LAVA_NAV_HOLD_RADIUS + ") 连续 "
                                 + LAVA_NAV_RELEASE_CONFIRM_SEC + "s 无岩浆"
                                 + (exempt ? " / 已豁免(防火或造墙施工)" : "")
@@ -690,11 +708,8 @@ public class AltoClef implements ModInitializer {
         }
         // 每 tick 强制写 (applyState 可能随时把任务栈里的旧值写回 baritone settings)。
         // 未抑制时写回基线 true, 与 initializeBaritoneSettings 的原值一致。
+        // 只动这一个开关: blockPlacementPenalty 已于 2026-09-19 移出本保险。
         getClientBaritoneSettings().allowDiagonalAscend.value = !_lavaNavSuppressActive;
-        if (_lavaNavSuppressActive) {
-            getClientBaritoneSettings().blockPlacementPenalty.value =
-                    Math.min(getClientBaritoneSettings().blockPlacementPenalty.value, LAVA_NAV_PLACE_PENALTY_CAP);
-        }
     }
 
     // ==== 永久夜视 (2026-09-18) ====
