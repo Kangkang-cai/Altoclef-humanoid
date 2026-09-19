@@ -8,6 +8,8 @@ import net.minecraft.entity.Entity;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -53,11 +55,40 @@ public class DoToClosestEntityTask extends AbstractDoToClosestObjectTask<Entity>
 
     @Override
     protected Optional<Entity> getClosestTo(AltoClef mod, Vec3d pos) {
-        if (!mod.getEntityTracker().entityFound(_targetEntities)) return Optional.empty();
-        // (2026-09-07 击杀超时兜底) 跳过 CombatMemory 不可达冷却中的目标,
-        // 防止"放弃 → 立刻重选同一只 → 再放弃"死循环 (蜘蛛躲暗处实测)。
-        return mod.getEntityTracker().getClosestEntity(pos,
-                _shouldInteractWith.and(e -> !CombatMemory.isUnreachable(e.getUuid())), _targetEntities);
+        // (2026-09-19 22:44 用户"怎么有的时候, 明明有烈焰人在区域内任务还是等待生成")
+        // 候选 = 追踪器 (感知路径, 原语义不变) ∪ additionalCandidates (绕过感知的补充)。
+        // 为什么需要补充来源: entityTracker 只收录"看得见/听得见, 或记忆窗口内感知过"
+        // 的实体, 而 bot 站上自己刚砌的墙/顶盖补块时, 那圈墙正好挡住自己的视线 →
+        // 目标明明在围场里却"看不见" → 本方法返回 empty → 击杀任务空转、父任务每 tick
+        // 重选 → 界面上就是"有烈焰人却一直等待生成"。
+        Predicate<Entity> accept = _shouldInteractWith.and(e -> !CombatMemory.isUnreachable(e.getUuid()));
+        Entity best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        if (mod.getEntityTracker().entityFound(_targetEntities)) {
+            Optional<Entity> tracked = mod.getEntityTracker().getClosestEntity(pos, accept, _targetEntities);
+            if (tracked.isPresent()) {
+                best = tracked.get();
+                bestSq = best.getPos().squaredDistanceTo(pos);
+            }
+        }
+        for (Entity extra : additionalCandidates(mod)) {
+            if (extra == null || !accept.test(extra)) continue;
+            double sq = extra.getPos().squaredDistanceTo(pos);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = extra;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * (2026-09-19 22:44) 感知之外的补充候选。**默认空 —— 所有现有使用者的行为一字不变。**
+     * 只用于"实体肯定还在, 只是自己被自己挡住看不见"的场景 (目前唯一使用者是
+     * {@link KillEntitiesTask} 的围场候选, 见 CollectBlazeRodsTask.blazesInEnclosure)。
+     */
+    protected List<Entity> additionalCandidates(AltoClef mod) {
+        return Collections.emptyList();
     }
 
     @Override

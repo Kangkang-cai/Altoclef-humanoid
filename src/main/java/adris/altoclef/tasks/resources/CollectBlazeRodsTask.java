@@ -33,10 +33,12 @@ import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -109,14 +111,14 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 施工中(spawnerWorkPending)不开农场杀, 但贴脸烈焰人必须紧急处理 ——
      * MobDefense 施工让位后没人管, bot 会被贴脸烧着还继续放方块。
      *
-     * (2026-09-19 22:31 用户"把触发门槛增大, 不要改时间") 触发门槛 3 → **2** 格。
-     * 221114 实锤贴脸击杀与建墙每 2~3 秒互抢一轮 (22:15:48 杀 → 49.9 建 → 52.1
-     * 杀 → 52.8 建): 烈焰人一飘进 3 格就切去杀、一飘出就切回, 建墙被切得稀碎。
-     * 用户拍板走"**收紧触发条件**"这条路, 而不是加时间冷却 ——
-     * 2 格基本是贴身 (烈焰人近战/火球已经打在身上), 3 格"刚够得着"不再触发,
-     * 达标次数自然下降。谓词同口径引用本常量, 击杀进行中目标飘出 2 格即结束。
+     * (2026-09-19 22:44 用户"不行, 还是不要收紧") 22:31 那次 3 → 2 格已回退,
+     * 维持 **3 格** (火球这距离躲不开)。同一个会话里另有真问题 ——
+     * "明明有烈焰人在区域内任务还是等待生成", 见 {@link #blazesInEnclosure}
+     * (自己砌的墙挡住自己的视线 → 感知不到 → 不打 → 等)。所以不靠收紧阈值解决。
      */
-    private static final double BLAZE_MELEE_EMERGENCY_RANGE = 2.0;
+    private static final double BLAZE_MELEE_EMERGENCY_RANGE = 3.0;
+    /** (2026-09-19 22:47) 感知盲区诊断日志节流 (30s 一条, 供实跑核对根因)。 */
+    private long _lastPerceptDiagMs = 0;
 
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
@@ -213,6 +215,51 @@ public class CollectBlazeRodsTask extends ResourceTask {
         return true;
     }
 
+    /**
+     * (2026-09-19 22:44 用户"怎么有的时候, 明明有烈焰人在区域内任务还是等待生成")
+     * 围场盒子内的烈焰人 —— 绕过【人类式感知】直接查世界实体。
+     *
+     * 为什么必须绕: {@code entityTracker} 只收录"看得见/听得见, 或最近记忆窗口内
+     * 感知过"的实体 (EntityTracker.updateState → VisibilityHelper.isEntityVisible),
+     * 而 bot 站到围墙上/顶盖上补块时, **它自己刚砌的那圈墙正好挡住自己的视线** →
+     * 感知不到 → 击杀分支根本不进 → 一路走到最后
+     * "Waiting inside our enclosure for blazes to spawn"。
+     * 223931 实锤: 两次 Waiting (22:41:41.317 / 22:41:50.668) 都紧跟在
+     * Place structure 之后 1.5~2s, bot 一动视线恢复就立刻转
+     * "Killing CLOSE-RANGE blaze" —— 不是没烈焰人, 是看不见。
+     *
+     * 这不是透视: 范围严格限制在自己造的围场盒子内 (7x7 × y-1..y+3), 语义等于
+     * "我记得我把它关在里面了"—— 封闭围场里的实体跑不掉, 且每次只查这一小块。
+     */
+    private List<BlazeEntity> blazesInEnclosure(AltoClef mod) {
+        BlockPos s = _foundBlazeSpawner;
+        if (s == null || mod.getWorld() == null) return Collections.emptyList();
+        Box box = new Box(
+                s.getX() - SPAWNER_WALL_HALF, s.getY() - 1, s.getZ() - SPAWNER_WALL_HALF,
+                s.getX() + SPAWNER_WALL_HALF + 1, s.getY() + SPAWNER_ROOF_HEIGHT + 1, s.getZ() + SPAWNER_WALL_HALF + 1);
+        return mod.getWorld().getEntitiesByClass(BlazeEntity.class, box, Entity::isAlive);
+    }
+
+    /**
+     * 候选里距 ref 最近、且在 range 内的烈焰人; 无则 empty。
+     * {@code requireGrounded=true} 时额外排除"悬在岩浆上方/下方 23 格无实体地面"的
+     * (贴脸紧急杀的老口径: 打不到还追出去会摔)。
+     */
+    private Optional<Entity> closestBlazeWithin(AltoClef mod, List<BlazeEntity> candidates,
+                                                Vec3d ref, double range, boolean requireGrounded) {
+        BlazeEntity best = null;
+        double bestSq = range * range;
+        for (BlazeEntity b : candidates) {
+            if (b == null || !b.isAlive()) continue;
+            double sq = b.squaredDistanceTo(ref);
+            if (sq > bestSq) continue;
+            if (requireGrounded && isHoveringAboveLavaOrTooHigh(mod, b)) continue;
+            bestSq = sq;
+            best = b;
+        }
+        return Optional.ofNullable(best);
+    }
+
     @Override
     protected void onResourceStart(AltoClef mod) {
         mod.getBlockTracker().trackBlock(Blocks.SPAWNER);
@@ -288,8 +335,24 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // (2026-09-19 20:20) true = 本 tick 选的是【贴脸紧急杀】口径 (距 bot ≤3),
         // 击杀谓词要跟着用 bot 距离而不是笼心距离, 否则 KillEntitiesTask 追丢。
         boolean emergencyBlaze = false;
-        // If there is a blaze, kill it.
-        if (mod.getEntityTracker().entityFound(BlazeEntity.class)) {
+        // (2026-09-19 22:44 用户"明明有烈焰人在区域内任务还是等待生成") 候选 =
+        // 【感知到的】∪【围场盒子里的】—— 后者见 blazesInEnclosure 注释 (自己砌的
+        // 墙挡住自己视线 → 感知不到 → 明明有烈焰人却报"等待生成")。
+        List<BlazeEntity> blazeCandidates = new ArrayList<>(
+                mod.getEntityTracker().getTrackedEntities(BlazeEntity.class));
+        List<BlazeEntity> enclosureBlazes = blazesInEnclosure(mod);
+        // (2026-09-19 22:47 诊断) 感知盲区实锤点: tracker 一只都没收录、围场盒里却有 ——
+        // 那就是"bot 被自己砌的墙挡住视线"。30s 节流一条, 供实跑核对这个根因。
+        if (blazeCandidates.isEmpty() && !enclosureBlazes.isEmpty()
+                && System.currentTimeMillis() - _lastPerceptDiagMs > 30_000) {
+            _lastPerceptDiagMs = System.currentTimeMillis();
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-PERCEPT] tracker 收录 0 只, 但围场盒内有 "
+                    + enclosureBlazes.size() + " 只烈焰人 — 视线被自建围墙/顶盖挡住, 已由额外候选兜住");
+        }
+        for (BlazeEntity b : enclosureBlazes) {
+            if (!blazeCandidates.contains(b)) blazeCandidates.add(b);
+        }
+        if (!blazeCandidates.isEmpty()) {
 
             // (2026-09-19 用户) 有防火效果时不逃跑 — 火球的火焰伤害被完全免疫,
             // 剩下的只有轻微碰撞伤害, 贴身近战收割才是正解。
@@ -298,7 +361,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
             if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
                     && ItemHelper.countFireResPotions(mod) == 0
                     && !isEnclosureSafeHaven(mod)
-                    && mod.getEntityTracker().getTrackedEntities(BlazeEntity.class).size() >= TOO_MANY_BLAZES
+                    && blazeCandidates.size() >= TOO_MANY_BLAZES
                     && mod.getPlayer().getHealth() <= TOO_LITTLE_HEALTH_BLAZE) {
                 setDebugState("Running away as there are too many blazes nearby.");
                 return new TimeoutWanderTask();
@@ -312,15 +375,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
             if (_foundBlazeSpawner != null) {
                 if (!spawnerWorkPending) {
                     Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
-                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
-                            .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
+                    toKill = closestBlazeWithin(mod, blazeCandidates, spawnerCenter, ENCLOSURE_KILL_RANGE, false);
                 } else {
-                    // (2026-09-19 22:31 用户"把触发门槛增大, 不要改时间") 不加时间冷却,
-                    // 只把门槛从 3 格收紧到 2 格 —— 见 BLAZE_MELEE_EMERGENCY_RANGE 注释。
                     emergencyBlaze = true;
-                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
-                            .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
-                                    && !isHoveringAboveLavaOrTooHigh(mod, b));
+                    toKill = closestBlazeWithin(mod, blazeCandidates, mod.getPlayer().getPos(),
+                            BLAZE_MELEE_EMERGENCY_RANGE, true);
                 }
             }
         }
@@ -350,13 +409,17 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // 侧时目标可能距笼心 >4.5, 用笼心谓词会追丢)。
             if (emergencyBlaze) {
                 Vec3d botPos = mod.getPlayer().getPos();
-                return new KillEntitiesTask(entity ->
+                // (2026-09-19 22:44) 补上"围场盒内的烈焰人"作为额外候选 —— 否则 bot 被
+                // 自己砌的墙挡住视线时, 击杀任务拿不到目标 (见 blazesInEnclosure)。
+                return new KillEntitiesTask(() -> new ArrayList<Entity>(blazesInEnclosure(mod)),
+                        entity ->
                                 entity.squaredDistanceTo(botPos) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
                                         && !isHoveringAboveLavaOrTooHigh(mod, entity),
                         BlazeEntity.class);
             }
             Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
-            return new KillEntitiesTask(entity ->
+            return new KillEntitiesTask(() -> new ArrayList<Entity>(blazesInEnclosure(mod)),
+                    entity ->
                             entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
                                     && !isHoveringAboveLavaOrTooHigh(mod, entity),
                     BlazeEntity.class);
