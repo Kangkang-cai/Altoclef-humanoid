@@ -34,6 +34,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.Vec3i;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -110,6 +111,20 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 口径 = 距 bot 3 格内 (火球这距离已经躲不开, 近战清掉再造)。
      */
     private static final double BLAZE_MELEE_EMERGENCY_RANGE = 3.0;
+
+    // (2026-09-19 22:25 用户澄清: "不是增加击打时间, 是减少触发击打概率")
+    // 221114 实锤: 贴脸击杀与建墙 22:15:48 → 49 切回建墙 → 52 又杀 → 52.8 又建,
+    // 每 2~3 秒互抢一轮 —— 烈焰人飘进 3 格就切去杀, 飘出就切回, 建墙被切得稀碎。
+    // 修法 = 【触发节流】而非延长击杀: 一轮贴脸击杀结束 (目标死/飘出) 后进入
+    // BLAZE_MELEE_TRIGGER_COOLDOWN_S 秒冷却, 期间即使又有烈焰人进 3 格也不触发,
+    // 专心建墙 —— 把"切去杀"的次数降下来, 而不是把每次打得更久。
+    // 安全阀: bot 血量 ≤ BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH 时忽略冷却立即处理。
+    private static final double BLAZE_MELEE_TRIGGER_COOLDOWN_S = 8;
+    private static final float BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH = 12.0f;
+    private long _meleeCooldownUntilMs = 0;
+    /** 是否正处在一轮贴脸击杀中 (用于"结束时才开始计冷却")。 */
+    private boolean _meleeEngaged = false;
+
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
     // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
@@ -165,6 +180,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final int ENCLOSURE_BEAT_SECONDS = 8;
     private final TimerGame _beatTimer = new TimerGame(ENCLOSURE_BEAT_SECONDS);
 
+    // (2026-09-19 22:25 用户"你这也得考虑建墙完成百分之多少才开始节流呀, 不然建
+    // 一会就换任务了") 建墙优先期: 缺块还多时本拍只做补墙, 不轮入清障/灭火 ——
+    // 否则"建几块就被换去清障/灭火", 墙永远立不起来。完成度 ≥ 90% 才恢复轮转。
+    /** 围场结构总格数 = 顶盖 5x5 + 围墙 7x7 外圈 + 地板 5x5 = 25 + 24 + 25 = 74。 */
+    private static final int ENCLOSURE_TOTAL_BLOCKS =
+            (2 * SPAWNER_FLOOR_HALF + 1) * (2 * SPAWNER_FLOOR_HALF + 1) * 2
+                    + (2 * SPAWNER_WALL_HALF + 1) * (2 * SPAWNER_WALL_HALF + 1)
+                    - (2 * SPAWNER_FLOOR_HALF + 1) * (2 * SPAWNER_FLOOR_HALF + 1);
+    private static final double ENCLOSURE_BUILD_FOCUS_COMPLETION = 0.90;
+
     private enum EnclosureAction { NONE, BUILD, CLEAR, FIRE }
 
     private EnclosureAction _beatAction = EnclosureAction.NONE;
@@ -219,6 +244,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _skipBuildThisBeat = false;
         _beatFireTarget = null;
         _currentBuildTarget = null;
+        // (2026-09-19 22:25) 贴脸击杀触发节流态清零 —— 实例重建后不沿用上一段的冷却。
+        _meleeCooldownUntilMs = 0;
+        _meleeEngaged = false;
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
             // (2026-09-19 18:05 用户) 沿用前先验岩浆 — 别沿用一个岩浆笼再走
@@ -293,14 +321,24 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // —— 施工让位后 MobDefense 不插手, 这里不处理就没人处理。
             if (_foundBlazeSpawner != null) {
                 if (!spawnerWorkPending) {
+                    // 施工结束 → 贴脸节流态作废 (改走农场杀口径)。
+                    _meleeEngaged = false;
                     Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
                     toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
                             .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
                 } else {
-                    emergencyBlaze = true;
-                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
-                            .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
-                                    && !isHoveringAboveLavaOrTooHigh(mod, b));
+                    // (2026-09-19 22:25 用户"不是增加击打时间, 是减少触发击打概率")
+                    // 触发节流: 上一轮贴脸击杀结束后的 8s 内不再触发, 专心建墙。
+                    // 血量告急时忽略节流 (安全阀)。
+                    boolean cooldownActive = System.currentTimeMillis() < _meleeCooldownUntilMs;
+                    boolean healthEmergency = mod.getPlayer().getHealth() <= BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH;
+                    if (!cooldownActive || healthEmergency) {
+                        emergencyBlaze = true;
+                        toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
+                                .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
+                                        && !isHoveringAboveLavaOrTooHigh(mod, b));
+                        if (toKill.isPresent()) _meleeEngaged = true;
+                    }
                 }
             }
         }
@@ -340,6 +378,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
                             entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
                                     && !isHoveringAboveLavaOrTooHigh(mod, entity),
                     BlazeEntity.class);
+        }
+
+        // (2026-09-19 22:25 用户"减少触发击打概率") 一轮贴脸击杀在此结束 (目标死 /
+        // 飘出 3 格 / 玩家血量恢复): 从这里才开始计 8s 触发冷却。计在"结束"而不是
+        // "开始", 才不会把打到一半的目标切走 —— 用户要的是"少切几次", 不是"打更久"。
+        if (_meleeEngaged && emergencyBlaze) {
+            _meleeEngaged = false;
+            _meleeCooldownUntilMs = System.currentTimeMillis() + (long) (BLAZE_MELEE_TRIGGER_COOLDOWN_S * 1000);
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-MELEE] trigger cooldown started ("
+                    + (int) BLAZE_MELEE_TRIGGER_COOLDOWN_S + "s) — back to building");
         }
 
 
@@ -851,8 +899,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     _currentBuildTarget = null;
                     Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] build target stalled, rotating "
                             + next.toShortString() + " to back of queue");
-                    // (2026-09-19 21:50) 不再 return null 空等 —— 本拍降级给清障/灭火,
-                    // 否则补墙优先级最高会把另外两个分支无限饿死。
+                    // (2026-09-19 22:25 用户"建墙完成百分之多少才开始节流") 建墙优先期
+                    // (完成度 < 90%) 不降级: 轮转后继续建其他块, 不把本拍让给清障/灭火。
+                    if (isBuildFocusPhase(missing.size())) {
+                        return null;
+                    }
+                    // 收尾期才降级 (否则补墙优先级最高会把另外两个分支无限饿死)。
                     _skipBuildThisBeat = true;
                     _beatAction = pickBeatAction(mod, missing);
                     return null;
@@ -866,11 +918,15 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 // 四向找落脚点, 那四格全是它刚放好的顶盖 (isSolid) → 返回 null →
                 // 只能原地 wander (走不出去) → 10s stall 轮转队尾 → 15s 重扫又报
                 // 同一格, "1 missing" 永远补不上。
-                // 修法: 目标是顶盖层 (y+3) 且 bot 已在顶盖高度及以上 → 先降回围场
-                // 内部 (站在刷新笼旁的地面上), 从下方贴面放置。用户实测这位置放得下。
-                // 10s 内下不去由上面的 stall 兜底轮转, 不会死等。
+                // (2026-09-19 22:25 回归修复) 触发条件必须收紧到【真的被困住】:
+                // 221114 实锤 —— 只判"bot 在顶盖层"就抢, 会和 PlaceBlockTask 自己的
+                // "Standing inside target cell, stepping out first"(水平走到邻格再放)
+                // 每 2~3 秒互抢一次 (22:15:52~22:16:14 六轮), 而抢完后返回的
+                // GetToBlockTask(spawner.up()) 的"到达"并不等于真下到围场内
+                // (301ms 就 Completing goal) → 下一 tick 又触发, 形成横跳。
+                // 现在只在水平四邻全堵 (pickStepOutPos 会返回 null 的那种) 才介入。
                 if (next.getY() >= _foundBlazeSpawner.getY() + SPAWNER_ROOF_HEIGHT
-                        && mod.getPlayer().getBlockPos().getY() >= next.getY()) {
+                        && isTrappedInTargetCell(mod, next)) {
                     setDebugState("Dropping down to build roof from below");
                     return new GetToBlockTask(_foundBlazeSpawner.up(), false);
                 }
@@ -903,12 +959,50 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
     }
 
+    /**
+     * (2026-09-19 22:25 回归修复) bot 是否【真的】被困在目标格里走不出去 ——
+     * 与 {@code PlaceBlockTask.pickStepOutPos} 同口径: 脚正好在目标格, 且水平四向
+     * 的候选 (非固体 + 头顶非固体) 一个都没有。
+     *
+     * 为什么必须复算, 而不是"看 bot 在顶盖层就抢": 221114 实锤 —— bot 在顶盖层时
+     * PlaceBlockTask 会走 "Standing inside target cell, stepping out first"
+     * (自己水平走到 777,80,121 再放), 父任务若一律抢走返回
+     * GetToBlockTask(spawner.up()), 两者每 2~3 秒互抢一次 (22:15:52~22:16:14
+     * 六轮); 且 GetToBlockTask 的"到达"不等于真下到围场内 (301ms 就 Completing
+     * goal), 于是下一 tick 又触发, 形成横跳。只有水平四邻全堵 (214013 那种
+     * "no walkable neighbor" 真死结) 才需要父任务介入把它降下来。
+     */
+    private static boolean isTrappedInTargetCell(AltoClef mod, BlockPos target) {
+        if (!mod.getPlayer().getBlockPos().equals(target)) return false;
+        for (Vec3i offset : STEP_OUT_OFFSETS) {
+            BlockPos p = target.add(offset);
+            if (WorldHelper.isSolid(mod, p)) continue;      // 被堵
+            if (WorldHelper.isSolid(mod, p.up())) continue; // 头顶被堵
+            return false;
+        }
+        return true;
+    }
+
+    private static final Vec3i[] STEP_OUT_OFFSETS = new Vec3i[]{
+            new Vec3i(1, 0, 0), new Vec3i(-1, 0, 0), new Vec3i(0, 0, 1), new Vec3i(0, 0, -1)
+    };
+
     /** 本拍该做什么: 补墙 (可被 stall 降级跳过) > 清障 > 灭火 > 无。 */
     private EnclosureAction pickBeatAction(AltoClef mod, List<BlockPos> missing) {
-        if (!_skipBuildThisBeat && missing != null && !missing.isEmpty()) return EnclosureAction.BUILD;
+        int missingCount = (missing == null) ? 0 : missing.size();
+        // (2026-09-19 22:25 用户) 建墙优先期 (完成度 < 90%): 只看补墙, 不轮入清障/
+        // 灭火 —— 连 stall 降级都不给让位, 免得"建一会就换任务"。
+        boolean buildFocus = missingCount > 0 && isBuildFocusPhase(missingCount);
+        if (missingCount > 0 && (buildFocus || !_skipBuildThisBeat)) return EnclosureAction.BUILD;
         if (findInteriorObstructor(mod, _foundBlazeSpawner) != null) return EnclosureAction.CLEAR;
         if (pickFireToExtinguish(mod) != null) return EnclosureAction.FIRE;
         return EnclosureAction.NONE;
+    }
+
+    /** 缺块占比是否还在"专心建墙"区间内 (完成度 < {@link #ENCLOSURE_BUILD_FOCUS_COMPLETION})。 */
+    private static boolean isBuildFocusPhase(int missingCount) {
+        double completion = 1.0 - (double) missingCount / ENCLOSURE_TOTAL_BLOCKS;
+        return completion < ENCLOSURE_BUILD_FOCUS_COMPLETION;
     }
 
     /**
