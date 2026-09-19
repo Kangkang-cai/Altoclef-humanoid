@@ -27,10 +27,8 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.item.Items;
-import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -80,17 +78,31 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final float POTION_LOW_HEALTH = 10.0f;
 
     // =========================================================================
-    // (2026-09-19 刷怪笼包围策略, 用户) 浮在空中的烈焰人要去搭路追打, 极危险
-    // (0919 搭路靠近烈焰人摔死实锤)。改为"先封顶关笼子, 再在罩子里收割":
-    //   ① 出发前背包至少 32 地狱岩 (封顶 5x5=25 格 + 余量);
+    // (2026-09-19 刷怪笼包围策略, 用户; 13:05 二次修订) 浮在空中的烈焰人要去
+    // 搭路追打, 极危险 (0919 搭路靠近烈焰人摔死实锤)。改为"先围场关笼子, 再在
+    // 围场里收割":
+    //   ① 出发前准备 2 组 (128) 搭路方块 (围场 48 块墙 + 地板缺口 + 路上脚手
+    //      架, 32 不够用 — 用户实测);
     //   ② 到达刷怪笼先喝防火药水 (有药才等, 没药直接往下走, 不死等);
-    //   ③ 刷怪笼上方两格高度的 5x5 区域用方块封顶, 烈焰人飞不出去;
-    //   ④ 封顶完成前不开杀 (半路追打空中烈焰人正是摔死事故的根源)。
+    //   ③ 围场结构: 刷怪笼同层 5x5 地板补实 + 高一格/高两层各一圈 7x7 外圈
+    //      围墙 ("两圈"), 内圈 5x5 两格高敞开 — bot (1.8 格高) 与烈焰人同在
+    //      围场里, 烈焰人追着 bot 打飞不出去;
+    //   ④ 围场未完工不开杀; 只打围场内的烈焰人, 外面的暂定直接不打 (用户);
+    //   ⑤ 破洞检查每 15s 一次 (不再每 tick 扫), 离开围场每 10s 检查一次并回去;
+    //   ⑥ 围场阶段地狱岩 <32 → 随时补 32 个 (2 组用完后的续补口径, 用户)。
     // =========================================================================
-    private static final int ENCLOSURE_NETHERRACK_MIN = 32;
-    // 封顶层相对刷怪笼的高度偏移 ("上面两格高度") 与 5x5 的半径 (±2)。
-    private static final int SPAWNER_CEILING_HEIGHT = 2;
-    private static final int SPAWNER_CEILING_HALF = 2;
+    private static final int ENCLOSURE_NETHERRACK_PREP = 128;
+    private static final int ENCLOSURE_RESTOCK_TRIGGER = 32;
+    private static final int ENCLOSURE_RESTOCK_TOPUP = 32;
+    // 脚底地板 5x5 (刷怪笼同层, 中枢是刷怪笼本身) 与围墙 7x7 外圈半径。
+    private static final int SPAWNER_FLOOR_HALF = 2;
+    private static final int SPAWNER_WALL_HALF = 3;
+    private static final int[] SPAWNER_WALL_HEIGHTS = {1, 2};
+    // 破洞重扫间隔 / 回场检查间隔 (秒, 用户 13:05)。
+    private static final int HOLE_CHECK_INTERVAL_S = 15;
+    private static final int RETURN_CHECK_INTERVAL_S = 10;
+    // 围场内烈焰人才打 (刷怪笼中心 4.5 格 ≈ 7x7 围场对角半径)。
+    private static final double ENCLOSURE_KILL_RANGE = 4.5;
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
     // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
@@ -108,6 +120,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private String _worldKey = null;
     private BlockPos _recallTarget = null;
     private final TimerGame _recallTimer = new TimerGame(SPAWNER_RECALL_TIMEOUT);
+
+    // (2026-09-19 13:05) 破洞检查缓存 (每 15s 全扫一次, 期间只对缓存清单做
+    // 廉价的 isSolid 刷新) 与回场检查计时 (每 10s 一次)。
+    private final TimerGame _holeCheckTimer = new TimerGame(HOLE_CHECK_INTERVAL_S);
+    private List<BlockPos> _cachedMissingEnclosure = null;
+    private final TimerGame _returnCheckTimer = new TimerGame(RETURN_CHECK_INTERVAL_S);
 
     public CollectBlazeRodsTask(int count) {
         super(Items.BLAZE_ROD, count);
@@ -134,6 +152,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _worldKey = WorldIdentity.key(mod);
         _recallTarget = null;
         _recallTimer.reset();
+        // (2026-09-19 13:05) 实例重建 → 围场缓存清零, 到场后立即重扫一次。
+        _cachedMissingEnclosure = null;
+        _holeCheckTimer.reset();
+        _returnCheckTimer.reset();
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
             _foundBlazeSpawner = remembered;
@@ -154,39 +176,33 @@ public class CollectBlazeRodsTask extends ResourceTask {
             return new DefaultGoToDimensionTask(Dimension.NETHER);
         }
 
-        // (2026-09-19 包围策略④) 刷怪笼作业未完成 (没喝药 / 没封顶) 时不开杀 —
-        // 半路去追打飘在空中的烈焰人正是 0919 摔死事故的根源, 先把笼子关上。
+        // (2026-09-19 包围策略④) 围场未完工 (没喝药 / 缺块未补) 时不开杀 —
+        // 半路去追打飘在空中的烈焰人正是 0919 摔死事故的根源, 先把围场立起来。
         boolean spawnerWorkPending = isSpawnerWorkPending(mod);
 
         Optional<Entity> toKill = Optional.empty();
         // If there is a blaze, kill it.
         if (mod.getEntityTracker().entityFound(BlazeEntity.class)) {
 
-            // If we're in danger and there are too many blazes, run away.
-            if (mod.getEntityTracker().getTrackedEntities(BlazeEntity.class).size() >= TOO_MANY_BLAZES && mod.getPlayer().getHealth() <= TOO_LITTLE_HEALTH_BLAZE) {
+            // (2026-09-19 用户) 有防火效果时不逃跑 — 火球的火焰伤害被完全免疫,
+            // 剩下的只有轻微碰撞伤害, 贴身近战收割才是正解。
+            if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                    && mod.getEntityTracker().getTrackedEntities(BlazeEntity.class).size() >= TOO_MANY_BLAZES
+                    && mod.getPlayer().getHealth() <= TOO_LITTLE_HEALTH_BLAZE) {
                 setDebugState("Running away as there are too many blazes nearby.");
                 return new TimeoutWanderTask();
             }
 
-            toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class);
-
-            if (_foundBlazeSpawner != null && toKill.isPresent()) {
-                Entity kill = toKill.get();
-                Vec3d nearest = kill.getPos();
-
-                double sqDistanceToPlayer = nearest.squaredDistanceTo(mod.getPlayer().getPos());//_foundBlazeSpawner.getX(), _foundBlazeSpawner.getY(), _foundBlazeSpawner.getZ());
-                // Ignore if the blaze is too far away.
-                if (sqDistanceToPlayer > SPAWNER_BLAZE_RADIUS * SPAWNER_BLAZE_RADIUS) {
-                    // If the blaze can see us it needs to go lol
-                    BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(mod.getPlayer().getCameraPosVec(1.0F), kill.getCameraPosVec(1.0F), RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mod.getPlayer()));
-                    if (hit != null && hit.getBlockPos().getSquaredDistance(mod.getPlayer().getPos()) < sqDistanceToPlayer) {
-                        toKill = Optional.empty();
-                    }
-                }
+            // (2026-09-19 13:05 用户) 只打【我们自己围起来的区域】里的烈焰人;
+            // 走廊/别的房间里的暂定直接不打 — 追出去打正是摔死事故的根源。
+            if (_foundBlazeSpawner != null && !spawnerWorkPending) {
+                Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
+                toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
+                        .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
             }
         }
 
-        if (toKill.isPresent() && toKill.get().isAlive() && !spawnerWorkPending) {
+        if (toKill.isPresent() && toKill.get().isAlive()) {
             // (2026-09-06 药水门槛, 用户) 落单烈焰人不再浪费药水 — 改走盾牌
             // 波次格挡 (AbstractKillEntityTask)。只有以下情况才喝:
             //   1) 感知到 ≥ POTION_MIN_BLAZES 只烈焰人 (刷怪笼房, 火球密度太高);
@@ -203,8 +219,14 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     return new DrinkFireResPotionTask();
                 }
             }
-            setDebugState("Killing blaze");
-            return new KillEntitiesTask(entity -> !isHoveringAboveLavaOrTooHigh(mod, entity), BlazeEntity.class);
+            setDebugState("Killing blaze inside our enclosure");
+            // 击杀谓词限定围场内: KillEntitiesTask 否则会追到走廊里打外面的
+            // 烈焰人 (用户 13:05: 外面的暂定直接不打)。
+            Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
+            return new KillEntitiesTask(entity ->
+                            entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
+                                    && !isHoveringAboveLavaOrTooHigh(mod, entity),
+                    BlazeEntity.class);
         }
 
 
@@ -219,20 +241,30 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
         // If we have a blaze spawner, go near it.
         if (_foundBlazeSpawner != null) {
-            boolean arrived = _foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4);
             int netherrackHave = StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK);
+
+            // (2026-09-19 13:05 用户⑥) 围场阶段地狱岩 <32 → 随时补 32 个
+            // (2 组备料用完后的续补口径)。粘性实例: 补货中途 have 渐涨但目标
+            // 已固定, 只在目标上调时重建, 防 MineAndCollect 反复重启 (铁律 #3)。
+            if (netherrackHave < ENCLOSURE_RESTOCK_TRIGGER) {
+                setDebugState("Restocking netherrack (have " + netherrackHave + ", topup "
+                        + ENCLOSURE_RESTOCK_TOPUP + ")");
+                return getEnclosureRestockTask(mod, netherrackHave + ENCLOSURE_RESTOCK_TOPUP);
+            }
+            clearEnclosureRestockTask();
+
+            boolean arrived = _foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4);
             if (!arrived) {
-                // (2026-09-19 包围策略①, 用户) 出发前置: 背包至少 32 地狱岩
-                // (封顶 5x5=25 格 + 余量), 不够先挖满 — 到了现场再下矿等于裸奔。
-                // (2026-09-19 123515 追加) 一次性闩: 补满一次即闩上, 不再反复检查
-                // —— 否则路上 baritone 每垫一块脚手架 31<32 又弹回补货, 恰好 32
-                // 无余量, 2s 一轮 Restock↔Going 死循环 (123515 实锤)。路上的
-                // 脚手架消耗是正常开销, 到笼后由"缺几补几"的精确口径接管。
+                // (2026-09-19 包围策略①, 用户) 出发前置: 准备 2 组 (128) 搭路
+                // 方块。一次性闩: 补满一次即闩上, 不再反复检查 —— 否则路上
+                // baritone 每垫一块脚手架就跌破阈值又弹回补货, 2s 一轮
+                // Restock↔Going 死循环 (123515 实锤)。路上的消耗是正常开销,
+                // 由上面的 <32 续补口径兜底。
                 String stockKey = enclosureStockKey();
                 boolean stockedForThisSpawner = stockKey != null && stockKey.equals(_enclosureStockedFor);
-                if (!stockedForThisSpawner && netherrackHave < ENCLOSURE_NETHERRACK_MIN) {
-                    setDebugState("Restocking " + ENCLOSURE_NETHERRACK_MIN + " netherrack for spawner enclosure");
-                    return getEnclosureRestockTask(mod, ENCLOSURE_NETHERRACK_MIN);
+                if (!stockedForThisSpawner && netherrackHave < ENCLOSURE_NETHERRACK_PREP) {
+                    setDebugState("Preparing " + ENCLOSURE_NETHERRACK_PREP + " netherrack (2 stacks) for spawner enclosure");
+                    return getEnclosureRestockTask(mod, ENCLOSURE_NETHERRACK_PREP);
                 }
                 if (!stockedForThisSpawner) {
                     _enclosureStockedFor = stockKey;
@@ -245,34 +277,42 @@ public class CollectBlazeRodsTask extends ResourceTask {
             }
 
             // (2026-09-19 包围策略②, 用户) 到达刷怪笼先喝药水。包里没药不卡
-            // 在这一步 (防火效果本身不是封顶的硬前置, 硬等会死循环)。
+            // 在这一步 (防火效果本身不是围场的硬前置, 硬等会死循环)。
             if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
                     && ItemHelper.countFireResPotions(mod) > 0) {
                 setDebugState("Drinking fire resistance at spawner (before enclosure)");
                 return new DrinkFireResPotionTask();
             }
 
-            // (2026-09-19 包围策略③) 封顶: 刷怪笼上方两格高度 5x5, 缺哪补哪。
-            // 封死烈焰人往上飞出去的路, 之后在罩子里近战收割, 不再搭路追打。
-            // (2026-09-19 卡死修复 120616) 封顶中途缺料只补【剩余缺口】—— 旧的
-            // "任何时候 <32 就中断去补满 32" 把封顶打到一半拆去补货 (放掉几块就
-            // 31<32), 补货又追一个洞沿掉落物死循环 5 分钟 (20260919-120616 实锤)。
-            // 32 只是出发前置, 不是封顶全程的库存红线。
-            int missingCount = countMissingCeilingBlocks(mod, _foundBlazeSpawner);
-            if (missingCount > 0) {
-                if (netherrackHave < missingCount) {
-                    setDebugState("Restocking netherrack for ceiling (missing " + missingCount
-                            + ", have " + netherrackHave + ")");
-                    // 目标 = missing (ResourceTask 是"凑够 n 个"语义): 放一块
-                    // have/missing 同减, have≥missing 恒保持, 恰好够用。+have 会
-                    // 过量收集, 且目标每 tick 随 have 变 → 任务反复重建 (123515 复盘)。
-                    return getEnclosureRestockTask(mod, missingCount);
+            // (2026-09-19 13:05 包围策略③⑤) 围场: 同层 5x5 地板 + 高一格/高两
+            // 层各一圈 7x7 外圈围墙。破洞全扫每 15s 一次 (不每 tick 扫), 期间只
+            // 对缓存清单做廉价的 isSolid 刷新 (防已补位置被当缺口循环)。
+            if (_holeCheckTimer.elapsed() || _cachedMissingEnclosure == null) {
+                _holeCheckTimer.reset();
+                _cachedMissingEnclosure = findMissingEnclosureBlocks(mod, _foundBlazeSpawner);
+                if (_cachedMissingEnclosure.isEmpty()) {
+                    Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (scan at tick "
+                            + WorldHelper.getTicks() + ")");
                 }
-                clearEnclosureRestockTask();
-                BlockPos missingCeiling = findMissingCeilingBlock(mod, _foundBlazeSpawner);
-                setDebugState("Enclosing spawner: ceiling 5x5 at +"
-                        + SPAWNER_CEILING_HEIGHT + ", missing " + missingCeiling.toShortString());
-                return new PlaceStructureBlockTask(missingCeiling);
+            }
+            List<BlockPos> missing = _cachedMissingEnclosure;
+            if (missing != null) {
+                missing.removeIf(p -> WorldHelper.isSolid(mod, p));
+                if (!missing.isEmpty()) {
+                    BlockPos next = missing.get(0);
+                    setDebugState("Building enclosure: " + missing.size() + " missing, next " + next.toShortString());
+                    return new PlaceStructureBlockTask(next);
+                }
+            }
+
+            // (2026-09-19 13:05 用户) bot 留在自己围起来的区域里打最方便最安全:
+            // 每 10s 检查一次, 离开围场就回去 (允许短暂离开)。
+            if (_returnCheckTimer.elapsed()) {
+                _returnCheckTimer.reset();
+                if (!isInsideEnclosure(mod.getPlayer().getBlockPos())) {
+                    setDebugState("Returning to our enclosure");
+                    return new GetToBlockTask(_foundBlazeSpawner.up(), false);
+                }
             }
 
             // Put out fire that might mess with us.
@@ -282,7 +322,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 return new PutOutFireTask(nearestFire.get());
             }
 
-            setDebugState("Waiting near blaze spawner for blazes to spawn");
+            setDebugState("Waiting inside our enclosure for blazes to spawn");
             return null;
         } else {
             // Search for blaze
@@ -439,9 +479,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 包围策略) 已到达确认刷怪笼旁、且包围作业还没做完 (该喝的药没喝 /
-     * 封顶没封完) → 期间不开杀, 由刷怪笼分支执行喝药与封顶。不在场或作业完成
-     * 则返回 false, 击杀逻辑照常。
+     * (2026-09-19 包围策略④) 已到达确认刷怪笼旁、且围场作业还没做完 (该喝的药
+     * 没喝 / 围场缺块未补或还没扫过) → 期间不开杀, 由刷怪笼分支执行喝药与建围
+     * 场。不在场或已确认完工则返回 false, 围场内击杀照常。
      */
     private boolean isSpawnerWorkPending(AltoClef mod) {
         if (_foundBlazeSpawner == null) return false;
@@ -451,34 +491,46 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 && ItemHelper.countFireResPotions(mod) > 0) {
             return true;
         }
-        return findMissingCeilingBlock(mod, _foundBlazeSpawner) != null;
+        // 还没扫过 (缓存 null) 或扫出缺口 → 围场未确认完工, 不开杀。
+        List<BlockPos> missing = _cachedMissingEnclosure;
+        return missing == null || !missing.isEmpty();
     }
 
     /**
-     * (2026-09-19 包围策略③) 找封顶层 (刷怪笼上方 {@link #SPAWNER_CEILING_HEIGHT}
-     * 格, 5x5) 里第一块还没被实体方块遮住的位置; 全遮住返回 null。
+     * (2026-09-19 13:05 包围策略③) 围场缺口全扫: 刷怪笼同层 5x5 地板 + 高一格/
+     * 高两层各一圈 7x7 外圈围墙 (内圈 5x5 两格高敞开, bot 与烈焰人都在里面)。
      */
-    private BlockPos findMissingCeilingBlock(AltoClef mod, BlockPos spawner) {
-        BlockPos layer = spawner.up(SPAWNER_CEILING_HEIGHT);
-        for (int dx = -SPAWNER_CEILING_HALF; dx <= SPAWNER_CEILING_HALF; dx++) {
-            for (int dz = -SPAWNER_CEILING_HALF; dz <= SPAWNER_CEILING_HALF; dz++) {
-                BlockPos p = layer.add(dx, 0, dz);
-                if (!WorldHelper.isSolid(mod, p)) return p.toImmutable();
+    private List<BlockPos> findMissingEnclosureBlocks(AltoClef mod, BlockPos spawner) {
+        List<BlockPos> missing = new ArrayList<>();
+        // 脚底地板 5x5 (中枢是刷怪笼本身, 算实心)。
+        for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
+            for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
+                BlockPos p = spawner.add(dx, 0, dz);
+                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
             }
         }
-        return null;
-    }
-
-    /** 封顶层还缺几块 (5x5 里非实体方块的格数)。 */
-    private int countMissingCeilingBlocks(AltoClef mod, BlockPos spawner) {
-        BlockPos layer = spawner.up(SPAWNER_CEILING_HEIGHT);
-        int missing = 0;
-        for (int dx = -SPAWNER_CEILING_HALF; dx <= SPAWNER_CEILING_HALF; dx++) {
-            for (int dz = -SPAWNER_CEILING_HALF; dz <= SPAWNER_CEILING_HALF; dz++) {
-                if (!WorldHelper.isSolid(mod, layer.add(dx, 0, dz))) missing++;
+        // 两圈围墙: +1 / +2 各一圈 7x7 外圈。
+        for (int dy : SPAWNER_WALL_HEIGHTS) {
+            for (int dx = -SPAWNER_WALL_HALF; dx <= SPAWNER_WALL_HALF; dx++) {
+                for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
+                    if (Math.abs(dx) != SPAWNER_WALL_HALF && Math.abs(dz) != SPAWNER_WALL_HALF) continue;
+                    BlockPos p = spawner.add(dx, dy, dz);
+                    if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
+                }
             }
         }
         return missing;
+    }
+
+    /**
+     * (2026-09-19 13:05) bot 是否还在自己围起来的 7x7 区域内 (只看水平投影,
+     * 允许任何高度 — 被顶一下/跳一下不算离开)。
+     */
+    private boolean isInsideEnclosure(BlockPos pos) {
+        if (_foundBlazeSpawner == null) return false;
+        int dx = pos.getX() - _foundBlazeSpawner.getX();
+        int dz = pos.getZ() - _foundBlazeSpawner.getZ();
+        return Math.abs(dx) <= SPAWNER_WALL_HALF && Math.abs(dz) <= SPAWNER_WALL_HALF;
     }
 
     // ------------------------------------------------------------------ //

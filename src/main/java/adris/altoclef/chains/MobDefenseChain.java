@@ -30,8 +30,10 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.boss.WitherEntity;
 import net.minecraft.entity.boss.dragon.EnderDragonEntity;
 import net.minecraft.entity.mob.*;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.projectile.DragonFireballEntity;
 import net.minecraft.entity.projectile.FireballEntity;
+import net.minecraft.entity.projectile.SmallFireballEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
@@ -1798,6 +1800,13 @@ public class MobDefenseChain extends SingleTaskChain {
                 }
                 if (projectile.projectileType == DragonFireballEntity.class) {
                     // Ignore dragon fireballs
+                    continue;
+                }
+                // (2026-09-19 用户"有防火效果时不要触发举盾策略") 烈焰人小火球
+                // 的伤害全是火焰, 身上有 FIRE_RESISTANCE 时被命中完全不掉血 →
+                // 不再触发举盾格挡/躲避 (小白箭/三叉戟等非火焰弹射物不受影响)。
+                if (projectile.projectileType == SmallFireballEntity.class
+                        && mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
                     continue;
                 }
 
