@@ -314,6 +314,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 }
             }
             List<BlockPos> missing = _cachedMissingEnclosure;
+            // (2026-09-19 16:05) 围墙施工窗口标志: 有缺块就处于施工中。
+            _enclosureBuildActive = missing != null && !missing.isEmpty();
             if (missing != null) {
                 missing.removeIf(p -> WorldHelper.isSolid(mod, p));
                 if (!missing.isEmpty()) {
@@ -532,6 +534,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final long LAVA_TROUBLE_SWITCH_MS = 45_000;
     private long _lavaTroubleSinceMs = 0;
 
+    // (2026-09-19 16:05 用户补充: 免逃岩浆只针对建围墙时的特殊宽限, 其他情况不变)
+    // 围场施工进行中 (已到笼、缺块未补) 的全局标志 —— WorldSurvivalChain 只在
+    // [防火效果 + 本标志] 同时成立时才豁免逃岩浆/灭火, 其余场景一律照旧。
+    private static volatile boolean _enclosureBuildActive = false;
+
+    /** 围场墙施工是否进行中 (供 WorldSurvivalChain 的岩浆/火焰豁免判定)。 */
+    public static boolean isEnclosureBuildWorkActive() {
+        return _enclosureBuildActive;
+    }
+
     private String lavaTroubleKey() {
         return (_worldKey == null || _foundBlazeSpawner == null)
                 ? null : _worldKey + "@" + _foundBlazeSpawner.toShortString();
@@ -682,6 +694,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
         mod.getBlockTracker().stopTracking(Blocks.SPAWNER);
         clearEnclosureRestockTask();
+        _enclosureBuildActive = false;
     }
 
     @Override

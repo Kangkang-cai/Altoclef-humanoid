@@ -9,6 +9,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasks.movement.*;
+import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
 import adris.altoclef.tasks.resources.TradeWithPiglinsTask;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.tasksystem.Task;
@@ -157,11 +158,13 @@ public class WorldSurvivalChain extends SingleTaskChain {
         if (fireResDrink != Float.NEGATIVE_INFINITY) return fireResDrink;
 
         // Lava Escape
-        // (2026-09-19 16:05 用户"岩浆从高处流下来时专心放方块, 不要触发逃开岩浆,
-        // 因为有防火药") 有 FIRE_RESISTANCE 时不逃岩浆 — 火焰伤害完全免疫, 岩浆
-        // 不再致命; 逃走会丢下围场施工, 墙盖好岩浆自然被挡住。
+        // (2026-09-19 16:05 用户"岩浆从高处流下来时专心放方块"; 16:05 补充: 免逃
+        // 只限建围墙窗口) 豁免条件 = 有 FIRE_RESISTANCE 且围场墙施工进行中
+        // (CollectBlazeRodsTask.isEnclosureBuildWorkActive) —— 二者缺一不可,
+        // 其他情况(防火但不在施工)照旧逃岩浆。
         if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()
-                && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+                && !(mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                        && CollectBlazeRodsTask.isEnclosureBuildWorkActive())) {
             setTask(new EscapeFromLavaTask());
             // (2026-09-14 防火岩浆自救取证) 2s 一条: 位置/速度/防火/baritone 是否在
             // 规划。用于区分"baritone 在游"与"baritone 又 A* 起点判据全灭"。
@@ -187,8 +190,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
 
         // Fire escape
-        // (2026-09-19 16:05) 防火期间站在火里无害, 不灭火不干扰围场施工。
-        if (isInFire(mod) && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+        // (2026-09-19 16:05) 豁免同逃岩浆: 防火 + 围场墙施工中 才跳过灭火干扰,
+        // 其他情况照旧。
+        if (isInFire(mod) && !(mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                && CollectBlazeRodsTask.isEnclosureBuildWorkActive())) {
             setTask(new DoToClosestBlockTask(PutOutFireTask::new, Blocks.FIRE, Blocks.SOUL_FIRE));
             return 100;
         }
