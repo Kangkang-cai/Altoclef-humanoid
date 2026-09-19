@@ -3,6 +3,7 @@ package adris.altoclef.tasks.movement;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.Settings;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
@@ -14,6 +15,9 @@ import baritone.api.pathing.goals.GoalNear;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.biome.BiomeKeys;
@@ -221,6 +225,31 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _currentMemoryTarget;
 
     // =========================================================================
+    // (2026-09-19 记忆目标失败分级处理) 实锤 20260918-231551: clue=memory-center
+    // 的目标失败后 `_currentTarget.equals(_currentMemoryTarget)` 永假 (stepTowards
+    // 恒返回 EXPLORE_STEP 距离的中间点, 永远不等于中心), "查讫"是死代码 → 同一个
+    // 记忆中心每 6s 超时重选, 原地循环 36s+ 且探测/随机分支永远轮不到 (memory-center
+    // 分支优先级最高)。修法: ① 走到中心 32 格内失败 → 查讫 (原语义); ② 远处反复
+    // 失败 (≥3 次) → 真中心冷却 3 分钟 / 推断候选按 32 格登记淘汰 —— 让探测、
+    // 更近的其他中心、随机分支接管 (更近优选不受冷却影响)。
+    // =========================================================================
+    private static final int MEMORY_TARGET_GIVEUP_FAILS = 3;
+    private static final long CENTER_COOLDOWN_MS = 180_000;
+    private static final java.util.Map<BlockPos, Long> _centerCooldownUntil = new java.util.HashMap<>();
+    private int _memoryFailStreak = 0;
+    private boolean _currentMemoryIsCenter = false;
+
+    // =========================================================================
+    // (2026-09-19 垫脚方块断供兜底) 20260918-231551 实锤: 背包没有可放置方块
+    // (手里是 nether_brick 冶炼物品放不出), 对着需要垫柱的地形原地跳 36s+。
+    // 外围步失败且可放置方块数为 0 → 先补一组地狱岩再继续探索 (灵魂沙算垫脚,
+    // baritone 放置列表已放行, 见 AltoClef.java 同日注释)。
+    // =========================================================================
+    private static final int SCAFFOLD_RESTOCK_COUNT = 64;
+    private static final long SCAFFOLD_RESTOCK_COOLDOWN_TICKS = 600; // 补货失败 30s 后才可重试
+    private static long _scaffoldRestockNextTick = 0;
+
+    // =========================================================================
     // (2026-09-05 通用化) 同一套人类式探索复用于不同下界目标: 音效线索前缀 /
     // 听觉范围 / 视觉线索方块 / 是否启用走廊地面模式。默认构造 = 找要塞
     // (行为与 2026-09-04 版本完全一致); forPiglins() = 找猪灵。
@@ -266,6 +295,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _scanTicker = 0;
         _failCounter = 0;
         _currentTarget = null;
+        // (2026-09-19) 记忆目标失败计数随实例复位 (冷却表 _centerCooldownUntil 是
+        // static, 刻意跨实例保留 —— 任务被上层 4-12 分钟重建一次不失忆)。
+        _currentMemoryTarget = null;
+        _memoryFailStreak = 0;
+        _currentMemoryIsCenter = false;
         _corridorMode = false;
         // (2026-09-09) 探深状态随任务重开复位 (走廊记忆 _visitedCells 仍保留)。
         _expandFailStreak = 0;
@@ -816,9 +850,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         if (_currentTarget == null || xzDistance(mod.getPlayer().getBlockPos(), _currentTarget) <= EXPEDITION_ARRIVE_XZ) {
             // (2026-09-13) 到达即"查讫": 记忆推断目标扑空一次就登记, 不再去
             // 同一片记忆区反复撞 (getCandidateAreas 每次随机重生成候选点)。
-            if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
-                markMemoryChecked(_currentTarget);
+            // (2026-09-19 修) 旧判据 `_currentTarget.equals(_currentMemoryTarget)`
+            // 恒假 (stepTowards 恒返回中间点), 查讫是死代码 —— 改按"到过中心
+            // 32 格内"判定; 中间点到达而中心还远时照常继续逐段推进。
+            if (_currentMemoryTarget != null
+                    && _currentMemoryTarget.isWithinDistance(mod.getPlayer().getBlockPos(), MEMORY_CHECK_RADIUS)) {
+                markMemoryChecked(_currentMemoryTarget);
                 _currentMemoryTarget = null;
+                _memoryFailStreak = 0;
             }
             _currentTarget = pickOutsideTarget(mod, pos);
             if (_currentTarget == null) {
@@ -847,10 +886,40 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
             _failCounter++;
-            // (2026-09-13) 寻路失败同样记"查讫" —— 走不到的地方不该反复试。
-            if (_currentTarget != null && _currentTarget.equals(_currentMemoryTarget)) {
-                markMemoryChecked(_currentTarget);
+            // (2026-09-19 记忆目标失败分级) 旧判据 `_currentTarget.equals(
+            // _currentMemoryTarget)` 恒假 (stepTowards 恒返回中间点), 查讫是死
+            // 代码 → 同一记忆中心 6s 一轮无限重选 (20260918-231551 实锤 36s+)。
+            if (_currentMemoryTarget != null) {
+                if (_currentMemoryTarget.isWithinDistance(mod.getPlayer().getPos(), MEMORY_CHECK_RADIUS)) {
+                    // 真的走到中心附近才"查讫" (到达扑空语义)。
+                    markMemoryChecked(_currentMemoryTarget);
+                    _memoryFailStreak = 0;
+                } else if (++_memoryFailStreak >= MEMORY_TARGET_GIVEUP_FAILS) {
+                    if (_currentMemoryIsCenter) {
+                        // 远处中心反复走不到 → 冷却 3 分钟, 让探测/更近中心/随机分支接管。
+                        _centerCooldownUntil.put(_currentMemoryTarget.toImmutable(),
+                                System.currentTimeMillis() + CENTER_COOLDOWN_MS);
+                        Debug.logMessage("[Expedition] memory center " + _currentMemoryTarget.toShortString()
+                                + " unreachable after " + MEMORY_TARGET_GIVEUP_FAILS + " fails, cooling down 3min");
+                    } else {
+                        // 推断候选按 32 格登记, 淘汰整片候选区。
+                        markMemoryChecked(_currentMemoryTarget);
+                    }
+                    _memoryFailStreak = 0;
+                }
                 _currentMemoryTarget = null;
+                _currentMemoryIsCenter = false;
+            }
+            // (2026-09-19 垫脚断供兜底) 可放置方块数为 0 → 先补一组地狱岩再继续
+            // 探索 (baritone 没有可放置方块时会对需要垫柱的地形原地无限跳)。
+            if (countPlaceableScaffoldBlocks(mod) == 0 && _tickId >= _scaffoldRestockNextTick) {
+                _scaffoldRestockNextTick = _tickId + SCAFFOLD_RESTOCK_COOLDOWN_TICKS;
+                _progress.reset();
+                _currentTarget = null;
+                Debug.logMessage("[FortressExplore] no placeable blocks in inventory, restocking "
+                        + SCAFFOLD_RESTOCK_COUNT + " netherrack first");
+                setDebugState("Out of scaffolding blocks, collecting netherrack");
+                return TaskCatalogue.getItemTask(Items.NETHERRACK, SCAFFOLD_RESTOCK_COUNT);
             }
             _currentTarget = null;
             // (2026-09-13 P2 遇障换向) 停滞够久才升级试探, 普通寻路失败不换向。
@@ -897,9 +966,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         //    切回找堡垒任务要能想起来, 不再只靠中心周围随机撒点 + 192 格
         //    距离过滤。查讫机制同样适用: 中心扑空过就跳过, 不死磕假地标。
         _currentMemoryTarget = null;
+        _currentMemoryIsCenter = false;
         List<BlockPos> centers = mod.getKnowledgeMemory()
                 .getRememberedCenters(KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
         centers.removeIf(this::isCheckedMemory);
+        // (2026-09-19) 冷却中的中心 (远处反复走不到) 跳过 —— 最近优选在剩余
+        // 中心里照常生效, 更近的新堡垒不会被冷却的老中心挡住。
+        centers.removeIf(FortressExploreTask::isCenterOnCooldown);
         if (!centers.isEmpty()) {
             BlockPos best = null;
             double bestSq = Double.POSITIVE_INFINITY;
@@ -913,6 +986,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             if (best != null) {
                 _lastClue = "memory-center";
                 _currentMemoryTarget = best;
+                _currentMemoryIsCenter = true;
                 setDebugState("Heading towards remembered fortress location");
                 return stepTowards(pos, best.getX(), best.getZ(), best.getY());
             }
@@ -920,6 +994,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         List<BlockPos> candidates = mod.getKnowledgeMemory()
                 .getCandidateAreas(pos, KnowledgeMemory.StructureType.NETHER_FORTRESS);
         candidates.removeIf(this::isCheckedMemory);
+        // (2026-09-19) 冷却中心周边 64 格的候选一并跳过 (候选锚在中心 ±48 生成)。
+        for (BlockPos cooled : _centerCooldownUntil.keySet()) {
+            if (isCenterOnCooldown(cooled)) {
+                candidates.removeIf(cand -> cand.isWithinDistance(cooled, 64));
+            }
+        }
         if (!candidates.isEmpty()) {
             _lastClue = "memory";
             BlockPos best = null;
@@ -1061,6 +1141,26 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             Debug.logMessage("[Expedition] memory area checked-empty at " + target.toShortString()
                     + " (" + checked.size() + "/" + MAX_CHECKED_MEMORY + " total)");
         }
+    }
+
+    /**
+     * (2026-09-19) 背包里 baritone 真能放置的方块数 (BlockItem 且非岩浆块,
+     * 与 baritone 放置列表同口径, 灵魂沙算 —— 见 AltoClef.java 同日注释)。
+     */
+    private static int countPlaceableScaffoldBlocks(AltoClef mod) {
+        int n = 0;
+        for (Item item : mod.getModSettings().getThrowawayItems(mod, true)) {
+            if (item instanceof BlockItem && item != Items.MAGMA_BLOCK) {
+                n += mod.getItemStorage().getItemCount(item);
+            }
+        }
+        return n;
+    }
+
+    /** (2026-09-19) 中心是否在"走不到"冷却期内。 */
+    private static boolean isCenterOnCooldown(BlockPos center) {
+        Long until = _centerCooldownUntil.get(center);
+        return until != null && until > System.currentTimeMillis();
     }
 
     private int checkedMemoryCount() {

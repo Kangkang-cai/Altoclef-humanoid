@@ -39,6 +39,7 @@ import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import org.lwjgl.glfw.GLFW;
@@ -179,8 +180,17 @@ public class AltoClef implements ModInitializer {
         adris.altoclef.Settings.load(newSettings -> {
             _settings = newSettings;
             // Baritone's `acceptableThrowawayItems` should match our own.
+            // (2026-09-19 修垫脚死循环) ① 只有 BlockItem 才真能被 baritone 放置:
+            // nether_brick 是冶炼产物物品 (无方块形态), 混进列表后 baritone 的
+            // hasGenericThrowaway 只按物品身份匹配 (反编译 baritone jar 实锤,
+            // 无 BlockItem 判断), 会规划垫柱动作并选中一个放不出的物品 → 原地
+            // 无限跳 (20260918-231551: hand=nether_brick, jump 循环 36s+)。
+            // ② 灵魂沙放行: v30 的 forceWalkOn 谓词 + treatSoulSandAsOrdinaryBlock
+            // 已让 baritone 能站上灵魂沙规划/行走, 用户明确灵魂沙可以垫脚;
+            // 岩浆块仍排除 (放下去烧自己)。
             List<Item> baritoneCanPlace = Arrays.stream(_settings.getThrowawayItems(this, true))
-                    .filter(item -> item != Items.SOUL_SAND && item != Items.MAGMA_BLOCK) // Don't place soul sand or magma blocks, that messes us up.
+                    .filter(item -> item instanceof BlockItem)
+                    .filter(item -> item != Items.MAGMA_BLOCK)
                     .collect(Collectors.toList());
             getClientBaritoneSettings().acceptableThrowawayItems.value.addAll(baritoneCanPlace);
             // If we should run an idle command...
