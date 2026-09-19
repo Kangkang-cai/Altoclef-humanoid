@@ -1100,6 +1100,34 @@ public class MineAndCollectTask extends ResourceTask {
             return false;
         }
 
+        // =========================================================================
+        // (2026-09-19 垫脚补货贴地选择) 20260919-102254 实锤: 下界垫脚补货挖到
+        // 的下界岩大量【悬空】生成 (下 8 格全空/岩浆湖上空的漂浮团块) —— ① 掉落
+        // 坠 8 格根本捡不到 (用户"挖几个就不挖了"); ② 悬空块常走不到 (DestroyBlock
+        // 42 ticks unreachable + 拉黑循环 Try 5/4)。规则: 目标为下界岩时优先选
+        // 【2 格内有实体地面】的贴地块 (掉落落在目标位附近, 站邻位即捡), 悬空块
+        // 罚 1e9 选块距离 (全贴地候选耗尽后仍可兜底, 不硬拒绝)。
+        // =========================================================================
+        private boolean isScaffoldGroundTarget() {
+            return _blocks.length == 1 && _blocks[0] == Blocks.NETHERRACK;
+        }
+
+        private static boolean scaffoldDropLandsNearby(AltoClef mod, BlockPos p) {
+            for (int dy = 1; dy <= 2; dy++) {
+                BlockPos below = p.down(dy);
+                BlockState s = mod.getWorld().getBlockState(below);
+                // 下方 2 格内遇岩浆 = 掉落必丢, 比悬空更糟。
+                if (s.getBlock() == Blocks.LAVA) return false;
+                if (WorldHelper.isSolid(mod, below)) return true;
+            }
+            return false;
+        }
+
+        /** 悬空垫脚目标的选块罚距: 贴地块正常排序, 悬空块排到最后 (兜底才选)。 */
+        private double scaffoldSelectionPenalty(AltoClef mod, BlockPos p) {
+            return (isScaffoldGroundTarget() && !scaffoldDropLandsNearby(mod, p)) ? 1.0e9 : 0.0;
+        }
+
         @Override
         protected Vec3d getPos(AltoClef mod, Object obj) {
             if (obj instanceof BlockPos b) {
@@ -1563,7 +1591,8 @@ public class MineAndCollectTask extends ResourceTask {
                         }
                         if (!matches) continue;
                     }
-                    double dSq = p.getSquaredDistance(fromPos);
+                    double dSq = p.getSquaredDistance(fromPos)
+                            + scaffoldSelectionPenalty(mod, p); // (2026-09-19) 悬空下界岩排后
                     if (dSq < bestDistSq) {
                         bestDistSq = dSq;
                         best = p;
@@ -1599,7 +1628,9 @@ public class MineAndCollectTask extends ResourceTask {
             }
             if (candidates.isEmpty()) return Optional.empty();
             // 按距离升序逐个过 LOS (含 isBuriedOre 包裹判定), 首个成功即最近可感知矿。
-            candidates.sort(Comparator.comparingDouble(p -> p.getSquaredDistance(fromPos)));
+            // (2026-09-19) 悬空下界岩罚距排后 —— 贴地块优先出队过 LOS。
+            candidates.sort(Comparator.comparingDouble(p ->
+                    p.getSquaredDistance(fromPos) + scaffoldSelectionPenalty(mod, p)));
             int raycasts = 0;
             for (BlockPos p : candidates) {
                 Long failMs = _losFailCache.get(p);
@@ -1654,7 +1685,9 @@ public class MineAndCollectTask extends ResourceTask {
                         if (!WorldHelper.canBreak(mod, p)) continue;
                         // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
                         if (piglinDensityGated(mod, p)) continue;
-                        double dSq = p.getSquaredDistance(fromPos);
+                        // (2026-09-19) 悬空下界岩罚距排后 (cache miss 兜底同口径)。
+                        double dSq = p.getSquaredDistance(fromPos)
+                                + scaffoldSelectionPenalty(mod, p);
                         if (dSq < bestSq) {
                             bestSq = dSq;
                             best = p;

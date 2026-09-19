@@ -246,6 +246,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // baritone 放置列表已放行, 见 AltoClef.java 同日注释)。
     // =========================================================================
     private static final int SCAFFOLD_RESTOCK_COUNT = 64;
+    // (2026-09-19) 放行阈值: 攒到 32 块才放行回探索 —— 102254 场实锤阈值 >0
+    // 时挖到 2 块就放行, baritone 马上垫掉 2 块又归零, 无限循环"补货→垫掉"。
+    private static final int SCAFFOLD_RESTOCK_RELEASE_MIN = 32;
     private static final long SCAFFOLD_RESTOCK_COOLDOWN_TICKS = 600; // 补货失败 30s 后才可重试
     private static long _scaffoldRestockNextTick = 0;
     // (2026-09-19 sticky 补货) 本仓任务模型: 父任务 onTick 每 tick 重估子任务,
@@ -856,9 +859,12 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
         // (2026-09-19 sticky 补货) 每 tick 重派同一补货实例, 完成才释放 ——
         // 一次性 return 会在下一 tick 被 null 抢停 (见字段注释)。
+        // 放行阈值 32 块: >0 就放行会被 baritone 立刻垫掉又归零 (102254 实锤)。
         if (_restockTask != null) {
-            if (countPlaceableScaffoldBlocks(mod) > 0 || _restockTask.isFinished(mod)) {
-                Debug.logMessage("[FortressExplore] scaffolding restock finished.");
+            int scaffoldCount = countPlaceableScaffoldBlocks(mod);
+            if (scaffoldCount >= SCAFFOLD_RESTOCK_RELEASE_MIN || _restockTask.isFinished(mod)) {
+                Debug.logMessage("[FortressExplore] scaffolding restock finished (" + scaffoldCount + " blocks).");
+                _scaffoldRestockNextTick = 0; // 垫完归零后立刻可再补, 不吃 30s 冷却
                 _restockTask = null;
             } else {
                 setDebugState("Out of scaffolding blocks, collecting netherrack");
