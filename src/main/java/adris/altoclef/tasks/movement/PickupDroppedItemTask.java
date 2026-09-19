@@ -38,6 +38,10 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     // Not clean practice, but it helps keep things self contained I think.
     private static boolean isGettingPickaxeFirstFlag = false;
     private final ItemTarget[] _itemTargets;
+    // (2026-09-19 15:45) 追掉落物的最大距离 (平方), 0 = 不限。默认不限
+    // (稀有掉落不设上限); 垫脚补料等"遍地都是"的目标传入小半径, 防
+    // 陈旧掉落 (区块卸载冻结 despawn 后"复活") 把 bot 拽去几十格外。
+    private final double _maxPursuitRangeSq;
     private final Set<ItemEntity> _blacklist = new HashSet<>();
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(3);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(20);
@@ -86,8 +90,13 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     }
 
     public PickupDroppedItemTask(ItemTarget[] itemTargets, boolean freeInventoryIfFull) {
+        this(itemTargets, freeInventoryIfFull, 0);
+    }
+
+    public PickupDroppedItemTask(ItemTarget[] itemTargets, boolean freeInventoryIfFull, double maxPursuitRangeSq) {
         _itemTargets = itemTargets;
         _freeInventoryIfFull = freeInventoryIfFull;
+        _maxPursuitRangeSq = maxPursuitRangeSq > 0 ? maxPursuitRangeSq : Double.POSITIVE_INFINITY;
     }
 
     public PickupDroppedItemTask(ItemTarget target, boolean freeInventoryIfFull) {
@@ -381,7 +390,8 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         Optional<ItemEntity> tracked = mod.getEntityTracker().getClosestItemDrop(
                 pos,
                 _itemTargets);
-        if (tracked.isPresent()) {
+        // (2026-09-19 15:45 追距上限) 超出追距的掉落不算目标 (见 _maxPursuitRangeSq)。
+        if (tracked.isPresent() && inPursuitRange(tracked.get(), pos)) {
             return tracked;
         }
         // (2026-08-26 修复: 掉落眼追不到) EntityTracker 的 _itemDropLocations 只
@@ -393,6 +403,11 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         return findClosestDropByScan(mod, pos);
     }
 
+    /** (2026-09-19) 该掉落物是否在追距内 (无上限构造时恒 true)。 */
+    private boolean inPursuitRange(ItemEntity drop, Vec3d pos) {
+        return drop.squaredDistanceTo(pos) <= _maxPursuitRangeSq;
+    }
+
     /** 直接扫世界找最近的匹配掉落物 (含下落中/未落地, 兜底 EntityTracker 缓存)。 */
     private Optional<ItemEntity> findClosestDropByScan(AltoClef mod, Vec3d pos) {
         ItemEntity best = null;
@@ -401,6 +416,8 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             if (!(e instanceof ItemEntity ie) || !ie.isAlive()) continue;
             if (_blacklist.contains(ie)) continue;
             if (!matchesAnyTarget(ie)) continue;
+            // (2026-09-19) 追距上限: 超距的陈旧掉落直接跳过。
+            if (!inPursuitRange(ie, pos)) continue;
             double d = ie.squaredDistanceTo(pos);
             if (d < bestDist) {
                 bestDist = d;
@@ -547,6 +564,9 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
 
     @Override
     protected boolean isValid(AltoClef mod, ItemEntity obj) {
+        // (2026-09-19) 追距上限兜底: 粘住的目标若因位移超距 (bot 被击退/绕路),
+        // 立即失效重选, 不再"感知目标死追到底"。
+        if (obj.squaredDistanceTo(getOriginPos(mod)) > _maxPursuitRangeSq) return false;
         return obj.isAlive() && !_blacklist.contains(obj);
     }
 

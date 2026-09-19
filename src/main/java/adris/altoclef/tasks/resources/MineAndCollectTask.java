@@ -1013,7 +1013,12 @@ public class MineAndCollectTask extends ResourceTask {
             _blocks = blocks;
             _targets = targets;
             _greedy = greedy;
-            _pickupTask = new PickupDroppedItemTask(_targets, true);
+            // (2026-09-19 15:45) 垫脚补料 (纯下界岩) 的内部拾取任务带上 8 格
+            // 追距上限 —— getClosestTo 的掉落上限只管选目标, 这里派发出去的
+            // PickupDroppedItemTask 自己有完整的选目标+粘滞, 不带上限就照样
+            // 追几十格外的陈旧掉落 (151808/154xxx 实锤两次)。其它目标不限。
+            _pickupTask = new PickupDroppedItemTask(_targets, true,
+                    isScaffoldGroundTarget() ? SCAFFOLD_DROP_PICKUP_RANGE_SQ : 0);
         }
 
         private boolean isTargetingWood() {
