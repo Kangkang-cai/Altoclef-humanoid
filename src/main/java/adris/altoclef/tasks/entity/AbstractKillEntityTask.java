@@ -160,11 +160,17 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 收紧到 reach - 1.2 (= 2.0, 默认配置): 即便目标悬在头顶 2 格, 3D 距离
         // 也只有 ~2.8, 仍有 0.4 余量。其余生物维持 MELEE_HUG_DISTANCE 不变
         // (09-01 用户"打小白/僵尸距离太近", 3.0 是特意放远的)。
+        // (2026-09-19 23:29 用户定值) 2.0 → **2.5**: 2.0 过于贴脸, 改成 2.5 ——
+        // 与攻击阈值 entityReachRange(默认 3.2) 仍留 0.7 格余量, 足够吸收飞行
+        // 高度差 (水平 2.5 + 垂直 1 格 = 2.69 < 3.2)。
         if (entity instanceof BlazeEntity) {
-            return Math.max(1.5, mod.getModSettings().getEntityReachRange() - 1.2);
+            return BLAZE_APPROACH_DISTANCE;
         }
         return MELEE_HUG_DISTANCE;
     }
+
+    /** (2026-09-19 23:29 用户) 烈焰人接近距离: 命中优先 (reach 3.2 留 0.7 余量) 但不贴脸。 */
+    private static final double BLAZE_APPROACH_DISTANCE = 2.5;
 
     private static final Item[] WEAPON_ITEMS = new Item[]{
             Items.DIAMOND_SWORD,
