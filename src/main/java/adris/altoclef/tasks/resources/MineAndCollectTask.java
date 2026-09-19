@@ -1135,7 +1135,14 @@ public class MineAndCollectTask extends ResourceTask {
 
         /** 悬空垫脚目标的选块罚距: 贴地块正常排序, 悬空块排到最后 (兜底才选)。 */
         private double scaffoldSelectionPenalty(AltoClef mod, BlockPos p) {
-            return (isScaffoldGroundTarget() && !scaffoldDropLandsNearby(mod, p)) ? 1.0e9 : 0.0;
+            if (!isScaffoldGroundTarget()) return 0.0;
+            // (2026-09-19 16:05 问题一, 用户"拿方块容易持续向下挖") 脚下以下的
+            // 下界岩重罚 —— 向下挖出坑, 爬回来又要费方块。平层/以上正常排序,
+            // 以下按深度递增罚 (全场上都 Below 时近的下面仍优先兜底)。
+            int feetY = (mod.getPlayer() != null) ? mod.getPlayer().getBlockPos().getY() : Integer.MIN_VALUE;
+            double penalty = (p.getY() < feetY) ? 1.0e6 * (double)(feetY - p.getY()) : 0.0;
+            if (!scaffoldDropLandsNearby(mod, p)) penalty += 1.0e9; // 悬空照旧最重罚
+            return penalty;
         }
 
         @Override
@@ -1763,6 +1770,12 @@ public class MineAndCollectTask extends ResourceTask {
                         // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
                         if (piglinDensityGated(mod, p)) continue;
                         double dSq = mod.getPlayer().getBlockPos().getSquaredDistance(p);
+                        // (2026-09-19 16:05 问题一) 垫脚目标: 脚下以下的块重罚
+                        // (与 scaffoldSelectionPenalty 同口径), 防近场链挖一路
+                        // 向下挖出坑。
+                        if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY()) {
+                            dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - p.getY());
+                        }
                         if (dSq < bestSq) {
                             bestSq = dSq;
                             best = p;

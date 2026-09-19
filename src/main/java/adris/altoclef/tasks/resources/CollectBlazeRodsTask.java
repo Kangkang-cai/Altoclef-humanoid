@@ -161,6 +161,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
             _foundBlazeSpawner = remembered;
             Debug.logMessage("[BLAZE-SPAWNER] 沿用已确认刷怪笼 " + remembered.toShortString()
                     + " (实例重建, key=" + _worldKey + ")");
+            registerEnclosureProtection(mod);
         } else {
             // Session-static 里也没有 → 交给每层 tick 走"亲眼看见 / 记忆召回"两条路。
             _foundBlazeSpawner = null;
@@ -294,6 +295,23 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (scan at tick "
                             + WorldHelper.getTicks() + ")");
                 }
+                // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域: 有防火药
+                // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 45s 且
+                // 记忆里有别的刷怪笼才换笼。
+                if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
+                    if (_lavaTroubleSinceMs == 0) {
+                        _lavaTroubleSinceMs = System.currentTimeMillis();
+                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
+                    } else if (System.currentTimeMillis() - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
+                        trySwitchAwayFromLavaSpawner(mod);
+                        if (_foundBlazeSpawner == null) {
+                            setDebugState("Switching away from lava-flooded spawner");
+                            return _fortressSearcher;
+                        }
+                    }
+                } else {
+                    _lavaTroubleSinceMs = 0;
+                }
             }
             List<BlockPos> missing = _cachedMissingEnclosure;
             if (missing != null) {
@@ -338,6 +356,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
                             Debug.logMessage("[BLAZE-SPAWNER] 亲眼确认刷怪笼并记住 " + pos.toShortString());
                         }
                     }
+                    registerEnclosureProtection(mod);
                     break;
                 }
             }
@@ -409,6 +428,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 _foundBlazeSpawner = best;
                 _confirmedSpawnerByKey.put(_worldKey, best.toImmutable());
                 Debug.logMessage("[BLAZE-SPAWNER] 现场验明通过, 确立刷怪笼 " + best.toShortString());
+                registerEnclosureProtection(mod);
             } else {
                 // 记得这里有刷怪笼, 但它不是烈焰人的 (主世界蜘蛛笼之类)。
                 rejectSpawner(best, "记忆点不是烈焰刷怪笼");
@@ -456,6 +476,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
         if (_worldKey != null) {
             _confirmedSpawnerByKey.remove(_worldKey, pos);
         }
+        // (2026-09-19 16:05) 防拆保护随刷怪笼失效 (谓词读 _protectedSpawnerPos)。
+        if (_protectedSpawnerPos != null && _protectedSpawnerPos.isWithinDistance(pos, 2)) {
+            _protectedSpawnerPos = null;
+        }
         rejectSpawner(pos, reason);
     }
 
@@ -467,6 +491,93 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _confirmedSpawnerByKey.clear();
         _rejectedSpawnerByKey.clear();
         _enclosureStockedFor = null;
+        _protectedSpawnerPos = null;
+        _lavaTroubleSpawnerKeys.clear();
+    }
+
+    /**
+     * (2026-09-19 16:05 问题二b) 围场结构位置判定 (静态供行为谓词用)。
+     * 材质无关: 围墙"只要求有东西堵着"—— 栅栏等任何实体方块都算 (isSolid 口径),
+     * 不要求非得是地狱岩。
+     */
+    private static BlockPos _protectedSpawnerPos = null;
+    private static boolean _protectionRegistered = false;
+
+    private static boolean isEnclosureStructurePos(BlockPos pos) {
+        BlockPos s = _protectedSpawnerPos;
+        if (s == null) return false;
+        int dx = pos.getX() - s.getX();
+        int dz = pos.getZ() - s.getZ();
+        int dy = pos.getY() - s.getY();
+        // 脚底地板 5x5 (低一格)。
+        if (dy == -1 && Math.abs(dx) <= SPAWNER_FLOOR_HALF && Math.abs(dz) <= SPAWNER_FLOOR_HALF) return true;
+        // 高一格/高二层 7x7 外圈围墙。
+        if ((dy == 1 || dy == 2)
+                && Math.abs(dx) <= SPAWNER_WALL_HALF && Math.abs(dz) <= SPAWNER_WALL_HALF
+                && (Math.abs(dx) == SPAWNER_WALL_HALF || Math.abs(dz) == SPAWNER_WALL_HALF)) return true;
+        return false;
+    }
+
+    /** 注册围场防拆谓词 (整个会话一次; 谓词读静态刷怪笼位, 换存档自动失效)。 */
+    private void registerEnclosureProtection(AltoClef mod) {
+        _protectedSpawnerPos = _foundBlazeSpawner.toImmutable();
+        if (_protectionRegistered) return;
+        _protectionRegistered = true;
+        mod.getBehaviour().avoidBlockBreaking(CollectBlazeRodsTask::isEnclosureStructurePos);
+        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] structure break-protection registered");
+    }
+
+    /** (2026-09-19 16:05 问题三) 岩浆 Trouble 登记表 (存档key@刷怪笼坐标)。 */
+    private static final Set<String> _lavaTroubleSpawnerKeys = new HashSet<>();
+    private static final long LAVA_TROUBLE_SWITCH_MS = 45_000;
+    private long _lavaTroubleSinceMs = 0;
+
+    private String lavaTroubleKey() {
+        return (_worldKey == null || _foundBlazeSpawner == null)
+                ? null : _worldKey + "@" + _foundBlazeSpawner.toShortString();
+    }
+
+    /** 围场区域 (7x7 水平 × y-1..y+3) 内是否有岩浆。 */
+    private boolean isLavaInEnclosureRegion(AltoClef mod, BlockPos spawner) {
+        for (int dy = -1; dy <= 3; dy++) {
+            for (int dx = -SPAWNER_WALL_HALF; dx <= SPAWNER_WALL_HALF; dx++) {
+                for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
+                    if (mod.getWorld().getBlockState(spawner.add(dx, dy, dz)).getBlock() == Blocks.LAVA) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-19 16:05 问题三, 用户) 当前刷怪笼持续 45s 有岩浆 → 若记忆里有
+     * 别的 (非排除、非岩浆) 刷怪笼候选就切换过去; 没有就留下来继续盖 (墙能挡)。
+     */
+    private void trySwitchAwayFromLavaSpawner(AltoClef mod) {
+        if (_worldKey == null || _foundBlazeSpawner == null || mod.getPlayer() == null) return;
+        Vec3d pos = mod.getPlayer().getPos();
+        List<BlockPos> candidates = new ArrayList<>(mod.getKnowledgeMemory()
+                .getRememberedCenters(KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
+        candidates.removeIf(c -> isRejectedSpawner(c)
+                || _lavaTroubleSpawnerKeys.contains(_worldKey + "@" + c.toShortString())
+                || c.getSquaredDistance(_foundBlazeSpawner) < REJECT_RADIUS * REJECT_RADIUS);
+        if (candidates.isEmpty()) {
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava persists but no alternative spawner known, keep building");
+            _lavaTroubleSinceMs = System.currentTimeMillis(); // 重置, 45s 后再查
+            return;
+        }
+        String key = lavaTroubleKey();
+        if (key != null) _lavaTroubleSpawnerKeys.add(key);
+        Debug.logMessage("[BLAZE-ENCLOSURE] spawner lava-troubled (45s+), switching to another known spawner ("
+                + candidates.size() + " candidates)");
+        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] switch away from lava spawner " + _foundBlazeSpawner.toShortString());
+        invalidateSpawner(_foundBlazeSpawner, "lava pouring into region, switching away");
+        _foundBlazeSpawner = null;
+        _recallTarget = null;
+        _recallTimer.reset();
+        _cachedMissingEnclosure = null;
+        _lavaTroubleSinceMs = 0;
+        clearEnclosureRestockTask();
     }
 
     private boolean isValidBlazeSpawner(AltoClef mod, BlockPos pos) {
@@ -502,10 +613,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
      */
     private List<BlockPos> findMissingEnclosureBlocks(AltoClef mod, BlockPos spawner) {
         List<BlockPos> missing = new ArrayList<>();
-        // 脚底地板 5x5 (中枢是刷怪笼本身, 算实心)。
+        // 脚底地板 5x5: (2026-09-19 16:05 用户) "脚下"指【低一格】, 不是同高。
         for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
             for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
-                BlockPos p = spawner.add(dx, 0, dz);
+                BlockPos p = spawner.add(dx, -1, dz);
                 if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
             }
         }

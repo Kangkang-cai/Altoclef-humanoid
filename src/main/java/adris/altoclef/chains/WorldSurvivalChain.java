@@ -157,7 +157,11 @@ public class WorldSurvivalChain extends SingleTaskChain {
         if (fireResDrink != Float.NEGATIVE_INFINITY) return fireResDrink;
 
         // Lava Escape
-        if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()) {
+        // (2026-09-19 16:05 用户"岩浆从高处流下来时专心放方块, 不要触发逃开岩浆,
+        // 因为有防火药") 有 FIRE_RESISTANCE 时不逃岩浆 — 火焰伤害完全免疫, 岩浆
+        // 不再致命; 逃走会丢下围场施工, 墙盖好岩浆自然被挡住。
+        if (isInLavaOhShit(mod) && mod.getBehaviour().shouldEscapeLava()
+                && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
             setTask(new EscapeFromLavaTask());
             // (2026-09-14 防火岩浆自救取证) 2s 一条: 位置/速度/防火/baritone 是否在
             // 规划。用于区分"baritone 在游"与"baritone 又 A* 起点判据全灭"。
@@ -183,7 +187,8 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
 
         // Fire escape
-        if (isInFire(mod)) {
+        // (2026-09-19 16:05) 防火期间站在火里无害, 不灭火不干扰围场施工。
+        if (isInFire(mod) && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
             setTask(new DoToClosestBlockTask(PutOutFireTask::new, Blocks.FIRE, Blocks.SOUL_FIRE));
             return 100;
         }
