@@ -157,8 +157,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // 修法: 决策与执行分离 —— 每 ENCLOSURE_BEAT_SECONDS 秒才重新决策一次
     // "这一拍做哪件事", 节拍内只认锁定的动作 (补墙 > 清障 > 灭火), 不重估其他
     // 分支; 同类工作可在节拍内连续做 (清障可连挖多格)。
+    // (2026-09-19 22:09 用户"8s 吧, 3s 太频繁") 定 8s: 单次灭火要走位 1s+ 再点,
+    // 一拍 8s 足够把动作跑完整; 清障一拍内可连挖 8~16 格, 不浪费。
+    // 与既有节奏的关系: BUILD_TARGET_STALL_MS=10s 略大于一拍 → stall 轮转最早
+    // 落在第二拍 (不会一拍就轮转); 灭火 FIRE_GIVEUP_ATTEMPTS=2 拍 = 16s 才冷却。
     // =========================================================================
-    private static final int ENCLOSURE_BEAT_SECONDS = 3;
+    private static final int ENCLOSURE_BEAT_SECONDS = 8;
     private final TimerGame _beatTimer = new TimerGame(ENCLOSURE_BEAT_SECONDS);
 
     private enum EnclosureAction { NONE, BUILD, CLEAR, FIRE }
