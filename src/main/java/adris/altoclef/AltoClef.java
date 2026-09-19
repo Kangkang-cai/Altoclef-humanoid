@@ -625,6 +625,10 @@ public class AltoClef implements ModInitializer {
     /** 落脚点邻格下方连续非实心 ≥ 此深度 = 悬崖/深坑 (MC 摔落伤害自第 4 格起)。 */
     private static final int LAVA_NAV_FALL_RISK_DEPTH = 4;
     private static final double LAVA_NAV_REPLAN_THROTTLE_SEC = 3.0;
+    /** 连续重算仍命中的上限: 到了就停止重算 (地形必经之路换了也没用, 只白烧 A*)。 */
+    private static final int LAVA_NAV_REPLAN_MAX_STREAK = 3;
+    /** 触发后至少保持这么久才允许解除 (防"触发→解除→触发"的 4~5s 周期横跳)。 */
+    private static final double LAVA_NAV_MIN_HOLD_SEC = 8.0;
     /** 主世界参与判据的最大 Y (钻石层/深板岩层岩浆湖; 地表无岩浆, 不参与)。 */
     private static final int LAVA_NAV_OVERWORLD_MAX_Y = 20;
     /** 关跳所需的 baritone 可放置垫块数: 太少时垫不出替代路线, 禁跳反把 bot 冻住。 */
@@ -634,6 +638,10 @@ public class AltoClef implements ModInitializer {
     private final adris.altoclef.util.time.TimerGame _lavaNavClearTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_RELEASE_CONFIRM_SEC);
     /** 命中危险后请求重算路径的节流 (防 forceCancel 反复重算同一条路)。 */
     private final adris.altoclef.util.time.TimerGame _lavaNavReplanTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_REPLAN_THROTTLE_SEC);
+    /** 触发后的最小保持计时: 解除需同时满足"外围无岩浆 + 路径无危险斜跳 + 已保持 ≥8s"。 */
+    private final adris.altoclef.util.time.TimerGame _lavaNavHoldTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_MIN_HOLD_SEC);
+    /** 连续"重算后仍命中"计数; 路径一旦干净立即清零。 */
+    private int _lavaNavReplanStreak = 0;
     private boolean _lavaNavSuppressActive = false;
     private boolean _lavaNavNoBlockWarned = false;
 
@@ -682,6 +690,10 @@ public class AltoClef implements ModInitializer {
             // 4 格深度 ≈ 百次 getBlockState / 0.25s, 比中心扫描小一个量级。
             boolean pathHit = pathDiagonalDanger();
             boolean danger = triggerHit || pathHit;
+            // 路径变干净 (重算成功 / 本就无危险斜跳) ⇒ 退避计数清零。
+            if (!pathHit) {
+                _lavaNavReplanStreak = 0;
+            }
 
             boolean suppress = _lavaNavSuppressActive;
             // 三类"不需要保守导航"的情形:
@@ -701,6 +713,9 @@ public class AltoClef implements ModInitializer {
                     if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) >= LAVA_NAV_MIN_PLACEABLE) {
                         suppress = true;
                         _lavaNavClearTimer.reset();
+                        // 最小保持: 触发后 8s 内不允许解除, 掐掉实跑里那串
+                        // "触发 187 → 解除 181 → 触发 187" 的 4~5s 周期横跳。
+                        _lavaNavHoldTimer.reset();
                         // 已算好的路径里那个斜跳不会因为开关关闭而消失 (baritone 只在
                         // 算路时读设置), 必须请求重算才能真的绕开。
                         if (pathHit) requestLavaNavReplan();
@@ -712,12 +727,14 @@ public class AltoClef implements ModInitializer {
                     }
                 }
             } else if (exempt) {
+                // 豁免 (防火/施工/飞行) 立即解除, 不受最小保持限制。
                 suppress = false;
+                _lavaNavReplanStreak = 0;
             } else if (holdHit || pathHit) {
                 _lavaNavClearTimer.reset();
-                // 抑制期间路径仍在危险区 (例如重算后仍选中同一条), 持续尝试重算。
+                // 抑制期间路径仍在危险区: 继续尝试重算 (内部有 3 次退避)。
                 if (pathHit) requestLavaNavReplan();
-            } else if (_lavaNavClearTimer.elapsed()) {
+            } else if (_lavaNavClearTimer.elapsed() && _lavaNavHoldTimer.elapsed()) {
                 suppress = false;
             }
 
@@ -768,10 +785,16 @@ public class AltoClef implements ModInitializer {
             int end = Math.min(movements.size(), start + LAVA_NAV_PATH_LOOKAHEAD);
             for (int i = start; i < end; i++) {
                 Object mv = movements.get(i);
-                // 只关心斜向升格: 关掉 allowDiagonalAscend 唯一影响的就是它。
+                // 只关心斜向**升格**: 关掉 allowDiagonalAscend 后唯一会消失的就是它。
+                // 下行的斜跳 (dest.y <= src.y) 不受这个开关影响 —— 把它算作危险只会
+                // 白白重算: 2026-09-19 19:55 场实证每 3s 一次连续 10 次重算, 路径
+                // 始终换不掉, 白烧一次全量 A* 还打断走位。
                 if (!(mv instanceof baritone.pathing.movement.movements.MovementDiagonal)) continue;
-                BlockPos dest = ((baritone.api.pathing.movement.IMovement) mv).getDest();
-                if (dest == null) continue;
+                baritone.api.pathing.movement.IMovement im = (baritone.api.pathing.movement.IMovement) mv;
+                BlockPos src = im.getSrc();
+                BlockPos dest = im.getDest();
+                if (src == null || dest == null) continue;
+                if (dest.getY() <= src.getY()) continue;
                 if (destDangerous(dest)) return true;
             }
         } catch (Throwable ignored) {
@@ -827,12 +850,17 @@ public class AltoClef implements ModInitializer {
      * forceCancel 保留目标、下一 tick 由 PathingControlManager 重新规划; 节流防抖。
      */
     private void requestLavaNavReplan() {
+        // 退避: 连续重算命中说明"关跳换不掉这条路"(多半是必经地形), 再算只是每 3s
+        // 烧一次全量 A* 并打断走位 —— 2026-09-19 19:54:44~19:55:33 连续 10 次实证。
+        if (_lavaNavReplanStreak >= LAVA_NAV_REPLAN_MAX_STREAK) return;
         if (!_lavaNavReplanTimer.elapsed()) return;
         _lavaNavReplanTimer.reset();
+        _lavaNavReplanStreak++;
         try {
             getClientBaritone().getPathingBehavior().forceCancel();
-            String m = "[LavaNav] 路径预检命中危险斜跳, 已请求重算 (节流 "
-                    + LAVA_NAV_REPLAN_THROTTLE_SEC + "s) pos=" + getPlayer().getBlockPos().toShortString();
+            String m = "[LavaNav] 路径预检命中危险斜跳, 已请求重算 (第 " + _lavaNavReplanStreak
+                    + "/" + LAVA_NAV_REPLAN_MAX_STREAK + " 次, 节流 " + LAVA_NAV_REPLAN_THROTTLE_SEC
+                    + "s; 达到上限则只关跳不再重算) pos=" + getPlayer().getBlockPos().toShortString();
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         } catch (Throwable ignored) {
