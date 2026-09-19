@@ -22,7 +22,10 @@ import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.WorldIdentity;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.FenceBlock;
+import net.minecraft.block.WallBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.BlazeEntity;
@@ -120,6 +123,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private String _worldKey = null;
     private BlockPos _recallTarget = null;
     private final TimerGame _recallTimer = new TimerGame(SPAWNER_RECALL_TIMEOUT);
+
+    // (2026-09-19 16:22) 自上向下搭建时顶圈可能暂无贴面放不了: 同一目标卡
+    // 超 10s 就轮到队尾 (优先级让位, 不死等)。
+    private static final long BUILD_TARGET_STALL_MS = 10_000;
+    private BlockPos _currentBuildTarget = null;
+    private long _currentBuildStartMs = 0;
 
     // (2026-09-19 13:05) 破洞检查缓存 (每 15s 全扫一次, 期间只对缓存清单做
     // 廉价的 isSolid 刷新) 与回场检查计时 (每 10s 一次)。
@@ -320,10 +329,25 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 missing.removeIf(p -> WorldHelper.isSolid(mod, p));
                 if (!missing.isEmpty()) {
                     BlockPos next = missing.get(0);
+                    // (2026-09-19 16:22) 自上向下优先, 但顶圈暂无贴面放不了时
+                    // 不死等: 同一目标超 10s 轮到队尾。
+                    long nowMs = System.currentTimeMillis();
+                    if (!next.equals(_currentBuildTarget)) {
+                        _currentBuildTarget = next;
+                        _currentBuildStartMs = nowMs;
+                    } else if (nowMs - _currentBuildStartMs > BUILD_TARGET_STALL_MS) {
+                        missing.remove(0);
+                        missing.add(next);
+                        _currentBuildTarget = null;
+                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] build target stalled, rotating "
+                                + next.toShortString() + " to back of queue");
+                        return null;
+                    }
                     setDebugState("Building enclosure: " + missing.size() + " missing, next " + next.toShortString());
                     return new PlaceStructureBlockTask(next);
                 }
             }
+            _currentBuildTarget = null;
 
             // (2026-09-19 13:05 用户) bot 留在自己围起来的区域里打最方便最安全:
             // 每 10s 检查一次, 离开围场就回去 (允许短暂离开)。
@@ -505,18 +529,26 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static BlockPos _protectedSpawnerPos = null;
     private static boolean _protectionRegistered = false;
 
-    private static boolean isEnclosureStructurePos(BlockPos pos) {
+    /**
+     * (2026-09-19 16:22 修订) 围场保护盒: 刷怪笼周围 9x9 × y-2..+4 整盒禁拆 +
+     * 附近 16 格内的栅栏/墙类方块禁拆。上一版只保护"精确结构位", 用户自摆的
+     * 栅栏位置/高度不固定落在保护集外, 照样被 baritone 寻路拆掉 (16:22 实锤)。
+     * 材质无关: 围墙"只要求有东西堵着"。
+     */
+    private static final int SPAWNER_PROTECT_HALF = 4;
+
+    private static boolean isEnclosureStructurePos(AltoClef mod, BlockPos pos) {
         BlockPos s = _protectedSpawnerPos;
         if (s == null) return false;
-        int dx = pos.getX() - s.getX();
-        int dz = pos.getZ() - s.getZ();
+        int dx = Math.abs(pos.getX() - s.getX());
+        int dz = Math.abs(pos.getZ() - s.getZ());
         int dy = pos.getY() - s.getY();
-        // 脚底地板 5x5 (低一格)。
-        if (dy == -1 && Math.abs(dx) <= SPAWNER_FLOOR_HALF && Math.abs(dz) <= SPAWNER_FLOOR_HALF) return true;
-        // 高一格/高二层 7x7 外圈围墙。
-        if ((dy == 1 || dy == 2)
-                && Math.abs(dx) <= SPAWNER_WALL_HALF && Math.abs(dz) <= SPAWNER_WALL_HALF
-                && (Math.abs(dx) == SPAWNER_WALL_HALF || Math.abs(dz) == SPAWNER_WALL_HALF)) return true;
+        // 整盒保护: 9x9 水平 × 低两格到高四格。
+        if (dx <= SPAWNER_PROTECT_HALF && dz <= SPAWNER_PROTECT_HALF && dy >= -2 && dy <= 4) return true;
+        // 栅栏/墙类方块在更大范围 (16 格) 内也保护 — 用户拿它们当围墙用。
+        Block b = mod.getWorld().getBlockState(pos).getBlock();
+        if ((b instanceof FenceBlock || b instanceof WallBlock)
+                && pos.isWithinDistance(s, 16)) return true;
         return false;
     }
 
@@ -525,8 +557,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _protectedSpawnerPos = _foundBlazeSpawner.toImmutable();
         if (_protectionRegistered) return;
         _protectionRegistered = true;
-        mod.getBehaviour().avoidBlockBreaking(CollectBlazeRodsTask::isEnclosureStructurePos);
-        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] structure break-protection registered");
+        mod.getBehaviour().avoidBlockBreaking(pos -> isEnclosureStructurePos(mod, pos));
+        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] structure break-protection registered (9x9 box + nearby fences)");
     }
 
     /** (2026-09-19 16:05 问题三) 岩浆 Trouble 登记表 (存档key@刷怪笼坐标)。 */
@@ -620,26 +652,26 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 13:05 包围策略③) 围场缺口全扫: 刷怪笼同层 5x5 地板 + 高一格/
-     * 高两层各一圈 7x7 外圈围墙 (内圈 5x5 两格高敞开, bot 与烈焰人都在里面)。
+     * (2026-09-19 13:05 包围策略③; 16:22 用户"搭建顺序先封顶, 自上向下") 围场
+     * 缺口全扫, 顺序 = 顶圈 (+2) → 下圈 (+1) → 地板 (y-1, 低一格)。
      */
     private List<BlockPos> findMissingEnclosureBlocks(AltoClef mod, BlockPos spawner) {
         List<BlockPos> missing = new ArrayList<>();
-        // 脚底地板 5x5: (2026-09-19 16:05 用户) "脚下"指【低一格】, 不是同高。
-        for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
-            for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
-                BlockPos p = spawner.add(dx, -1, dz);
-                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
-            }
-        }
-        // 两圈围墙: +1 / +2 各一圈 7x7 外圈。
-        for (int dy : SPAWNER_WALL_HEIGHTS) {
+        // 两圈围墙自上向下: 先顶圈 (+2) 再下圈 (+1)。
+        for (int dy = SPAWNER_WALL_HEIGHTS[1]; dy >= SPAWNER_WALL_HEIGHTS[0]; dy--) {
             for (int dx = -SPAWNER_WALL_HALF; dx <= SPAWNER_WALL_HALF; dx++) {
                 for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
                     if (Math.abs(dx) != SPAWNER_WALL_HALF && Math.abs(dz) != SPAWNER_WALL_HALF) continue;
                     BlockPos p = spawner.add(dx, dy, dz);
                     if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
                 }
+            }
+        }
+        // 脚底地板 5x5 最后 (低一格)。
+        for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
+            for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
+                BlockPos p = spawner.add(dx, -1, dz);
+                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
             }
         }
         return missing;
