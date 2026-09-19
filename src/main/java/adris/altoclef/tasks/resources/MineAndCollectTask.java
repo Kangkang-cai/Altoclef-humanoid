@@ -1112,6 +1112,10 @@ public class MineAndCollectTask extends ResourceTask {
             return _blocks.length == 1 && _blocks[0] == Blocks.NETHERRACK;
         }
 
+        // (2026-09-19 15:20 用户"贼远处的地狱岩掉落物太远了") 垫脚补料只追
+        // 这个半径内的掉落物, 更远的直接无视。
+        private static final double SCAFFOLD_DROP_PICKUP_RANGE_SQ = 24 * 24;
+
         private static boolean scaffoldDropLandsNearby(AltoClef mod, BlockPos p) {
             for (int dy = 1; dy <= 2; dy++) {
                 BlockPos below = p.down(dy);
@@ -1159,6 +1163,15 @@ public class MineAndCollectTask extends ResourceTask {
             Optional<ItemEntity> closestDrop = Optional.empty();
             if (mod.getEntityTracker().itemDropped(_targets)) {
                 closestDrop = mod.getEntityTracker().getClosestItemDrop(pos, _targets);
+            }
+            // (2026-09-19 15:20 用户) 垫脚补料目标只追 24 格内的掉落物, 更远的
+            // 无视 —— 现场 151808 实锤: 旧围场留下的陈旧掉落物 (777,77,122) 把
+            // bot 在 38~54 格间来回拽 (区块卸载冻结了 5 分钟 despawn 计时, 重载
+            // 后"复活")。挖身边的矿自己会掉新的, 远掉落不值得跑一趟; 补料挖满
+            // 时它早就 despawn 了。
+            if (closestDrop.isPresent() && isScaffoldGroundTarget()
+                    && closestDrop.get().squaredDistanceTo(pos) > SCAFFOLD_DROP_PICKUP_RANGE_SQ) {
+                closestDrop = Optional.empty();
             }
             // (2026-09-15 批采记账前置) 本任务正在挖的目标已变空气 → 先记账再选目标。
             // 必须放在一切 return 之前: 旧实现这笔账记在下面粘性块里, 木头目标的
