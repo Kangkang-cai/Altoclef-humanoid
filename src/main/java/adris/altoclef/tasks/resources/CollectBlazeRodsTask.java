@@ -24,11 +24,8 @@ import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.WorldIdentity;
 import adris.altoclef.util.time.TimerGame;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.FenceBlock;
-import net.minecraft.block.WallBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.BlazeEntity;
@@ -588,14 +585,28 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static boolean _protectionRegistered = false;
 
     /**
-     * (2026-09-19 16:22 修订) 围场保护盒: 刷怪笼周围 9x9 × y-2..+4 整盒禁拆 +
-     * 附近 16 格内的栅栏/墙类方块禁拆。上一版只保护"精确结构位", 用户自摆的
-     * 栅栏位置/高度不固定落在保护集外, 照样被 baritone 寻路拆掉 (16:22 实锤)。
-     * 材质无关: 围墙"只要求有东西堵着"。
+     * (2026-09-19 16:22 修订; 2026-09-19 19:45 收窄) 围场保护盒: 刷怪笼周围
+     * 9x9 × y-2..+4 整盒禁拆。材质无关: 围墙"只要求有东西堵着"。
+     *
+     * 【已删: 附近 16 格内栅栏/墙类方块禁拆】(2026-09-19 19:45, 用户"实测无效")
+     * 三条理由:
+     *   ① **管不到真凶**: avoidBlockBreaking → shouldAvoidBreaking 只有 baritone
+     *      侧 (canBreak / MovementHelper.avoidBreaking 的寻路成本) 会查; 而拆掉
+     *      栅栏的是 **builder process 的放置清场** 与 DestroyBlockTask 的手动长按,
+     *      两者从不消费这个谓词 (同 BotBehaviour.isPortalBodyBlock 的已知边界,
+     *      09-13 下界挖金把门框打穿实锤)。所以"栅栏被换成地狱岩"它拦不住。
+     *   ② **却误伤合法挖掘**: 它是 COST_INF **硬禁**, 会把范围内 baritone 的采掘
+     *      / 绕行合法路径一起废掉 (AltoClef.java 黑曜石段注释同款警告); 堡垒里
+     *      16 格几乎全是栅栏结构, 寻路代价凭空上升。
+     *   ③ **目的已被判据修复覆盖**: isEnclosureBlocking 已把栅栏算"已封堵", 不再
+     *      进补块队列 → 没有放置任务 → 没有清场 → 不会拆。要保护的是"别把它当
+     *      缺口", 而不是"禁止挖它"。
+     * 真要"少挖穿堡垒栅栏"应走软避让 (blocksToAvoidBreaking, 只加成本不禁死),
+     * 不是 shouldAvoidBreaking 这条硬禁。
      */
     private static final int SPAWNER_PROTECT_HALF = 4;
 
-    private static boolean isEnclosureStructurePos(AltoClef mod, BlockPos pos) {
+    private static boolean isEnclosureStructurePos(BlockPos pos) {
         BlockPos s = _protectedSpawnerPos;
         if (s == null) return false;
         int dx = Math.abs(pos.getX() - s.getX());
@@ -607,12 +618,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
             if (!(dx == 0 && dz == 0 && dy == 0)) return false;
         }
         // 整盒保护: 9x9 水平 × 低两格到高四格。
-        if (dx <= SPAWNER_PROTECT_HALF && dz <= SPAWNER_PROTECT_HALF && dy >= -2 && dy <= 4) return true;
-        // 栅栏/墙类方块在更大范围 (16 格) 内也保护 — 用户拿它们当围墙用。
-        Block b = mod.getWorld().getBlockState(pos).getBlock();
-        if ((b instanceof FenceBlock || b instanceof WallBlock)
-                && pos.isWithinDistance(s, 16)) return true;
-        return false;
+        return dx <= SPAWNER_PROTECT_HALF && dz <= SPAWNER_PROTECT_HALF && dy >= -2 && dy <= 4;
     }
 
     /** 注册围场防拆谓词 (整个会话一次; 谓词读静态刷怪笼位, 换存档自动失效)。 */
@@ -620,8 +626,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _protectedSpawnerPos = _foundBlazeSpawner.toImmutable();
         if (_protectionRegistered) return;
         _protectionRegistered = true;
-        mod.getBehaviour().avoidBlockBreaking(pos -> isEnclosureStructurePos(mod, pos));
-        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] structure break-protection registered (9x9 box + nearby fences)");
+        mod.getBehaviour().avoidBlockBreaking(CollectBlazeRodsTask::isEnclosureStructurePos);
+        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] structure break-protection registered (9x9 box)");
     }
 
     /** (2026-09-19 16:05 问题三) 岩浆 Trouble 登记表 (存档key@刷怪笼坐标)。 */
@@ -807,8 +813,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 为什么不能只用 isSolid: isSolidBlock 要求整格满立方, 下界砖栅栏 (堡垒自带)
      * 恒为 false → 被当成缺口 → 交给 baritone builder 补块, 而 builder 放置前会
      * "清场" (挖掉目标位原有方块), 于是好端端的栅栏被拆掉换成地狱岩 (用户现场)。
-     * 更糟的一步: isEnclosureStructurePos 已把 16 格内栅栏列为禁拆, 拆不动 →
-     * 建造目标永久 stall (每 10s 轮转一次队尾), 围场永远"没完工"。
+     * 更糟的一步: 当时 isEnclosureStructurePos 还把 16 格内栅栏列为禁拆, 拆不动 →
+     * 建造目标永久 stall (每 10s 轮转一次队尾), 围场永远"没完工"。那条禁拆支已于
+     * 19:45 删除 (见其注释: 管不到 builder 清场、却误伤合法挖掘), 本判据才是根治项。
      *
      * 空气 / 流体 / 火把等无碰撞箱 → 仍算缺口, 该补照补。
      * 地板位同样用宽松判据: 栅栏顶面站得住, 挖开反而可能踩空掉进洞或岩浆。
@@ -825,10 +832,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 允许任何高度 — 被顶一下/跳一下不算离开)。
      */
     private boolean isInsideEnclosure(BlockPos pos) {
-        if (_foundBlazeSpawner == null) return false;
-        int dx = pos.getX() - _foundBlazeSpawner.getX();
-        int dz = pos.getZ() - _foundBlazeSpawner.getZ();
-        return Math.abs(dx) <= SPAWNER_WALL_HALF && Math.abs(dz) <= SPAWNER_WALL_HALF;
+        return isInsideEnclosureOf(_foundBlazeSpawner, pos);
     }
 
     // ------------------------------------------------------------------ //
@@ -850,10 +854,18 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     /** 静态口径的"人在围场内" (供安全屋判定, 不依赖实例的 _foundBlazeSpawner)。 */
     private static boolean isInsideProtectedEnclosure(BlockPos pos) {
-        BlockPos s = _protectedSpawnerPos;
-        if (s == null || pos == null) return false;
-        return Math.abs(pos.getX() - s.getX()) <= SPAWNER_WALL_HALF
-                && Math.abs(pos.getZ() - s.getZ()) <= SPAWNER_WALL_HALF;
+        return isInsideEnclosureOf(_protectedSpawnerPos, pos);
+    }
+
+    /**
+     * (2026-09-19 19:45 合并) "围场内"的唯一判据: 以 center 为中心的 7x7 水平
+     * 投影 (只看水平, 允许任何高度 — 被顶一下/跳一下不算离开)。原先实例口径与
+     * 静态口径各抄了一份同样的阈值表达式, 属同概念两套判据, 收成一处。
+     */
+    private static boolean isInsideEnclosureOf(BlockPos center, BlockPos pos) {
+        if (center == null || pos == null) return false;
+        return Math.abs(pos.getX() - center.getX()) <= SPAWNER_WALL_HALF
+                && Math.abs(pos.getZ() - center.getZ()) <= SPAWNER_WALL_HALF;
     }
 
     /**
