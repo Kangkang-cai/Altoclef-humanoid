@@ -8,13 +8,21 @@ import adris.altoclef.tasks.movement.GetWithinRangeOfBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
 
 /**
  * (2026-09-18 顺手收珍珠) 下界诡异森林蹲守打末影人。
@@ -52,6 +60,113 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             Blocks.WARPED_WART_BLOCK
     };
 
+    // (2026-09-19 就近原则) 按需近场采样的参数 —— 见 findVisibleSignal。
+    // 近轮: 半径 32 / 水平 step 2 / 垂直 step 2; 远轮: 半径 64 / step 4 / 3。
+    // 垂直只看玩家上下 SCAN_Y_RANGE 层: 下界地表起伏有限, 林子不会在头顶 60 格。
+    private static final int SCAN_NEAR_RADIUS = 32;
+    private static final int SCAN_NEAR_STEP_XZ = 2;
+    private static final int SCAN_NEAR_STEP_Y = 2;
+    private static final int SCAN_FAR_RADIUS = 64;
+    private static final int SCAN_FAR_STEP_XZ = 4;
+    private static final int SCAN_FAR_STEP_Y = 3;
+    private static final int SCAN_Y_RANGE = 12;
+
+    /**
+     * (2026-09-19 就近原则, 用户拍板"只要看到就采取就近原则") bot 用"自己的视力"
+     * 找诡异森林信号方块 —— <b>刻意不依赖 BlockTracker 的追踪集合</b>。
+     *
+     * <p><b>为什么不能直接用 {@code BlockTracker.getNearestPerceivedInView}:</b>
+     * 那个方法的候选来自 BlockTracker 缓存, 而缓存里只会有<b>已 trackBlock 的类型</b>。
+     * 诡异森林这 4 类信号方块此前刻意【没有】注册追踪 —— 一旦注册, trackBlock 首次
+     * 加入新类型会 setDirty + forceElapse → {@code rescanWorld} → baritone
+     * {@code MineProcess.searchWorld} 对<b>全部已追踪方块</b>扫三个维度的所有已加载
+     * 区块; 2026-09-18 22:46 正是这样把客户端 CPU 打满、被服务端超时踢掉的
+     * (性能红线, 见 detail/12-perf-redline.md)。
+     *
+     * <p>代价是"视力恒瞎": 原先只有"脚下群系正好是 warped_forest"这一条 O(1) 路径
+     * 能命中。2026-09-19 17:56 会话实锤 —— bot 站在林子边缘 (脚下不是该群系), 眼前
+     * 就是诡异森林, 却一路 {@code Get to chunk: [57,-11] → [57,-12] → …} 逐区块往
+     * 记忆中的远处跑 (tasks.log 18:02)。
+     *
+     * <p>本方法绕开这个两难: <b>按需采样</b>已加载区块拿候选, 然后走<b>与
+     * {@code BlockTracker.getNearestPerceivedInView} 完全相同的视线判据</b> ——
+     * FOV 锥 ({@code VisibilityHelper.isBlockInView}) 先便宜地筛掉背后的, 再对最近的
+     * {@code maxChecks} 个做 LOS 射线 ({@code isBlockPerceivable})。所以"看不看得见"
+     * 的口径没有分裂, 变的只是数据来源 (缓存 → 按需采样), 拟人语义一致。
+     *
+     * @param maxRange 采样半径上限 (由设置 opportunisticPearlSightRange 给)
+     * @param maxChecks 最多对几个最近候选做 LOS 射线 (射线最贵)
+     * @return 最近的一个通过 FOV + LOS 的信号方块位置, 没有则 empty
+     */
+    public static Optional<BlockPos> findVisibleSignal(AltoClef mod, double maxRange, int maxChecks) {
+        ClientWorld world = mod.getWorld();
+        if (world == null || mod.getPlayer() == null) return Optional.empty();
+        BlockPos center = mod.getPlayer().getBlockPos();
+
+        // 两轮采样: 近密远疏。近轮命中即返回 —— "脸上有森林"在近轮就结束,
+        // 远轮的稀疏广扫只在近处确实没有时才付代价。
+        List<BlockPos> candidates = new ArrayList<>();
+        sampleSignals(mod, world, center, (int) Math.min(SCAN_NEAR_RADIUS, maxRange),
+                SCAN_NEAR_STEP_XZ, SCAN_NEAR_STEP_Y, candidates);
+        Optional<BlockPos> hit = firstPerceived(mod, center, candidates, maxChecks);
+        if (hit.isPresent()) return hit;
+
+        if (maxRange <= SCAN_NEAR_RADIUS) return Optional.empty();
+        candidates.clear();
+        sampleSignals(mod, world, center, (int) Math.min(SCAN_FAR_RADIUS, maxRange),
+                SCAN_FAR_STEP_XZ, SCAN_FAR_STEP_Y, candidates);
+        return firstPerceived(mod, center, candidates, maxChecks);
+    }
+
+    /** 按步长采样玩家周围的信号方块 (只走已加载区块), 结果追加进 out。 */
+    private static void sampleSignals(AltoClef mod, ClientWorld world, BlockPos center,
+                                      int radius, int stepXZ, int stepY, List<BlockPos> out) {
+        if (radius <= 0) return;
+        int rSq = radius * radius;
+        BlockPos.Mutable mp = new BlockPos.Mutable();
+        for (int dx = -radius; dx <= radius; dx += stepXZ) {
+            for (int dz = -radius; dz <= radius; dz += stepXZ) {
+                if (dx * dx + dz * dz > rSq) continue;
+                int x = center.getX() + dx;
+                int z = center.getZ() + dz;
+                // 整列先判区块加载: 未加载的列直接跳过, 省掉逐层 getBlockState。
+                if (!mod.getChunkTracker().isChunkLoaded(mp.set(x, center.getY(), z))) continue;
+                for (int dy = -SCAN_Y_RANGE; dy <= SCAN_Y_RANGE; dy += stepY) {
+                    int y = center.getY() + dy;
+                    if (y < 0 || y > 255) continue;
+                    BlockState state = world.getBlockState(mp.set(x, y, z));
+                    if (isSignalBlock(state.getBlock())) {
+                        out.add(new BlockPos(x, y, z));
+                    }
+                }
+            }
+        }
+    }
+
+    /** 候选 → FOV 锥 → 按距离排序 → 最近几个做 LOS 射线, 返回第一个真正看得见的。 */
+    private static Optional<BlockPos> firstPerceived(AltoClef mod, BlockPos center,
+                                                     List<BlockPos> candidates, int maxChecks) {
+        if (candidates.isEmpty()) return Optional.empty();
+        candidates.removeIf(pos -> !VisibilityHelper.isBlockInView(mod, pos));
+        if (candidates.isEmpty()) return Optional.empty();
+        candidates.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(center)));
+        int limit = Math.min(maxChecks, candidates.size());
+        for (int i = 0; i < limit; ++i) {
+            BlockPos check = candidates.get(i);
+            if (VisibilityHelper.isBlockPerceivable(mod, check)) {
+                return Optional.of(check);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isSignalBlock(Block block) {
+        for (Block signal : WARPED_FOREST_SIGNAL_BLOCKS) {
+            if (signal == block) return true;
+        }
+        return false;
+    }
+
     // 蹲守半径: 离锚点超过这个距离就先走回林子, 防止巡逻把 bot 带出林子。
     private static final double CAMP_RADIUS = 24;
     // 走回林子的"到位"判据: 进到锚点这么多格内就算回到林子, 交给巡逻接管。
@@ -88,7 +203,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-        mod.getBlockTracker().trackBlock(WARPED_FOREST_SIGNAL_BLOCKS);
+        // (2026-09-19 就近原则) 这里【不再】trackBlock(WARPED_FOREST_SIGNAL_BLOCKS)。
+        // 两个理由:
+        //   ① 性能红线: trackBlock 首次加入新方块类型会 setDirty + forceElapse →
+        //      BlockTracker.rescanWorld → baritone MineProcess.searchWorld 对全部已追踪
+        //      方块扫三个维度的所有已加载区块。2026-09-18 22:46 就是这样把客户端 CPU
+        //      打满、被服务端超时踢掉的 (detail/12-perf-redline.md)。
+        //   ② 它本来就漏配了 stopTracking (onResourceStop 里没有), 一旦调用就永久
+        //      占用追踪名额, 会把别的方块类型挤出缓存。
+        // 现在"看见林子"改由 {@link #findVisibleSignal} 按需采样 + 统一视线判据提供,
+        // 不需要 BlockTracker 追踪, 蹲守也就不会再触发全量重扫。
         _campTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlCampMaxSeconds());
         _dryTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlDrySeconds());
         _lastEndermanSeenMs = System.currentTimeMillis();

@@ -2266,7 +2266,7 @@ public class BeatMinecraft2Task extends Task {
                     // 始终高一点 (blazeWorkInReach: 有棒可捡/有烈焰人可打 → 让位)。
                     // 位置放在金靴之后、防火药水/烈焰棒之前 —— 金靴是猪灵交易与
                     // 下界生存的硬前置, 不该被蹲守挤掉。
-                    Task oppPearl = getOpportunisticPearlTask(mod, enderPearlTarget);
+                    Task oppPearl = getForestPearlCampTask(mod, enderPearlTarget, true);
                     if (oppPearl != null) {
                         // 蹲守期间不烧防火药水阶段的计时 —— 否则会出现"药一瓶没收
                         // 到, 阶段先超时"的裸奔进要塞 (09-14 事故的同类风险)。
@@ -2814,25 +2814,48 @@ public class BeatMinecraft2Task extends Task {
             int goldBuffer = 32;
             return new TradeWithPiglinsTask(32, Items.ENDER_PEARL, count);
         } else {
+            // (2026-09-19 就近原则, 用户拍板"只要看到就采取就近原则")
+            // 【先看眼前有没有林子】, 再谈别的。顺序很关键: 蹲守任务内部就用
+            // KillEntitiesTask 打末影人, 所以只要看得见林子就该交给它 —— 否则外层
+            // 这个 KillAndLootTask 分支会打断蹲守 (末影人一出现就换任务), 打完再
+            // 回来重建蹲守实例, 蹲守的总时长上限被反复清零, 永远达不到。
+            Task nearCamp = getForestPearlCampTask(mod, count, false);
+            if (nearCamp != null) {
+                return nearCamp;
+            }
             if (mod.getEntityTracker().entityFound(EndermanEntity.class) || mod.getEntityTracker().itemDropped(Items.ENDER_PEARL)) {
                 return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
             }
+            // 看不见任何林子 → 才逐区块去远处找 (老路径, 现在降级为兜底)。
             // Search for warped forests this way...
             return new SearchChunkForBlockTask(Blocks.WARPED_NYLIUM);
         }
     }
 
     /**
-     * (2026-09-18 顺手收珍珠, 用户拍板) 主线 (烈焰棒 / 防火药水) 进行中的"顺手"珍珠任务。
+     * (2026-09-18 顺手收珍珠 / 2026-09-19 就近原则, 用户拍板) "看得见诡异森林 → 就近
+     * 驻留刷珍珠" 的统一入口。顺手阶段 (烈焰棒主线进行中) 与<b>正式收珍珠阶段</b>
+     * 都走这里, 唯一区别是 {@code blazeHasPriority}。
      *
      * <p>语义: 末影珍珠不需要任何前置, 所以不必排在两个主线任务之后; 只要 bot
-     * 【亲眼看见】诡异森林就驻留开刷。但烈焰棒优先级始终高一点 —— 见
-     * {@link #blazeWorkInReach}: 地上有烈焰棒/粉、或感知范围内有烈焰人时,
-     * 直接返回 null 让主线继续。
+     * 【亲眼看见】诡异森林就驻留开刷。
      *
-     * @return 蹲守任务, 或 null (不该顺手 / 珍珠已够 / 冷却中 / 烈焰棒更急 / 没看见林子)
+     * <p><b>(2026-09-19) 为什么正式阶段也要走这里:</b> 原先本逻辑只挂在
+     * {@code needsBlazeRods} 分支里, 珍珠正式阶段 ({@link #getEnderPearlTask}) 走的
+     * 仍是老代码 {@code SearchChunkForBlockTask(Blocks.WARPED_NYLIUM)} —— 逐区块
+     * 扫描是"找地图", 不是"走进眼前这片林子"。2026-09-19 17:56 会话实锤: bot 站在
+     * 诡异森林边缘, 任务栈却是 {@code Getting Ender Pearls → Searching chunk for
+     * blocks {warped_nylium} → Get to chunk: [57,-11] → [57,-12] → …} 一路往远处爬
+     * (tasks.log 18:02), 且整个会话 diag.log 里<b>一条 [PEARL-OPP] 都没有</b> ——
+     * 因为顺手逻辑压根没被调用过。现在正式阶段也先问"看得见林子吗", 看得见就就近,
+     * 看不见才让逐区块搜索兜底。
+     *
+     * @param blazeHasPriority 是否让烈焰棒优先 —— 顺手阶段 true (见
+     *                         {@link #blazeWorkInReach}); 正式收珍珠阶段 false,
+     *                         那时珍珠自己就是主线, 不该被"烈焰棒还能推进"挤掉。
+     * @return 蹲守任务, 或 null (不该蹲 / 珍珠已够 / 冷却中 / 烈焰棒更急 / 没看见林子)
      */
-    private Task getOpportunisticPearlTask(AltoClef mod, int enderPearlTarget) {
+    private Task getForestPearlCampTask(AltoClef mod, int enderPearlTarget, boolean blazeHasPriority) {
         if (!mod.getModSettings().isOpportunisticWarpedForestPearlsEnabled()) return null;
         // 珍珠走猪灵交易流 (堡垒) 时不适用: 那是"等金锭+金靴"的另一条路。
         if (_config.barterPearlsInsteadOfEndermanHunt) return null;
@@ -2843,8 +2866,8 @@ public class BeatMinecraft2Task extends Task {
         // 上次蹲守枯竭/超时 → 冷却内不再起 (防"放弃→立刻又看见林子→再放弃"横跳)。
         if (now < _pearlCampBlockedUntilMs) return null;
 
-        // 烈焰棒始终比珍珠高一点。
-        if (blazeWorkInReach(mod)) return null;
+        // 烈焰棒始终比珍珠高一点 —— 但只在顺手阶段成立 (blazeHasPriority)。
+        if (blazeHasPriority && blazeWorkInReach(mod)) return null;
 
         // 已在蹲守: 粘住同一实例 (每 tick new 会把计时器/巡逻状态清零, 见 _stoneAxeTask 教训)。
         if (_opportunisticPearlTask != null) {
@@ -2854,19 +2877,35 @@ public class BeatMinecraft2Task extends Task {
                 _opportunisticPearlTask = null;
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
                         + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
+                // (2026-09-19) 冷却一生效就必须退出。原来这里没有 return, 会继续往下
+                // 用旧锚点重建蹲守任务 → "放弃→同 tick 立刻重开"横跳, 冷却形同虚设。
+                return null;
             } else if (shouldForce(mod, _opportunisticPearlTask)) {
                 return _opportunisticPearlTask;
             }
         }
 
-        // 找林子: 扫描带节流 (要过 LOS 射线)。
+        // 找林子: 扫描带节流 (要过 FOV 锥 + LOS 射线)。
         if (now - _pearlForestScanMs >= PEARL_FOREST_SCAN_INTERVAL_MS) {
             _pearlForestScanMs = now;
+            // scanMs 必须可观测: 这次"找林子"是【主线程同步采样】(上万次 getBlockState),
+            // 不像 BlockTracker 的近/远扫描那样跑在 baritone 线程池。1s 一次、每次若
+            // 超过 ~20ms 就会肉眼可见地掉帧 —— 届时要把采样步长/半径调粗或改异步。
+            long scanStartNs = System.nanoTime();
             _pearlForestAnchor = findPerceivedWarpedForest(mod);
+            long scanMs = (System.nanoTime() - scanStartNs) / 1_000_000L;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tSCAN anchor="
+                    + (_pearlForestAnchor == null ? "none" : _pearlForestAnchor.toShortString())
+                    + " dist=" + (_pearlForestAnchor == null ? "-"
+                            : String.format("%.0f", Math.sqrt(
+                                    mod.getPlayer().getBlockPos().getSquaredDistance(_pearlForestAnchor))))
+                    + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + enderPearlTarget
+                    + " blazePriority=" + blazeHasPriority
+                    + " scanMs=" + scanMs);
         }
         if (_pearlForestAnchor == null) return null;
 
-        setDebugState("Opportunistic: camping warped forest for ender pearls");
+        setDebugState("Camping warped forest for ender pearls (nearest visible forest)");
         _opportunisticPearlTask = new CollectEnderPearlsInForestTask(enderPearlTarget, _pearlForestAnchor);
         return _opportunisticPearlTask;
     }
@@ -2916,21 +2955,23 @@ public class BeatMinecraft2Task extends Task {
         if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
             return playerPos;
         }
-        // 2) 否则看能不能真的看见一片林子 (远处森林): 走全项目统一口径
-        //    BlockTracker.getNearestPerceivedInView (近远扫缓存 + FOV 锥 + LOS 射线)。
+        // 2) 否则看能不能真的看见一片林子 (远处森林): 走 CollectEnderPearlsInForestTask
+        //    .findVisibleSignal —— 按需采样已加载区块拿候选, 再过全项目统一口径的
+        //    FOV 锥 + LOS 射线。
         //
-        //    ⚠ 这里刻意【不】调 trackBlock(signals): trackBlock 首次加入新方块类型会
-        //    setDirty + forceElapse → BlockTracker.update() → rescanWorld() →
-        //    MineProcess.searchWorld(...) 对【全部已追踪方块】扫三个维度的所有已加载
-        //    区块。2026-09-18 22:46 卡死事故: 我新加 4 类诡异森林方块即触发这次全量
-        //    重扫 ("Rescanning world for 15 blocks" 是日志最后一行), 后台线程 CPU 打满
-        //    → 主线程无响应 → 22:47:18 服务端连接超时把客户端踢掉。
-        //    代价/收益: 不追踪则缓存里没有该类方块 (getKnownLocations 返回空), 只能靠
-        //    "走进林子"触发蹲守 —— 而走进林子正是用户要的"路过顺手刷", 完全够用。
-        Block[] signals = CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS;
-        return mod.getBlockTracker().getNearestPerceivedInView(
+        //    ⚠ 刻意【不】走 BlockTracker.getNearestPerceivedInView: 它的候选来自
+        //    BlockTracker 缓存, 而缓存里只会有【已 trackBlock 的类型】。诡异森林这
+        //    4 类信号方块一旦注册追踪, trackBlock 首次加入新类型就会 setDirty +
+        //    forceElapse → rescanWorld → baritone MineProcess.searchWorld 对全部已追踪
+        //    方块扫三个维度的所有已加载区块 —— 2026-09-18 22:46 卡死事故
+        //    ("Rescanning world for 15 blocks" 是日志最后一行, 22:47:18 客户端被踢)。
+        //    代价就是"视力恒瞎": 站在林子边缘 (脚下不是 warped_forest 群系) 时完全
+        //    看不见眼前的林子 —— 2026-09-19 17:56 会话正是这样。按需采样绕开了这个
+        //    两难: 不碰追踪集合 (零 rescanWorld 风险), 视线判据又与全项目一致。
+        return CollectEnderPearlsInForestTask.findVisibleSignal(
+                        mod,
                         mod.getModSettings().getOpportunisticPearlSightRange(),
-                        PEARL_FOREST_LOS_CANDIDATES, signals)
+                        PEARL_FOREST_LOS_CANDIDATES)
                 .orElse(null);
     }
 
