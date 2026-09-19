@@ -313,8 +313,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 失效条件 (key = 存档@刷怪笼坐标, 与 {@link #enclosureStockKey} 同口径):
      * 换笼 / 换存档 → key 变化 → 新笼重新走"建好一次"流程。
      *
-     * ⚠ 与 {@link #_enclosureCompleteFlag} 的区别: 那个是"**当前**是否完好",
-     * 供断药坚守/安全屋判定用 —— 安全屋必须真完好, 不能闩; 本方法管击杀口径。
+     * ⚠ 与 {@link #_enclosureCompleteFlag} 的区别 (23:16 起两者阈值同为 95%,
+     * 差别只剩"一次性 vs 实时"): 那个每次 15s 洞检刷新, 反映"**当前**是否达标",
+     * 墙被炸坏会掉回 false (安全屋/断药坚守必须看实时状态); 本方法是一次性闩,
+     * 只管击杀口径, 达标一次就不再回退。
      */
     private boolean isEnclosureStructureDone() {
         String key = enclosureStockKey();
@@ -631,9 +633,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 _holeCheckTimer.reset();
                 _cachedMissingEnclosure = findMissingEnclosureBlocks(mod, _foundBlazeSpawner);
                 // (2026-09-19 18:55) 完工标志同步刷新 (断药坚守/收药切换的判定依据)。
-                _enclosureCompleteFlag = _cachedMissingEnclosure.isEmpty();
-                if (_cachedMissingEnclosure.isEmpty()) {
-                    Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (scan at tick "
+                // (2026-09-19 23:16 用户"也放宽") 判据与建成阈值统一为 95% (缺块 ≤3):
+                // 与击杀闩共用 isBuiltCompletion, 不再要求"缺块完全为空"。注意本标志
+                // 仍保持【实时刷新】(墙被炸坏会掉回 false → 安全屋/坚守失效), 不是一次性闩。
+                _enclosureCompleteFlag = isBuiltCompletion(_cachedMissingEnclosure.size());
+                if (_enclosureCompleteFlag) {
+                    Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (missing="
+                            + _cachedMissingEnclosure.size() + ", scan at tick "
                             + WorldHelper.getTicks() + ")");
                 }
             }
@@ -1321,7 +1327,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // (2026-09-19 18:55 用户三条特殊规则) 断药场景: 收药 / 墙内坚守
     // ------------------------------------------------------------------ //
 
-    /** 当前确认笼的围场是否已完工 (每次 15s 洞检刷新; 换笼/失效即 false)。 */
+    /**
+     * 当前确认笼的围场是否已达标 —— **实时刷新** (每次 15s 洞检; 换笼/失效即 false)。
+     * (2026-09-19 23:16 用户"也放宽") 判据 = {@link #isBuiltCompletion}, 与击杀闩
+     * 同一阈值 95% (缺块 ≤3); 原先要求缺块完全为空, bot 会为了最后几块一直不敢
+     * 进"坚守/安全屋"状态。墙被炸坏掉回 false 是**有意保留**的实时性。
+     */
     private static volatile boolean _enclosureCompleteFlag = false;
 
     /**
