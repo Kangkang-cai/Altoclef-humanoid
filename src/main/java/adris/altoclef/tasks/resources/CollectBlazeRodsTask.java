@@ -285,16 +285,41 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 22:59 用户"当墙建好之后, 就不要 3 格距离限制了") 围场【结构】是否
-     * 已完工 —— 只看缺块 (扫过且为空), **不把清障进度算进去**。
-     * 原来"是否开农场杀"直接复用 isSpawnerWorkPending, 而后者把"内圈还没清完"也算
-     * 施工中 → 墙明明已经建好, 却仍按贴脸 3 格口径 → 区域内 4 格外的烈焰人不打。
-     * 未扫过 (缓存 null) 视为未完工, 走保守的贴脸口径。
+     * (2026-09-19 23:03 用户"如何判断墙建好了？我推荐一次性建好，之后距离就放开，只看位置")
+     * 围场【结构】是否已建好 —— **一次性闩**, 不是"当前是否完好"。
+     *
+     * 判据 (首次): {@link #findMissingEnclosureBlocks} 全扫 74 格
+     * (顶盖 y+3 5x5 = 25 + 围墙 y+1 7x7 外圈 = 24 + 地板 y-1 5x5 = 25),
+     * 每格都"挡得住"({@link #isEnclosureBlocking}: 满立方 solid, 或有碰撞箱的
+     * 非空气方块 —— 栅栏/墙/玻璃都算) ⇒ 缺块为空 ⇒ **闩上**。
+     *
+     * 为什么必须一次性: 原实现每次都读 {@code _cachedMissingEnclosure} (15s 重扫),
+     * 于是**烈焰人火球炸掉一块墙 → 下次重扫缺块非空 → 击杀口径立刻退回"只打贴脸
+     * 3 格"** → 打着打着又不打, 口径随墙体状态反复横跳。用户拍板: 墙建好一次就
+     * 永久放开距离, 只按位置(在不在围场区域内)判定; 之后补墙照做, 但不影响口径。
+     *
+     * 失效条件 (key = 存档@刷怪笼坐标, 与 {@link #enclosureStockKey} 同口径):
+     * 换笼 / 换存档 → key 变化 → 新笼重新走"建好一次"流程。
+     *
+     * ⚠ 与 {@link #_enclosureCompleteFlag} 的区别: 那个是"**当前**是否完好",
+     * 供断药坚守/安全屋判定用 —— 安全屋必须真完好, 不能闩; 本方法管击杀口径。
      */
     private boolean isEnclosureStructureDone() {
+        String key = enclosureStockKey();
+        if (key == null) return false;
+        if (key.equals(_enclosureBuiltOnceKey)) return true;
         List<BlockPos> missing = _cachedMissingEnclosure;
-        return missing != null && missing.isEmpty();
+        if (missing != null && missing.isEmpty()) {
+            _enclosureBuiltOnceKey = key;
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] first build complete — "
+                    + "kill range unlocked (围场区域内全打, 不再看距离)");
+            return true;
+        }
+        return false;
     }
+
+    /** (2026-09-19 23:03) 一次性完工闩 (存档key@刷怪笼坐标); 换笼/换存档即失效。 */
+    private static String _enclosureBuiltOnceKey = null;
 
     /**
      * (2026-09-19 22:51 用户"烈焰人就在脸上 3 格左右距离"，"你的改法治标不治本")
@@ -804,6 +829,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _confirmedSpawnerByKey.clear();
         _rejectedSpawnerByKey.clear();
         _enclosureStockedFor = null;
+        // (2026-09-19 23:03) 一次性完工闩也要清 —— 否则上个世界的"墙已建好"会带到新存档。
+        _enclosureBuiltOnceKey = null;
         _protectedSpawnerPos = null;
         _lavaTroubleSpawnerKeys.clear();
     }
