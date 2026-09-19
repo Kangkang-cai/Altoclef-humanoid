@@ -163,10 +163,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _returnCheckTimer.reset();
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
-            _foundBlazeSpawner = remembered;
-            Debug.logMessage("[BLAZE-SPAWNER] 沿用已确认刷怪笼 " + remembered.toShortString()
-                    + " (实例重建, key=" + _worldKey + ")");
-            registerEnclosureProtection(mod);
+            // (2026-09-19 18:05 用户) 沿用前先验岩浆 — 别沿用一个岩浆笼再走
+            // "喝药→备料→盖墙→换笼"的冤枉路。
+            if (isSpawnerLavaTroubled(mod, remembered)) {
+                Debug.logMessage("[BLAZE-SPAWNER] 已确认笼 " + remembered.toShortString()
+                        + " 打怪区域有岩浆, 选笼阶段直接跳过 (不喝药不备料)");
+                rejectSpawner(remembered, "打怪区域有岩浆, 选笼时直接跳过");
+                _confirmedSpawnerByKey.remove(_worldKey, remembered);
+            } else {
+                _foundBlazeSpawner = remembered;
+                Debug.logMessage("[BLAZE-SPAWNER] 沿用已确认刷怪笼 " + remembered.toShortString()
+                        + " (实例重建, key=" + _worldKey + ")");
+                registerEnclosureProtection(mod);
+            }
         } else {
             // Session-static 里也没有 → 交给每层 tick 走"亲眼看见 / 记忆召回"两条路。
             _foundBlazeSpawner = null;
@@ -304,32 +313,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
                             + WorldHelper.getTicks() + ")");
                 }
             }
-            // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域: 有防火药
-            // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 20s 且
-            // 记忆里有别的刷怪笼才换笼。
-            // (2026-09-19 17:50 换笼提速) 检查独立每 5s 一次; 偶发一次"没岩浆"
-            // 不再清零计时 (岩浆时涨时消会让阈值永远攒不够 — 171228 实锤 60s)。
-            // (2026-09-19 18:00 修正) 必须放在 15s 洞检门控【外】—— 175617 实锤
-            // 挪在里面 5s 节流形同虚设, 实际节奏还是 15s, 换笼拖到 30s。
+            // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域。
+            // (2026-09-19 18:05 用户"20s没有必要") 见岩浆立即换笼, 不攒时长;
+            // 必须放在 15s 洞检门控【外】, 否则 5s 节流形同虚设 (175617 实锤)。
+            // 无候选可换时留下继续盖墙 (trySwitchAway 内兜底), 5s 后再查。
             long lavaNowMs = System.currentTimeMillis();
             if (lavaNowMs - _lavaLastCheckMs >= LAVA_CHECK_INTERVAL_MS) {
                 _lavaLastCheckMs = lavaNowMs;
                 if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
-                    _lavaFreeStreak = 0;
-                    if (_lavaTroubleSinceMs == 0) {
-                        _lavaTroubleSinceMs = lavaNowMs;
-                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
-                    } else if (lavaNowMs - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
-                        trySwitchAwayFromLavaSpawner(mod);
-                        if (_foundBlazeSpawner == null) {
-                            setDebugState("Switching away from lava-flooded spawner");
-                            return _fortressSearcher;
-                        }
+                    trySwitchAwayFromLavaSpawner(mod);
+                    if (_foundBlazeSpawner == null) {
+                        setDebugState("Switching away from lava-flooded spawner");
+                        return _fortressSearcher;
                     }
-                } else if (++_lavaFreeStreak >= 2) {
-                    // 连续 2 次(约10s)确认无岩浆才认作岩浆退了, 计时清零重来。
-                    _lavaTroubleSinceMs = 0;
-                    _lavaFreeStreak = 0;
                 }
             }
             List<BlockPos> missing = _cachedMissingEnclosure;
@@ -397,6 +393,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 // 实锤: 换笼后 0.3s 内又确认回同一个岩浆笼)。
                 if (isRejectedSpawner(pos)) continue;
                 if (isValidBlazeSpawner(mod, pos)) {
+                    // (2026-09-19 18:05 用户) 选笼阶段直接跳过岩浆笼: 打怪区域
+                    // 有岩浆 = 到场就是喝药+备料+换笼的冤枉路, 当场排除。
+                    if (isSpawnerLavaTroubled(mod, pos)) {
+                        rejectSpawner(pos, "打怪区域有岩浆, 选笼时直接跳过");
+                        continue;
+                    }
                     _foundBlazeSpawner = pos;
                     // (2026-09-18) 亲眼确认 → 写 static, 后续实例重建能直接接回。
                     if (_worldKey != null) {
@@ -473,10 +475,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // 走到现场且区块可读 → 验明正身。
         if (mod.getChunkTracker().isChunkLoaded(best) && best.isWithinDistance(pos, SPAWNER_RECALL_ARRIVE)) {
             if (isValidBlazeSpawner(mod, best)) {
-                _foundBlazeSpawner = best;
-                _confirmedSpawnerByKey.put(_worldKey, best.toImmutable());
-                Debug.logMessage("[BLAZE-SPAWNER] 现场验明通过, 确立刷怪笼 " + best.toShortString());
-                registerEnclosureProtection(mod);
+                // (2026-09-19 18:05 用户) 走到现场验明是烈焰笼, 但打怪区域有岩浆
+                // → 同样当场排除, 继续找下一个候选。
+                if (isSpawnerLavaTroubled(mod, best)) {
+                    rejectSpawner(best, "记忆点烈焰笼但打怪区域有岩浆, 跳过");
+                } else {
+                    _foundBlazeSpawner = best;
+                    _confirmedSpawnerByKey.put(_worldKey, best.toImmutable());
+                    Debug.logMessage("[BLAZE-SPAWNER] 现场验明通过, 确立刷怪笼 " + best.toShortString());
+                    registerEnclosureProtection(mod);
+                }
             } else {
                 // 记得这里有刷怪笼, 但它不是烈焰人的 (主世界蜘蛛笼之类)。
                 rejectSpawner(best, "记忆点不是烈焰刷怪笼");
@@ -590,16 +598,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     /** (2026-09-19 16:05 问题三) 岩浆 Trouble 登记表 (存档key@刷怪笼坐标)。 */
     private static final Set<String> _lavaTroubleSpawnerKeys = new HashSet<>();
-    // (2026-09-19 17:50 换笼提速) 45s→20s: 174140 实锤 lava 起算 47s 用户就停了
-    // 都没等到换笼; 45s 阈值 + 15s 洞检节奏实际要 45~60s 才触发, 用户观感=就是不换笼。
-    private static final long LAVA_TROUBLE_SWITCH_MS = 20_000;
-    // (2026-09-19 17:50) 岩浆检查从 15s 洞检拆出, 单独每 5s 跑一次 (7x7x5 扫描很廉价)。
+    // (2026-09-19 18:05 用户"20s没有必要") 岩浆笼语义改为【当场跳过】: 选笼阶段
+    // 就排除打怪区域有岩浆的笼 (不走路不喝药不备料), 施工中见岩浆立即换笼。
+    // 20s 攒时长的唯一意义是给"盖墙挡岩浆"一个机会, 但 175617 实证高处浇下来
+    // 的岩浆墙挡不住, 只是白喝一瓶药 → 计时器整体裁撤, 只留 5s 检查节流防刷屏。
+    // (2026-09-19 17:50) 岩浆检查独立节奏, 每 5s 一次 (7x7x5 扫描很廉价)。
     private static final long LAVA_CHECK_INTERVAL_MS = 5_000;
-    private long _lavaTroubleSinceMs = 0;
     private long _lavaLastCheckMs = 0;
-    // (2026-09-19 17:50) 岩浆时涨时消会让计时反复清零永远攒不够 (171228 实锤拖到
-    // 60s 才换笼) —— 连续 2 次检查(约10s)无岩浆才认作真退了, 单次假阴性不清零。
-    private int _lavaFreeStreak = 0;
 
     // (2026-09-19 16:05 用户补充: 免逃岩浆只针对建围墙时的特殊宽限, 其他情况不变)
     // 围场施工进行中 (已到笼、缺块未补) 的全局标志 —— WorldSurvivalChain 只在
@@ -629,8 +634,18 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 17:50 提速) 当前刷怪笼持续 20s 有岩浆 → 若记忆里有
-     * 别的 (非排除、非岩浆) 刷怪笼候选就切换过去; 没有就留下来继续盖 (墙能挡)。
+     * (2026-09-19 18:05 用户) 该刷怪笼打怪区域 (围场 7x7 × y-1..y+3) 有岩浆 →
+     * 选笼阶段【当场跳过】: 不走路过去、不喝防火药、不备 128 块料 — 到场才
+     * 发现岩浆就是白喝一瓶药 + 白跑一趟。区块未加载时无法判定, 交给到场检查。
+     */
+    private boolean isSpawnerLavaTroubled(AltoClef mod, BlockPos spawner) {
+        if (!mod.getChunkTracker().isChunkLoaded(spawner)) return false;
+        return isLavaInEnclosureRegion(mod, spawner);
+    }
+
+    /**
+     * (2026-09-19 18:05 用户"20s没有必要") 施工中一旦发现岩浆进打怪区域, 立即
+     * 换笼 — 若记忆里有别的 (非排除) 刷怪笼候选就切换过去; 没有才留下来继续盖。
      */
     private void trySwitchAwayFromLavaSpawner(AltoClef mod) {
         if (_worldKey == null || _foundBlazeSpawner == null || mod.getPlayer() == null) return;
@@ -641,8 +656,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 || _lavaTroubleSpawnerKeys.contains(_worldKey + "@" + c.toShortString())
                 || c.getSquaredDistance(_foundBlazeSpawner) < REJECT_RADIUS * REJECT_RADIUS);
         if (candidates.isEmpty()) {
-            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava persists but no alternative spawner known, keep building");
-            _lavaTroubleSinceMs = System.currentTimeMillis(); // 重置, 20s 后再查
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava in region but no alternative spawner known, keep building (recheck in 5s)");
             return;
         }
         String key = lavaTroubleKey();
@@ -655,8 +669,6 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _recallTarget = null;
         _recallTimer.reset();
         _cachedMissingEnclosure = null;
-        _lavaTroubleSinceMs = 0;
-        _lavaFreeStreak = 0;
         _lavaLastCheckMs = 0;
         clearEnclosureRestockTask();
     }
