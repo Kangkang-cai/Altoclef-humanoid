@@ -224,11 +224,22 @@ public class CollectBlazeRodsTask extends ResourceTask {
             if (!arrived) {
                 // (2026-09-19 包围策略①, 用户) 出发前置: 背包至少 32 地狱岩
                 // (封顶 5x5=25 格 + 余量), 不够先挖满 — 到了现场再下矿等于裸奔。
-                if (netherrackHave < ENCLOSURE_NETHERRACK_MIN) {
+                // (2026-09-19 123515 追加) 一次性闩: 补满一次即闩上, 不再反复检查
+                // —— 否则路上 baritone 每垫一块脚手架 31<32 又弹回补货, 恰好 32
+                // 无余量, 2s 一轮 Restock↔Going 死循环 (123515 实锤)。路上的
+                // 脚手架消耗是正常开销, 到笼后由"缺几补几"的精确口径接管。
+                String stockKey = enclosureStockKey();
+                boolean stockedForThisSpawner = stockKey != null && stockKey.equals(_enclosureStockedFor);
+                if (!stockedForThisSpawner && netherrackHave < ENCLOSURE_NETHERRACK_MIN) {
                     setDebugState("Restocking " + ENCLOSURE_NETHERRACK_MIN + " netherrack for spawner enclosure");
                     return getEnclosureRestockTask(mod, ENCLOSURE_NETHERRACK_MIN);
                 }
-                clearEnclosureRestockTask();
+                if (!stockedForThisSpawner) {
+                    _enclosureStockedFor = stockKey;
+                    clearEnclosureRestockTask();
+                    Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] stock latch set (netherrack="
+                            + netherrackHave + ", spawner=" + _foundBlazeSpawner.toShortString() + ")");
+                }
                 setDebugState("Going to blaze spawner");
                 return new GetToBlockTask(_foundBlazeSpawner.up(), false);
             }
@@ -252,7 +263,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 if (netherrackHave < missingCount) {
                     setDebugState("Restocking netherrack for ceiling (missing " + missingCount
                             + ", have " + netherrackHave + ")");
-                    return getEnclosureRestockTask(mod, missingCount + netherrackHave);
+                    // 目标 = missing (ResourceTask 是"凑够 n 个"语义): 放一块
+                    // have/missing 同减, have≥missing 恒保持, 恰好够用。+have 会
+                    // 过量收集, 且目标每 tick 随 have 变 → 任务反复重建 (123515 复盘)。
+                    return getEnclosureRestockTask(mod, missingCount);
                 }
                 clearEnclosureRestockTask();
                 BlockPos missingCeiling = findMissingCeilingBlock(mod, _foundBlazeSpawner);
@@ -412,6 +426,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
     public static void onWorldBoundary() {
         _confirmedSpawnerByKey.clear();
         _rejectedSpawnerByKey.clear();
+        _enclosureStockedFor = null;
     }
 
     private boolean isValidBlazeSpawner(AltoClef mod, BlockPos pos) {
@@ -473,6 +488,17 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // ------------------------------------------------------------------ //
     private Task _enclosureRestockTask = null;
     private int _enclosureRestockTarget = -1;
+
+    // (2026-09-19 123515 追加) "出发前置 32 已备足"的一次性闩, 记到 存档key@刷怪笼坐标。
+    // 不闩的话路上 baritone 每垫一块脚手架 31<32 就弹回补货 (恰好 32 零余量),
+    // 2s 一轮 Restock↔Going 死循环。换存档 (onWorldBoundary) 自动失效。
+    private static String _enclosureStockedFor = null;
+
+    /** 当前 (存档key @ 已确认刷怪笼) 的备料闩 key; 无刷怪笼返回 null。 */
+    private String enclosureStockKey() {
+        return (_worldKey == null || _foundBlazeSpawner == null)
+                ? null : _worldKey + "@" + _foundBlazeSpawner.toShortString();
+    }
 
     private Task getEnclosureRestockTask(AltoClef mod, int target) {
         if (_enclosureRestockTask == null || target > _enclosureRestockTarget) {
