@@ -101,6 +101,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final int RETURN_CHECK_INTERVAL_S = 10;
     // 围场内烈焰人才打 (刷怪笼中心 4.5 格 ≈ 7x7 围场对角半径)。
     private static final double ENCLOSURE_KILL_RANGE = 4.5;
+    /**
+     * (2026-09-19 20:20 用户"贴脸的烈焰人还是要打, 打远了就不管了继续造墙")
+     * 施工中(spawnerWorkPending)不开农场杀, 但贴脸烈焰人必须紧急处理 ——
+     * MobDefense 施工让位后没人管, bot 会被贴脸烧着还继续放方块。
+     * 口径 = 距 bot 3 格内 (火球这距离已经躲不开, 近战清掉再造)。
+     */
+    private static final double BLAZE_MELEE_EMERGENCY_RANGE = 3.0;
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
     // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
@@ -212,6 +219,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
 
         Optional<Entity> toKill = Optional.empty();
+        // (2026-09-19 20:20) true = 本 tick 选的是【贴脸紧急杀】口径 (距 bot ≤3),
+        // 击杀谓词要跟着用 bot 距离而不是笼心距离, 否则 KillEntitiesTask 追丢。
+        boolean emergencyBlaze = false;
         // If there is a blaze, kill it.
         if (mod.getEntityTracker().entityFound(BlazeEntity.class)) {
 
@@ -230,10 +240,20 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
             // (2026-09-19 13:05 用户) 只打【我们自己围起来的区域】里的烈焰人;
             // 走廊/别的房间里的暂定直接不打 — 追出去打正是摔死事故的根源。
-            if (_foundBlazeSpawner != null && !spawnerWorkPending) {
-                Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
-                toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
-                        .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
+            // (2026-09-19 20:20 用户) 施工中(spawnerWorkPending)不开农场杀,
+            // 但【贴脸】烈焰人(距 bot ≤3)必须紧急杀掉, 打远了就不管继续造墙
+            // —— 施工让位后 MobDefense 不插手, 这里不处理就没人处理。
+            if (_foundBlazeSpawner != null) {
+                if (!spawnerWorkPending) {
+                    Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
+                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
+                            .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
+                } else {
+                    emergencyBlaze = true;
+                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
+                            .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
+                                    && !isHoveringAboveLavaOrTooHigh(mod, b));
+                }
             }
         }
 
@@ -254,9 +274,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     return new DrinkFireResPotionTask();
                 }
             }
-            setDebugState("Killing blaze inside our enclosure");
-            // 击杀谓词限定围场内: KillEntitiesTask 否则会追到走廊里打外面的
-            // 烈焰人 (用户 13:05: 外面的暂定直接不打)。
+            setDebugState(emergencyBlaze
+                    ? "Killing CLOSE-RANGE blaze (emergency, then back to building)"
+                    : "Killing blaze inside our enclosure");
+            // 击杀谓词与选目标口径一致: 农场杀=距笼心 4.5 (限定围场内, 否则会追
+            // 到走廊里打外面的 — 用户 13:05); 贴脸紧急杀=距 bot 3 (bot 站在墙外
+            // 侧时目标可能距笼心 >4.5, 用笼心谓词会追丢)。
+            if (emergencyBlaze) {
+                Vec3d botPos = mod.getPlayer().getPos();
+                return new KillEntitiesTask(entity ->
+                                entity.squaredDistanceTo(botPos) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
+                                        && !isHoveringAboveLavaOrTooHigh(mod, entity),
+                        BlazeEntity.class);
+            }
             Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
             return new KillEntitiesTask(entity ->
                             entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
