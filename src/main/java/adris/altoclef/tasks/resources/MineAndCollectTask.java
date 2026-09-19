@@ -1112,9 +1112,10 @@ public class MineAndCollectTask extends ResourceTask {
             return _blocks.length == 1 && _blocks[0] == Blocks.NETHERRACK;
         }
 
-        // (2026-09-19 15:20 用户"贼远处的地狱岩掉落物太远了") 垫脚补料只追
-        // 这个半径内的掉落物, 更远的直接无视。
-        private static final double SCAFFOLD_DROP_PICKUP_RANGE_SQ = 24 * 24;
+        // (2026-09-19 15:20 用户"贼远处的地狱岩掉落物太远了"; 15:28 用户"24还是大")
+        // 垫脚补料只追这个半径内的掉落物, 更远的直接无视。挖矿掉落本来就落在
+        // 脚下 1~3 格, 8 格已经 covers 掉落弹跳/滚坡, 再远的都是陈旧遗留。
+        private static final double SCAFFOLD_DROP_PICKUP_RANGE_SQ = 8 * 8;
 
         private static boolean scaffoldDropLandsNearby(AltoClef mod, BlockPos p) {
             for (int dy = 1; dy <= 2; dy++) {
