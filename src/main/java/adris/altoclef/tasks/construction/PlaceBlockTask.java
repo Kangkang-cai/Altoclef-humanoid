@@ -8,6 +8,7 @@ import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.schematic.AbstractSchematic;
@@ -93,17 +94,20 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         return count;
     }
 
-    /** (2026-08-23) 可作为 CAST_FRAME 支撑的结构方块: 泥土/圆石/深板岩原石/下界岩。
+    /** (2026-08-23) 可作为 CAST_FRAME 支撑的结构方块。
      *  (2026-08-26 讨论: 沙子/沙砾不能加入 — 重力方块水平搭路(悬空)时无支撑会
-     *  落下去, 桥搭不起来反而更危险。只能用于有下方支撑的填埋场景, 需单独机制。) */
+     *  落下去, 桥搭不起来反而更危险。只能用于有下方支撑的填埋场景, 需单独机制。)
+     *  (2026-09-19 21:20 统一口径) 收编 ScaffoldBlocks 中心清单 (非重力, 同约束)。 */
     private static boolean isStructureMaterial(Item item) {
-        return item == Items.DIRT || item == Items.COBBLESTONE
-                || item == Items.COBBLED_DEEPSLATE || item == Items.NETHERRACK;
+        return ScaffoldBlocks.isScaffoldBlock(item);
     }
 
     public static Task getMaterialTask(int count) {
-        return TaskCatalogue.getSquashedItemTask(new ItemTarget(Items.DIRT, count), new ItemTarget(Items.COBBLESTONE, count),
-                new ItemTarget(Items.COBBLED_DEEPSLATE, count), new ItemTarget(Items.NETHERRACK, count));
+        ItemTarget[] targets = new ItemTarget[ScaffoldBlocks.SAFE_MATERIALS.length];
+        for (int i = 0; i < targets.length; i++) {
+            targets[i] = new ItemTarget(ScaffoldBlocks.SAFE_MATERIALS[i], count);
+        }
+        return TaskCatalogue.getSquashedItemTask(targets);
     }
 
     @Override

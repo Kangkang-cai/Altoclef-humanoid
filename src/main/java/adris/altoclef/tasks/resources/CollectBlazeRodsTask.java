@@ -19,6 +19,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -29,6 +30,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.BlazeEntity;
+import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -306,13 +308,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
         // If we have a blaze spawner, go near it.
         if (_foundBlazeSpawner != null) {
-            int netherrackHave = StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK);
+            // (2026-09-19 21:20 统一口径) 不再只数地狱岩 — 黑石/玄武岩/深板岩
+            // 圆石/哭泣黑曜石等搭路方块一并计入 (ScaffoldBlocks 中心清单),
+            // 否则包里 60 块黑石还跑去补地狱岩。
+            int netherrackHave = ScaffoldBlocks.countInInventory(mod);
 
-            // (2026-09-19 13:05 用户⑥) 围场阶段地狱岩 <32 → 随时补 32 个
+            // (2026-09-19 13:05 用户⑥) 围场阶段搭路方块 <32 → 随时补 32 个
             // (2 组备料用完后的续补口径)。粘性实例: 补货中途 have 渐涨但目标
             // 已固定, 只在目标上调时重建, 防 MineAndCollect 反复重启 (铁律 #3)。
             if (netherrackHave < ENCLOSURE_RESTOCK_TRIGGER) {
-                setDebugState("Restocking netherrack (have " + netherrackHave + ", topup "
+                setDebugState("Restocking scaffold blocks (have " + netherrackHave + ", topup "
                         + ENCLOSURE_RESTOCK_TOPUP + ")");
                 return getEnclosureRestockTask(mod, netherrackHave + ENCLOSURE_RESTOCK_TOPUP);
             }
@@ -940,10 +945,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
         boolean logIt = recreate && target != _enclosureRestockTarget;
         if (recreate) {
             _enclosureRestockTarget = target;
-            _enclosureRestockTask = TaskCatalogue.getItemTask(Items.NETHERRACK, target);
+            // (2026-09-19 21:20 统一口径) 挖什么按维度/存量定: 下界优先地狱岩,
+            // 背包已有黑石/玄武岩就续用同款 (ScaffoldBlocks.preferredRestockItem)。
+            Item restockItem = ScaffoldBlocks.preferredRestockItem(mod);
+            _enclosureRestockTask = TaskCatalogue.getItemTask(restockItem, target);
             if (logIt) {
                 Debug.logMessage("[BLAZE-ENCLOSURE] restock task target=" + target
-                        + " (netherrack now " + StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) + ")");
+                        + " (" + restockItem.toString() + " now " + ScaffoldBlocks.countInInventory(mod) + ")");
             }
         }
         return _enclosureRestockTask;

@@ -7,6 +7,7 @@ import adris.altoclef.tasks.entity.TowerKillEntityTask;
 import adris.altoclef.tasks.misc.EatItemTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.PillarJumpHelper;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
 import net.minecraft.entity.Entity;
@@ -41,10 +42,9 @@ public class TowerEscapeTask extends Task {
 
     public enum Result { RUNNING, SUCCESS, ABORT_THREAT, TIMEOUT }
 
-    // 可放置方块 (与 ShelterAndRecoverTask 同款清单, 不用会下落的沙/沙砾)。
-    private static final Item[] TOWER_ITEMS = new Item[]{
-            Items.DIRT, Items.COBBLESTONE, Items.NETHERRACK, Items.STONE, Items.COBBLED_DEEPSLATE
-    };
+    // 可放置方块 (2026-09-19 21:20 统一口径: 收编 ScaffoldBlocks 中心清单,
+    // 不含会下落的沙/沙砾)。
+    private static final Item[] TOWER_ITEMS = ScaffoldBlocks.SAFE_MATERIALS;
 
     // 用户拍板: 脚下 3 块"悬空方块"(水平四方向无方块) → 近战怪不可能上来。
     private static final int TOWER_HEIGHT = 3;

@@ -8,6 +8,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.trackers.KnowledgeMemory;
 import baritone.api.pathing.goals.Goal;
@@ -946,12 +947,15 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             // 补货实例粘性重派 (sticky), 见 _restockTask 字段注释。
             if (countPlaceableScaffoldBlocks(mod) == 0 && _tickId >= _scaffoldRestockNextTick) {
                 _scaffoldRestockNextTick = _tickId + SCAFFOLD_RESTOCK_COOLDOWN_TICKS;
-                _restockTask = TaskCatalogue.getItemTask(Items.NETHERRACK, SCAFFOLD_RESTOCK_COUNT);
+                // (2026-09-19 21:20 统一口径) 原来固定补地狱岩; 现按维度/存量定点:
+                // 下界=地狱岩→黑石→玄武岩, 主世界=圆石→深板岩圆石 (ScaffoldBlocks)。
+                Item restockItem = ScaffoldBlocks.preferredRestockItem(mod);
+                _restockTask = TaskCatalogue.getItemTask(restockItem, SCAFFOLD_RESTOCK_COUNT);
                 _progress.reset();
                 _currentTarget = null;
                 Debug.logMessage("[FortressExplore] no placeable blocks in inventory, restocking "
-                        + SCAFFOLD_RESTOCK_COUNT + " netherrack first");
-                setDebugState("Out of scaffolding blocks, collecting netherrack");
+                        + SCAFFOLD_RESTOCK_COUNT + " " + restockItem.toString() + " first");
+                setDebugState("Out of scaffolding blocks, collecting " + restockItem.toString());
                 return _restockTask;
             }
             _currentTarget = null;

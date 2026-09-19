@@ -18,6 +18,7 @@ import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.slots.PlayerSlot;
 import adris.altoclef.util.slots.Slot;
 import adris.altoclef.util.time.TimerGame;
@@ -1114,7 +1115,10 @@ public class MineAndCollectTask extends ResourceTask {
         // 罚 1e9 选块距离 (全贴地候选耗尽后仍可兜底, 不硬拒绝)。
         // =========================================================================
         private boolean isScaffoldGroundTarget() {
-            return _blocks.length == 1 && _blocks[0] == Blocks.NETHERRACK;
+            // (2026-09-19 21:20 统一口径) 原来只认地狱岩 — 挖黑石/玄武岩/深板岩
+            // 圆石时近场扩展、8 格掉落物追踪、悬空罚等垫脚优化全部失效。现在认
+            // ScaffoldBlocks 全清单 (单方块目标且属搭路材料)。
+            return _blocks.length == 1 && ScaffoldBlocks.isScaffoldBlock(_blocks[0].asItem());
         }
 
         // (2026-09-19 15:20 用户"贼远处的地狱岩掉落物太远了"; 15:28 用户"24还是大")

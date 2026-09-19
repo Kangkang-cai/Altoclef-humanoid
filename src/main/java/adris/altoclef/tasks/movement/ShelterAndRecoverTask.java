@@ -6,6 +6,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PlaceBlockTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -28,9 +29,9 @@ public class ShelterAndRecoverTask extends Task implements ITaskRequiresGrounded
     private static final Block[] SHELTER_BLOCKS = new Block[]{
             Blocks.DIRT, Blocks.COBBLESTONE, Blocks.NETHERRACK, Blocks.STONE, Blocks.COBBLED_DEEPSLATE
     };
-    private static final Item[] SHELTER_ITEMS = new Item[]{
-            Items.DIRT, Items.COBBLESTONE, Items.NETHERRACK, Items.STONE, Items.COBBLED_DEEPSLATE
-    };
+    // (2026-09-19 21:20 统一口径) 收编 ScaffoldBlocks 中心清单 (原清单缺黑石/
+    // 玄武岩/深板岩本体等 — 避难搭墙时背包有什么用什么)。
+    private static final Item[] SHELTER_ITEMS = ScaffoldBlocks.SAFE_MATERIALS;
 
     private static final int MIN_BLOCKS = 2;
     private static final int BUILD_TIMEOUT_TICKS = 20 * 30;

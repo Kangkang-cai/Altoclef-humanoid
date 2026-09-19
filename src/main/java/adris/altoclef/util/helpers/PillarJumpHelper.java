@@ -35,12 +35,12 @@ public final class PillarJumpHelper {
     private PillarJumpHelper() {
     }
 
-    /** 常规建材 (不受重力, 任意场景可放)。 */
-    public static final Item[] SAFE_MATERIALS = new Item[]{
-            Items.DIRT, Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.NETHERRACK,
-            Items.STONE, Items.DEEPSLATE, Items.TUFF,
-            Items.GRANITE, Items.DIORITE, Items.ANDESITE
-    };
+    /**
+     * 常规建材 (不受重力, 任意场景可放)。
+     * (2026-09-19 21:20 统一口径) 收编到 ScaffoldBlocks.SAFE_MATERIALS ——
+     * 原清单缺黑石/玄武岩/灵魂沙/哭泣黑曜石 (下界搭路常用材料)。
+     */
+    public static final Item[] SAFE_MATERIALS = ScaffoldBlocks.SAFE_MATERIALS;
 
     /**
      * 重力方块。水平搭路会掉, 但**垂直垫塔下方必有支撑不会掉** ——
