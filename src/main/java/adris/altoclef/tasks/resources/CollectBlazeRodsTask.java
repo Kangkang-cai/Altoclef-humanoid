@@ -303,32 +303,33 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (scan at tick "
                             + WorldHelper.getTicks() + ")");
                 }
-                // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域: 有防火药
-                // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 20s 且
-                // 记忆里有别的刷怪笼才换笼。
-                // (2026-09-19 17:50 换笼提速) 检查节奏从搭车 15s 洞检改为独立每
-                // 5s 一次; 且偶发一次"没岩浆"不再清零计时 (原 :321 每次 false 都
-                // 清零, 岩浆时涨时消时阈值永远攒不够 — 171228 实锤 60s 才换笼)。
-                long lavaNowMs = System.currentTimeMillis();
-                if (lavaNowMs - _lavaLastCheckMs >= LAVA_CHECK_INTERVAL_MS) {
-                    _lavaLastCheckMs = lavaNowMs;
-                    if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
-                        _lavaFreeStreak = 0;
-                        if (_lavaTroubleSinceMs == 0) {
-                            _lavaTroubleSinceMs = lavaNowMs;
-                            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
-                        } else if (lavaNowMs - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
-                            trySwitchAwayFromLavaSpawner(mod);
-                            if (_foundBlazeSpawner == null) {
-                                setDebugState("Switching away from lava-flooded spawner");
-                                return _fortressSearcher;
-                            }
+            }
+            // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域: 有防火药
+            // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 20s 且
+            // 记忆里有别的刷怪笼才换笼。
+            // (2026-09-19 17:50 换笼提速) 检查独立每 5s 一次; 偶发一次"没岩浆"
+            // 不再清零计时 (岩浆时涨时消会让阈值永远攒不够 — 171228 实锤 60s)。
+            // (2026-09-19 18:00 修正) 必须放在 15s 洞检门控【外】—— 175617 实锤
+            // 挪在里面 5s 节流形同虚设, 实际节奏还是 15s, 换笼拖到 30s。
+            long lavaNowMs = System.currentTimeMillis();
+            if (lavaNowMs - _lavaLastCheckMs >= LAVA_CHECK_INTERVAL_MS) {
+                _lavaLastCheckMs = lavaNowMs;
+                if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
+                    _lavaFreeStreak = 0;
+                    if (_lavaTroubleSinceMs == 0) {
+                        _lavaTroubleSinceMs = lavaNowMs;
+                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
+                    } else if (lavaNowMs - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
+                        trySwitchAwayFromLavaSpawner(mod);
+                        if (_foundBlazeSpawner == null) {
+                            setDebugState("Switching away from lava-flooded spawner");
+                            return _fortressSearcher;
                         }
-                    } else if (++_lavaFreeStreak >= 2) {
-                        // 连续 2 次(约10s)确认无岩浆才认作岩浆退了, 计时清零重来。
-                        _lavaTroubleSinceMs = 0;
-                        _lavaFreeStreak = 0;
                     }
+                } else if (++_lavaFreeStreak >= 2) {
+                    // 连续 2 次(约10s)确认无岩浆才认作岩浆退了, 计时清零重来。
+                    _lavaTroubleSinceMs = 0;
+                    _lavaFreeStreak = 0;
                 }
             }
             List<BlockPos> missing = _cachedMissingEnclosure;
@@ -628,7 +629,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 16:05 问题三, 用户) 当前刷怪笼持续 45s 有岩浆 → 若记忆里有
+     * (2026-09-19 17:50 提速) 当前刷怪笼持续 20s 有岩浆 → 若记忆里有
      * 别的 (非排除、非岩浆) 刷怪笼候选就切换过去; 没有就留下来继续盖 (墙能挡)。
      */
     private void trySwitchAwayFromLavaSpawner(AltoClef mod) {
@@ -641,12 +642,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 || c.getSquaredDistance(_foundBlazeSpawner) < REJECT_RADIUS * REJECT_RADIUS);
         if (candidates.isEmpty()) {
             Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava persists but no alternative spawner known, keep building");
-            _lavaTroubleSinceMs = System.currentTimeMillis(); // 重置, 45s 后再查
+            _lavaTroubleSinceMs = System.currentTimeMillis(); // 重置, 20s 后再查
             return;
         }
         String key = lavaTroubleKey();
         if (key != null) _lavaTroubleSpawnerKeys.add(key);
-        Debug.logMessage("[BLAZE-ENCLOSURE] spawner lava-troubled (45s+), switching to another known spawner ("
+        Debug.logMessage("[BLAZE-ENCLOSURE] spawner lava-troubled, switching to another known spawner ("
                 + candidates.size() + " candidates)");
         Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] switch away from lava spawner " + _foundBlazeSpawner.toShortString());
         invalidateSpawner(_foundBlazeSpawner, "lava pouring into region, switching away");
