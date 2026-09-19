@@ -1226,7 +1226,12 @@ public class BeatMinecraft2Task extends Task {
         int eyes = StorageHelper.countItemInInventoryReal(mod, Items.ENDER_EYE);
         if (eyes < eyesNeededMin || (!_ranStrongholdLocator && _collectingEyes && eyes < eyesNeeded)) {
             _collectingEyes = true;
-            return getEyesOfEnderTask(mod, eyesNeeded);
+            // (2026-09-19 18:35 用户"老老实实收集8个棒") 收集目标【固定满额
+            // targetEyes=16】, 不再扣减传送门框已插的眼数。原逻辑拿
+            // targetEyes-filledPortalFrames 当收集目标, 把收集和门框状态耦合:
+            // 珍珠/棒/粉目标全部跟着门框浮动 (实测 pearls 14/棒 7), 真人玩家
+            // 根本不会这么算 —— 就按满额收集, 多出来的当余量, 简单可靠。
+            return getEyesOfEnderTask(mod, _config.targetEyes);
         } else {
             _collectingEyes = false;
         }
@@ -2956,18 +2961,16 @@ public class BeatMinecraft2Task extends Task {
             return playerPos;
         }
         // 2) 否则看能不能真的看见一片林子 (远处森林): 走 CollectEnderPearlsInForestTask
-        //    .findVisibleSignal —— 按需采样已加载区块拿候选, 再过全项目统一口径的
-        //    FOV 锥 + LOS 射线。
+        //    .findVisibleSignal —— 与"看见堡垒"同一架构: BlockTracker 缓存查表 →
+        //    FOV 锥 → LOS 射线。
         //
-        //    ⚠ 刻意【不】走 BlockTracker.getNearestPerceivedInView: 它的候选来自
-        //    BlockTracker 缓存, 而缓存里只会有【已 trackBlock 的类型】。诡异森林这
-        //    4 类信号方块一旦注册追踪, trackBlock 首次加入新类型就会 setDirty +
-        //    forceElapse → rescanWorld → baritone MineProcess.searchWorld 对全部已追踪
-        //    方块扫三个维度的所有已加载区块 —— 2026-09-18 22:46 卡死事故
-        //    ("Rescanning world for 15 blocks" 是日志最后一行, 22:47:18 客户端被踢)。
-        //    代价就是"视力恒瞎": 站在林子边缘 (脚下不是 warped_forest 群系) 时完全
-        //    看不见眼前的林子 —— 2026-09-19 17:56 会话正是这样。按需采样绕开了这个
-        //    两难: 不碰追踪集合 (零 rescanWorld 风险), 视线判据又与全项目一致。
+        //    ⚠ 缓存里只会有【已注册追踪】的类型, 而直接 trackBlock 首次加入新类型会
+        //    setDirty + forceElapse → rescanWorld → baritone MineProcess.searchWorld
+        //    对全部已追踪方块扫三个维度的所有已加载区块 —— 2026-09-18 22:46 卡死事故
+        //    就是这么来的。所以 findVisibleSignal 内部走的是 trackBlockQuiet
+        //    (静默注册: 进集合但不当场讨债), 数据由近区 5Hz / 远区 4s 的常规后台扫描
+        //    自然填充; 后台扫描所有类型共用同一遍遍历 (HashSet 判定), 多这 4 类的
+        //    边际成本≈0, 主线程只剩查表 + 几条射线。
         return CollectEnderPearlsInForestTask.findVisibleSignal(
                         mod,
                         mod.getModSettings().getOpportunisticPearlSightRange(),
