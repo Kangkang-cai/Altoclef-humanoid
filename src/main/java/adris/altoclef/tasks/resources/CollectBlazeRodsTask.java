@@ -833,24 +833,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 }
                 BlockPos next = missing.get(0);
 
-                // (2026-09-19 21:50 顶盖死结, 用户现场确认"他站在顶的那个位置上,
-                // 头挡住那个位置, 没法封顶; 其实站在底下就可以放方块")
-                // 214013 实锤: <Place structure{} at 779,80,123> 报 "Standing inside
-                // target cell, no walkable neighbor, wandering" —— bot 把自己站进了
-                // 顶盖最后一个缺口格, 而 PlaceBlockTask.pickStepOutPos 只往【水平】
-                // 四向找落脚点, 那四格全是它刚放好的顶盖 (isSolid) → 返回 null →
-                // 只能原地 wander (走不出去) → 10s stall 轮转队尾 → 15s 重扫又报
-                // 同一格, "1 missing" 永远补不上。
-                // 修法: 目标是顶盖层 (y+3) 且 bot 已在顶盖高度及以上 → 先降回围场
-                // 内部 (站在刷新笼旁的地面上), 从下方贴面放置。用户实测这位置放得下。
-                if (next.getY() >= _foundBlazeSpawner.getY() + SPAWNER_ROOF_HEIGHT
-                        && mod.getPlayer().getBlockPos().getY() >= next.getY()) {
-                    setDebugState("Dropping down to build roof from below");
-                    return new GetToBlockTask(_foundBlazeSpawner.up(), false);
-                }
-
                 // (2026-09-19 16:22) 自上向下优先, 但暂无贴面放不了时不死等:
-                // 同一目标超 BUILD_TARGET_STALL_MS 就轮到队尾。
+                // 同一目标超 BUILD_TARGET_STALL_MS 就轮到队尾。必须先于下面的顶盖
+                // 站位前置 —— 否则"下不去"时前置会每 tick 重发同一个 GetToBlockTask,
+                // 永远走不到 stall 兜底 (死等)。
                 long nowMs = System.currentTimeMillis();
                 if (!next.equals(_currentBuildTarget)) {
                     _currentBuildTarget = next;
@@ -867,6 +853,24 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     _beatAction = pickBeatAction(mod, missing);
                     return null;
                 }
+
+                // (2026-09-19 21:50 顶盖死结, 用户现场确认"他站在顶的那个位置上,
+                // 头挡住那个位置, 没法封顶; 其实站在底下就可以放方块")
+                // 214013 实锤: <Place structure{} at 779,80,123> 报 "Standing inside
+                // target cell, no walkable neighbor, wandering" —— bot 把自己站进了
+                // 顶盖最后一个缺口格, 而 PlaceBlockTask.pickStepOutPos 只往【水平】
+                // 四向找落脚点, 那四格全是它刚放好的顶盖 (isSolid) → 返回 null →
+                // 只能原地 wander (走不出去) → 10s stall 轮转队尾 → 15s 重扫又报
+                // 同一格, "1 missing" 永远补不上。
+                // 修法: 目标是顶盖层 (y+3) 且 bot 已在顶盖高度及以上 → 先降回围场
+                // 内部 (站在刷新笼旁的地面上), 从下方贴面放置。用户实测这位置放得下。
+                // 10s 内下不去由上面的 stall 兜底轮转, 不会死等。
+                if (next.getY() >= _foundBlazeSpawner.getY() + SPAWNER_ROOF_HEIGHT
+                        && mod.getPlayer().getBlockPos().getY() >= next.getY()) {
+                    setDebugState("Dropping down to build roof from below");
+                    return new GetToBlockTask(_foundBlazeSpawner.up(), false);
+                }
+
                 setDebugState("Building enclosure: " + missing.size() + " missing, next " + next.toShortString());
                 return new PlaceStructureBlockTask(next);
             }
