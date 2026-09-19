@@ -840,6 +840,10 @@ public class StorageHelper {
                 Items.GOLD_INGOT, Items.IRON_INGOT,
                 Items.FLINT_AND_STEEL, Items.FIRE_CHARGE,
                 Items.SHIELD,
+                // (2026-09-19 18:55 用户"bot 意外把药水丢了") 药水保命物资不参与
+                // 兜底随机丢 — 与 ItemHelper.canThrowAwayStack 的 PotionItem 保护
+                // 同口径 (183919 会话: 满包腾位把防火药水扔了, 下界裸奔)。
+                Items.POTION, Items.SPLASH_POTION, Items.LINGERING_POTION,
                 // (2026-08-31 用户"做完木棍把木棍丢出来/背包很空") 木棍是合成基础
                 // 材料(工具/火把/床等都要), 刚合成/待用的木棍绝不能被"满包随机丢"
                 // 当垃圾扔掉。加到永不随机丢清单。

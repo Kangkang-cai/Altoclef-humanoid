@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.movement.*;
+import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.control.KillAura;
@@ -537,6 +538,23 @@ public class MobDefenseChain extends SingleTaskChain {
         if (!retreat && endermanCount == 0 && mod.getPlayer().getHealth() <= LOW_HEALTH_FORCE_RETREAT) {
             retreat = true;
         }
+        // (2026-09-19 18:55 用户"有药水效果还逃跑应该避免"/"墙完工坚守到8分钟") 安全
+        // 屋豁免: 威胁只有烈焰人时 (火伤被防火效果免疫 / 被围场墙挡), 人在自己的完工
+        // 围场里不撤 —— 留在墙里打到收药冷却到点, 由 CollectBlazeRodsTask 主动出去收药。
+        // 低血量硬闸同样豁免: 墙内撤退只会把自己暴露在更多火球下。骷髅/苦力怕/猪灵
+        // 围殴/末影人×2 等其他威胁照旧撤 (safeHaven 口径见 CollectBlazeRodsTask)。
+        boolean safeHavenHold = false;
+        if (retreat && !anyCreeper && bruteCount == 0 && piglinSwarm <= 2
+                && meleeCount < RETREAT_MELEE_THRESHOLD && endermanCount < 2
+                && CollectBlazeRodsTask.isEnclosureSafeHaven(mod)) {
+            boolean allRangedBlaze = hostiles.stream()
+                    .filter(h -> h != null && h.isAlive() && isRangedThreat(h))
+                    .allMatch(h -> h instanceof BlazeEntity);
+            if (allRangedBlaze) {
+                retreat = false;
+                safeHavenHold = true;
+            }
+        }
         long nowMs = System.currentTimeMillis();
         if (nowMs - _lastRetreatDecLogMs > 500) {
             _lastRetreatDecLogMs = nowMs;
@@ -547,6 +565,7 @@ public class MobDefenseChain extends SingleTaskChain {
                     + " isRanged=" + anyRanged
                     + " isCreeper=" + anyCreeper
                     + " health=" + String.format("%.1f", mod.getPlayer().getHealth())
+                    + " safeHavenHold=" + safeHavenHold
                     + " decide=" + (retreat ? "retreat" : "fight");
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);

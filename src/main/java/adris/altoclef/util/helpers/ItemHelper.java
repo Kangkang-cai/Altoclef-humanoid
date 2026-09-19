@@ -12,6 +12,7 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.item.PotionItem;
 import net.minecraft.potion.PotionUtil;
 import net.minecraft.potion.Potions;
 import net.minecraft.tag.BlockTags;
@@ -552,6 +553,13 @@ public class ItemHelper {
         Item item = stack.getItem();
         if (item == Items.WATER_BUCKET || item == Items.LAVA_BUCKET
                 || item == Items.BUCKET || item == Items.SHIELD) {
+            return false;
+        }
+        // (2026-09-19 18:55 用户"bot 意外把药水丢了") 药水(饮用/喷溅/滞留)绝不能丢:
+        // 183919 会话实锤 —— 背包满(393 食物)时 EnsureFreeInventorySlotTask 腾位,
+        // 药水进了光标被 ThrowCursorTask 点窗口外(slot=-999)扔掉, 下界打烈焰人
+        // 直接裸奔。药水=保命物资, 与水桶/盾牌同级, 主垃圾路径在此统一堵上。
+        if (item instanceof PotionItem) {
             return false;
         }
         // (2026-09-02 木棍主路径保护, 用户"做铁镐前把木棍当垃圾丢了→没木棍卡住")

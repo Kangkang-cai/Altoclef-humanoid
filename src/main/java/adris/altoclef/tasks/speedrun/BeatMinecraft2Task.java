@@ -593,7 +593,8 @@ public class BeatMinecraft2Task extends Task {
     // 闩 — 本实例内一旦结束 (达标或超时) 就不再进本阶段, 之后喝掉 1~2 瓶
     // (库存跌回 < 2) 也不会重新触发药水任务, 由喝药门槛 (CollectBlazeRodsTask)
     // 决定要不要花。
-    private static final int FIRE_RES_POTION_TARGET = 2;
+    // (2026-09-19 18:55 改 public) CollectBlazeRodsTask 断药转收药时引用同一目标数。
+    public static final int FIRE_RES_POTION_TARGET = 2;
     private boolean _fireResPhaseActive = false;
     private boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(45 * 60);
@@ -616,6 +617,14 @@ public class BeatMinecraft2Task extends Task {
     // 同样必须 static: 实例重建会洗掉"刚喝完药"这个事实。
     private static final long FIRE_RES_DRINK_REOPEN_COOLDOWN_MS = 8 * 60_000;
     private static int _lastSeenFireResPotions = -1;
+
+    /**
+     * (2026-09-19 18:55 用户三条特殊规则) 收药冷却到期时刻, 供 CollectBlazeRodsTask /
+     * MobDefenseChain 查询: 墙已完工且冷却未到 → 在墙里坚守开打; 到点 → 出墙收药。
+     */
+    public static long getFireResReopenAtMs() {
+        return _fireResReopenAtMs;
+    }
 
     // (2026-09-09 进下界前排空熔炉, 用户"把烧金子挪到进传送门之前") 进下界前若
     // 16 格内有非空熔炉 (input/fuel/output 任一有物), 先 EmptyFurnaceTask 取尽

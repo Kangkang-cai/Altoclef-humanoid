@@ -10,6 +10,7 @@ import adris.altoclef.tasks.construction.PlaceStructureBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.SearchChunkForBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -159,6 +160,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _recallTimer.reset();
         // (2026-09-19 13:05) 实例重建 → 围场缓存清零, 到场后立即重扫一次。
         _cachedMissingEnclosure = null;
+        // (2026-09-19 18:55) 完工标志同步作废, 到场重扫后再确立 (断药坚守判定依据)。
+        _enclosureCompleteFlag = false;
         _holeCheckTimer.reset();
         _returnCheckTimer.reset();
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
@@ -195,13 +198,30 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // 半路去追打飘在空中的烈焰人正是 0919 摔死事故的根源, 先把围场立起来。
         boolean spawnerWorkPending = isSpawnerWorkPending(mod);
 
+        // (2026-09-19 18:55 用户三条特殊规则) 无防火效果且背包无药水时:
+        //  ① 墙未完工 → 停止造墙, 转去获得药水 (不裸奔硬撑);
+        //  ② 墙已完工且 8 分钟收药冷却未到 → 留在墙里继续打 (不逃);
+        //  ③ 冷却到点 → 出墙去收药。
+        // 判定放在最顶上 (战斗/逃跑逻辑之前), 统一接管两个场景。
+        if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                && ItemHelper.countFireResPotions(mod) == 0
+                && shouldAbandonForPotions()) {
+            _enclosureBuildActive = false;
+            setDebugState("No fire res effect & no potions -> getting potions");
+            return new CollectFireResPotionsTask(BeatMinecraft2Task.FIRE_RES_POTION_TARGET);
+        }
+
         Optional<Entity> toKill = Optional.empty();
         // If there is a blaze, kill it.
         if (mod.getEntityTracker().entityFound(BlazeEntity.class)) {
 
             // (2026-09-19 用户) 有防火效果时不逃跑 — 火球的火焰伤害被完全免疫,
             // 剩下的只有轻微碰撞伤害, 贴身近战收割才是正解。
+            // (2026-09-19 18:55) 补两个豁免: ①包里有药 → 先喝药不逃 (跑是浪费药);
+            // ②完工围场内(安全屋) → 坚守到收药冷却到点, 不逃。
             if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                    && ItemHelper.countFireResPotions(mod) == 0
+                    && !isEnclosureSafeHaven(mod)
                     && mod.getEntityTracker().getTrackedEntities(BlazeEntity.class).size() >= TOO_MANY_BLAZES
                     && mod.getPlayer().getHealth() <= TOO_LITTLE_HEALTH_BLAZE) {
                 setDebugState("Running away as there are too many blazes nearby.");
@@ -308,6 +328,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
             if (_holeCheckTimer.elapsed() || _cachedMissingEnclosure == null) {
                 _holeCheckTimer.reset();
                 _cachedMissingEnclosure = findMissingEnclosureBlocks(mod, _foundBlazeSpawner);
+                // (2026-09-19 18:55) 完工标志同步刷新 (断药坚守/收药切换的判定依据)。
+                _enclosureCompleteFlag = _cachedMissingEnclosure.isEmpty();
                 if (_cachedMissingEnclosure.isEmpty()) {
                     Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] enclosure complete (scan at tick "
                             + WorldHelper.getTicks() + ")");
@@ -532,6 +554,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         if (_worldKey != null) {
             _confirmedSpawnerByKey.remove(_worldKey, pos);
         }
+        // (2026-09-19 18:55) 笼失效 = 安全屋/完工标志同步作废。
+        _enclosureCompleteFlag = false;
         // (2026-09-19 17:20) 保护【不】随失效清除 —— 换笼后 bot 还在旧笼边上
         // 补货, 保护若立刻解除, 近场链挖会把刚搭好的墙当最近下界岩挖掉 (171228
         // 实锤: 换笼后 restock 挖掉自己围场的整圈墙)。保护一直持续到新刷怪笼
@@ -761,6 +785,45 @@ public class CollectBlazeRodsTask extends ResourceTask {
         int dx = pos.getX() - _foundBlazeSpawner.getX();
         int dz = pos.getZ() - _foundBlazeSpawner.getZ();
         return Math.abs(dx) <= SPAWNER_WALL_HALF && Math.abs(dz) <= SPAWNER_WALL_HALF;
+    }
+
+    // ------------------------------------------------------------------ //
+    // (2026-09-19 18:55 用户三条特殊规则) 断药场景: 收药 / 墙内坚守
+    // ------------------------------------------------------------------ //
+
+    /** 当前确认笼的围场是否已完工 (每次 15s 洞检刷新; 换笼/失效即 false)。 */
+    private static volatile boolean _enclosureCompleteFlag = false;
+
+    /**
+     * (2026-09-19 18:55 用户) 断药 (无效果且无药水) 时是否该放弃当前动作去收药:
+     * ① 没有确立的笼 / 围场未完工 → true (规则①, 停止造墙去收药);
+     * ② 围场完工 → 收药冷却 (8 分钟) 到点才 true (规则③), 未到点留在墙里打 (规则②)。
+     */
+    private boolean shouldAbandonForPotions() {
+        if (_protectedSpawnerPos == null || !_enclosureCompleteFlag) return true;
+        return System.currentTimeMillis() >= BeatMinecraft2Task.getFireResReopenAtMs();
+    }
+
+    /** 静态口径的"人在围场内" (供安全屋判定, 不依赖实例的 _foundBlazeSpawner)。 */
+    private static boolean isInsideProtectedEnclosure(BlockPos pos) {
+        BlockPos s = _protectedSpawnerPos;
+        if (s == null || pos == null) return false;
+        return Math.abs(pos.getX() - s.getX()) <= SPAWNER_WALL_HALF
+                && Math.abs(pos.getZ() - s.getZ()) <= SPAWNER_WALL_HALF;
+    }
+
+    /**
+     * (2026-09-19 18:55 用户"有药水效果还逃跑应该避免") 完工围场 = 安全屋:
+     * 人在自己盖好的 7x7 围场里, 且 (有防火效果 或 8 分钟收药冷却未到) →
+     * MobDefenseChain 对纯烈焰人威胁不撤退, 留在墙里打到冷却到点。
+     * 换笼/失效/离开围场自动失效。
+     */
+    public static boolean isEnclosureSafeHaven(AltoClef mod) {
+        if (mod == null || mod.getPlayer() == null) return false;
+        if (_protectedSpawnerPos == null || !_enclosureCompleteFlag) return false;
+        if (!isInsideProtectedEnclosure(mod.getPlayer().getBlockPos())) return false;
+        return mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                || System.currentTimeMillis() < BeatMinecraft2Task.getFireResReopenAtMs();
     }
 
     // ------------------------------------------------------------------ //
