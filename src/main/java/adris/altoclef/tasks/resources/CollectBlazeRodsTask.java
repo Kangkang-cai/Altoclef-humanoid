@@ -219,44 +219,57 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
         // If we have a blaze spawner, go near it.
         if (_foundBlazeSpawner != null) {
-            // (2026-09-19 包围策略①) 出发前背包至少 32 地狱岩 (封顶 5x5=25 格 +
-            // 余量), 不够先挖 — 到了现场再下矿等于裸奔。用真实背包计数, 不吃缓存。
-            if (StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) < ENCLOSURE_NETHERRACK_MIN) {
-                setDebugState("Restocking " + ENCLOSURE_NETHERRACK_MIN + " netherrack for spawner enclosure");
-                return TaskCatalogue.getItemTask(Items.NETHERRACK, ENCLOSURE_NETHERRACK_MIN);
-            }
-            if (!_foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4)) {
+            boolean arrived = _foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4);
+            int netherrackHave = StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK);
+            if (!arrived) {
+                // (2026-09-19 包围策略①, 用户) 出发前置: 背包至少 32 地狱岩
+                // (封顶 5x5=25 格 + 余量), 不够先挖满 — 到了现场再下矿等于裸奔。
+                if (netherrackHave < ENCLOSURE_NETHERRACK_MIN) {
+                    setDebugState("Restocking " + ENCLOSURE_NETHERRACK_MIN + " netherrack for spawner enclosure");
+                    return getEnclosureRestockTask(mod, ENCLOSURE_NETHERRACK_MIN);
+                }
+                clearEnclosureRestockTask();
                 setDebugState("Going to blaze spawner");
                 return new GetToBlockTask(_foundBlazeSpawner.up(), false);
-            } else {
-
-                // (2026-09-19 包围策略②, 用户) 到达刷怪笼先喝药水。包里没药不卡
-                // 在这一步 (防火效果本身不是封顶的硬前置, 硬等会死循环)。
-                if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
-                        && ItemHelper.countFireResPotions(mod) > 0) {
-                    setDebugState("Drinking fire resistance at spawner (before enclosure)");
-                    return new DrinkFireResPotionTask();
-                }
-
-                // (2026-09-19 包围策略③) 封顶: 刷怪笼上方两格高度 5x5, 缺哪补哪。
-                // 封死烈焰人往上飞出去的路, 之后在罩子里近战收割, 不再搭路追打。
-                BlockPos missingCeiling = findMissingCeilingBlock(mod, _foundBlazeSpawner);
-                if (missingCeiling != null) {
-                    setDebugState("Enclosing spawner: ceiling 5x5 at +"
-                            + SPAWNER_CEILING_HEIGHT + ", missing " + missingCeiling.toShortString());
-                    return new PlaceStructureBlockTask(missingCeiling);
-                }
-
-                // Put out fire that might mess with us.
-                Optional<BlockPos> nearestFire = mod.getBlockTracker().getNearestWithinRange(_foundBlazeSpawner, 5, Blocks.FIRE);
-                if (nearestFire.isPresent()) {
-                    setDebugState("Clearing fire around spawner to prevent loss of blaze rods.");
-                    return new PutOutFireTask(nearestFire.get());
-                }
-
-                setDebugState("Waiting near blaze spawner for blazes to spawn");
-                return null;
             }
+
+            // (2026-09-19 包围策略②, 用户) 到达刷怪笼先喝药水。包里没药不卡
+            // 在这一步 (防火效果本身不是封顶的硬前置, 硬等会死循环)。
+            if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                    && ItemHelper.countFireResPotions(mod) > 0) {
+                setDebugState("Drinking fire resistance at spawner (before enclosure)");
+                return new DrinkFireResPotionTask();
+            }
+
+            // (2026-09-19 包围策略③) 封顶: 刷怪笼上方两格高度 5x5, 缺哪补哪。
+            // 封死烈焰人往上飞出去的路, 之后在罩子里近战收割, 不再搭路追打。
+            // (2026-09-19 卡死修复 120616) 封顶中途缺料只补【剩余缺口】—— 旧的
+            // "任何时候 <32 就中断去补满 32" 把封顶打到一半拆去补货 (放掉几块就
+            // 31<32), 补货又追一个洞沿掉落物死循环 5 分钟 (20260919-120616 实锤)。
+            // 32 只是出发前置, 不是封顶全程的库存红线。
+            int missingCount = countMissingCeilingBlocks(mod, _foundBlazeSpawner);
+            if (missingCount > 0) {
+                if (netherrackHave < missingCount) {
+                    setDebugState("Restocking netherrack for ceiling (missing " + missingCount
+                            + ", have " + netherrackHave + ")");
+                    return getEnclosureRestockTask(mod, missingCount + netherrackHave);
+                }
+                clearEnclosureRestockTask();
+                BlockPos missingCeiling = findMissingCeilingBlock(mod, _foundBlazeSpawner);
+                setDebugState("Enclosing spawner: ceiling 5x5 at +"
+                        + SPAWNER_CEILING_HEIGHT + ", missing " + missingCeiling.toShortString());
+                return new PlaceStructureBlockTask(missingCeiling);
+            }
+
+            // Put out fire that might mess with us.
+            Optional<BlockPos> nearestFire = mod.getBlockTracker().getNearestWithinRange(_foundBlazeSpawner, 5, Blocks.FIRE);
+            if (nearestFire.isPresent()) {
+                setDebugState("Clearing fire around spawner to prevent loss of blaze rods.");
+                return new PutOutFireTask(nearestFire.get());
+            }
+
+            setDebugState("Waiting near blaze spawner for blazes to spawn");
+            return null;
         } else {
             // Search for blaze
             // (2026-09-04 人类式感知) 原来 getKnownLocations(SPAWNER) 绕过了
@@ -441,9 +454,45 @@ public class CollectBlazeRodsTask extends ResourceTask {
         return null;
     }
 
+    /** 封顶层还缺几块 (5x5 里非实体方块的格数)。 */
+    private int countMissingCeilingBlocks(AltoClef mod, BlockPos spawner) {
+        BlockPos layer = spawner.up(SPAWNER_CEILING_HEIGHT);
+        int missing = 0;
+        for (int dx = -SPAWNER_CEILING_HALF; dx <= SPAWNER_CEILING_HALF; dx++) {
+            for (int dz = -SPAWNER_CEILING_HALF; dz <= SPAWNER_CEILING_HALF; dz++) {
+                if (!WorldHelper.isSolid(mod, layer.add(dx, 0, dz))) missing++;
+            }
+        }
+        return missing;
+    }
+
+    // ------------------------------------------------------------------ //
+    // (2026-09-19 卡死修复 120616) 包围补货任务粘性。父任务每 tick 重估子任务,
+    // 每 tick new 一个 MineAndCollect 会反复重启寻路/追踪 (铁律 #3 同款);
+    // 这里复用实例, 只在目标上调时重建, 缺料解决后由调用方 clear。
+    // ------------------------------------------------------------------ //
+    private Task _enclosureRestockTask = null;
+    private int _enclosureRestockTarget = -1;
+
+    private Task getEnclosureRestockTask(AltoClef mod, int target) {
+        if (_enclosureRestockTask == null || target > _enclosureRestockTarget) {
+            _enclosureRestockTarget = target;
+            _enclosureRestockTask = TaskCatalogue.getItemTask(Items.NETHERRACK, target);
+            Debug.logMessage("[BLAZE-ENCLOSURE] restock task target=" + target
+                    + " (netherrack now " + StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) + ")");
+        }
+        return _enclosureRestockTask;
+    }
+
+    private void clearEnclosureRestockTask() {
+        _enclosureRestockTask = null;
+        _enclosureRestockTarget = -1;
+    }
+
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
         mod.getBlockTracker().stopTracking(Blocks.SPAWNER);
+        clearEnclosureRestockTask();
     }
 
     @Override

@@ -318,6 +318,18 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         // 卡住, 眼睛在下方洞里)。水面场景由上面的 isTouchingWater 分支 + 
         // DiveToGrabItemTask 下潜处理, 这里只管"落地/在洞穴/在树顶"等陆地情况。
         if (obj.isOnGround()) {
+            BlockPos ib = obj.getBlockPos();
+            // (2026-09-19 洞沿掉落物) 物品"落地"但其坐标列下方 2 格内无实心 —
+            // 卡在洞沿/方块棱边上 (支撑在邻列, 坐标列读空气) → GoalBlock 站不
+            // 进去, baritone active-stale 每 4s 强制重寻路 + 触发全图重扫, bot
+            // 永远到不了 (20260919-120616 实锤: 地狱岩补货追 (776,65,128) 5 分
+            // 钟, 玩家距物品 0.6 格就是不吸)。改为导航到 ±1 邻列中【物品同高
+            // 可站】的格子, 贴身 0.5~0.9 格即可吸起。找不到可站邻列才退回实体
+            // 精确位置 (旧行为)。
+            if (!WorldHelper.isSolid(mod, ib.down()) && !WorldHelper.isSolid(mod, ib.down(2))) {
+                Vec3d stand = findStandableNeighbor(mod, ib);
+                if (stand != null) return stand;
+            }
             return obj.getPos();
         }
         // (2026-08-25 用户实测: 捡末影之眼导航到"天空") 掉落物还在空中/半空下落
@@ -336,6 +348,32 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             return obj.getPos().subtract(0,1,0);
         }
         return obj.getPos();
+    }
+
+    /**
+     * (2026-09-19 洞沿掉落物) 物品坐标列不可站立时, 找 ±1 邻列中"同高度可站"
+     * (本列与上列非实心 + 下方实心) 且离物品最近的格子中心; 找不到返回 null。
+     */
+    private Vec3d findStandableNeighbor(AltoClef mod, BlockPos itemPos) {
+        Vec3d itemCenter = new Vec3d(itemPos.getX() + 0.5, itemPos.getY() + 0.5, itemPos.getZ() + 0.5);
+        Vec3d best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                BlockPos p = new BlockPos(itemPos.getX() + dx, itemPos.getY(), itemPos.getZ() + dz);
+                if (!mod.getChunkTracker().isChunkLoaded(p)) continue;
+                if (WorldHelper.isSolid(mod, p) || WorldHelper.isSolid(mod, p.up())) continue;
+                if (!WorldHelper.isSolid(mod, p.down())) continue;
+                Vec3d c = new Vec3d(p.getX() + 0.5, p.getY(), p.getZ() + 0.5);
+                double sq = c.squaredDistanceTo(itemCenter);
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    best = c;
+                }
+            }
+        }
+        return best;
     }
 
     @Override
