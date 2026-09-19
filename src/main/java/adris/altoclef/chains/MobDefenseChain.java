@@ -609,6 +609,31 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
+     * (2026-09-19 20:10 用户"造墙任务被 Staying committed 抢了, 一直打不造墙")
+     * 围场施工让位: CollectBlazeRodsTask 正在造围墙 ({@code _enclosureBuildActive})
+     * 且附近敌对怪【全是】烈焰人时, 防御链对烈焰人整体让位 —— 它自有一套施工期
+     * 语义 (到笼先喝药 :319 / 围场内限定击杀 / 断药转收药 / 血量低逃跑兜底),
+     * 防御链的 FIGHT(prio 65) / RETREAT(prio 80) 一插手优先级都高于造墙所在的
+     * 用户任务, 而刷怪笼持续出怪 → FIGHT 批次永远吸收新怪清不完 → 造墙饿死
+     * (195218 实锤: 20:02:33 进 FIGHT 后一直在 Killing blaze, 墙卡在 10 缺块)。
+     * 只要有任何非烈焰人敌对怪 (骷髅/苦力怕/猪灵等) 在场 → 不让位, 照常处理。
+     */
+    private boolean shouldYieldBlazesToEnclosureBuild(AltoClef mod) {
+        if (!CollectBlazeRodsTask.isEnclosureBuildWorkActive()) return false;
+        List<Entity> hostiles;
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            hostiles = mod.getEntityTracker().getHostiles();
+        }
+        boolean anyHostile = false;
+        for (Entity h : hostiles) {
+            if (h == null || !h.isAlive()) continue;
+            if (!(h instanceof BlazeEntity)) return false;
+            anyHostile = true;
+        }
+        return anyHostile;
+    }
+
+    /**
      * (2026-08-23) 尝试自信战斗: 条件满足则提交 FIGHT 批次 (16 格内全部
      * 存活怪), 返回 true。调用方直接 return 65。
      */
@@ -790,7 +815,11 @@ public class MobDefenseChain extends SingleTaskChain {
             List<Entity> toDealWith = new ArrayList<>();
 
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+                // (2026-09-19 20:10 造墙施工让位) 施工中且威胁全是烈焰人 → 烈焰人
+                // 不进击杀清单, 交给 CollectBlazeRodsTask 自己处理, 防御链不插手。
+                boolean yieldBlazes = shouldYieldBlazesToEnclosureBuild(mod);
                 for (Entity hostile : hostiles) {
+                    if (yieldBlazes && hostile instanceof BlazeEntity) continue;
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
                     int annoyingRange = hostile instanceof SkeletonEntity
                             ? SKELETON_KILL_TRIGGER_RANGE
@@ -959,10 +988,24 @@ public class MobDefenseChain extends SingleTaskChain {
         // 2. Absorb hostiles that joined the fight (集中击杀: since we're
         // already fighting here, finish the newcomers too instead of letting
         // them chip away at us while we path back to the user task).
+        // (2026-09-19 20:10 造墙施工让位) 施工中且威胁全是烈焰人 → 既不吸收新
+        // 烈焰人, 已提交批次若也全是烈焰人就立即交还控制 —— 刷怪笼持续出怪会
+        // 让批次永远清不完, 造墙饿死 (195218 实锤)。
+        boolean yieldBlazes = shouldYieldBlazesToEnclosureBuild(mod);
+        if (yieldBlazes) {
+            boolean onlyBlazes = _fightTargets.stream().allMatch(t -> t instanceof BlazeEntity);
+            if (onlyBlazes) {
+                Debug.logMessage("Combat finished: yielding blaze-only batch back to enclosure build.");
+                exitFightState();
+                _defenseState = DefenseState.EVALUATE;
+                return 0;
+            }
+        }
         if (mod.getModSettings().shouldDealWithAnnoyingHostiles()) {
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
                 for (Entity hostile : mod.getEntityTracker().getHostiles()) {
                     if (_fightTargets.contains(hostile)) continue;
+                    if (yieldBlazes && hostile instanceof BlazeEntity) continue;
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
                     int annoyingRange = hostile instanceof SkeletonEntity
                             ? SKELETON_KILL_TRIGGER_RANGE
@@ -1896,9 +1939,13 @@ public class MobDefenseChain extends SingleTaskChain {
             try {
                 ClientPlayerEntity player = mod.getPlayer();
                 List<Entity> hostiles = mod.getEntityTracker().getHostiles();
+                // (2026-09-19 20:10 造墙施工让位) 施工中且威胁全是烈焰人 → 烈焰人
+                // 不算"危险", 防 RETREAT(prio 80) 也把造墙抢掉 (195218 实锤 20:01:44)。
+                boolean yieldBlazes = shouldYieldBlazesToEnclosureBuild(mod);
                 for (Entity entity : hostiles) {
                     // Ignore skeletons
                     if (entity instanceof SkeletonEntity) continue;
+                    if (yieldBlazes && entity instanceof BlazeEntity) continue;
                     if (entity.isInRange(player, SAFE_KEEP_DISTANCE) && !mod.getBehaviour().shouldExcludeFromForcefield(entity) && EntityHelper.isAngryAtPlayer(mod, entity)) {
                         return true;
                     }
