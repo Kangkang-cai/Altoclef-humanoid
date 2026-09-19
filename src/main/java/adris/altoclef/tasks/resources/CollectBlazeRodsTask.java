@@ -117,6 +117,15 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * (自己砌的墙挡住自己的视线 → 感知不到 → 不打 → 等)。所以不靠收紧阈值解决。
      */
     private static final double BLAZE_MELEE_EMERGENCY_RANGE = 3.0;
+    /**
+     * (2026-09-19 22:51 用户"烈焰人就在脸上 3 格左右距离"+"你的改法治标不治本")
+     * 贴脸目标的【释放】距离 = 双阈值迟滞的另一半: 进 3 格锁定后, 保持到 死 /
+     * 飘出 6 格 / 施工结束。3.0 是硬边界, 3.1 格就漏 —— 用户看到的"3 格左右"
+     * 正好卡在边界上, 表现就是"一会儿打、一会儿干等"。
+     */
+    private static final double BLAZE_MELEE_STICKY_RELEASE = 6.0;
+    /** 当前锁定的贴脸目标 (见 {@link #pickMeleeByStickyTarget})。 */
+    private BlazeEntity _meleeTarget = null;
     /** (2026-09-19 22:47) 感知盲区诊断日志节流 (30s 一条, 供实跑核对根因)。 */
     private long _lastPerceptDiagMs = 0;
 
@@ -240,24 +249,68 @@ public class CollectBlazeRodsTask extends ResourceTask {
         return mod.getWorld().getEntitiesByClass(BlazeEntity.class, box, Entity::isAlive);
     }
 
-    /**
-     * 候选里距 ref 最近、且在 range 内的烈焰人; 无则 empty。
-     * {@code requireGrounded=true} 时额外排除"悬在岩浆上方/下方 23 格无实体地面"的
-     * (贴脸紧急杀的老口径: 打不到还追出去会摔)。
-     */
-    private Optional<Entity> closestBlazeWithin(AltoClef mod, List<BlazeEntity> candidates,
-                                                Vec3d ref, double range, boolean requireGrounded) {
+    /** 候选里距 ref 最近、且在 range 内的烈焰人; 无则 empty (农场杀用)。 */
+    private Optional<Entity> closestBlazeWithin(List<BlazeEntity> candidates, Vec3d ref, double range) {
         BlazeEntity best = null;
         double bestSq = range * range;
         for (BlazeEntity b : candidates) {
             if (b == null || !b.isAlive()) continue;
             double sq = b.squaredDistanceTo(ref);
             if (sq > bestSq) continue;
-            if (requireGrounded && isHoveringAboveLavaOrTooHigh(mod, b)) continue;
             bestSq = sq;
             best = b;
         }
         return Optional.ofNullable(best);
+    }
+
+    /**
+     * (2026-09-19 22:51 用户"烈焰人就在脸上 3 格左右距离"，"你的改法治标不治本")
+     * 贴脸击杀的目标选取。三处都是"别漏掉脸上的目标":
+     *
+     *  ① **触发不看感知**: 直接查 bot 周围 {@link #BLAZE_MELEE_EMERGENCY_RANGE} 格内的
+     *     世界实体, 不走 entityTracker。原路径要求"看得见/听得见", 而 bot 砌墙时面朝
+     *     墙、背后贴脸的烈焰人可能落在感知闸门之外 (FOV 例外只有 6 格内, 3 格本不该
+     *     被朝向挡住, 但没必要赌这个 —— 贴脸本来就不需要"看见"才算数)。
+     *  ② **不再要求"非悬浮岩浆上方"**: 下界堡垒是**悬空**的, 贴脸烈焰人常年悬在半空
+     *     (下方 23 格无实体地面 / 下面是岩浆海) → 老判据 `isHoveringAboveLavaOrTooHigh`
+     *     直接把它过滤掉 → **"就在脸上却不打"**。该判据的初衷是"打不到还追出去会摔",
+     *     而 3 格内不存在追出去的问题, 贴脸必须先清掉。
+     *  ③ **双阈值迟滞**: 一旦锁定就保持到 死 / 飘出 {@link #BLAZE_MELEE_STICKY_RELEASE}
+     *     格 / 施工结束。3.0 是硬边界, 3.1 格就漏 —— 用户看到的"3 格左右"正好卡边界。
+     */
+    private Optional<Entity> pickMeleeByStickyTarget(AltoClef mod) {
+        Vec3d botPos = mod.getPlayer().getPos();
+        BlazeEntity locked = _meleeTarget;
+        if (locked != null) {
+            if (locked.isAlive() && locked.squaredDistanceTo(botPos)
+                    <= BLAZE_MELEE_STICKY_RELEASE * BLAZE_MELEE_STICKY_RELEASE) {
+                return Optional.of(locked);
+            }
+            _meleeTarget = null;
+        }
+        BlazeEntity fresh = nearestBlazeAround(mod, botPos, BLAZE_MELEE_EMERGENCY_RANGE);
+        if (fresh != null) {
+            _meleeTarget = fresh;
+            return Optional.of(fresh);
+        }
+        return Optional.empty();
+    }
+
+    /** bot 周围 range 格内最近的烈焰人 (直接查世界实体, 不走感知)。 */
+    private BlazeEntity nearestBlazeAround(AltoClef mod, Vec3d pos, double range) {
+        if (mod.getWorld() == null) return null;
+        Box box = new Box(pos.x - range, pos.y - range, pos.z - range,
+                pos.x + range, pos.y + range, pos.z + range);
+        BlazeEntity best = null;
+        double bestSq = range * range;
+        for (BlazeEntity b : mod.getWorld().getEntitiesByClass(BlazeEntity.class, box, Entity::isAlive)) {
+            double sq = b.squaredDistanceTo(pos);
+            if (sq <= bestSq) {
+                bestSq = sq;
+                best = b;
+            }
+        }
+        return best;
     }
 
     @Override
@@ -284,6 +337,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _skipBuildThisBeat = false;
         _beatFireTarget = null;
         _currentBuildTarget = null;
+        // (2026-09-19 22:51) 贴脸锁定目标清零 —— 实例重建后不沿用上一段的锁定对象。
+        _meleeTarget = null;
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
             // (2026-09-19 18:05 用户) 沿用前先验岩浆 — 别沿用一个岩浆笼再走
@@ -374,12 +429,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // —— 施工让位后 MobDefense 不插手, 这里不处理就没人处理。
             if (_foundBlazeSpawner != null) {
                 if (!spawnerWorkPending) {
+                    // 施工结束 → 贴脸锁定作废 (改走农场杀口径)。
+                    _meleeTarget = null;
                     Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
-                    toKill = closestBlazeWithin(mod, blazeCandidates, spawnerCenter, ENCLOSURE_KILL_RANGE, false);
+                    toKill = closestBlazeWithin(blazeCandidates, spawnerCenter, ENCLOSURE_KILL_RANGE);
                 } else {
                     emergencyBlaze = true;
-                    toKill = closestBlazeWithin(mod, blazeCandidates, mod.getPlayer().getPos(),
-                            BLAZE_MELEE_EMERGENCY_RANGE, true);
+                    toKill = pickMeleeByStickyTarget(mod);
                 }
             }
         }
@@ -409,12 +465,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // 侧时目标可能距笼心 >4.5, 用笼心谓词会追丢)。
             if (emergencyBlaze) {
                 Vec3d botPos = mod.getPlayer().getPos();
-                // (2026-09-19 22:44) 补上"围场盒内的烈焰人"作为额外候选 —— 否则 bot 被
-                // 自己砌的墙挡住视线时, 击杀任务拿不到目标 (见 blazesInEnclosure)。
-                return new KillEntitiesTask(() -> new ArrayList<Entity>(blazesInEnclosure(mod)),
-                        entity ->
-                                entity.squaredDistanceTo(botPos) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
-                                        && !isHoveringAboveLavaOrTooHigh(mod, entity),
+                // (2026-09-19 22:51) 候选 = 已锁定的贴脸目标 (绕过感知); 范围用【释放】
+                // 阈值而非触发阈值 —— 否则目标一飘到 3.1 格, 谓词立刻判否 → 击杀任务
+                // 秒结束 → 父任务切回建墙, 又变回"干等"。
+                // 也不要求"非悬浮岩浆上方": 下界堡垒是悬空的, 贴脸烈焰人本来就悬在半空。
+                return new KillEntitiesTask(
+                        () -> _meleeTarget != null && _meleeTarget.isAlive()
+                                ? Collections.singletonList((Entity) _meleeTarget)
+                                : Collections.<Entity>emptyList(),
+                        entity -> entity.squaredDistanceTo(botPos)
+                                <= BLAZE_MELEE_STICKY_RELEASE * BLAZE_MELEE_STICKY_RELEASE,
                         BlazeEntity.class);
             }
             Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
