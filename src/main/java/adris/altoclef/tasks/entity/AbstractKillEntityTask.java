@@ -149,6 +149,20 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         if (entity instanceof WitherSkeletonEntity) {
             return Math.max(2.6, mod.getModSettings().getEntityReachRange());
         }
+        // (2026-09-19 23:26 用户"3 格好像 bot 打不到, 得靠近一点才打得到吧; 我观察到
+        // bot 瞄着烈焰人, 但是不出手") 烈焰人单独收紧接近距离。
+        //
+        // 根因: 接近距离 = MELEE_HUG_DISTANCE = 3.0, 而攻击判定是
+        //   inReach = entity.squaredDistanceTo(player) <= entityReachRange²
+        // (entityReachRange 默认 3.2) —— **只差 0.2 格余量**。烈焰人是飞行怪,
+        // 水平 3 格 + 垂直 1 格就已经 3.16、垂直 1.5 格就 3.35, 目标一飘就出射程
+        // → inReach 闪成 false → 那一 tick 不出刀, 表现就是"一直瞄着不挥"。
+        // 收紧到 reach - 1.2 (= 2.0, 默认配置): 即便目标悬在头顶 2 格, 3D 距离
+        // 也只有 ~2.8, 仍有 0.4 余量。其余生物维持 MELEE_HUG_DISTANCE 不变
+        // (09-01 用户"打小白/僵尸距离太近", 3.0 是特意放远的)。
+        if (entity instanceof BlazeEntity) {
+            return Math.max(1.5, mod.getModSettings().getEntityReachRange() - 1.2);
+        }
         return MELEE_HUG_DISTANCE;
     }
 
