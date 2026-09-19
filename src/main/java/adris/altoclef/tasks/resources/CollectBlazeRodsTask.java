@@ -142,6 +142,41 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static int _lastLooseBlocked = -1;
     private final TimerGame _returnCheckTimer = new TimerGame(RETURN_CHECK_INTERVAL_S);
 
+    // =========================================================================
+    // (2026-09-19 21:50 用户"bot 搭完路反复触发清理, 又触发补墙; 补墙和清理这些
+    // 都应该有时间间隔触发, 而不是时刻检查") 围场维护【统一节拍】。
+    //
+    // 事故现场 20260919-214013 (60s 内清障与灭火互抢 17 轮, ≈1.7s/轮):
+    //   ① 清障 (原每 tick 全扫 findInteriorObstructor) 与灭火 (原每 tick 查
+    //      5 格内 FIRE) 都在【每 tick 路径】且零节流, 而补墙 (15s 缓存) 也用
+    //      同一 tick 抢任务点 → 三者秒级横跳。anomaly.log 已自行报出周期 3 的
+    //      任务环: null ↔ PutOutFire ↔ InteractWithBlockTask。
+    //   ② 灭火还自锁: 单次灭火要先走位 1s+, 而清障/补墙每 0.5~1.5s 抢一次 →
+    //      灭火永远跑不完 → 火永远在 (目标恒为 775,79,121) → 下一 tick 又触发。
+    //
+    // 修法: 决策与执行分离 —— 每 ENCLOSURE_BEAT_SECONDS 秒才重新决策一次
+    // "这一拍做哪件事", 节拍内只认锁定的动作 (补墙 > 清障 > 灭火), 不重估其他
+    // 分支; 同类工作可在节拍内连续做 (清障可连挖多格)。
+    // =========================================================================
+    private static final int ENCLOSURE_BEAT_SECONDS = 3;
+    private final TimerGame _beatTimer = new TimerGame(ENCLOSURE_BEAT_SECONDS);
+
+    private enum EnclosureAction { NONE, BUILD, CLEAR, FIRE }
+
+    private EnclosureAction _beatAction = EnclosureAction.NONE;
+    /** 本节拍跳过补墙: 同一目标 stall 轮转后不再死等, 让清障/灭火有机会跑。 */
+    private boolean _skipBuildThisBeat = false;
+    /** 上一拍锁定的灭火坐标 (供节拍结算"火还在不在")。 */
+    private BlockPos _beatFireTarget = null;
+
+    // (2026-09-19 21:50 用户"没注意, 不确定"火源 → 保守处理) 同一火位连续
+    // FIRE_GIVEUP_ATTEMPTS 拍仍未扑灭 → 冷却 FIRE_GIVEUP_COOLDOWN_MS, 期间不再
+    // 选它, 免得在一个灭不掉的火上原地打转 (烈焰人火球会持续重新点燃)。
+    private static final int FIRE_GIVEUP_ATTEMPTS = 2;
+    private static final long FIRE_GIVEUP_COOLDOWN_MS = 30_000;
+    private final Map<BlockPos, Integer> _fireAttempts = new HashMap<>();
+    private final Map<BlockPos, Long> _fireGiveUpUntilMs = new HashMap<>();
+
     public CollectBlazeRodsTask(int count) {
         super(Items.BLAZE_ROD, count);
         _count = count;
@@ -173,6 +208,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _enclosureCompleteFlag = false;
         _holeCheckTimer.reset();
         _returnCheckTimer.reset();
+        // (2026-09-19 21:50) 节拍照同步清零 —— 实例/分支二次进入时不许沿用上一拍的
+        // 锁定动作 (否则会带着旧的 BUILD/CLEAR/FIRE 直接返回旧目标)。
+        _beatTimer.reset();
+        _beatAction = EnclosureAction.NONE;
+        _skipBuildThisBeat = false;
+        _beatFireTarget = null;
+        _currentBuildTarget = null;
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
             // (2026-09-19 18:05 用户) 沿用前先验岩浆 — 别沿用一个岩浆笼再走
@@ -389,36 +431,14 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // (2026-09-19 16:05) 围墙施工窗口标志: 有缺块就处于施工中。
             _enclosureBuildActive = missing != null && !missing.isEmpty();
             if (missing != null) {
+                // 廉价刷新: 已补(或被别人补)的格从缓存清单剔除, 防"已补位置被当缺口"循环。
                 missing.removeIf(p -> WorldHelper.isSolid(mod, p));
-                if (!missing.isEmpty()) {
-                    BlockPos next = missing.get(0);
-                    // (2026-09-19 16:22) 自上向下优先, 但顶圈暂无贴面放不了时
-                    // 不死等: 同一目标超 10s 轮到队尾。
-                    long nowMs = System.currentTimeMillis();
-                    if (!next.equals(_currentBuildTarget)) {
-                        _currentBuildTarget = next;
-                        _currentBuildStartMs = nowMs;
-                    } else if (nowMs - _currentBuildStartMs > BUILD_TARGET_STALL_MS) {
-                        missing.remove(0);
-                        missing.add(next);
-                        _currentBuildTarget = null;
-                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] build target stalled, rotating "
-                                + next.toShortString() + " to back of queue");
-                        return null;
-                    }
-                    setDebugState("Building enclosure: " + missing.size() + " missing, next " + next.toShortString());
-                    return new PlaceStructureBlockTask(next);
-                }
             }
-            _currentBuildTarget = null;
 
-            // (2026-09-19 17:33 用户"最后清理刷怪空间") 结构完工后清空内圈
-            // 5x5 × y..y+2 的障碍 (不含刷怪笼本体), 给烈焰人生成和走位腾地方。
-            BlockPos interior = findInteriorObstructor(mod, _foundBlazeSpawner);
-            if (interior != null) {
-                setDebugState("Clearing spawn space inside enclosure: " + interior.toShortString());
-                return new DestroyBlockTask(interior);
-            }
+            // (2026-09-19 21:50 用户) 统一节拍: 补墙 / 清障 / 灭火 三选一, 每拍只做
+            // 一件事, 节拍内不重估 —— 取代原先三个分支同 tick 抢任务点的写法。
+            Task beatTask = enclosureBeat(mod, missing);
+            if (beatTask != null) return beatTask;
 
             // (2026-09-19 13:05 用户) bot 留在自己围起来的区域里打最方便最安全:
             // 每 10s 检查一次, 离开围场就回去 (允许短暂离开)。
@@ -428,13 +448,6 @@ public class CollectBlazeRodsTask extends ResourceTask {
                     setDebugState("Returning to our enclosure");
                     return new GetToBlockTask(_foundBlazeSpawner.up(), false);
                 }
-            }
-
-            // Put out fire that might mess with us.
-            Optional<BlockPos> nearestFire = mod.getBlockTracker().getNearestWithinRange(_foundBlazeSpawner, 5, Blocks.FIRE);
-            if (nearestFire.isPresent()) {
-                setDebugState("Clearing fire around spawner to prevent loss of blaze rods.");
-                return new PutOutFireTask(nearestFire.get());
             }
 
             setDebugState("Waiting inside our enclosure for blazes to spawn");
@@ -789,6 +802,150 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // (2026-09-19 17:33) 刷怪空间还没清完也算 pending — 先清场再开杀。
         return findInteriorObstructor(mod, _foundBlazeSpawner) != null;
     }
+
+    // ------------------------------------------------------------------ //
+    // (2026-09-19 21:50 用户) 围场维护统一节拍
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 围场维护统一节拍。每 {@link #ENCLOSURE_BEAT_SECONDS} 秒重新决策一次"这一拍
+     * 做哪件事", 节拍内只认锁定动作, 同类工作可连续做 (清障可连挖多格)。
+     * 返回 null = 本拍无事可做 (由调用方继续走回场/等待)。
+     *
+     * 为什么必须"决策与执行分离": 原先补墙/清障/灭火三个分支写在同一个 tick 路径
+     * 上, 前一个分支 return 的子任务一旦被执行器判完/抢走, 下一 tick 立刻重估,
+     * 于是三者以秒级频率互相打断 (214013: 60s 内 17 轮)。灭火这种"必须先走位
+     * 1s+ 才能生效"的动作永远跑不完, 形成自锁环。
+     */
+    private Task enclosureBeat(AltoClef mod, List<BlockPos> missing) {
+        if (_beatTimer.elapsed()) {
+            settleBeatOutcome(mod);
+            _beatTimer.reset();
+            _skipBuildThisBeat = false;
+            _beatAction = pickBeatAction(mod, missing);
+        }
+        switch (_beatAction) {
+            case BUILD: {
+                if (missing == null || missing.isEmpty()) {
+                    _beatAction = EnclosureAction.NONE;
+                    _currentBuildTarget = null;
+                    return null;
+                }
+                BlockPos next = missing.get(0);
+
+                // (2026-09-19 21:50 顶盖死结, 用户现场确认"他站在顶的那个位置上,
+                // 头挡住那个位置, 没法封顶; 其实站在底下就可以放方块")
+                // 214013 实锤: <Place structure{} at 779,80,123> 报 "Standing inside
+                // target cell, no walkable neighbor, wandering" —— bot 把自己站进了
+                // 顶盖最后一个缺口格, 而 PlaceBlockTask.pickStepOutPos 只往【水平】
+                // 四向找落脚点, 那四格全是它刚放好的顶盖 (isSolid) → 返回 null →
+                // 只能原地 wander (走不出去) → 10s stall 轮转队尾 → 15s 重扫又报
+                // 同一格, "1 missing" 永远补不上。
+                // 修法: 目标是顶盖层 (y+3) 且 bot 已在顶盖高度及以上 → 先降回围场
+                // 内部 (站在刷新笼旁的地面上), 从下方贴面放置。用户实测这位置放得下。
+                if (next.getY() >= _foundBlazeSpawner.getY() + SPAWNER_ROOF_HEIGHT
+                        && mod.getPlayer().getBlockPos().getY() >= next.getY()) {
+                    setDebugState("Dropping down to build roof from below");
+                    return new GetToBlockTask(_foundBlazeSpawner.up(), false);
+                }
+
+                // (2026-09-19 16:22) 自上向下优先, 但暂无贴面放不了时不死等:
+                // 同一目标超 BUILD_TARGET_STALL_MS 就轮到队尾。
+                long nowMs = System.currentTimeMillis();
+                if (!next.equals(_currentBuildTarget)) {
+                    _currentBuildTarget = next;
+                    _currentBuildStartMs = nowMs;
+                } else if (nowMs - _currentBuildStartMs > BUILD_TARGET_STALL_MS) {
+                    missing.remove(0);
+                    missing.add(next);
+                    _currentBuildTarget = null;
+                    Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] build target stalled, rotating "
+                            + next.toShortString() + " to back of queue");
+                    // (2026-09-19 21:50) 不再 return null 空等 —— 本拍降级给清障/灭火,
+                    // 否则补墙优先级最高会把另外两个分支无限饿死。
+                    _skipBuildThisBeat = true;
+                    _beatAction = pickBeatAction(mod, missing);
+                    return null;
+                }
+                setDebugState("Building enclosure: " + missing.size() + " missing, next " + next.toShortString());
+                return new PlaceStructureBlockTask(next);
+            }
+            case CLEAR: {
+                BlockPos interior = findInteriorObstructor(mod, _foundBlazeSpawner);
+                if (interior == null) {
+                    _beatAction = pickBeatAction(mod, missing);
+                    return null;
+                }
+                setDebugState("Clearing spawn space inside enclosure: " + interior.toShortString());
+                return new DestroyBlockTask(interior);
+            }
+            case FIRE: {
+                BlockPos fire = pickFireToExtinguish(mod);
+                if (fire == null) {
+                    _beatAction = EnclosureAction.NONE;
+                    _beatFireTarget = null;
+                    return null;
+                }
+                _beatFireTarget = fire.toImmutable();
+                setDebugState("Clearing fire around spawner to prevent loss of blaze rods.");
+                return new PutOutFireTask(fire);
+            }
+            default:
+                return null;
+        }
+    }
+
+    /** 本拍该做什么: 补墙 (可被 stall 降级跳过) > 清障 > 灭火 > 无。 */
+    private EnclosureAction pickBeatAction(AltoClef mod, List<BlockPos> missing) {
+        if (!_skipBuildThisBeat && missing != null && !missing.isEmpty()) return EnclosureAction.BUILD;
+        if (findInteriorObstructor(mod, _foundBlazeSpawner) != null) return EnclosureAction.CLEAR;
+        if (pickFireToExtinguish(mod) != null) return EnclosureAction.FIRE;
+        return EnclosureAction.NONE;
+    }
+
+    /**
+     * 节拍结算: 上一拍锁定的灭火动作若结束时火还在 → 记一次失败; 连续
+     * {@link #FIRE_GIVEUP_ATTEMPTS} 拍都没扑灭 → 该火位进 {@link #FIRE_GIVEUP_COOLDOWN_MS}
+     * 冷却, 期间不再选它 (烈焰人火球会持续重新点燃, 无限重试没有任何收益)。
+     */
+    private void settleBeatOutcome(AltoClef mod) {
+        BlockPos target = _beatFireTarget;
+        _beatFireTarget = null;
+        if (_beatAction != EnclosureAction.FIRE || target == null) return;
+        BlockState s = mod.getWorld().getBlockState(target);
+        if (s.getBlock() != Blocks.FIRE && s.getBlock() != Blocks.SOUL_FIRE) {
+            _fireAttempts.remove(target);
+            return;
+        }
+        int attempts = _fireAttempts.merge(target, 1, Integer::sum);
+        if (attempts >= FIRE_GIVEUP_ATTEMPTS) {
+            _fireAttempts.remove(target);
+            _fireGiveUpUntilMs.put(target, System.currentTimeMillis() + FIRE_GIVEUP_COOLDOWN_MS);
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] fire at " + target.toShortString()
+                    + " still burning after " + attempts + " beats, cooling down "
+                    + (FIRE_GIVEUP_COOLDOWN_MS / 1000) + "s");
+        }
+    }
+
+    /** 刷怪笼 5 格内最近的、未在冷却中的火; 无火或全在冷却 → null。 */
+    private BlockPos pickFireToExtinguish(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        _fireGiveUpUntilMs.entrySet().removeIf(e -> e.getValue() <= now);
+        BlockPos best = null;
+        double bestSq = FIRE_SEARCH_RANGE * FIRE_SEARCH_RANGE;
+        for (BlockPos p : mod.getBlockTracker().getKnownLocations(Blocks.FIRE)) {
+            if (_fireGiveUpUntilMs.getOrDefault(p, 0L) > now) continue;
+            double sq = p.getSquaredDistance(_foundBlazeSpawner);
+            if (sq <= bestSq) {
+                bestSq = sq;
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    /** (2026-09-19 21:50) 灭火搜索半径, 与旧内联常量 5 同值。 */
+    private static final double FIRE_SEARCH_RANGE = 5;
 
     /**
      * (2026-09-19 17:20 终版规格) 围场缺口全扫, 顺序自上向下:
