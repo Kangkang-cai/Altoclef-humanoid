@@ -494,6 +494,37 @@ public class AltoClef implements ModInitializer {
         getClientBaritoneSettings().planAheadFailureTimeoutMS.value = 10000L;
         // Was 100
         getClientBaritoneSettings().movementTimeoutTicks.value = 200;
+
+        // (2026-09-19 黑曜石不参与"寻路顺手挖")
+        //
+        // 现场: 下界堡垒附近赶路, bot 把一块完全不必挖的黑曜石挖穿 (钻石镐无效率
+        // 附魔, 散块, 不属于任何门结构)。不是任务在采集 —— 是 baritone 寻路自己
+        // 选的, 因此 tasks.log 里连一条 DestroyBlockTask 都没有 (盲区)。
+        //
+        // 根因是**成本账本里没有"黑曜石很贵"这一项**:
+        //   MovementHelper.getMiningDurationTicks = 1/ToolSet.getStrVsBlock(state)
+        //                                          + blockBreakAdditionalCost
+        //   ToolSet: 镐速 ÷ 硬度 ÷ 30 → 钻石镐挖黑曜石 = 8/50/30 = 0.00533/tick
+        //   ⇒ 187.5 ticks ≈ 9.4s; 而 blockBreakAdditionalCost 默认只有 2 ticks
+        //   (0.1 秒), 全库只有岩浆逃生(20)/龙息(10)调高过 —— 对 187 这个量级无感。
+        //   步行一格成本 4.63 ⇒ 挖一块黑曜石 ≈ 绕 41 格路; 堡垒里上下坡绕行轻松超过
+        //   这个值, 于是"挖穿"成了 baritone 眼里的理性选择。它只算时间, 不知道
+        //   黑曜石是不可再生的战略物资。
+        //
+        // 为什么用 blocksToAvoidBreaking(软) 而不是 blocksToDisallowBreaking(硬禁):
+        //   软: ToolSet.avoidanceMultiplier 在方块命中该列表时返回
+        //       avoidBreakingMultiplier(默认 0.1), 乘在**挖掘速度**上 ⇒ 成本 ×10
+        //       → 189.5 → 1895 ticks ≈ 等价绕 409 格, 寻路基本不会再选它。
+        //       且 MineProcess.plausibleToBreak 判据是 `成本 < 1e6`, 1895 仍通过,
+        //       ⇒ WorldHelper.canBreak 不受影响, CollectObsidianTask 的显式采集照常可用。
+        //   硬禁: MovementHelper.avoidBreaking 直接返回 COST_INF ⇒ plausibleToBreak
+        //       = false ⇒ CollectObsidianTask 的 goodObsidian 谓词再也找不到可挖目标,
+        //       **采集合法路径一起废掉**。同理 AltoClef 自己的 avoidBlockBreaking
+        //       谓词(shouldAvoidBreaking)也是 COST_INF, 一样不能用。
+        // 门框保护另走 BotBehaviour.isPortalBodyBlock(栈底全局谓词), 与本项不冲突;
+        // 本项把散块/废弃传送门结构/哭泣黑曜石一起拔到"寻路不值得挖"的量级。
+        getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.OBSIDIAN);
+        getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.CRYING_OBSIDIAN);
     }
 
     // ==== (2026-09-15 interaction pause 看门狗) ====
@@ -546,58 +577,113 @@ public class AltoClef implements ModInitializer {
     // (A* 改选"垫一格绕行", 执行成功率≈100%)。没有 baritone 放得下去的垫块时
     // 保持原行为: 硬禁跳可能把 bot 冻在原地, 跳总比冻死强 (PillarJumpHelper.
     // countBaritonePlaceable 判定, 与 baritone 的 hasThrowaway 同口径)。
-    // 扫描每秒一次 (TimerGame 节流, 25x17x25 块立方体); 每 tick 强制写设置,
-    // 防任务栈 applyState 把旧值写回去。惩罚值用 Math.min 收紧、解除时不回写 —
-    // 残留的低惩罚只会"更爱垫路", 无害, 下一次任务栈 applyState 自动恢复。
-    private static final double LAVA_NAV_SCAN_RADIUS = 12;
+    // ===== (2026-09-19 收紧判据, 用户"触发太频繁") =====
+    // 旧判据 = "玩家周围 25x17x25 (水平 ±12、垂直 -12..+4) 立方体内存在任意一格
+    // LAVA"的布尔存在量, 三个结构性缺陷:
+    //   (a) 无距离权重 — 12 格外的整片岩浆海与脚边一格岩浆判据相同, 而下界到处
+    //       是岩浆 ⇒ 抑制几乎恒真, 旋转跳长期关闭, 路径无谓变长;
+    //   (b) 扫描盒与"会不会掉进去"无关 — 脚下 12 格深的岩浆、头顶 +4 处渗流的
+    //       岩浆滴 (下界极常见) 都算数;
+    //   (c) 未查区块加载 — 未加载区块 getBlockState 返回空气, 走到加载边界时判据
+    //       突变 (放大下面的横跳)。
+    // 新判据 = 触发收紧 + 解除迟滞:
+    //   ① 触发只看**落地邻域** (水平切比雪夫 ≤3、下 2、上 1), 这是"斜向升格失败
+    //      会掉进去"的真实范围, 与旋转跳的风险直接对应。
+    //   ② 解除走**双半径迟滞**: 激活后用更大的外围 (水平 ≤6、下 3、上 2) 判断
+    //      "是否已离开这片岩浆区域", 外围连续 LAVA_NAV_RELEASE_CONFIRM_SEC 秒无
+    //      岩浆才解除。旧判据 1s 一次布尔翻转、无迟滞, 在湖边来回走就反复开关
+    //      旋转跳 —— 与 09-14 岩浆横跳、SurfaceHelper 判据4 是同一根因。
+    //   ③ 扫描补 isChunkLoaded 判定。
+    // 扫描节流 0.25s (体积 10625 → 1014, 开销更小、灵敏度更高); 每 tick 强制写
+    // 设置, 防任务栈 applyState 把旧值写回去。惩罚值用 Math.min 收紧、解除时不
+    // 回写 — 残留的低惩罚只会"更爱垫路", 无害, 下一次任务栈 applyState 自动恢复。
+    private static final int LAVA_NAV_TRIGGER_RADIUS = 3;
+    private static final int LAVA_NAV_TRIGGER_DOWN = 2;
+    private static final int LAVA_NAV_TRIGGER_UP = 1;
+    private static final int LAVA_NAV_HOLD_RADIUS = 6;
+    private static final int LAVA_NAV_HOLD_DOWN = 3;
+    private static final int LAVA_NAV_HOLD_UP = 2;
+    private static final double LAVA_NAV_RELEASE_CONFIRM_SEC = 3.0;
     private static final double LAVA_NAV_PLACE_PENALTY_CAP = 2.0;
-    private final adris.altoclef.util.time.TimerGame _lavaNavScanTimer = new adris.altoclef.util.time.TimerGame(1.0);
+    private final adris.altoclef.util.time.TimerGame _lavaNavScanTimer = new adris.altoclef.util.time.TimerGame(0.25);
+    /** 外围连续无岩浆计时 (解除确认窗): 外围任一格有岩浆就重置。 */
+    private final adris.altoclef.util.time.TimerGame _lavaNavClearTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_RELEASE_CONFIRM_SEC);
     private boolean _lavaNavSuppressActive = false;
     private boolean _lavaNavNoBlockWarned = false;
 
     private void tickNetherLavaNavGuard() {
         if (inGame() && getPlayer() != null && getWorld() != null && _lavaNavScanTimer.elapsed()) {
             _lavaNavScanTimer.reset();
-            boolean lavaNearby = false;
-            boolean suppress = false;
+            boolean triggerHit = false; // 落地邻域 (内圈) 有岩浆
+            boolean holdHit = false;    // 外围警戒环有岩浆
             if (adris.altoclef.util.helpers.WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) {
                 BlockPos center = getPlayer().getBlockPos();
-                int r = (int) LAVA_NAV_SCAN_RADIUS;
+                int r = LAVA_NAV_HOLD_RADIUS;
                 scan:
                 for (int dx = -r; dx <= r; dx++) {
-                    for (int dy = -r; dy <= 4; dy++) {
-                        for (int dz = -r; dz <= r; dz++) {
-                            if (getWorld().getBlockState(center.add(dx, dy, dz)).getBlock() == Blocks.LAVA) {
-                                lavaNearby = true;
-                                break scan;
+                    for (int dz = -r; dz <= r; dz++) {
+                        for (int dy = -LAVA_NAV_HOLD_DOWN; dy <= LAVA_NAV_HOLD_UP; dy++) {
+                            BlockPos p = center.add(dx, dy, dz);
+                            // 未加载区块 getBlockState 返回空气, 走到加载边界会造成
+                            // 判据突变 (解除迟滞的放大器), 直接跳过。
+                            if (!getChunkTracker().isChunkLoaded(p)) continue;
+                            if (getWorld().getBlockState(p).getBlock() != Blocks.LAVA) continue;
+                            holdHit = true;
+                            int horiz = Math.max(Math.abs(dx), Math.abs(dz));
+                            if (horiz <= LAVA_NAV_TRIGGER_RADIUS
+                                    && dy >= -LAVA_NAV_TRIGGER_DOWN && dy <= LAVA_NAV_TRIGGER_UP) {
+                                triggerHit = true;
+                                break scan; // 内圈命中已足够, 不必扫完外围
                             }
                         }
                     }
                 }
-                if (lavaNearby) {
-                    // (2026-09-19 17:20 用户"喝药水的情况就不要惩罚") 有防火效果
-                    // 时跳过保守模式 (关旋转跳/压垫块惩罚) — 火焰免疫, 岩浆邻域
-                    // 的保守导航只会干扰围场施工 (原地惩罚跳跃)。
-                    if (getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
-                        suppress = false;
-                    } else {
-                        suppress = adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0;
-                    }
-                    if (!suppress && !_lavaNavNoBlockWarned && !getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
-                        Debug.logToFile("altoclef_diag.log",
-                                "[LavaNav] lava nearby but no baritone-placeable blocks — keeping diagonal ascend ON");
-                        _lavaNavNoBlockWarned = true;
-                    }
-                }
             }
-            if (!lavaNearby) {
+            if (!holdHit) {
                 _lavaNavNoBlockWarned = false;
             }
+
+            boolean suppress = _lavaNavSuppressActive;
+            // 两类"不需要保守导航"的情形 (与 WorldSurvivalChain 的逃生豁免同源):
+            //   ① 有防火效果 (2026-09-19 17:20 用户"喝药水的情况就不要惩罚");
+            //   ② 正卡在刷怪笼造墙施工 (2026-09-19 用户"造墙期间强制关闭") — 关掉
+            //      斜向升格会让 bot 在笼边原地绕/跳不动, 干扰施工。
+            // 二者都**立即**解除、不等迟滞窗: 施工一结束 (或药效一过), 下一轮扫描
+            // 就回到正常判据, 内圈仍有岩浆会立刻重新触发 (触发本身零延迟)。
+            boolean fireRes = getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE);
+            boolean building = adris.altoclef.tasks.resources.CollectBlazeRodsTask.isEnclosureBuildWorkActive();
+            boolean exempt = fireRes || building;
+            if (!suppress) {
+                if (triggerHit && !exempt) {
+                    if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0) {
+                        suppress = true;
+                        _lavaNavClearTimer.reset();
+                    } else if (!_lavaNavNoBlockWarned) {
+                        _lavaNavNoBlockWarned = true;
+                        Debug.logToFile("altoclef_diag.log",
+                                "[LavaNav] lava in landing range but no baritone-placeable blocks — keeping diagonal ascend ON");
+                    }
+                }
+            } else if (exempt) {
+                suppress = false;
+            } else if (holdHit) {
+                _lavaNavClearTimer.reset();
+            } else if (_lavaNavClearTimer.elapsed()) {
+                suppress = false;
+            }
+
             if (suppress != _lavaNavSuppressActive) {
                 _lavaNavSuppressActive = suppress;
+                String pos = getPlayer().getBlockPos().toShortString();
                 String m = suppress
-                        ? "[LavaNav] 下界岩浆邻域: 关斜向升格(旋转跳), 垫块惩罚压到 " + LAVA_NAV_PLACE_PENALTY_CAP
-                        : "[LavaNav] 岩浆邻域解除: 恢复斜向升格";
+                        ? "[LavaNav] 触发: 落地邻域岩浆 (水平<=" + LAVA_NAV_TRIGGER_RADIUS
+                                + "/下" + LAVA_NAV_TRIGGER_DOWN + "/上" + LAVA_NAV_TRIGGER_UP
+                                + "), 关斜向升格(旋转跳), 垫块惩罚压到 " + LAVA_NAV_PLACE_PENALTY_CAP
+                                + " pos=" + pos
+                        : "[LavaNav] 解除: 外围(<=" + LAVA_NAV_HOLD_RADIUS + ") 连续 "
+                                + LAVA_NAV_RELEASE_CONFIRM_SEC + "s 无岩浆"
+                                + (exempt ? " / 已豁免(防火或造墙施工)" : "")
+                                + ", 恢复斜向升格 pos=" + pos;
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
             }
