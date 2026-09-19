@@ -25,6 +25,7 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.WorldIdentity;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.WallBlock;
@@ -131,6 +132,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // 廉价的 isSolid 刷新) 与回场检查计时 (每 10s 一次)。
     private final TimerGame _holeCheckTimer = new TimerGame(HOLE_CHECK_INTERVAL_S);
     private List<BlockPos> _cachedMissingEnclosure = null;
+    /** (2026-09-19 19:30) 上次扫描里"非满立方但已封堵"的格数, 变化才打日志。 */
+    private static int _lastLooseBlocked = -1;
     private final TimerGame _returnCheckTimer = new TimerGame(RETURN_CHECK_INTERVAL_S);
 
     public CollectBlazeRodsTask(int count) {
@@ -577,7 +580,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     /**
      * (2026-09-19 16:05 问题二b) 围场结构位置判定 (静态供行为谓词用)。
-     * 材质无关: 围墙"只要求有东西堵着"—— 栅栏等任何实体方块都算 (isSolid 口径),
+     * 材质无关: 围墙"只要求有东西堵着"—— 栅栏等挡得住的方块都算 (isEnclosureBlocking
+     * 口径; 2026-09-19 19:30 前误用 isSolid, 栅栏被判缺口遭 builder 清场换成地狱岩),
      * 不要求非得是地狱岩。
      */
     private static BlockPos _protectedSpawnerPos = null;
@@ -748,14 +752,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
     /**
      * (2026-09-19 17:20 终版规格) 围场缺口全扫, 顺序自上向下:
      * 顶盖 (y+3, 5x5) → 围墙 (y+1, 7x7 外圈单圈) → 地板 (y-1, 5x5)。
+     * (2026-09-19 19:30) 缺口判据改为 {@link #isEnclosureBlocking} (见其注释)。
      */
     private List<BlockPos> findMissingEnclosureBlocks(AltoClef mod, BlockPos spawner) {
         List<BlockPos> missing = new ArrayList<>();
+        int looseBlocked = 0;
         // ① 顶盖 y+3, 5x5。
         for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
             for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
                 BlockPos p = spawner.add(dx, SPAWNER_ROOF_HEIGHT, dz);
-                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
+                looseBlocked += noteEnclosureGap(mod, p, missing);
             }
         }
         // ② 围墙 y+1, 7x7 外圈。
@@ -763,17 +769,55 @@ public class CollectBlazeRodsTask extends ResourceTask {
             for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
                 if (Math.abs(dx) != SPAWNER_WALL_HALF && Math.abs(dz) != SPAWNER_WALL_HALF) continue;
                 BlockPos p = spawner.add(dx, SPAWNER_WALL_HEIGHT, dz);
-                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
+                looseBlocked += noteEnclosureGap(mod, p, missing);
             }
         }
         // ③ 脚底地板 y-1, 5x5。
         for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
             for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
                 BlockPos p = spawner.add(dx, -1, dz);
-                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
+                looseBlocked += noteEnclosureGap(mod, p, missing);
             }
         }
+        if (looseBlocked != _lastLooseBlocked) {
+            _lastLooseBlocked = looseBlocked;
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] scan: missing=" + missing.size()
+                    + ", blocked-by-non-full-cube (fence/wall/glass...)=" + looseBlocked
+                    + ", spawner=" + spawner.toShortString());
+        }
         return missing;
+    }
+
+    /** 单格登记: 真缺口入 missing 返回 0; 非满立方但已封堵返回 1 (仅供计数/日志)。 */
+    private static int noteEnclosureGap(AltoClef mod, BlockPos p, List<BlockPos> missing) {
+        boolean solid = WorldHelper.isSolid(mod, p);
+        if (solid || isEnclosureBlocking(mod, p)) {
+            return solid ? 0 : 1;
+        }
+        missing.add(p.toImmutable());
+        return 0;
+    }
+
+    /**
+     * (2026-09-19 19:30 用户"下界砖栅栏也是遮挡方块, 没必要换成地狱岩") 围场
+     * 缺口判据 = 【挡得住就算数】, 不要求整格满立方:
+     *   isSolid (满立方: 地狱岩 / 下界砖 …) 算;
+     *   非满立方但有碰撞箱 —— 栅栏 / 墙 / 玻璃 / 铁栏杆 / 台阶 —— 也算。
+     *
+     * 为什么不能只用 isSolid: isSolidBlock 要求整格满立方, 下界砖栅栏 (堡垒自带)
+     * 恒为 false → 被当成缺口 → 交给 baritone builder 补块, 而 builder 放置前会
+     * "清场" (挖掉目标位原有方块), 于是好端端的栅栏被拆掉换成地狱岩 (用户现场)。
+     * 更糟的一步: isEnclosureStructurePos 已把 16 格内栅栏列为禁拆, 拆不动 →
+     * 建造目标永久 stall (每 10s 轮转一次队尾), 围场永远"没完工"。
+     *
+     * 空气 / 流体 / 火把等无碰撞箱 → 仍算缺口, 该补照补。
+     * 地板位同样用宽松判据: 栅栏顶面站得住, 挖开反而可能踩空掉进洞或岩浆。
+     */
+    private static boolean isEnclosureBlocking(AltoClef mod, BlockPos pos) {
+        if (WorldHelper.isSolid(mod, pos)) return true;
+        BlockState s = mod.getWorld().getBlockState(pos);
+        if (s.isAir()) return false;
+        return !s.getCollisionShape(mod.getWorld(), pos).isEmpty();
     }
 
     /**
