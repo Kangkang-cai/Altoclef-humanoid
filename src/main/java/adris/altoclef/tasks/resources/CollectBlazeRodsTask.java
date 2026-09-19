@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
+import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PlaceStructureBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
@@ -347,6 +348,14 @@ public class CollectBlazeRodsTask extends ResourceTask {
             }
             _currentBuildTarget = null;
 
+            // (2026-09-19 17:33 用户"最后清理刷怪空间") 结构完工后清空内圈
+            // 5x5 × y..y+2 的障碍 (不含刷怪笼本体), 给烈焰人生成和走位腾地方。
+            BlockPos interior = findInteriorObstructor(mod, _foundBlazeSpawner);
+            if (interior != null) {
+                setDebugState("Clearing spawn space inside enclosure: " + interior.toShortString());
+                return new DestroyBlockTask(interior);
+            }
+
             // (2026-09-19 13:05 用户) bot 留在自己围起来的区域里打最方便最安全:
             // 每 10s 检查一次, 离开围场就回去 (允许短暂离开)。
             if (_returnCheckTimer.elapsed()) {
@@ -545,6 +554,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
         int dx = Math.abs(pos.getX() - s.getX());
         int dz = Math.abs(pos.getZ() - s.getZ());
         int dy = pos.getY() - s.getY();
+        // (2026-09-19 17:33 用户"最后要清理刷怪空间") 内圈 5x5 × y..y+2 (刷怪笼
+        // 本体除外) 是要清空的刷怪空间, 不在保护集里 —— 否则清障拆不动。
+        if (dy >= 0 && dy <= 2 && dx <= SPAWNER_FLOOR_HALF && dz <= SPAWNER_FLOOR_HALF) {
+            if (!(dx == 0 && dz == 0 && dy == 0)) return false;
+        }
         // 整盒保护: 9x9 水平 × 低两格到高四格。
         if (dx <= SPAWNER_PROTECT_HALF && dz <= SPAWNER_PROTECT_HALF && dy >= -2 && dy <= 4) return true;
         // 栅栏/墙类方块在更大范围 (16 格) 内也保护 — 用户拿它们当围墙用。
@@ -626,6 +640,25 @@ public class CollectBlazeRodsTask extends ResourceTask {
         clearEnclosureRestockTask();
     }
 
+    /**
+     * (2026-09-19 17:33 用户"最后清理刷怪空间") 内圈 5x5 × y..y+2 (不含刷怪笼
+     * 本体) 里第一个可拆的障碍块; 全空返回 null。岩浆/基岩等拆不动的跳过。
+     */
+    private BlockPos findInteriorObstructor(AltoClef mod, BlockPos spawner) {
+        for (int dy = 0; dy <= 2; dy++) {
+            for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
+                for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
+                    if (dx == 0 && dz == 0 && dy == 0) continue; // 刷怪笼本体
+                    BlockPos p = spawner.add(dx, dy, dz);
+                    if (mod.getWorld().getBlockState(p).isAir()) continue;
+                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    return p.toImmutable();
+                }
+            }
+        }
+        return null;
+    }
+
     private boolean isValidBlazeSpawner(AltoClef mod, BlockPos pos) {
         if (!mod.getChunkTracker().isChunkLoaded(pos)) {
             // If unloaded, go to it. Unless it's super far away.
@@ -650,7 +683,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
         // 还没扫过 (缓存 null) 或扫出缺口 → 围场未确认完工, 不开杀。
         List<BlockPos> missing = _cachedMissingEnclosure;
-        return missing == null || !missing.isEmpty();
+        if (missing == null || !missing.isEmpty()) return true;
+        // (2026-09-19 17:33) 刷怪空间还没清完也算 pending — 先清场再开杀。
+        return findInteriorObstructor(mod, _foundBlazeSpawner) != null;
     }
 
     /**
