@@ -304,21 +304,31 @@ public class CollectBlazeRodsTask extends ResourceTask {
                             + WorldHelper.getTicks() + ")");
                 }
                 // (2026-09-19 16:05 问题三, 用户) 高处岩浆流进围场区域: 有防火药
-                // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 45s 且
+                // 硬抗, 不逃不躲专心放方块 (墙盖好岩浆自然被挡住); 持续 20s 且
                 // 记忆里有别的刷怪笼才换笼。
-                if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
-                    if (_lavaTroubleSinceMs == 0) {
-                        _lavaTroubleSinceMs = System.currentTimeMillis();
-                        Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
-                    } else if (System.currentTimeMillis() - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
-                        trySwitchAwayFromLavaSpawner(mod);
-                        if (_foundBlazeSpawner == null) {
-                            setDebugState("Switching away from lava-flooded spawner");
-                            return _fortressSearcher;
+                // (2026-09-19 17:50 换笼提速) 检查节奏从搭车 15s 洞检改为独立每
+                // 5s 一次; 且偶发一次"没岩浆"不再清零计时 (原 :321 每次 false 都
+                // 清零, 岩浆时涨时消时阈值永远攒不够 — 171228 实锤 60s 才换笼)。
+                long lavaNowMs = System.currentTimeMillis();
+                if (lavaNowMs - _lavaLastCheckMs >= LAVA_CHECK_INTERVAL_MS) {
+                    _lavaLastCheckMs = lavaNowMs;
+                    if (isLavaInEnclosureRegion(mod, _foundBlazeSpawner)) {
+                        _lavaFreeStreak = 0;
+                        if (_lavaTroubleSinceMs == 0) {
+                            _lavaTroubleSinceMs = lavaNowMs;
+                            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] lava pouring into region, keep building with fire res");
+                        } else if (lavaNowMs - _lavaTroubleSinceMs > LAVA_TROUBLE_SWITCH_MS) {
+                            trySwitchAwayFromLavaSpawner(mod);
+                            if (_foundBlazeSpawner == null) {
+                                setDebugState("Switching away from lava-flooded spawner");
+                                return _fortressSearcher;
+                            }
                         }
+                    } else if (++_lavaFreeStreak >= 2) {
+                        // 连续 2 次(约10s)确认无岩浆才认作岩浆退了, 计时清零重来。
+                        _lavaTroubleSinceMs = 0;
+                        _lavaFreeStreak = 0;
                     }
-                } else {
-                    _lavaTroubleSinceMs = 0;
                 }
             }
             List<BlockPos> missing = _cachedMissingEnclosure;
@@ -579,8 +589,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
     /** (2026-09-19 16:05 问题三) 岩浆 Trouble 登记表 (存档key@刷怪笼坐标)。 */
     private static final Set<String> _lavaTroubleSpawnerKeys = new HashSet<>();
-    private static final long LAVA_TROUBLE_SWITCH_MS = 45_000;
+    // (2026-09-19 17:50 换笼提速) 45s→20s: 174140 实锤 lava 起算 47s 用户就停了
+    // 都没等到换笼; 45s 阈值 + 15s 洞检节奏实际要 45~60s 才触发, 用户观感=就是不换笼。
+    private static final long LAVA_TROUBLE_SWITCH_MS = 20_000;
+    // (2026-09-19 17:50) 岩浆检查从 15s 洞检拆出, 单独每 5s 跑一次 (7x7x5 扫描很廉价)。
+    private static final long LAVA_CHECK_INTERVAL_MS = 5_000;
     private long _lavaTroubleSinceMs = 0;
+    private long _lavaLastCheckMs = 0;
+    // (2026-09-19 17:50) 岩浆时涨时消会让计时反复清零永远攒不够 (171228 实锤拖到
+    // 60s 才换笼) —— 连续 2 次检查(约10s)无岩浆才认作真退了, 单次假阴性不清零。
+    private int _lavaFreeStreak = 0;
 
     // (2026-09-19 16:05 用户补充: 免逃岩浆只针对建围墙时的特殊宽限, 其他情况不变)
     // 围场施工进行中 (已到笼、缺块未补) 的全局标志 —— WorldSurvivalChain 只在
@@ -637,6 +655,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _recallTimer.reset();
         _cachedMissingEnclosure = null;
         _lavaTroubleSinceMs = 0;
+        _lavaFreeStreak = 0;
+        _lavaLastCheckMs = 0;
         clearEnclosureRestockTask();
     }
 
