@@ -108,22 +108,15 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * (2026-09-19 20:20 用户"贴脸的烈焰人还是要打, 打远了就不管了继续造墙")
      * 施工中(spawnerWorkPending)不开农场杀, 但贴脸烈焰人必须紧急处理 ——
      * MobDefense 施工让位后没人管, bot 会被贴脸烧着还继续放方块。
-     * 口径 = 距 bot 3 格内 (火球这距离已经躲不开, 近战清掉再造)。
+     *
+     * (2026-09-19 22:31 用户"把触发门槛增大, 不要改时间") 触发门槛 3 → **2** 格。
+     * 221114 实锤贴脸击杀与建墙每 2~3 秒互抢一轮 (22:15:48 杀 → 49.9 建 → 52.1
+     * 杀 → 52.8 建): 烈焰人一飘进 3 格就切去杀、一飘出就切回, 建墙被切得稀碎。
+     * 用户拍板走"**收紧触发条件**"这条路, 而不是加时间冷却 ——
+     * 2 格基本是贴身 (烈焰人近战/火球已经打在身上), 3 格"刚够得着"不再触发,
+     * 达标次数自然下降。谓词同口径引用本常量, 击杀进行中目标飘出 2 格即结束。
      */
-    private static final double BLAZE_MELEE_EMERGENCY_RANGE = 3.0;
-
-    // (2026-09-19 22:25 用户澄清: "不是增加击打时间, 是减少触发击打概率")
-    // 221114 实锤: 贴脸击杀与建墙 22:15:48 → 49 切回建墙 → 52 又杀 → 52.8 又建,
-    // 每 2~3 秒互抢一轮 —— 烈焰人飘进 3 格就切去杀, 飘出就切回, 建墙被切得稀碎。
-    // 修法 = 【触发节流】而非延长击杀: 一轮贴脸击杀结束 (目标死/飘出) 后进入
-    // BLAZE_MELEE_TRIGGER_COOLDOWN_S 秒冷却, 期间即使又有烈焰人进 3 格也不触发,
-    // 专心建墙 —— 把"切去杀"的次数降下来, 而不是把每次打得更久。
-    // 安全阀: bot 血量 ≤ BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH 时忽略冷却立即处理。
-    private static final double BLAZE_MELEE_TRIGGER_COOLDOWN_S = 8;
-    private static final float BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH = 12.0f;
-    private long _meleeCooldownUntilMs = 0;
-    /** 是否正处在一轮贴脸击杀中 (用于"结束时才开始计冷却")。 */
-    private boolean _meleeEngaged = false;
+    private static final double BLAZE_MELEE_EMERGENCY_RANGE = 2.0;
 
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
@@ -244,9 +237,6 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _skipBuildThisBeat = false;
         _beatFireTarget = null;
         _currentBuildTarget = null;
-        // (2026-09-19 22:25) 贴脸击杀触发节流态清零 —— 实例重建后不沿用上一段的冷却。
-        _meleeCooldownUntilMs = 0;
-        _meleeEngaged = false;
         BlockPos remembered = _confirmedSpawnerByKey.get(_worldKey);
         if (remembered != null) {
             // (2026-09-19 18:05 用户) 沿用前先验岩浆 — 别沿用一个岩浆笼再走
@@ -321,24 +311,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // —— 施工让位后 MobDefense 不插手, 这里不处理就没人处理。
             if (_foundBlazeSpawner != null) {
                 if (!spawnerWorkPending) {
-                    // 施工结束 → 贴脸节流态作废 (改走农场杀口径)。
-                    _meleeEngaged = false;
                     Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
                     toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
                             .filter(b -> b.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE);
                 } else {
-                    // (2026-09-19 22:25 用户"不是增加击打时间, 是减少触发击打概率")
-                    // 触发节流: 上一轮贴脸击杀结束后的 8s 内不再触发, 专心建墙。
-                    // 血量告急时忽略节流 (安全阀)。
-                    boolean cooldownActive = System.currentTimeMillis() < _meleeCooldownUntilMs;
-                    boolean healthEmergency = mod.getPlayer().getHealth() <= BLAZE_MELEE_COOLDOWN_OVERRIDE_HEALTH;
-                    if (!cooldownActive || healthEmergency) {
-                        emergencyBlaze = true;
-                        toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
-                                .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
-                                        && !isHoveringAboveLavaOrTooHigh(mod, b));
-                        if (toKill.isPresent()) _meleeEngaged = true;
-                    }
+                    // (2026-09-19 22:31 用户"把触发门槛增大, 不要改时间") 不加时间冷却,
+                    // 只把门槛从 3 格收紧到 2 格 —— 见 BLAZE_MELEE_EMERGENCY_RANGE 注释。
+                    emergencyBlaze = true;
+                    toKill = mod.getEntityTracker().getClosestEntity(mod.getPlayer().getPos(), BlazeEntity.class)
+                            .filter(b -> b.squaredDistanceTo(mod.getPlayer()) <= BLAZE_MELEE_EMERGENCY_RANGE * BLAZE_MELEE_EMERGENCY_RANGE
+                                    && !isHoveringAboveLavaOrTooHigh(mod, b));
                 }
             }
         }
@@ -378,16 +360,6 @@ public class CollectBlazeRodsTask extends ResourceTask {
                             entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
                                     && !isHoveringAboveLavaOrTooHigh(mod, entity),
                     BlazeEntity.class);
-        }
-
-        // (2026-09-19 22:25 用户"减少触发击打概率") 一轮贴脸击杀在此结束 (目标死 /
-        // 飘出 3 格 / 玩家血量恢复): 从这里才开始计 8s 触发冷却。计在"结束"而不是
-        // "开始", 才不会把打到一半的目标切走 —— 用户要的是"少切几次", 不是"打更久"。
-        if (_meleeEngaged && emergencyBlaze) {
-            _meleeEngaged = false;
-            _meleeCooldownUntilMs = System.currentTimeMillis() + (long) (BLAZE_MELEE_TRIGGER_COOLDOWN_S * 1000);
-            Debug.logToFile("altoclef_diag.log", "[BLAZE-MELEE] trigger cooldown started ("
-                    + (int) BLAZE_MELEE_TRIGGER_COOLDOWN_S + "s) — back to building");
         }
 
 
