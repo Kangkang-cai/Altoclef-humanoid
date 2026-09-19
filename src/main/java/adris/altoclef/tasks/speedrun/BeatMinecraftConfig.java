@@ -10,8 +10,14 @@ public class BeatMinecraftConfig {
     public boolean rePickupFurnace = true;
     public boolean searchRuinedPortals = true;
     public boolean searchDesertTemples = true;
-    public int minFoodUnits = 20;
-    public int foodUnits = 300;
+    // (2026-09-19 23:15 与运行配置对齐, 零行为) 这两项源码曾在 09-01 的 checkpoint
+    // (793a7f01) 被改成 20/300, 但 altoclef/configs/beat_minecraft.json 一直存在
+    // ⇒ ConfigHelper 每次都用【文件值】覆盖, 09-01 之后源码改动从未生效, 实跑的是
+    // 文件里的 10/120 (09-08 的 [FoodPeak] 分析即以 max(120, foodPeakUnits=240)=240
+    // 为基准)。现把默认值改回与现役一致的 10/120: 零行为改动, 只消除"改了源码
+    // 却不生效"的陷阱。若要让 20/300 真正生效, 改 JSON, 不是改这里。
+    public int minFoodUnits = 10;
+    public int foodUnits = 120;
     // (2026-09-15 进下界前食物硬闸, 用户"去地狱之前必须达到150units") 进下界
     // (_goToNetherTask) 前背包食物分低于该值 → 先 CollectFoodTask 收满。
     // 不受觅食远征"超时降低"影响 (硬闸优先)。<=0 时禁用。

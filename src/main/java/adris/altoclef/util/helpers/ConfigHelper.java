@@ -15,9 +15,12 @@ import net.minecraft.util.math.Vec3d;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.Objects;
 import java.util.Scanner;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -77,10 +80,45 @@ public class ConfigHelper {
         // Save over to include NEW settings
         // but only if a load was successful. Don't want to override user settings!
         if (!failed) {
+            // (2026-09-19 23:15 覆盖可见化) 文件值会【静默】覆盖源码默认值 ——
+            // 实测 beat_minecraft.json 的 targetEyes=14 把源码 16 压了数周,
+            // 用户"为什么还是只收 7 根棒"排查半天, 全程无任何日志痕迹。
+            // 纯播报、零行为: 不改写文件、不改判据, 只把差异打出来。
+            logOverriddenFields(path, getDefault.get(), result, classToLoad);
             saveConfig(path, result);
         }
 
         return result;
+    }
+
+    /**
+     * (2026-09-19 23:15 配置覆盖可见化, 纯诊断/零行为) 播报"文件值 != 源码默认值"
+     * 的字段。ConfigHelper 的设计是"文件存在即以文件为准", 所以源码里调完默认值
+     * 可能毫无效果 (beat_minecraft.json 的 targetEyes=14 压住源码 16, 直接导致
+     * 烈焰棒目标 7 而非 8)。此处只打日志, 让覆盖行为可见。
+     */
+    private static <T> void logOverriddenFields(String path, T defaults, T loaded, Class<T> classToLoad) {
+        if (defaults == null || loaded == null) return;
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (Field field : classToLoad.getFields()) {
+            if (Modifier.isStatic(field.getModifiers())) continue;
+            try {
+                Object dv = field.get(defaults);
+                Object lv = field.get(loaded);
+                if (Objects.deepEquals(dv, lv)) continue;
+                if (count > 0) sb.append(", ");
+                sb.append(field.getName()).append("=").append(dv).append("->").append(lv);
+                count++;
+            } catch (IllegalAccessException ignored) {
+                // getFields() 只返回 public, 理论不会发生
+            }
+        }
+        if (count == 0) return;
+        String msg = "[Config-Override] " + path + ": " + count
+                + " field(s) taken from FILE (default->file): " + sb;
+        Debug.logMessage(msg);
+        Debug.logToFile("altoclef_diag.log", msg);
     }
 
     public static <T> void loadConfig(String path, Supplier<T> getDefault, Class<T> classToLoad, Consumer<T> onReload) {
