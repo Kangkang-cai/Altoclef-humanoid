@@ -248,6 +248,16 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int SCAFFOLD_RESTOCK_COUNT = 64;
     private static final long SCAFFOLD_RESTOCK_COOLDOWN_TICKS = 600; // 补货失败 30s 后才可重试
     private static long _scaffoldRestockNextTick = 0;
+    // (2026-09-19 sticky 补货) 本仓任务模型: 父任务 onTick 每 tick 重估子任务,
+    // 一次性 return 的子任务会在下一 tick 因父任务返回 null 而被抢停
+    // (20260919-095231 实锤: 补货链 49ms 即 "interrupted by null")。
+    // 补货期间粘住同一实例, 背包有垫脚方块才释放。
+    private Task _restockTask;
+    // (2026-09-19) 中心被冷却后 30s 内跳过 memory-center 分支 —— 记忆中心常
+    // 集中在同一象限 (knowledge.log 实锤 x644-788 一带 15+ 个), 逐个冷却每
+    // 个要 18s+, 期间 probe/随机分支永远轮不到, bot 表现为"原地不动找不到目标"。
+    private static final long MEMORY_CENTER_SUPPRESS_TICKS = 600;
+    private static long _memoryCenterSuppressUntilTick = 0;
 
     // =========================================================================
     // (2026-09-05 通用化) 同一套人类式探索复用于不同下界目标: 音效线索前缀 /
@@ -844,6 +854,18 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private Task tickOutside(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
 
+        // (2026-09-19 sticky 补货) 每 tick 重派同一补货实例, 完成才释放 ——
+        // 一次性 return 会在下一 tick 被 null 抢停 (见字段注释)。
+        if (_restockTask != null) {
+            if (countPlaceableScaffoldBlocks(mod) > 0 || _restockTask.isFinished(mod)) {
+                Debug.logMessage("[FortressExplore] scaffolding restock finished.");
+                _restockTask = null;
+            } else {
+                setDebugState("Out of scaffolding blocks, collecting netherrack");
+                return _restockTask;
+            }
+        }
+
         // (2026-09-13 浮空目标) 到达判定改 2D: GoalXZWithin 只约束水平距离, 站到
         // 目标点水平 R 格内任意高度都算到。旧 3D isWithinDistance(3) 会因 y 差
         // >3 判"没到", 卡到 progress 超时才换目标, 白走。
@@ -899,6 +921,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
                         // 远处中心反复走不到 → 冷却 3 分钟, 让探测/更近中心/随机分支接管。
                         _centerCooldownUntil.put(_currentMemoryTarget.toImmutable(),
                                 System.currentTimeMillis() + CENTER_COOLDOWN_MS);
+                        // 同时跳过 memory-center 分支 30s, 让试探/随机方向真正接管
+                        // (否则剩余中心仍锚在同一象限, 换向等于没换)。
+                        _memoryCenterSuppressUntilTick = _tickId + MEMORY_CENTER_SUPPRESS_TICKS;
                         Debug.logMessage("[Expedition] memory center " + _currentMemoryTarget.toShortString()
                                 + " unreachable after " + MEMORY_TARGET_GIVEUP_FAILS + " fails, cooling down 3min");
                     } else {
@@ -912,14 +937,16 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             }
             // (2026-09-19 垫脚断供兜底) 可放置方块数为 0 → 先补一组地狱岩再继续
             // 探索 (baritone 没有可放置方块时会对需要垫柱的地形原地无限跳)。
+            // 补货实例粘性重派 (sticky), 见 _restockTask 字段注释。
             if (countPlaceableScaffoldBlocks(mod) == 0 && _tickId >= _scaffoldRestockNextTick) {
                 _scaffoldRestockNextTick = _tickId + SCAFFOLD_RESTOCK_COOLDOWN_TICKS;
+                _restockTask = TaskCatalogue.getItemTask(Items.NETHERRACK, SCAFFOLD_RESTOCK_COUNT);
                 _progress.reset();
                 _currentTarget = null;
                 Debug.logMessage("[FortressExplore] no placeable blocks in inventory, restocking "
                         + SCAFFOLD_RESTOCK_COUNT + " netherrack first");
                 setDebugState("Out of scaffolding blocks, collecting netherrack");
-                return TaskCatalogue.getItemTask(Items.NETHERRACK, SCAFFOLD_RESTOCK_COUNT);
+                return _restockTask;
             }
             _currentTarget = null;
             // (2026-09-13 P2 遇障换向) 停滞够久才升级试探, 普通寻路失败不换向。
@@ -967,8 +994,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         //    距离过滤。查讫机制同样适用: 中心扑空过就跳过, 不死磕假地标。
         _currentMemoryTarget = null;
         _currentMemoryIsCenter = false;
-        List<BlockPos> centers = mod.getKnowledgeMemory()
-                .getRememberedCenters(KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
+        // (2026-09-19) 中心刚被冷却 → 30s 内跳过 memory-center 分支, 让试探/
+        // 随机方向接管 (剩余中心仍锚在同一象限时, 换向等于没换)。
+        boolean suppressMemoryCenter = _tickId < _memoryCenterSuppressUntilTick;
+        List<BlockPos> centers = suppressMemoryCenter
+                ? new ArrayList<>()
+                : mod.getKnowledgeMemory()
+                        .getRememberedCenters(KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
         centers.removeIf(this::isCheckedMemory);
         // (2026-09-19) 冷却中的中心 (远处反复走不到) 跳过 —— 最近优选在剩余
         // 中心里照常生效, 更近的新堡垒不会被冷却的老中心挡住。
