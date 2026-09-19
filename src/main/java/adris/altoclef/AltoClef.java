@@ -604,13 +604,27 @@ public class AltoClef implements ModInitializer {
     //   ③ 扫描补 isChunkLoaded 判定。
     // 扫描节流 0.25s (体积 10625 → 1014, 开销更小、灵敏度更高); 每 tick 强制写
     // allowDiagonalAscend, 防任务栈 applyState 把旧值写回去。
-    private static final int LAVA_NAV_TRIGGER_RADIUS = 3;
+    // 脚下邻域 (兜底): 半径 3 → 2 (2026-09-19 用户"洞里一直触发"/"应该减小触发半径"),
+    // 前方危险改由下面的**路径预检**接管 —— 它比"人已经站在危险区"更早、更准。
+    private static final int LAVA_NAV_TRIGGER_RADIUS = 2;
     private static final int LAVA_NAV_TRIGGER_DOWN = 2;
     private static final int LAVA_NAV_TRIGGER_UP = 1;
     private static final int LAVA_NAV_HOLD_RADIUS = 6;
     private static final int LAVA_NAV_HOLD_DOWN = 3;
     private static final int LAVA_NAV_HOLD_UP = 2;
     private static final double LAVA_NAV_RELEASE_CONFIRM_SEC = 3.0;
+    // ==== 路径预检 (2026-09-19 用户: "导航是一次性的, 安全区算好的路径会穿过危险区") ====
+    // baritone 只在**算路时**读 allowDiagonalAscend, 已算好的路径里那个斜跳动作会照
+    // 执行 —— 所以"人走进危险区才关跳"永远晚一步。改为查**剩余路线**:
+    //   IPathExecutor exec = getPathingBehavior().getCurrent();
+    //   exec.getPath().movements() 从 exec.getPosition() 起 → 每个动作的落脚点 getDest()
+    // 只查其中的**斜向升格** (MovementDiagonal): 关跳只影响它, 路径里没斜跳就不触发
+    // (顺带治好"洞里一直触发"); 落脚点邻域的危险判据见 destDangerous()。
+    // 命中后 forceCancel() 请求重算 (节流), 让新路径在开关已关的状态下重新生成。
+    private static final int LAVA_NAV_PATH_LOOKAHEAD = 24;
+    /** 落脚点邻格下方连续非实心 ≥ 此深度 = 悬崖/深坑 (MC 摔落伤害自第 4 格起)。 */
+    private static final int LAVA_NAV_FALL_RISK_DEPTH = 4;
+    private static final double LAVA_NAV_REPLAN_THROTTLE_SEC = 3.0;
     /** 主世界参与判据的最大 Y (钻石层/深板岩层岩浆湖; 地表无岩浆, 不参与)。 */
     private static final int LAVA_NAV_OVERWORLD_MAX_Y = 20;
     /** 关跳所需的 baritone 可放置垫块数: 太少时垫不出替代路线, 禁跳反把 bot 冻住。 */
@@ -618,6 +632,8 @@ public class AltoClef implements ModInitializer {
     private final adris.altoclef.util.time.TimerGame _lavaNavScanTimer = new adris.altoclef.util.time.TimerGame(0.25);
     /** 外围连续无岩浆计时 (解除确认窗): 外围任一格有岩浆就重置。 */
     private final adris.altoclef.util.time.TimerGame _lavaNavClearTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_RELEASE_CONFIRM_SEC);
+    /** 命中危险后请求重算路径的节流 (防 forceCancel 反复重算同一条路)。 */
+    private final adris.altoclef.util.time.TimerGame _lavaNavReplanTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_REPLAN_THROTTLE_SEC);
     private boolean _lavaNavSuppressActive = false;
     private boolean _lavaNavNoBlockWarned = false;
 
@@ -632,7 +648,7 @@ public class AltoClef implements ModInitializer {
     private void tickLavaNavGuard() {
         if (inGame() && getPlayer() != null && getWorld() != null && _lavaNavScanTimer.elapsed()) {
             _lavaNavScanTimer.reset();
-            boolean triggerHit = false; // 落地邻域 (内圈) 有岩浆
+            boolean triggerHit = false; // 脚下邻域 (内圈) 有岩浆
             boolean holdHit = false;    // 外围警戒环有岩浆
             if (lavaNavApplies()) {
                 BlockPos center = getPlayer().getBlockPos();
@@ -661,32 +677,46 @@ public class AltoClef implements ModInitializer {
                 _lavaNavNoBlockWarned = false;
             }
 
+            // 路径预检: **全维度**执行 (悬崖/深坑到处都有; 末地无岩浆, 岩浆判据自然
+            // 不命中)。开销见注释: 24 个动作里斜跳通常个位数, 每个查 5 格邻域 × 最多
+            // 4 格深度 ≈ 百次 getBlockState / 0.25s, 比中心扫描小一个量级。
+            boolean pathHit = pathDiagonalDanger();
+            boolean danger = triggerHit || pathHit;
+
             boolean suppress = _lavaNavSuppressActive;
-            // 两类"不需要保守导航"的情形 (与 WorldSurvivalChain 的逃生豁免同源):
+            // 三类"不需要保守导航"的情形:
             //   ① 有防火效果 (2026-09-19 17:20 用户"喝药水的情况就不要惩罚");
             //   ② 正卡在刷怪笼造墙施工 (2026-09-19 用户"造墙期间强制关闭") — 关掉
-            //      斜向升格会让 bot 在笼边原地绕/跳不动, 干扰施工。
-            // 二者都**立即**解除、不等迟滞窗: 施工一结束 (或药效一过), 下一轮扫描
-            // 就回到正常判据, 内圈仍有岩浆会立刻重新触发 (触发本身零延迟)。
+            //      斜向升格会让 bot 在笼边原地绕/跳不动, 干扰施工;
+            //   ③ 飞行中 (创造/鞘翅, 2026-09-19 用户"开创造飞到空中反而触发") — 飞在
+            //      空中既不会摔, 也不受脚下岩浆影响, 关跳纯属干扰。
+            // 三者都**立即**解除、不等迟滞窗: 施工一结束 (或药效一过 / 一落地), 下一
+            // 轮扫描就回到正常判据, 危险仍在会立刻重新触发 (触发本身零延迟)。
             boolean fireRes = getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE);
             boolean building = adris.altoclef.tasks.resources.CollectBlazeRodsTask.isEnclosureBuildWorkActive();
-            boolean exempt = fireRes || building;
+            boolean flying = getPlayer().getAbilities().flying || getPlayer().isCreative();
+            boolean exempt = fireRes || building || flying;
             if (!suppress) {
-                if (triggerHit && !exempt) {
+                if (danger && !exempt) {
                     if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) >= LAVA_NAV_MIN_PLACEABLE) {
                         suppress = true;
                         _lavaNavClearTimer.reset();
+                        // 已算好的路径里那个斜跳不会因为开关关闭而消失 (baritone 只在
+                        // 算路时读设置), 必须请求重算才能真的绕开。
+                        if (pathHit) requestLavaNavReplan();
                     } else if (!_lavaNavNoBlockWarned) {
                         _lavaNavNoBlockWarned = true;
                         Debug.logToFile("altoclef_diag.log",
-                                "[LavaNav] lava in landing range but fewer than " + LAVA_NAV_MIN_PLACEABLE
+                                "[LavaNav] danger detected but fewer than " + LAVA_NAV_MIN_PLACEABLE
                                         + " baritone-placeable blocks — keeping diagonal ascend ON");
                     }
                 }
             } else if (exempt) {
                 suppress = false;
-            } else if (holdHit) {
+            } else if (holdHit || pathHit) {
                 _lavaNavClearTimer.reset();
+                // 抑制期间路径仍在危险区 (例如重算后仍选中同一条), 持续尝试重算。
+                if (pathHit) requestLavaNavReplan();
             } else if (_lavaNavClearTimer.elapsed()) {
                 suppress = false;
             }
@@ -694,13 +724,15 @@ public class AltoClef implements ModInitializer {
             if (suppress != _lavaNavSuppressActive) {
                 _lavaNavSuppressActive = suppress;
                 String pos = getPlayer().getBlockPos().toShortString();
+                // 触发原因只写一条主因, 便于日志判读: 路径预检命中优先 (它更早)。
+                String why = pathHit ? "路径斜跳落点高危(岩浆/深坑)"
+                        : (triggerHit ? "脚下邻域岩浆(水平<=" + LAVA_NAV_TRIGGER_RADIUS
+                                + "/下" + LAVA_NAV_TRIGGER_DOWN + "/上" + LAVA_NAV_TRIGGER_UP + ")" : "?");
                 String m = suppress
-                        ? "[LavaNav] 触发: 落地邻域岩浆 (水平<=" + LAVA_NAV_TRIGGER_RADIUS
-                                + "/下" + LAVA_NAV_TRIGGER_DOWN + "/上" + LAVA_NAV_TRIGGER_UP
-                                + "), 关斜向升格(旋转跳) pos=" + pos
+                        ? "[LavaNav] 触发: " + why + ", 关斜向升格(旋转跳) pos=" + pos
                         : "[LavaNav] 解除: 外围(<=" + LAVA_NAV_HOLD_RADIUS + ") 连续 "
-                                + LAVA_NAV_RELEASE_CONFIRM_SEC + "s 无岩浆"
-                                + (exempt ? " / 已豁免(防火或造墙施工)" : "")
+                                + LAVA_NAV_RELEASE_CONFIRM_SEC + "s 无岩浆且路径无危险斜跳"
+                                + (exempt ? " / 已豁免(防火或造墙施工或飞行)" : "")
                                 + ", 恢复斜向升格 pos=" + pos;
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
@@ -710,6 +742,101 @@ public class AltoClef implements ModInitializer {
         // 未抑制时写回基线 true, 与 initializeBaritoneSettings 的原值一致。
         // 只动这一个开关: blockPlacementPenalty 已于 2026-09-19 移出本保险。
         getClientBaritoneSettings().allowDiagonalAscend.value = !_lavaNavSuppressActive;
+    }
+
+    /**
+     * (2026-09-19 用户: "导航是一次性的, 在安全区算好的路径会穿过危险区") 剩余路线里
+     * 是否存在**经过危险区的斜向升格**。只看 MovementDiagonal —— 关跳只影响它, 路径
+     * 里没有斜跳就不触发 (顺带治好"洞里一直触发": 洞里多是平走/上下行); 只查该动作
+     * 的落脚点邻域, 不扫立方体, 所以很便宜。
+     *
+     * <p>路线来源: {@code getPathingBehavior().getCurrent()} → {@code IPathExecutor.getPath()}
+     * → {@code path.movements()} 从 {@code exec.getPosition()} (已走到第几个动作) 起,
+     * 每个 {@code IMovement.getDest()} 就是落脚点。与 BaritoneHelper.isBaritoneBuilding
+     * 同一套接口。
+     */
+    private boolean pathDiagonalDanger() {
+        try {
+            var baritone = getClientBaritone();
+            if (!baritone.getPathingBehavior().isPathing()) return false;
+            var exec = baritone.getPathingBehavior().getCurrent();
+            if (exec == null) return false;
+            var path = exec.getPath();
+            if (path == null) return false;
+            var movements = path.movements();
+            int start = Math.max(0, exec.getPosition());
+            int end = Math.min(movements.size(), start + LAVA_NAV_PATH_LOOKAHEAD);
+            for (int i = start; i < end; i++) {
+                Object mv = movements.get(i);
+                // 只关心斜向升格: 关掉 allowDiagonalAscend 唯一影响的就是它。
+                if (!(mv instanceof baritone.pathing.movement.movements.MovementDiagonal)) continue;
+                BlockPos dest = ((baritone.api.pathing.movement.IMovement) mv).getDest();
+                if (dest == null) continue;
+                if (destDangerous(dest)) return true;
+            }
+        } catch (Throwable ignored) {
+            return false; // 拿不到路径按"无危险"处理, 不阻塞正常寻路
+        }
+        return false;
+    }
+
+    /**
+     * 斜跳落脚点是否高危: dest 及其水平 4 邻里有岩浆 (掉进去即死), 或其下方是
+     * ≥ LAVA_NAV_FALL_RISK_DEPTH 格的深坑/悬崖 (斜跳失败掉下去摔死)。
+     * 之所以连邻格一起查: 斜跳失败不是精确落回原点, 而是掉到 dest 周边。
+     */
+    private boolean destDangerous(BlockPos dest) {
+        if (!getChunkTracker().isChunkLoaded(dest)) return false;
+        if (isLavaAt(dest) || isLavaAt(dest.down())) return true;
+        if (cliffDepth(dest) >= LAVA_NAV_FALL_RISK_DEPTH) return true;
+        for (net.minecraft.util.math.Direction dir : net.minecraft.util.math.Direction.values()) {
+            if (!dir.getAxis().isHorizontal()) continue;
+            BlockPos side = dest.offset(dir);
+            if (!getChunkTracker().isChunkLoaded(side)) continue;
+            if (isLavaAt(side) || isLavaAt(side.down())) return true;
+            if (cliffDepth(side) >= LAVA_NAV_FALL_RISK_DEPTH) return true;
+        }
+        return false;
+    }
+
+    private boolean isLavaAt(BlockPos p) {
+        if (!getChunkTracker().isChunkLoaded(p)) return false;
+        return getWorld().getBlockState(p).getBlock() == Blocks.LAVA;
+    }
+
+    /**
+     * p 下方连续非实心 (且非水) 的格数, 上限 LAVA_NAV_FALL_RISK_DEPTH。
+     * 下方是水返回 0 (摔不死, 反而可能是有意的跳水); 区块未加载返回 0 (按安全处理)。
+     */
+    private int cliffDepth(BlockPos p) {
+        int depth = 0;
+        for (int d = 1; d <= LAVA_NAV_FALL_RISK_DEPTH; d++) {
+            BlockPos q = p.down(d);
+            if (!getChunkTracker().isChunkLoaded(q)) return 0;
+            net.minecraft.block.BlockState st = getWorld().getBlockState(q);
+            if (st.getBlock() == Blocks.WATER) return 0;
+            if (adris.altoclef.util.helpers.WorldHelper.isSolid(this, q)) break;
+            depth = d;
+        }
+        return depth;
+    }
+
+    /**
+     * 请求 baritone 重算当前路径: 开关关掉**不会**让已算好的路径里的斜跳消失
+     * (baritone 只在算路时读 allowDiagonalAscend), 必须重算才能真的绕开。
+     * forceCancel 保留目标、下一 tick 由 PathingControlManager 重新规划; 节流防抖。
+     */
+    private void requestLavaNavReplan() {
+        if (!_lavaNavReplanTimer.elapsed()) return;
+        _lavaNavReplanTimer.reset();
+        try {
+            getClientBaritone().getPathingBehavior().forceCancel();
+            String m = "[LavaNav] 路径预检命中危险斜跳, 已请求重算 (节流 "
+                    + LAVA_NAV_REPLAN_THROTTLE_SEC + "s) pos=" + getPlayer().getBlockPos().toShortString();
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        } catch (Throwable ignored) {
+        }
     }
 
     // ==== 永久夜视 (2026-09-18) ====
