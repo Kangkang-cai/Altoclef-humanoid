@@ -195,7 +195,17 @@ public class CollectBlazeRodsTask extends ResourceTask {
             (2 * SPAWNER_FLOOR_HALF + 1) * (2 * SPAWNER_FLOOR_HALF + 1) * 2
                     + (2 * SPAWNER_WALL_HALF + 1) * (2 * SPAWNER_WALL_HALF + 1)
                     - (2 * SPAWNER_FLOOR_HALF + 1) * (2 * SPAWNER_FLOOR_HALF + 1);
-    private static final double ENCLOSURE_BUILD_FOCUS_COMPLETION = 0.90;
+    /**
+     * (2026-09-19 23:11 用户"把两者都调成 95%") 围场"算建成"阈值 ——
+     * 完成度 = 1 - missing / {@link #ENCLOSURE_TOTAL_BLOCKS} (74)。**同一个值同时
+     * 放开两件事** (用户要求同步, 所以这里就是一个判据
+     * {@link #isBuiltCompletion}, 不再留两个各调各的常量):
+     *   ① 建墙优先期结束 —— 补墙卡住时允许轮转清障/灭火 (不再死守只建墙);
+     *   ② 击杀放开距离 —— 只看"在不在围场区域内", 不再只打贴脸 3 格 (一次性闩)。
+     * 95% ⇒ missing ≤ 3 块。之所以能这么早: 剩两三块时墙已经围得住, 不必死等
+     * (顶盖那块结构性死结能拖很久, 期间 bot 只能干等挨打)。
+     */
+    private static final double ENCLOSURE_BUILT_COMPLETION = 0.95;
 
     private enum EnclosureAction { NONE, BUILD, CLEAR, FIRE }
 
@@ -291,7 +301,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 判据 (首次): {@link #findMissingEnclosureBlocks} 全扫 74 格
      * (顶盖 y+3 5x5 = 25 + 围墙 y+1 7x7 外圈 = 24 + 地板 y-1 5x5 = 25),
      * 每格都"挡得住"({@link #isEnclosureBlocking}: 满立方 solid, 或有碰撞箱的
-     * 非空气方块 —— 栅栏/墙/玻璃都算) ⇒ 缺块为空 ⇒ **闩上**。
+     * 非空气方块 —— 栅栏/墙/玻璃都算) ⇒ 完成度 ≥ {@link #ENCLOSURE_BUILT_COMPLETION}
+     * (95%, 即缺块 ≤ 3) ⇒ **闩上**。(2026-09-19 23:11 用户"把两者都调成 95%",
+     * 原先要求缺块完全为空; 剩余两三块时墙已围得住, 不必死等顶盖那块死结。)
      *
      * 为什么必须一次性: 原实现每次都读 {@code _cachedMissingEnclosure} (15s 重扫),
      * 于是**烈焰人火球炸掉一块墙 → 下次重扫缺块非空 → 击杀口径立刻退回"只打贴脸
@@ -309,10 +321,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
         if (key == null) return false;
         if (key.equals(_enclosureBuiltOnceKey)) return true;
         List<BlockPos> missing = _cachedMissingEnclosure;
-        if (missing != null && missing.isEmpty()) {
+        // (2026-09-19 23:11 用户"把两者都调成 95%") 阈值判据与建墙优先期共用
+        // isBuiltCompletion —— 两者同一时刻翻转 (95%, 缺块 ≤ 3)。
+        if (missing != null && isBuiltCompletion(missing.size())) {
             _enclosureBuiltOnceKey = key;
-            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] first build complete — "
-                    + "kill range unlocked (围场区域内全打, 不再看距离)");
+            int pct = (int) Math.round((1.0 - (double) missing.size() / ENCLOSURE_TOTAL_BLOCKS) * 100);
+            Debug.logToFile("altoclef_diag.log", "[BLAZE-ENCLOSURE] built " + pct + "% (missing="
+                    + missing.size() + ") — kill range unlocked (围场区域内全打, 不再看距离)");
             return true;
         }
         return false;
@@ -1164,10 +1179,18 @@ public class CollectBlazeRodsTask extends ResourceTask {
         return EnclosureAction.NONE;
     }
 
-    /** 缺块占比是否还在"专心建墙"区间内 (完成度 < {@link #ENCLOSURE_BUILD_FOCUS_COMPLETION})。 */
-    private static boolean isBuildFocusPhase(int missingCount) {
+    /**
+     * (2026-09-19 23:11 用户"把两者都调成 95%") 是否达到"算建成"的完成度 ——
+     * 建墙优先期与击杀放开距离**共用这一条判据**, 保证两者永远同一时刻翻转。
+     */
+    private static boolean isBuiltCompletion(int missingCount) {
         double completion = 1.0 - (double) missingCount / ENCLOSURE_TOTAL_BLOCKS;
-        return completion < ENCLOSURE_BUILD_FOCUS_COMPLETION;
+        return completion >= ENCLOSURE_BUILT_COMPLETION;
+    }
+
+    /** 缺块占比是否还在"专心建墙"区间内 (完成度未达 {@link #ENCLOSURE_BUILT_COMPLETION})。 */
+    private static boolean isBuildFocusPhase(int missingCount) {
+        return !isBuiltCompletion(missingCount);
     }
 
     /**
