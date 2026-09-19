@@ -104,8 +104,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
     // 破洞重扫间隔 / 回场检查间隔 (秒, 用户 13:05)。
     private static final int HOLE_CHECK_INTERVAL_S = 15;
     private static final int RETURN_CHECK_INTERVAL_S = 10;
-    // 围场内烈焰人才打 (刷怪笼中心 4.5 格 ≈ 7x7 围场对角半径)。
-    private static final double ENCLOSURE_KILL_RANGE = 4.5;
+    // (2026-09-19 22:59 已删 ENCLOSURE_KILL_RANGE = 4.5) 用户"刷怪区就是我们自己围上的
+    // 区域" —— 击杀口径从"距笼心 ≤4.5"改为"在不在围场盒内"(isInsideEnclosureBox)。
+    // 4.5 会漏掉角落/高处的目标 (7x7 对角 4.24, 叠上高度差即超 4.5)。
+    // 另: isHoveringAboveLavaOrTooHigh (向下 23 格找 LAVA/实体地面) 也一并在同日删除 ——
+    // 下界堡垒悬空, 烈焰人本来就常悬在岩浆海上方, 那道判据会把贴脸目标整个过滤掉。
     /**
      * (2026-09-19 20:20 用户"贴脸的烈焰人还是要打, 打远了就不管了继续造墙")
      * 施工中(spawnerWorkPending)不开农场杀, 但贴脸烈焰人必须紧急处理 ——
@@ -215,7 +218,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _count = count;
     }
 
-    private static boolean isHoveringAboveLavaOrTooHigh(AltoClef mod, Entity entity) {
+    private static boolean isHoveringAboveLavaOrTooHigh_UNUSED(AltoClef mod, Entity entity) {
         int MAX_HEIGHT = 23;
         for (BlockPos check = entity.getBlockPos(); entity.getBlockPos().getY() - check.getY() < MAX_HEIGHT; check = check.down()) {
             if (mod.getWorld().getBlockState(check).getBlock() == Blocks.LAVA) return true;
@@ -223,6 +226,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
         }
         return true;
     }
+    // (2026-09-19 22:59 保留但不调用) 上面那道判据是当天的漏判源之一: 下界堡垒悬空,
+    // 烈焰人常悬在岩浆海/无实体地面之上 → 恒判 true → 贴脸目标被整个过滤掉。
+    // 之所以留名而不是删除: 记录"它存在过、以及为什么不能用", 避免以后又被当成
+    // "防追出去摔"的通用保护重新接上。真正需要它的是"跨地形远征", 不是围场击杀。
 
     /**
      * (2026-09-19 22:44 用户"怎么有的时候, 明明有烈焰人在区域内任务还是等待生成")
@@ -249,18 +256,44 @@ public class CollectBlazeRodsTask extends ResourceTask {
         return mod.getWorld().getEntitiesByClass(BlazeEntity.class, box, Entity::isAlive);
     }
 
-    /** 候选里距 ref 最近、且在 range 内的烈焰人; 无则 empty (农场杀用)。 */
-    private Optional<Entity> closestBlazeWithin(List<BlazeEntity> candidates, Vec3d ref, double range) {
+    /**
+     * (2026-09-19 22:59 用户"刷怪区就是我们自己围上的区域") 围场【区域内】最近的
+     * 烈焰人 —— 墙建好后的唯一击杀口径, **不看距离**。
+     */
+    private Optional<Entity> closestBlazeInEnclosure(AltoClef mod, Vec3d ref) {
         BlazeEntity best = null;
-        double bestSq = range * range;
-        for (BlazeEntity b : candidates) {
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (BlazeEntity b : blazesInEnclosure(mod)) {
             if (b == null || !b.isAlive()) continue;
             double sq = b.squaredDistanceTo(ref);
-            if (sq > bestSq) continue;
-            bestSq = sq;
-            best = b;
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = b;
+            }
         }
         return Optional.ofNullable(best);
+    }
+
+    /** 位置是否落在"我们自己围起来的区域"(7x7 × y-1..y+3, 与 {@link #blazesInEnclosure} 同一盒子)。 */
+    private boolean isInsideEnclosureBox(BlockPos pos) {
+        BlockPos s = _foundBlazeSpawner;
+        if (s == null || pos == null) return false;
+        return Math.abs(pos.getX() - s.getX()) <= SPAWNER_WALL_HALF
+                && Math.abs(pos.getZ() - s.getZ()) <= SPAWNER_WALL_HALF
+                && pos.getY() >= s.getY() - 1
+                && pos.getY() <= s.getY() + SPAWNER_ROOF_HEIGHT;
+    }
+
+    /**
+     * (2026-09-19 22:59 用户"当墙建好之后, 就不要 3 格距离限制了") 围场【结构】是否
+     * 已完工 —— 只看缺块 (扫过且为空), **不把清障进度算进去**。
+     * 原来"是否开农场杀"直接复用 isSpawnerWorkPending, 而后者把"内圈还没清完"也算
+     * 施工中 → 墙明明已经建好, 却仍按贴脸 3 格口径 → 区域内 4 格外的烈焰人不打。
+     * 未扫过 (缓存 null) 视为未完工, 走保守的贴脸口径。
+     */
+    private boolean isEnclosureStructureDone() {
+        List<BlockPos> missing = _cachedMissingEnclosure;
+        return missing != null && missing.isEmpty();
     }
 
     /**
@@ -369,9 +402,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
             return new DefaultGoToDimensionTask(Dimension.NETHER);
         }
 
-        // (2026-09-19 包围策略④) 围场未完工 (没喝药 / 缺块未补) 时不开杀 —
-        // 半路去追打飘在空中的烈焰人正是 0919 摔死事故的根源, 先把围场立起来。
-        boolean spawnerWorkPending = isSpawnerWorkPending(mod);
+        // (2026-09-19 22:59) 原先这里算一个 spawnerWorkPending 开关"围场未完工不开杀";
+        // 现在该语义由击杀口径自己承担 (结构未完工 → 只打贴脸, 完工 → 区域内全打),
+        // 见下方 isEnclosureStructureDone 分支。顺带省掉每 tick 一次
+        // isSpawnerWorkPending 里的内圈全扫 (它会调 findInteriorObstructor)。
 
         // (2026-09-19 18:55 用户三条特殊规则) 无防火效果且背包无药水时:
         //  ① 墙未完工 → 停止造墙, 转去获得药水 (不裸奔硬撑);
@@ -428,12 +462,17 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // 但【贴脸】烈焰人(距 bot ≤3)必须紧急杀掉, 打远了就不管继续造墙
             // —— 施工让位后 MobDefense 不插手, 这里不处理就没人处理。
             if (_foundBlazeSpawner != null) {
-                if (!spawnerWorkPending) {
-                    // 施工结束 → 贴脸锁定作废 (改走农场杀口径)。
+                if (isEnclosureStructureDone()) {
+                    // (2026-09-19 22:59 用户"当墙建好之后, 就不要 3 格距离限制了呀,
+                    // 直接就杀刷怪区域内感知到的; 刷怪区就是我们自己围上的区域")
+                    // 墙建好 → 只要【在我们围起来的区域里】就杀, 不再按距离卡:
+                    // 原来的"距笼心 ≤4.5"会漏掉角落/高处的 (7x7 对角 4.24, 叠上高度差
+                    // 就超 4.5), 用户看到的就是"区域里有烈焰人却干等"。
                     _meleeTarget = null;
                     Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
-                    toKill = closestBlazeWithin(blazeCandidates, spawnerCenter, ENCLOSURE_KILL_RANGE);
+                    toKill = closestBlazeInEnclosure(mod, spawnerCenter);
                 } else {
+                    // 墙还没建好 → 只处理贴脸 (进 3 格 / 保持到 6 格), 不跑去追远处的。
                     emergencyBlaze = true;
                     toKill = pickMeleeByStickyTarget(mod);
                 }
@@ -477,11 +516,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
                                 <= BLAZE_MELEE_STICKY_RELEASE * BLAZE_MELEE_STICKY_RELEASE,
                         BlazeEntity.class);
             }
-            Vec3d spawnerCenter = Vec3d.ofCenter(_foundBlazeSpawner);
+            // (2026-09-19 22:59 用户) 谓词同口径: 【在围场区域内】即可, 不看距离;
+            // 并去掉悬浮岩浆过滤 (围场内不存在"追出去摔"的问题, 那道过滤只会漏目标)。
             return new KillEntitiesTask(() -> new ArrayList<Entity>(blazesInEnclosure(mod)),
-                    entity ->
-                            entity.squaredDistanceTo(spawnerCenter) <= ENCLOSURE_KILL_RANGE * ENCLOSURE_KILL_RANGE
-                                    && !isHoveringAboveLavaOrTooHigh(mod, entity),
+                    entity -> isInsideEnclosureBox(entity.getBlockPos()),
                     BlazeEntity.class);
         }
 
@@ -934,7 +972,12 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * (2026-09-19 包围策略④) 已到达确认刷怪笼旁、且围场作业还没做完 (该喝的药
      * 没喝 / 围场缺块未补或还没扫过) → 期间不开杀, 由刷怪笼分支执行喝药与建围
      * 场。不在场或已确认完工则返回 false, 围场内击杀照常。
+     *
+     * (2026-09-19 22:59 用户"当墙建好之后, 就不要 3 格距离限制了") 击杀口径已改用
+     * {@link #isEnclosureStructureDone} (并把清障进度排除在外), 本方法暂无调用者,
+     * 保留备查 —— 它的完整语义 (含喝药/清障) 与"能不能放心开杀"不是一回事。
      */
+    @SuppressWarnings("unused")
     private boolean isSpawnerWorkPending(AltoClef mod) {
         if (_foundBlazeSpawner == null) return false;
         if (!_foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4)) return false;
