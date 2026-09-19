@@ -1671,7 +1671,16 @@ public class BeatMinecraft2Task extends Task {
 
         int blazePowderCount = mod.getItemStorage().getItemCount(Items.BLAZE_POWDER);
         int blazeRodCount = mod.getItemStorage().getItemCount(Items.BLAZE_ROD);
-        int blazeRodTarget = (int)Math.ceil(((double)targetEyes - eyeCount - blazePowderCount) / 2.0);
+        // (2026-09-19 22:59 用户"固定满额 8 根, 不再扣已有眼/粉") 棒目标只按
+        // targetEyes 折算: ceil(16/2) = 8。旧口径会扣掉背包里已有的末影之眼 /
+        // 烈焰粉 —— 手里有 2 个眼 (等价 2 粉) 就只收 7 根 (223931 会话
+        // debugstate "Collect 7 blaze rods" 与 "ender_pearl x 14" 双证据互证,
+        // 反解 eyeCount=2 或 targetEyes=14)。用户要的是"满额收 + 余量",
+        // 多出的 1 根棒 (=2 粉) 当备份粉留在背包。
+        // ⚠ 生效前提: altoclef/configs/beat_minecraft.json 的 targetEyes 必须
+        // 是 16 —— 该 JSON 在 :75-77 静态加载时【覆盖】源码默认值 (实测
+        // "targetEyes" : 14 曾把目标压成 7)。只改源码常量无效。
+        int blazeRodTarget = (int)Math.ceil((double)targetEyes / 2.0);
         int enderPearlTarget = targetEyes - eyeCount;
         boolean needsBlazeRods = blazeRodCount < blazeRodTarget;
         boolean needsBlazePowder = eyeCount + blazePowderCount < targetEyes;
