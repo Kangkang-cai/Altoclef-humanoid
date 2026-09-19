@@ -1221,6 +1221,12 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-09-13) 半径统一由 nearR 决定 (贪婪 5x5x5 / 非贪婪 3x3x3),
             // 与 hasNearFieldTarget 必须同口径, 见 GREEDY_NEAR_FIELD_RADIUS。
             int nearR = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
+            // (2026-09-19 15:05 用户"获取方块不就近, 跳来跳去") 下界岩等垫脚料
+            // 满地都是, 3x3x3 挖净即断链 → 全局最近把 bot 拽去别的方向 (现场
+            // 20260919-150152: 目标 771,75,121 → 770,75,121 → 775,76,122 来回
+            // 横跳)。垫脚目标近场扩到 7x7x7 —— 一片挖干净再挪窝, 挪窝也只挪
+            // 到真正的最近片。
+            if (nearR == 1 && isScaffoldGroundTarget()) nearR = 3;
             // (2026-09-15 链挖锚点修复) 原: getNearFieldOreAt(mod, _miningPos, nearR)
             // —— _miningPos 刚被清空恒为 null, 链挖断链。改用 getChainAnchor()。
             // (2026-09-15 批采) 木头批采转入拾取阶段 (砍满/背包达标) 时跳过链挖,
@@ -1910,6 +1916,9 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-09-15) 锚点同样与 getClosestTo 同口径 (getChainAnchor 含刚挖
             // 完 4s 内的破坏位置兜底), 否则"判没活但链挖有目标"反向不一致。
             int r = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
+            // (2026-09-19 15:05) 与 getClosestTo 同口径: 垫脚目标近场 7x7x7,
+            // 否则"判没活"提前结束/反向不一致 (见 getClosestTo 处注释)。
+            if (r == 1 && isScaffoldGroundTarget()) r = 3;
             Optional<BlockPos> m = getNearFieldOreAt(mod, getChainAnchor(), r);
             if (m.isPresent()) return true;
             // 贪心: 玩家近身也有紧贴矿也算"还有活", 任务不结束 (等 getClosestTo 派发)。
