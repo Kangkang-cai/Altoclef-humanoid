@@ -30,7 +30,12 @@ import baritone.altoclef.AltoClefSettings;
 import baritone.api.BaritoneAPI;
 import baritone.api.Settings;
 import net.fabricmc.api.ModInitializer;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.FenceBlock;
+import net.minecraft.block.PaneBlock;
+import net.minecraft.block.WallBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
@@ -252,6 +257,9 @@ public class AltoClef implements ModInitializer {
             // (2026-09-18 岩浆邻域导航保险) 旋转跳 (斜向升格) 失败率>50%, 落地邻域
             // 有岩浆时动态禁跳 (下界全程 + 主世界深层), 详见 tickLavaNavGuard 注释。
             tickLavaNavGuard();
+            // (2026-09-19 修 17:58 围场施工站桩) baritone 的"岩浆可游"开关与现场
+            // 状态解耦同步, 详见 tickLavaSwimSync 注释。
+            tickLavaSwimSync();
             // (2026-09-17 跨世界残留状态) 换存档(不重启游戏)时 static 字段全部存活
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
@@ -479,7 +487,22 @@ public class AltoClef implements ModInitializer {
             if (world == null) return false;
             int y = pos.getY();
             if (y < world.getBottomY() || y >= world.getTopY()) return false;
-            return world.getBlockState(pos).getBlock() == Blocks.SOUL_SAND;
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() == Blocks.SOUL_SAND) return true;
+            // (2026-09-19 栅栏/墙/栏杆"解冻站位") MovementHelper.canWalkOn 是硬编码
+            // 白名单 —— isBlockNormalCube(整格满立方) 之后只放行
+            // LADDER/VINE/FARMLAND/DIRT_PATH/CHEST/ENDER_CHEST/TRAPPED_CHEST/GLASS/
+            // END_PORTAL_FRAME/SlabBlock/StairsBlock/AzaleaBlock/StainedGlassBlock,
+            // **没有 FenceBlock / WallBlock / PaneBlock**(javap 逐个核对)。栅栏/墙/
+            // 栏杆的碰撞盒顶面(1.5 / 1.5 / 1.0)是真实可站面, 于是 bot 一旦站上去,
+            // "脚下不可站" → 与该 class 的 COST_INF 判据全灭, 与灵魂沙同构。
+            //
+            // ⚠ 刻意【不】无条件放行这三类: canWalkOn=true 隐含不变量"该方块顶面
+            // ≤1 格、1.25 跳跃够得着"(白名单里全是 ≤1 高)。若全局放行 1.5 高的栅栏,
+            // MovementAscend 会规划出"跳上栅栏"的假路径 —— 物理上跳不上去 → 制造
+            // 新的站桩。故只解冻【bot 自己当前脚所在格 / 脚下方格】这一格:
+            // 描述的是"我正站在这里、我要走开", 事实成立、不可能引入假路径。
+            return isThinStandableBlock(state) && isOwnCurrentSupport(pos);
         });
 
         // 配套 (v29): 执行层也当普通方块走。规划层放行后 baritone 会真的把路径
@@ -565,6 +588,93 @@ public class AltoClef implements ModInitializer {
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         }
+    }
+
+    // ==== (2026-09-19 栅栏/墙/栏杆 细方块可站) ====
+
+    /**
+     * "细方块": 碰撞盒非满立方但顶面是真实可站面 —— 栅栏(1.5) / 墙(1.5) / 栏杆玻璃板(1.0)。
+     * baritone 的 canWalkOn 白名单不含这三类 (见 forceWalkOnPredicates 注册点注释)。
+     */
+    private static boolean isThinStandableBlock(BlockState state) {
+        Block b = state.getBlock();
+        return b instanceof FenceBlock || b instanceof WallBlock || b instanceof PaneBlock;
+    }
+
+    /**
+     * pos 是否就是 bot 自己当前所处的格 / 脚下方格 —— 用于把"细方块解冻"限制在
+     * "解冻当前站位"这一格, 绝不放行任意位置的栅栏 (否则 MovementAscend 会规划
+     * 跳上 1.5 高栅栏的假路径)。谓词跑在 baritone 计算线程, 只读 player 位置。
+     */
+    private static boolean isOwnCurrentSupport(BlockPos pos) {
+        ClientPlayerEntity p = MinecraftClient.getInstance().player;
+        if (p == null) return false;
+        BlockPos feet = p.getBlockPos();
+        return pos.equals(feet) || pos.equals(feet.down());
+    }
+
+    // ==== (2026-09-19 岩浆里 baritone 起点判据同步) ====
+    private boolean _lavaSwimSynced = false;
+
+    /**
+     * (2026-09-19 修"围场施工时站在岩浆里站桩", 现场 20260919-175617 / 17:58:40)
+     *
+     * 现场 (snapshot.log 实锤):
+     *   player=(763,80,140), target=763,80,140 = minecraft:lava (fluid=true),
+     *   below=763,79,140 = netherrack (solid=true) —— 支撑正常, 问题在脚所在格本身。
+     *   baritone: `22 movements considered / Open set size: 0 / PathNode map size: 1
+     *   / nodes per second: 2147483647`(int 溢出) 刷屏 → PlaceStructureBlockTask
+     *   2s 超时轮转 → 整条围场建造链空转 (17:58:28 `build target stalled, rotating` 同刻)。
+     *
+     * 字节码链 (patched baritone 1.18.2, javap 取证):
+     *   MovementTraverse.cost() 先算 getMiningDurationTicks(ctx, srcX, srcY, srcZ, srcState),
+     *   ≥1e6 直接 return COST_INF (offset 168~194); 而 getMiningDurationTicks 是
+     *     `if (canWalkThrough(state)) return 0;`  ← 岩浆唯二被放行的条件是
+     *        canSwimThroughLava() 为真 ∧ 方块==LAVA ∧ 上方无流体 (canWalkThrough offset 139~175)
+     *     `if (!state.getFluidState().isEmpty()) return 1e6;`
+     *   ⇒ 开关关闭时岩浆格恒 1e6 ⇒ 该起点出发的 22 种移动全部 COST_INF。
+     *   (同款指纹: 灵魂沙 09-13、岩浆 09-14 —— "A* 一步不展开先怀疑起点判据"。)
+     *
+     * 根因 = 开关与现场脱钩: `allowSwimThroughLava(true)` 只写在
+     *   EscapeFromLavaTask.onStart。该洞 09-14 已修过一次 (WorldSurvivalChain.isInLavaOhShit
+     *   改成"只要身体浸在岩浆里就派 Lava Escape"); 09-19 16:05 为"岩浆从高处浇下来时
+     *   专心盖墙"加的施工豁免 (防火 ∧ isEnclosureBuildWorkActive ⇒ 不派 Lava Escape)
+     *   **把同一个洞重新打开了** —— 豁免放行了"留在岩浆里", 却没配套放行 baritone 的开关。
+     *
+     * 本方法把开关直接对齐现场, 不经任何任务:
+     *   on  = 身体浸在岩浆里, 或脚所在格 / 脚下方格是岩浆;
+     *   off = 其余一切情况。
+     * 只在"已经泡在岩浆里"才开 ⇒ 不会从安全位置规划穿岩浆; 脱离即关 ⇒ 暴露窗口有界。
+     * 这正是 09-14 那条修复的语义, 此处补上 09-19 的围场豁免分支。
+     */
+    private void tickLavaSwimSync() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayerEntity player = client.player;
+        ClientWorld world = client.world;
+        if (player == null || world == null) {
+            return;
+        }
+        boolean inLava = player.isInLava();
+        if (!inLava) {
+            // baritone 起点判据看的是"脚所在格": 薄岩浆层可能只淹到脚、isInLava() 仍为
+            // false, 而 getMiningDurationTicks(脚所在格) 已经 1e6。故补一层方块口径
+            // (与 CollectBlazeRodsTask.isLavaInEnclosureRegion 同口径: block == LAVA)。
+            BlockPos feet = player.getBlockPos();
+            inLava = world.getBlockState(feet).getBlock() == Blocks.LAVA
+                    || world.getBlockState(feet.down()).getBlock() == Blocks.LAVA;
+        }
+        if (inLava == _lavaSwimSynced) {
+            return;
+        }
+        _lavaSwimSynced = inLava;
+        getBehaviour().allowSwimThroughLava(inLava);
+        String m = "[LavaSwim] baritone 岩浆可游=" + (inLava ? "on" : "off")
+                + " pos=" + player.getBlockPos().toShortString()
+                + " inLava=" + player.isInLava()
+                + " fireRes=" + player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                + " (开关只跟现场走; 旧的只挂在 EscapeFromLavaTask.onStart 会让"
+                + " 施工豁免期间起点判据全废 → Open set size: 0)";
+        Debug.logToFile("altoclef_diag.log", m);
     }
 
     // ==== (2026-09-18 岩浆邻域导航保险) ====

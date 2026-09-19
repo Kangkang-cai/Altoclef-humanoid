@@ -232,7 +232,15 @@ public class BotBehaviour {
         // current.applyState()
     }
 
+    /**
+     * (2026-09-19 幂等化) 本方法现在被 {@code AltoClef.tickLavaSwimSync()} 每 tick
+     * 同步调用一次 —— 值没变时直接返回, 不再 applyState。applyState 会整批同步
+     * 谓词表与全部属性, 每 tick 白跑一次是纯浪费。
+     * 幂等同时保证 push/pop 边界正确: 栈顶状态被换掉后 current() 的值与目标不一致,
+     * 下一 tick 会自动补写, 不需要事件式的"变化即写"。
+     */
     public void allowSwimThroughLava(boolean allow) {
+        if (current().swimThroughLava == allow) return;
         current().swimThroughLava = allow;
         current().applyState();
     }

@@ -11,9 +11,13 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.shape.VoxelShape;
 
 /**
  * 卡住挥击反应 (SwingThrough Chain, 2026-08-31)。
@@ -34,6 +38,20 @@ import net.minecraft.util.math.Vec3d;
  *    自带冷却，避免每 tick 狂点（触发一次后过 RE_SWING_COOLDOWN 才再挥）。
  *  - 只加行为+日志，不改任何既有任务/优先级数值/状态机跳转。
  *  - 绝不调用 getPriority()（避开 setTask→getPriority→setTask 递归铁律）。
+ *
+ * (2026-09-19 栅栏楔住扩展) 现场 20260919-195218 seq 9943 实锤：bot 脚所在格
+ * = jungle_fence（栅栏是细的一根，人挤在格子边缘，栅栏中心距 0.656 格），baritone
+ * 按着 MOVE_FORWARD 整整 942 tick(47s) 零位移。旧实现救不到它，两条原因：
+ *   ① 触发前置是"主任务是挖掘/导航类"，而该场主任务是建造类
+ *      <Place structure{} at 777,78,126> → 直接 reset，反应永不触发；
+ *   ② 挥击固定 4 tick（为草/藤蔓这类瞬破方块设计），对硬度 2.0 的栅栏无效。
+ * 扩展（纯增，不改旧路径）：
+ *   - 触发加一条 **"baritone 在强制移动输入 且 25 tick 内水平位移 < 1 格"** 的分支
+ *     —— "在推但推不动"才是楔住的签名；合法静止不会强制移动键。
+ *   - 挥击前先用 findThinBlocker 找"非满立方且有碰撞箱"的楔住物（栅栏/墙/栏杆），
+ *     找到就盯住它**持续挖**（上限 60 tick）而不是盲挥 4 tick；找不到退回旧行为。
+ *   - 目标合法性走 WorldHelper.canBreak（已含 shouldAvoidBreaking 全部保护谓词），
+ *     围场 9x9 保护盒内的栅栏不会被本反应拆掉。
  */
 public class SwingThroughChain extends TaskChain {
 
@@ -56,6 +74,13 @@ public class SwingThroughChain extends TaskChain {
     private boolean _swinging = false;
     private int _swingTicksLeft = 0;
     private long _lastSwingTick = Long.MIN_VALUE;
+
+    // (2026-09-19 栅栏楔住) 针对性持续挖掘状态：非 null 表示正在盯住某个细方块挖，
+    // 它会一直按住左键直到该方块消失 / 超过 _breakDeadlineTick / 变成不可挖。
+    private BlockPos _breakTarget = null;
+    private long _breakDeadlineTick = Long.MIN_VALUE;
+    // 持续挖掘上限 (tick)。栅栏硬度 2.0：空手 ~3s、石斧 ~0.5s；3s 兜底防死握。
+    private static final int BREAK_TARGET_MAX_TICKS = 60;
 
     public SwingThroughChain(TaskRunner runner) {
         super(runner);
@@ -99,9 +124,23 @@ public class SwingThroughChain extends TaskChain {
 
         // 正在挥击：保持按住，数到挥击时长结束松开并重置窗口，给 bot 恢复时间。
         if (_swinging) {
+            // (2026-09-19 栅栏楔住) 针对性持续挖掘：盯住楔住自己的细方块，直到它消失 /
+            // 超时 / 不可挖。栅栏硬度 2.0，旧逻辑的固定 4 tick 盲挥对它完全无效，会
+            // 无限"挥一下没挖掉→冷却 5s→再挥"空转。
+            if (_breakTarget != null) {
+                if (WorldHelper.isAir(mod, _breakTarget)
+                        || WorldHelper.getTicks() >= _breakDeadlineTick
+                        || !WorldHelper.canBreak(mod, _breakTarget)) {
+                    releaseSwing(mod);
+                    resetWindow();
+                    return;
+                }
+                // 每 tick 重新对准：baritone 的 LookBehavior 也会写朝向，会被它抢走。
+                LookHelper.lookAt(mod, _breakTarget);
+                return;
+            }
             if (--_swingTicksLeft <= 0) {
-                mod.getInputControls().release(Input.CLICK_LEFT);
-                _swinging = false;
+                releaseSwing(mod);
                 resetWindow();
             }
             return;
@@ -110,8 +149,14 @@ public class SwingThroughChain extends TaskChain {
         long nowTick = WorldHelper.getTicks();
         Vec3d pos = mod.getPlayer().getPos();
 
-        // 只对挖掘/导航类主任务生效。
-        if (!isMiningOrNavigating(mod)) {
+        // 只对挖掘/导航类主任务生效 —— 或 (2026-09-19 栅栏楔住) baritone 正在强制
+        // 某个移动输入。后者才是"被楔住"最直接的签名：bot 被自己那一格里的细方块
+        // (栅栏/墙/栏杆) 顶在格子边缘，baritone 仍按着 MOVE_FORWARD 往前推 47 秒
+        // 零位移 (20260919-195218 seq 9943 实锤：脚所在格 = jungle_fence，栅栏中心
+        // 距 0.656 格)。当时主任务是建造类 <Place structure{} at 777,78,126>，
+        // 旧判据 isMiningOrNavigating 直接 reset，反应永不触发。
+        // 反向风险：合法静止 (站桩挖矿 / 开熔炉 / 吃东西) 不会强制移动键，故不会误触发。
+        if (!isMiningOrNavigating(mod) && !isBaritonePushingMovement(mod)) {
             resetState();
             return;
         }
@@ -157,9 +202,18 @@ public class SwingThroughChain extends TaskChain {
         Vec3d pos = mod.getPlayer().getPos();
         Task main = mod.getUserTaskChain().getCurrentTask();
 
-        BlockPos front = getFrontNonAirBlock(mod);
-        if (front != null) {
-            LookHelper.lookAt(mod, front);
+        // (2026-09-19 栅栏楔住) 优先: 楔住 bot 的细方块 → 盯住它持续挖到消失。
+        BlockPos blocker = findThinBlocker(mod);
+        if (blocker != null) {
+            LookHelper.lookAt(mod, blocker);
+            _breakTarget = blocker;
+            _breakDeadlineTick = WorldHelper.getTicks() + BREAK_TARGET_MAX_TICKS;
+        } else {
+            _breakTarget = null;
+            BlockPos front = getFrontNonAirBlock(mod);
+            if (front != null) {
+                LookHelper.lookAt(mod, front);
+            }
         }
 
         mod.getInputControls().hold(Input.CLICK_LEFT);
@@ -169,9 +223,77 @@ public class SwingThroughChain extends TaskChain {
 
         String m = "[SWING-BREAK] stuck detected -> left-click swing. player=" + pos
                 + " task=" + (main == null ? "null" : main.toString())
-                + " stuckFor=" + stuckForTicks + " ticks hold=" + SWING_HOLD_TICKS;
+                + " stuckFor=" + stuckForTicks + " ticks hold=" + SWING_HOLD_TICKS
+                + (blocker != null
+                        ? " target=" + blocker.toShortString() + " (细方块 → 持续挖, 上限 " + BREAK_TARGET_MAX_TICKS + " tick)"
+                        : " (盲挥, 未找到细方块)");
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * (2026-09-19 栅栏楔住) baritone 是否正在强制某个移动输入 —— "在推"。
+     * 与"25 tick 内水平位移 < 1 格"合起来才是"推不动"的完整签名。绝不调用
+     * getPriority，只读 baritone 输入覆盖状态。
+     */
+    private boolean isBaritonePushingMovement(AltoClef mod) {
+        try {
+            var h = mod.getClientBaritone().getInputOverrideHandler();
+            return h.isInputForcedDown(Input.MOVE_FORWARD)
+                    || h.isInputForcedDown(Input.MOVE_BACK)
+                    || h.isInputForcedDown(Input.MOVE_LEFT)
+                    || h.isInputForcedDown(Input.MOVE_RIGHT)
+                    || h.isInputForcedDown(Input.JUMP);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * (2026-09-19 栅栏楔住) 找出把 bot 楔在原地的"细方块"。
+     *
+     * 只看三个候选位 (bot 自己脚所在格 → 正前方同层 → 正前方上一层，与
+     * getFrontNonAirBlock 同口径)，条件：
+     *   非空气 ∧ 碰撞箱非空 ∧ **非满立方** ∧ WorldHelper.canBreak。
+     * 为什么限定"非满立方"：栅栏/墙/栏杆玻璃板这类细方块是 baritone 唯一处理不了的
+     * 形状 —— 路径走的是格中心，而格中心正是那根柱子，于是 bot 被顶在格子边缘推不动；
+     * 满立方是 baritone 的正常业务 (它自己会挖)，且 bot 若被满立方埋住，眼睛在方块
+     * 内部，getReach 打不到，取了也挖不动。
+     * 为什么用 WorldHelper.canBreak 当闸门：它内部已消费 shouldAvoidBreaking，即
+     * 全局保护谓词 (围场 9x9 保护盒 / 门体 / 任务注册的临时保护) 全部生效 ——
+     * 本反应绝不会去拆自己的围场，也不会新增一套判据口径。
+     */
+    private BlockPos findThinBlocker(AltoClef mod) {
+        ClientPlayerEntity p = mod.getPlayer();
+        if (p == null) return null;
+        BlockPos feet = p.getBlockPos();
+        float yaw = p.getYaw();
+        int dx = (int) Math.round(-Math.sin(Math.toRadians(yaw)));
+        int dz = (int) Math.round(Math.cos(Math.toRadians(yaw)));
+        if (dx == 0 && dz == 0) dz = 1;
+        BlockPos[] candidates = { feet, feet.add(dx, 0, dz), feet.add(dx, 1, dz) };
+        for (BlockPos c : candidates) {
+            BlockState s = mod.getWorld().getBlockState(c);
+            if (s.isAir()) continue;
+            VoxelShape shape = s.getCollisionShape(mod.getWorld(), c);
+            if (shape.isEmpty()) continue;
+            if (Block.isShapeFullCube(shape)) continue;
+            if (!WorldHelper.canBreak(mod, c)) continue;
+            return c.toImmutable();
+        }
+        return null;
+    }
+
+    /** 松开左键并清掉持续挖掘状态 (所有退出路径共用, 防死握)。 */
+    private void releaseSwing(AltoClef mod) {
+        // 只在确实由本反应按住时才松 —— 与旧行为一致, 避免误松别的链正按的左键。
+        if (_swinging) {
+            mod.getInputControls().release(Input.CLICK_LEFT);
+        }
+        _swinging = false;
+        _swingTicksLeft = 0;
+        _breakTarget = null;
+        _breakDeadlineTick = Long.MIN_VALUE;
     }
 
     /**
@@ -219,25 +341,23 @@ public class SwingThroughChain extends TaskChain {
         resetWindow();
         _swinging = false;
         _swingTicksLeft = 0;
+        // (2026-09-19) 细方块目标必须一起清：只清 _swinging 会让下一轮触发继承
+        // 上一个已挖掉/已超时的目标，造成"对着空气持续挖"。
+        _breakTarget = null;
+        _breakDeadlineTick = Long.MIN_VALUE;
     }
 
     @Override
     protected void onStop(AltoClef mod) {
         // 保险：链停止时松开可能正按住的左键。
-        if (_swinging) {
-            mod.getInputControls().release(Input.CLICK_LEFT);
-            _swinging = false;
-        }
+        releaseSwing(mod);
         resetState();
     }
 
     @Override
     public void onInterrupt(AltoClef mod, TaskChain other) {
         // 后台反应没有可被打断的任务；若正处于挥击，安全松开左键。
-        if (_swinging) {
-            mod.getInputControls().release(Input.CLICK_LEFT);
-            _swinging = false;
-        }
+        releaseSwing(mod);
         resetState();
     }
 
