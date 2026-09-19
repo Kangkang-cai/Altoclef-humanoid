@@ -194,6 +194,10 @@ public class MobDefenseChain extends SingleTaskChain {
     // 一并纳入 _fightTargets; KillEntitiesTask 走 DoToClosestEntityTask 的"最近优先",
     // 于是自动先清贴脸怪、再回头打骷髅。图钉与 prio 95 全程不变 (绝不转逃)。
     private static final double MUST_KILL_MELEE_KEEP_DISTANCE = 3.0;   // 近战"贴脸"判定半径
+    // (2026-09-19 用户) 击杀小白的触发距离缩小为"刚好触发小白"的距离:
+    // 骷髅索敌就在 16 格 (开火射程 15), 旧值 18 会先手去招惹还没瞄准我们的
+    // 骷髅, 在堡垒走廊里白白多拉一波仇恨。女巫维持 18 不变。
+    private static final int SKELETON_KILL_TRIGGER_RANGE = 16;
 
     public MobDefenseChain(TaskRunner runner) {
         super(runner);
@@ -708,16 +712,25 @@ public class MobDefenseChain extends SingleTaskChain {
         // KillEntityTask 的 shieldCombatTick 处理 (举盾+反击), 否则这里
         // prio 65 抢占 → bot 一直举盾不打 (用户: "盾牌还是不放")。
         if (_targetEntity == null && !mod.getFoodChain().isTryingToEat() && mod.getModSettings().isDodgeProjectiles() && isProjectileClose(mod)) {
-            _doingFunkyStuff = true;
-            if (doProjectileBlock(mod)) {
-                _projectileBlocking = true;
+            // (2026-09-19 搭路禁举盾, 用户) baritone 正在搭方块 (搭柱/搭桥/上行/
+            // 斜行或 builder) 时【绝对禁止】举盾, 也不要躲避: 格挡会 cancelEverything,
+            // 防御瞄准(requestDefenseAim)会抢 baritone 放方块需要的转头 → 搭路中断,
+            // 半空就是坠落 (0919 搭路靠近烈焰人摔死实锤)。搭路期间弹射物防御整体
+            // 让位, 走完这段再防 (有防火药水时烈焰火球本就不构成致命威胁)。
+            if (BaritoneHelper.isBaritoneBuilding()) {
+                logShieldSuppressedForBuilding(mod);
+            } else {
+                _doingFunkyStuff = true;
+                if (doProjectileBlock(mod)) {
+                    _projectileBlocking = true;
+                    _runAwayTask = null;
+                    return 65;
+                }
+                _projectileBlocking = false;
                 _runAwayTask = null;
+                setTask(new DodgeProjectilesTask(ARROW_KEEP_DISTANCE_HORIZONTAL, ARROW_KEEP_DISTANCE_VERTICAL));
                 return 65;
             }
-            _projectileBlocking = false;
-            _runAwayTask = null;
-            setTask(new DodgeProjectilesTask(ARROW_KEEP_DISTANCE_HORIZONTAL, ARROW_KEEP_DISTANCE_VERTICAL));
-            return 65;
         }
 
         // Dodge all mobs cause we boutta die son
@@ -757,7 +770,10 @@ public class MobDefenseChain extends SingleTaskChain {
 
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
                 for (Entity hostile : hostiles) {
-                    int annoyingRange = (hostile instanceof SkeletonEntity || hostile instanceof WitchEntity) ? 18 : 5;
+                    // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
+                    int annoyingRange = hostile instanceof SkeletonEntity
+                            ? SKELETON_KILL_TRIGGER_RANGE
+                            : (hostile instanceof WitchEntity ? 18 : 5);
                     boolean isClose = hostile.isInRange(mod.getPlayer(), annoyingRange);
 
                     if (isClose) {
@@ -926,7 +942,10 @@ public class MobDefenseChain extends SingleTaskChain {
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
                 for (Entity hostile : mod.getEntityTracker().getHostiles()) {
                     if (_fightTargets.contains(hostile)) continue;
-                    int annoyingRange = (hostile instanceof SkeletonEntity || hostile instanceof WitchEntity) ? 18 : 5;
+                    // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
+                    int annoyingRange = hostile instanceof SkeletonEntity
+                            ? SKELETON_KILL_TRIGGER_RANGE
+                            : (hostile instanceof WitchEntity ? 18 : 5);
                     if (hostile.isInRange(mod.getPlayer(), annoyingRange)
                             && LookHelper.seesPlayer(hostile, mod.getPlayer(), annoyingRange)) {
                         _fightTargets.add(hostile);
@@ -1693,6 +1712,26 @@ public class MobDefenseChain extends SingleTaskChain {
                     + " below=" + mod.getWorld().getBlockState(below).getBlock().getTranslationKey()
                     + " builder=" + builder
                     + " projDist=" + String.format("%.1f", projDist));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // (2026-09-19 搭路禁举盾) 抑制日志的节流戳 (最多 1 秒一条)。
+    private long _lastShieldSuppressLogMs = 0;
+
+    /**
+     * (2026-09-19 搭路禁举盾) 因 baritone 正在搭方块而抑制弹射物防御时的取证日志。
+     * 只诊断不参与决策; 限流 1s 一条, 防止刷屏。
+     */
+    private void logShieldSuppressedForBuilding(AltoClef mod) {
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - _lastShieldSuppressLogMs < 1000) return;
+        _lastShieldSuppressLogMs = nowMs;
+        try {
+            Debug.logToFile("altoclef_diag.log", "[ShieldVsPath]\tSUPPRESS projectile block/dodge (baritone building)"
+                    + " pos=" + mod.getPlayer().getBlockPos().toShortString()
+                    + " y=" + String.format("%.2f", mod.getPlayer().getY())
+                    + " onGround=" + mod.getPlayer().isOnGround());
         } catch (Throwable ignored) {
         }
     }

@@ -610,6 +610,13 @@ public class BeatMinecraft2Task extends Task {
     private static final long FIRE_RES_REOPEN_COOLDOWN_MS = 180_000;
     private static long _fireResReopenAtMs = 0;
 
+    // (2026-09-19 用户"喝完两瓶药后8分钟内不再触发获取药水") 冷却以【喝完】为锚:
+    // 背包药水从有到无 (最后一瓶下肚) 的那一刻起算 8 分钟, 期间收药阶段不得重开。
+    // 与上面的 180s 取 max —— 谁更晚用谁, 保证"喝完→8 分钟"严格成立。
+    // 同样必须 static: 实例重建会洗掉"刚喝完药"这个事实。
+    private static final long FIRE_RES_DRINK_REOPEN_COOLDOWN_MS = 8 * 60_000;
+    private static int _lastSeenFireResPotions = -1;
+
     // (2026-09-09 进下界前排空熔炉, 用户"把烧金子挪到进传送门之前") 进下界前若
     // 16 格内有非空熔炉 (input/fuel/output 任一有物), 先 EmptyFurnaceTask 取尽
     // 并连炉带走: ①炉里的金锭/物资不丢 — 11:11 场次实测, 门旁炉内 8 金锭被
@@ -2276,6 +2283,20 @@ public class BeatMinecraft2Task extends Task {
                     // "_fireResPhaseDone 闩保证之后喝掉也不会重新进本阶段"已废除 ——
                     // 那等于两瓶喝完后下界全程裸奔 (本次事故: 09:56 药效到期后 7 秒烧死,
                     // 背包 0 瓶, 且此后再也不会去收)。现在阶段可重开, 但必须过冷却。
+                    // (2026-09-19 用户) 喝完两瓶药 (背包药水归零) → 8 分钟内不重开收药阶段。
+                    // 每 tick 观测药水计数, 捕捉 "有→无" 跳变并把重开时间推到 now+8min。
+                    int fireResPotionCountNow = ItemHelper.countFireResPotions(mod);
+                    if (_lastSeenFireResPotions > 0 && fireResPotionCountNow == 0) {
+                        long drinkCooldownUntil = System.currentTimeMillis() + FIRE_RES_DRINK_REOPEN_COOLDOWN_MS;
+                        if (drinkCooldownUntil > _fireResReopenAtMs) {
+                            _fireResReopenAtMs = drinkCooldownUntil;
+                            Debug.logMessage("(FireRes) Last potion drunk — acquisition cooldown "
+                                    + (FIRE_RES_DRINK_REOPEN_COOLDOWN_MS / 60000) + "min");
+                            Debug.logToFile("altoclef_diag.log", "[FireRes] last potion drunk, acquisition cooldown "
+                                    + (FIRE_RES_DRINK_REOPEN_COOLDOWN_MS / 60000) + "min");
+                        }
+                    }
+                    _lastSeenFireResPotions = fireResPotionCountNow;
                     if (!_fireResPhaseDone) {
                         if (!_fireResPhaseActive) {
                             if (ItemHelper.countFireResPotions(mod) < FIRE_RES_POTION_TARGET) {

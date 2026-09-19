@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.GetToEntityTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.CombatMemory;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
@@ -358,8 +359,17 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
                 && mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE);
         boolean shieldTarget = entity instanceof AbstractSkeletonEntity || entity instanceof CreeperEntity
                 || (entity instanceof BlazeEntity && !blazeShieldPointless);
-        if (hasShield && shieldTarget) {
+        // (2026-09-19 搭路禁举盾, 用户) baritone 正在搭方块 (搭柱/搭桥/上行/斜行)
+        // 时绝不举盾: 盾战格挡 + 防御瞄准(requestDefenseAim)会抢 baritone 放方块
+        // 需要的转头, 搭路中断 → 半空坠落 (0919 搭路靠近烈焰人摔死实锤)。
+        // 寻路搭建期间整体落到下面的无盾近战并行分支 (贴近+侧写出刀不受影响)。
+        boolean baritoneBuilding = BaritoneHelper.isBaritoneBuilding();
+        if (hasShield && shieldTarget && !baritoneBuilding) {
             return shieldCombatTick(mod, entity);
+        }
+        if (baritoneBuilding) {
+            // 清掉上一 tick 盾战可能残留的举盾, 否则 Blocking 状态下出不了刀。
+            mod.getInputControls().release(Input.CLICK_RIGHT);
         }
 
         // No shield equipped or shield not applicable: PERSISTENT approach + melee,

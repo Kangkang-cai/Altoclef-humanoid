@@ -2,8 +2,10 @@ package adris.altoclef.tasks.resources;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
+import adris.altoclef.tasks.construction.PlaceStructureBlockTask;
 import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
@@ -15,6 +17,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.ItemHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.WorldIdentity;
@@ -75,6 +78,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final int POTION_MIN_BLAZES = 2;
     // 血量低 (半血) 时即便落单也允许喝 — 盾战容错太差, 保命优先。
     private static final float POTION_LOW_HEALTH = 10.0f;
+
+    // =========================================================================
+    // (2026-09-19 刷怪笼包围策略, 用户) 浮在空中的烈焰人要去搭路追打, 极危险
+    // (0919 搭路靠近烈焰人摔死实锤)。改为"先封顶关笼子, 再在罩子里收割":
+    //   ① 出发前背包至少 32 地狱岩 (封顶 5x5=25 格 + 余量);
+    //   ② 到达刷怪笼先喝防火药水 (有药才等, 没药直接往下走, 不死等);
+    //   ③ 刷怪笼上方两格高度的 5x5 区域用方块封顶, 烈焰人飞不出去;
+    //   ④ 封顶完成前不开杀 (半路追打空中烈焰人正是摔死事故的根源)。
+    // =========================================================================
+    private static final int ENCLOSURE_NETHERRACK_MIN = 32;
+    // 封顶层相对刷怪笼的高度偏移 ("上面两格高度") 与 5x5 的半径 (±2)。
+    private static final int SPAWNER_CEILING_HEIGHT = 2;
+    private static final int SPAWNER_CEILING_HALF = 2;
     private final int _count;
     // (2026-09-04 人类式改造) 默认走 FortressExploreTask: 循声/循可见下界砖
     // 偏置游走 + 踏上要塞后只踩走廊地面, 不再 chunk 透视。
@@ -138,6 +154,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
             return new DefaultGoToDimensionTask(Dimension.NETHER);
         }
 
+        // (2026-09-19 包围策略④) 刷怪笼作业未完成 (没喝药 / 没封顶) 时不开杀 —
+        // 半路去追打飘在空中的烈焰人正是 0919 摔死事故的根源, 先把笼子关上。
+        boolean spawnerWorkPending = isSpawnerWorkPending(mod);
+
         Optional<Entity> toKill = Optional.empty();
         // If there is a blaze, kill it.
         if (mod.getEntityTracker().entityFound(BlazeEntity.class)) {
@@ -166,7 +186,7 @@ public class CollectBlazeRodsTask extends ResourceTask {
             }
         }
 
-        if (toKill.isPresent() && toKill.get().isAlive()) {
+        if (toKill.isPresent() && toKill.get().isAlive() && !spawnerWorkPending) {
             // (2026-09-06 药水门槛, 用户) 落单烈焰人不再浪费药水 — 改走盾牌
             // 波次格挡 (AbstractKillEntityTask)。只有以下情况才喝:
             //   1) 感知到 ≥ POTION_MIN_BLAZES 只烈焰人 (刷怪笼房, 火球密度太高);
@@ -199,10 +219,33 @@ public class CollectBlazeRodsTask extends ResourceTask {
 
         // If we have a blaze spawner, go near it.
         if (_foundBlazeSpawner != null) {
+            // (2026-09-19 包围策略①) 出发前背包至少 32 地狱岩 (封顶 5x5=25 格 +
+            // 余量), 不够先挖 — 到了现场再下矿等于裸奔。用真实背包计数, 不吃缓存。
+            if (StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) < ENCLOSURE_NETHERRACK_MIN) {
+                setDebugState("Restocking " + ENCLOSURE_NETHERRACK_MIN + " netherrack for spawner enclosure");
+                return TaskCatalogue.getItemTask(Items.NETHERRACK, ENCLOSURE_NETHERRACK_MIN);
+            }
             if (!_foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4)) {
                 setDebugState("Going to blaze spawner");
                 return new GetToBlockTask(_foundBlazeSpawner.up(), false);
             } else {
+
+                // (2026-09-19 包围策略②, 用户) 到达刷怪笼先喝药水。包里没药不卡
+                // 在这一步 (防火效果本身不是封顶的硬前置, 硬等会死循环)。
+                if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                        && ItemHelper.countFireResPotions(mod) > 0) {
+                    setDebugState("Drinking fire resistance at spawner (before enclosure)");
+                    return new DrinkFireResPotionTask();
+                }
+
+                // (2026-09-19 包围策略③) 封顶: 刷怪笼上方两格高度 5x5, 缺哪补哪。
+                // 封死烈焰人往上飞出去的路, 之后在罩子里近战收割, 不再搭路追打。
+                BlockPos missingCeiling = findMissingCeilingBlock(mod, _foundBlazeSpawner);
+                if (missingCeiling != null) {
+                    setDebugState("Enclosing spawner: ceiling 5x5 at +"
+                            + SPAWNER_CEILING_HEIGHT + ", missing " + missingCeiling.toShortString());
+                    return new PlaceStructureBlockTask(missingCeiling);
+                }
 
                 // Put out fire that might mess with us.
                 Optional<BlockPos> nearestFire = mod.getBlockTracker().getNearestWithinRange(_foundBlazeSpawner, 5, Blocks.FIRE);
@@ -365,6 +408,37 @@ public class CollectBlazeRodsTask extends ResourceTask {
             //return pos.isWithinDistance(mod.getPlayer().getPos(),3000);
         }
         return WorldHelper.getSpawnerEntity(mod, pos) instanceof BlazeEntity;
+    }
+
+    /**
+     * (2026-09-19 包围策略) 已到达确认刷怪笼旁、且包围作业还没做完 (该喝的药没喝 /
+     * 封顶没封完) → 期间不开杀, 由刷怪笼分支执行喝药与封顶。不在场或作业完成
+     * 则返回 false, 击杀逻辑照常。
+     */
+    private boolean isSpawnerWorkPending(AltoClef mod) {
+        if (_foundBlazeSpawner == null) return false;
+        if (!_foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4)) return false;
+        // 该喝药没喝 (包里有药且没效果) — 没药时不算 pending, 不死等。
+        if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                && ItemHelper.countFireResPotions(mod) > 0) {
+            return true;
+        }
+        return findMissingCeilingBlock(mod, _foundBlazeSpawner) != null;
+    }
+
+    /**
+     * (2026-09-19 包围策略③) 找封顶层 (刷怪笼上方 {@link #SPAWNER_CEILING_HEIGHT}
+     * 格, 5x5) 里第一块还没被实体方块遮住的位置; 全遮住返回 null。
+     */
+    private BlockPos findMissingCeilingBlock(AltoClef mod, BlockPos spawner) {
+        BlockPos layer = spawner.up(SPAWNER_CEILING_HEIGHT);
+        for (int dx = -SPAWNER_CEILING_HALF; dx <= SPAWNER_CEILING_HALF; dx++) {
+            for (int dz = -SPAWNER_CEILING_HALF; dz <= SPAWNER_CEILING_HALF; dz++) {
+                BlockPos p = layer.add(dx, 0, dz);
+                if (!WorldHelper.isSolid(mod, p)) return p.toImmutable();
+            }
+        }
+        return null;
     }
 
     @Override
