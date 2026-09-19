@@ -277,6 +277,43 @@ public class BlockTracker extends Tracker {
     }
 
     /**
+     * (2026-09-19 就近原则) 与 {@link #trackBlock} 语义相同 (同样带引用计数, 同样要用
+     * {@link #stopTracking} 配对), 唯一区别: <b>注册新类型时不触发一次全量重扫</b>。
+     *
+     * <p>为什么需要它: {@link #trackBlock} 首次加入新方块类型会 {@code setDirty()} +
+     * {@code _timer.forceElapse()} → {@link #update()} → {@code rescanWorld()} →
+     * baritone {@code MineProcess.searchWorld} 对全部已追踪方块扫三个维度的所有已加载
+     * 区块。2026-09-18 22:46 就是这样把客户端 CPU 打满、被服务端超时踢掉的。
+     *
+     * <p>但"不注册"的代价是缓存里永远没有这类方块 (近/远区扫描只扫
+     * {@code _trackingBlocks}), 于是"bot 的视力"对该类方块恒瞎 —— 诡异森林正是这样
+     * 在林子边缘看不见眼前的林子。静默注册解决了这个两难: 加进追踪集合, 但<b>不当场
+     * 讨债</b> —— 数据由下一次常规扫描自然填充:
+     * <ul>
+     *   <li>近区扫描 (5Hz, 半径 16) —— 注册后最多 0.2s 就有近处数据;</li>
+     *   <li>远区扫描 (4s, 半径 128) —— 最多 4s 覆盖到视距边缘;</li>
+     *   <li>周期性 {@code rescanWorld} (scanInterval=5s) 本就要跑, 新类型搭便车一起扫。</li>
+     * </ul>
+     *
+     * <p>成本: 与"看见堡垒" ({@code KnowledgeMemory} 首个 tick 就 trackBlock
+     * NETHER_BRICKS) 完全同一条路径 —— 后台扫描用 HashSet 判定
+     * ({@code scanRegionBySamplingZRange}), 所有类型共用同一遍遍历, 多 4 类的边际
+     * 成本≈0; 主线程只剩缓存查表 + FOV/LOS 射线。
+     */
+    public void trackBlockQuiet(Block... blocks) {
+        synchronized (_trackingBlocks) {
+            for (Block block : blocks) {
+                if (!_trackingBlocks.containsKey(block)) {
+                    // 刻意【不】setDirty() / 【不】_timer.forceElapse(): 上面注释里的
+                    // rescanWorld 全量重扫就是这两个调用触发的。
+                    _trackingBlocks.put(block, 0);
+                }
+                _trackingBlocks.put(block, _trackingBlocks.get(block) + 1);
+            }
+        }
+    }
+
+    /**
      * Stops tracking some blocks, after calling {@link #trackBlock(Block...) trackBlock}.
      *
      * Only call this once for every {@link #trackBlock(Block...) trackBlock}.

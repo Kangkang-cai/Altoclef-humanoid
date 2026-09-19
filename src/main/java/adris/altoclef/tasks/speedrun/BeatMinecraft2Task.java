@@ -2893,9 +2893,9 @@ public class BeatMinecraft2Task extends Task {
         // 找林子: 扫描带节流 (要过 FOV 锥 + LOS 射线)。
         if (now - _pearlForestScanMs >= PEARL_FOREST_SCAN_INTERVAL_MS) {
             _pearlForestScanMs = now;
-            // scanMs 必须可观测: 这次"找林子"是【主线程同步采样】(上万次 getBlockState),
-            // 不像 BlockTracker 的近/远扫描那样跑在 baritone 线程池。1s 一次、每次若
-            // 超过 ~20ms 就会肉眼可见地掉帧 —— 届时要把采样步长/半径调粗或改异步。
+            // scanMs 保留可观测: 现在这一步是【缓存查表 + ≤8 条 LOS 射线】(与看见堡垒
+            // 同架构), 常态应该是 0~几 ms; 若突然变毫秒级两位数, 说明有人把信号方块
+            // 弄成了按需全量扫描, 或者缓存被灌爆了 —— 那时再查, 别默默忍受。
             long scanStartNs = System.nanoTime();
             _pearlForestAnchor = findPerceivedWarpedForest(mod);
             long scanMs = (System.nanoTime() - scanStartNs) / 1_000_000L;
