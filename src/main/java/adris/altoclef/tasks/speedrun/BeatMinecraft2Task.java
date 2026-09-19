@@ -323,6 +323,10 @@ public class BeatMinecraft2Task extends Task {
     // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
     private long _pearlCampBlockedUntilMs = 0;
     private static final long PEARL_FOREST_SCAN_INTERVAL_MS = 1000;
+    // (2026-09-19 20:0x) [PEARL-NEAR] 日志节流: 看不见林子时 10s 一条就够 —— 否则
+    // 主线跑几十分钟, diag.log 被每秒一条的 anchor=none 刷爆 (195218 会话 3 分钟 200+ 条)。
+    private long _lastPearlScanLogMs = 0;
+    private static final long PEARL_SCAN_LOG_INTERVAL_MS = 10000;
     // 一次扫描最多对最近的这么多候选做 LOS 判定 (射线贵, 只验最可能的几个)。
     private static final int PEARL_FOREST_LOS_CANDIDATES = 8;
 
@@ -2908,14 +2912,20 @@ public class BeatMinecraft2Task extends Task {
             long scanStartNs = System.nanoTime();
             _pearlForestAnchor = findPerceivedWarpedForest(mod);
             long scanMs = (System.nanoTime() - scanStartNs) / 1_000_000L;
-            Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tSCAN anchor="
-                    + (_pearlForestAnchor == null ? "none" : _pearlForestAnchor.toShortString())
-                    + " dist=" + (_pearlForestAnchor == null ? "-"
-                            : String.format("%.0f", Math.sqrt(
-                                    mod.getPlayer().getBlockPos().getSquaredDistance(_pearlForestAnchor))))
-                    + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + enderPearlTarget
-                    + " blazePriority=" + blazeHasPriority
-                    + " scanMs=" + scanMs);
+            // 日志节流 (2026-09-19 20:0x): 看得见(anchor 有值)必打 —— 那是关键状态变化;
+            // 看不见时 10s 一条就够了 —— 否则主线一跑几十分钟, diag.log 会被每秒一条的
+            // 空扫描刷爆 (20260919-195218 三分钟就 200+ 条 anchor=none)。
+            if (_pearlForestAnchor != null || now - _lastPearlScanLogMs > PEARL_SCAN_LOG_INTERVAL_MS) {
+                _lastPearlScanLogMs = now;
+                Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tSCAN anchor="
+                        + (_pearlForestAnchor == null ? "none" : _pearlForestAnchor.toShortString())
+                        + " dist=" + (_pearlForestAnchor == null ? "-"
+                                : String.format("%.0f", Math.sqrt(
+                                        mod.getPlayer().getBlockPos().getSquaredDistance(_pearlForestAnchor))))
+                        + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + enderPearlTarget
+                        + " blazePriority=" + blazeHasPriority
+                        + " scanMs=" + scanMs);
+            }
         }
         if (_pearlForestAnchor == null) return null;
 

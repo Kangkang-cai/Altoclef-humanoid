@@ -118,6 +118,27 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private boolean _gaveUp = false;
     private String _giveUpReason = null;
 
+    /**
+     * (2026-09-19 19:5x 横跳修复) 拉回模式的<b>闩 (latch)</b>。
+     *
+     * <p>旧判据是<b>单阈值瞬时</b>的: 只要"离锚点 ≤ CAMP_RADIUS 就巡逻"。现场
+     * (20260919-195218) 实锤后果:
+     * <pre>
+     * 19:53:06.368 RETURN dist=24   ← 出界, 起拉回
+     * 19:53:08.365 PATROL step-done ← 2 秒后? 因为 baritone 往回走了几格, 一进 24 就切巡逻
+     * 19:53:11.465 RETURN dist=24   ← 又出界
+     * ...(5 轮, 直到 60s 枯竭放弃)
+     * </pre>
+     * 拉回任务 (GetWithinRangeOfBlockTask, 目标是进到锚点 8 格内) <b>一次都没跑完</b> ——
+     * 刚跨过 24 格边界就被换掉, 于是 bot 全程在 24 格边界反复折返, 从没真正走进林子,
+     * 观感就是"离森林很远还在那打转 / 和 wander 反复抢"。
+     *
+     * <p>修法: 双阈值迟滞 (与项目里岩浆保险的双半径迟滞同一套路) —— 出界
+     * ({@code > CAMP_RADIUS}) 上闩, 必须真正走进 {@code RETURN_RADIUS} 内才解锁。
+     * 两个半径之间 (8~24) 是**保持当前模式**的死区, 不再每 tick 翻转。
+     */
+    private boolean _returning = false;
+
     // 巡逻可观测性: 上次见到末影人的时刻 (墙钟), 以及回锚点/心跳两条日志的节流戳。
     private long _lastEndermanSeenMs = 0;
     private long _lastReturnLogMs = 0;
@@ -145,6 +166,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 不需要 BlockTracker 追踪, 蹲守也就不会再触发全量重扫。
         _campTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlCampMaxSeconds());
         _dryTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlDrySeconds());
+        // (2026-09-19) 实例复用/二次进入时清零可变状态 (Task 框架铁律: onStart 必须
+        // 把上一条命的闩/实例级状态清干净, 否则"带着上一次的拉回模式开局")。
+        _returning = false;
         _lastEndermanSeenMs = System.currentTimeMillis();
         Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tSTART anchor="
                 + (_anchor == null ? "none" : _anchor.toShortString())
@@ -183,15 +207,34 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         }
 
         // 4) 没末影人: 回到锚点 / 在林子里小步巡逻等刷新
-        if (_anchor != null
-                && mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor)) > CAMP_RADIUS * CAMP_RADIUS) {
+        //
+        //    (2026-09-19 横跳修复) 双阈值迟滞: 出界(> CAMP_RADIUS)上闩, 走到
+        //    RETURN_RADIUS 内才解锁。中间 8~24 格是死区, 保持当前模式 —— 否则拉回
+        //    任务刚跨过 24 就被巡逻换掉, bot 永远停在边界打转 (见 _returning 注释)。
+        if (_anchor != null) {
+            double distSq = mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor));
+            if (distSq > CAMP_RADIUS * CAMP_RADIUS) {
+                _returning = true;
+            } else if (distSq <= RETURN_RADIUS * RETURN_RADIUS) {
+                if (_returning) {
+                    _returning = false;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-ARRIVED dist="
+                            + String.format("%.0f", Math.sqrt(distSq))
+                            + " anchor=" + _anchor.toShortString()
+                            + " (真正走进林心 " + RETURN_RADIUS + " 格内, 解锁回巡逻)");
+                }
+            }
+        }
+        if (_anchor != null && _returning) {
             setDebugState("Returning to warped forest camp");
             long nowMs = System.currentTimeMillis();
             if (nowMs - _lastReturnLogMs > RETURN_LOG_INTERVAL_MS) {
                 _lastReturnLogMs = nowMs;
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN dist="
                         + String.format("%.0f", Math.sqrt(mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor))))
-                        + " anchor=" + _anchor.toShortString() + " (巡逻走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回)");
+                        + " anchor=" + _anchor.toShortString()
+                        + " (巡逻走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回中 — 闩住直到走进 "
+                        + RETURN_RADIUS + " 格内)");
             }
             // 回林子用现成的 GetWithinRangeOfBlockTask (GoalNear, 进到 RETURN_RADIUS 内
             // 即算到), 而不是 GetToBlockTask (GoalBlock, 必须精确站到 _anchor.up()
