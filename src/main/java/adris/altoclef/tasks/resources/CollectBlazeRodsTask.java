@@ -81,26 +81,21 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static final float POTION_LOW_HEALTH = 10.0f;
 
     // =========================================================================
-    // (2026-09-19 刷怪笼包围策略, 用户; 13:05 二次修订) 浮在空中的烈焰人要去
-    // 搭路追打, 极危险 (0919 搭路靠近烈焰人摔死实锤)。改为"先围场关笼子, 再在
-    // 围场里收割":
-    //   ① 出发前准备 2 组 (128) 搭路方块 (围场 48 块墙 + 地板缺口 + 路上脚手
-    //      架, 32 不够用 — 用户实测);
-    //   ② 到达刷怪笼先喝防火药水 (有药才等, 没药直接往下走, 不死等);
-    //   ③ 围场结构: 刷怪笼同层 5x5 地板补实 + 高一格/高两层各一圈 7x7 外圈
-    //      围墙 ("两圈"), 内圈 5x5 两格高敞开 — bot (1.8 格高) 与烈焰人同在
-    //      围场里, 烈焰人追着 bot 打飞不出去;
-    //   ④ 围场未完工不开杀; 只打围场内的烈焰人, 外面的暂定直接不打 (用户);
-    //   ⑤ 破洞检查每 15s 一次 (不再每 tick 扫), 离开围场每 10s 检查一次并回去;
-    //   ⑥ 围场阶段地狱岩 <32 → 随时补 32 个 (2 组用完后的续补口径, 用户)。
+    // (2026-09-19 刷怪笼包围策略, 用户; 17:20 终版规格) 结构 = 三件套:
+    //   地板: 刷怪笼低一格 (y-1) 5x5 补实
+    //   围墙: y+1 一圈 7x7 外圈 (单圈)
+    //   顶盖: y+3 5x5 补实 ("封顶")
+    //   内圈 5x5 在 y..y+2 敞开 (3 格高), bot 与烈焰人同场。
+    // 搭建顺序自上向下: 顶盖 → 围墙 → 地板 (用户)。
     // =========================================================================
     private static final int ENCLOSURE_NETHERRACK_PREP = 128;
     private static final int ENCLOSURE_RESTOCK_TRIGGER = 32;
     private static final int ENCLOSURE_RESTOCK_TOPUP = 32;
-    // 脚底地板 5x5 (刷怪笼同层, 中枢是刷怪笼本身) 与围墙 7x7 外圈半径。
+    // 脚底地板 5x5 (低一格) / 顶盖 5x5 (高 3 格) / 围墙 7x7 外圈半径。
     private static final int SPAWNER_FLOOR_HALF = 2;
+    private static final int SPAWNER_ROOF_HEIGHT = 3;
+    private static final int SPAWNER_WALL_HEIGHT = 1;
     private static final int SPAWNER_WALL_HALF = 3;
-    private static final int[] SPAWNER_WALL_HEIGHTS = {1, 2};
     // 破洞重扫间隔 / 回场检查间隔 (秒, 用户 13:05)。
     private static final int HOLE_CHECK_INTERVAL_S = 15;
     private static final int RETURN_CHECK_INTERVAL_S = 10;
@@ -261,7 +256,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
                         + ENCLOSURE_RESTOCK_TOPUP + ")");
                 return getEnclosureRestockTask(mod, netherrackHave + ENCLOSURE_RESTOCK_TOPUP);
             }
-            clearEnclosureRestockTask();
+            // (2026-09-19 17:20) 不再无条件 clear —— 之前这里每 tick 清空, 而
+            // !arrived 分支每 tick 重建 128 任务, "Preparing 128" 一秒刷 20 条 +
+            // MineAndCollect 实例反复重建 (171228 实锤, 补货后期卡顿源之一)。
+            // 复用/重建策略统一收敛到 getEnclosureRestockTask (isFinished 才重建)。
 
             boolean arrived = _foundBlazeSpawner.isWithinDistance(mod.getPlayer().getPos(), 4);
             if (!arrived) {
@@ -374,6 +372,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
             // 感知过滤 —— 岩石后面的刷怪笼也会被"知道"。改为 getPerceivedLocations:
             // 只有 LOS+FOV 亲眼看见的刷怪笼才能确立目标; 走廊巡逻自然会看见它。
             for (BlockPos pos : mod.getBlockTracker().getPerceivedLocations(Blocks.SPAWNER)) {
+                // (2026-09-19 17:20) 排除表同样拦感知重确认 —— 否则刚被换掉的
+                // 岩浆笼就在眼前、每 tick 被"亲眼看见"重新确立, 无限回拉 (171228
+                // 实锤: 换笼后 0.3s 内又确认回同一个岩浆笼)。
+                if (isRejectedSpawner(pos)) continue;
                 if (isValidBlazeSpawner(mod, pos)) {
                     _foundBlazeSpawner = pos;
                     // (2026-09-18) 亲眼确认 → 写 static, 后续实例重建能直接接回。
@@ -502,10 +504,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
         if (_worldKey != null) {
             _confirmedSpawnerByKey.remove(_worldKey, pos);
         }
-        // (2026-09-19 16:05) 防拆保护随刷怪笼失效 (谓词读 _protectedSpawnerPos)。
-        if (_protectedSpawnerPos != null && _protectedSpawnerPos.isWithinDistance(pos, 2)) {
-            _protectedSpawnerPos = null;
-        }
+        // (2026-09-19 17:20) 保护【不】随失效清除 —— 换笼后 bot 还在旧笼边上
+        // 补货, 保护若立刻解除, 近场链挖会把刚搭好的墙当最近下界岩挖掉 (171228
+        // 实锤: 换笼后 restock 挖掉自己围场的整圈墙)。保护一直持续到新刷怪笼
+        // 确立 (registerEnclosureProtection 覆写) 或换存档。
         rejectSpawner(pos, reason);
     }
 
@@ -652,22 +654,27 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 13:05 包围策略③; 16:22 用户"搭建顺序先封顶, 自上向下") 围场
-     * 缺口全扫, 顺序 = 顶圈 (+2) → 下圈 (+1) → 地板 (y-1, 低一格)。
+     * (2026-09-19 17:20 终版规格) 围场缺口全扫, 顺序自上向下:
+     * 顶盖 (y+3, 5x5) → 围墙 (y+1, 7x7 外圈单圈) → 地板 (y-1, 5x5)。
      */
     private List<BlockPos> findMissingEnclosureBlocks(AltoClef mod, BlockPos spawner) {
         List<BlockPos> missing = new ArrayList<>();
-        // 两圈围墙自上向下: 先顶圈 (+2) 再下圈 (+1)。
-        for (int dy = SPAWNER_WALL_HEIGHTS[1]; dy >= SPAWNER_WALL_HEIGHTS[0]; dy--) {
-            for (int dx = -SPAWNER_WALL_HALF; dx <= SPAWNER_WALL_HALF; dx++) {
-                for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
-                    if (Math.abs(dx) != SPAWNER_WALL_HALF && Math.abs(dz) != SPAWNER_WALL_HALF) continue;
-                    BlockPos p = spawner.add(dx, dy, dz);
-                    if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
-                }
+        // ① 顶盖 y+3, 5x5。
+        for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
+            for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
+                BlockPos p = spawner.add(dx, SPAWNER_ROOF_HEIGHT, dz);
+                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
             }
         }
-        // 脚底地板 5x5 最后 (低一格)。
+        // ② 围墙 y+1, 7x7 外圈。
+        for (int dx = -SPAWNER_WALL_HALF; dx <= SPAWNER_WALL_HALF; dx++) {
+            for (int dz = -SPAWNER_WALL_HALF; dz <= SPAWNER_WALL_HALF; dz++) {
+                if (Math.abs(dx) != SPAWNER_WALL_HALF && Math.abs(dz) != SPAWNER_WALL_HALF) continue;
+                BlockPos p = spawner.add(dx, SPAWNER_WALL_HEIGHT, dz);
+                if (!WorldHelper.isSolid(mod, p)) missing.add(p.toImmutable());
+            }
+        }
+        // ③ 脚底地板 y-1, 5x5。
         for (int dx = -SPAWNER_FLOOR_HALF; dx <= SPAWNER_FLOOR_HALF; dx++) {
             for (int dz = -SPAWNER_FLOOR_HALF; dz <= SPAWNER_FLOOR_HALF; dz++) {
                 BlockPos p = spawner.add(dx, -1, dz);
@@ -708,11 +715,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     private Task getEnclosureRestockTask(AltoClef mod, int target) {
-        if (_enclosureRestockTask == null || target > _enclosureRestockTarget) {
+        // (2026-09-19 17:20) 重建条件 = 未创建 / 目标上调 / 旧任务已凑满。同目标
+        // 重建不刷日志 (避免 一秒 20 条 CHAT 刷屏, 171228 实锤)。
+        boolean recreate = _enclosureRestockTask == null
+                || target > _enclosureRestockTarget
+                || _enclosureRestockTask.isFinished(mod);
+        boolean logIt = recreate && target != _enclosureRestockTarget;
+        if (recreate) {
             _enclosureRestockTarget = target;
             _enclosureRestockTask = TaskCatalogue.getItemTask(Items.NETHERRACK, target);
-            Debug.logMessage("[BLAZE-ENCLOSURE] restock task target=" + target
-                    + " (netherrack now " + StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) + ")");
+            if (logIt) {
+                Debug.logMessage("[BLAZE-ENCLOSURE] restock task target=" + target
+                        + " (netherrack now " + StorageHelper.countItemInInventoryReal(mod, Items.NETHERRACK) + ")");
+            }
         }
         return _enclosureRestockTask;
     }

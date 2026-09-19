@@ -575,8 +575,15 @@ public class AltoClef implements ModInitializer {
                     }
                 }
                 if (lavaNearby) {
-                    suppress = adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0;
-                    if (!suppress && !_lavaNavNoBlockWarned) {
+                    // (2026-09-19 17:20 用户"喝药水的情况就不要惩罚") 有防火效果
+                    // 时跳过保守模式 (关旋转跳/压垫块惩罚) — 火焰免疫, 岩浆邻域
+                    // 的保守导航只会干扰围场施工 (原地惩罚跳跃)。
+                    if (getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+                        suppress = false;
+                    } else {
+                        suppress = adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) > 0;
+                    }
+                    if (!suppress && !_lavaNavNoBlockWarned && !getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
                         Debug.logToFile("altoclef_diag.log",
                                 "[LavaNav] lava nearby but no baritone-placeable blocks — keeping diagonal ascend ON");
                         _lavaNavNoBlockWarned = true;
