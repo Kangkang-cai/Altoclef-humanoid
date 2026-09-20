@@ -324,6 +324,17 @@ public class BeatMinecraft2Task extends Task {
     private long _pearlCampBlockedUntilMs = 0;
     // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
     private TimeoutWanderTask _pearlCooldownHoldTask = null;
+
+    /** (2026-09-20 冷却 hold 拉回) 离林锚点超过该半径就走回去, 防随机 wander 漂离林子。 */
+    private static final double PEARL_HOLD_PULL_RADIUS = 10;
+
+    /** 拉回任务缓存实例 (同锚点复用, 到达/锚点变化才重建)。 */
+    private GetToBlockTask _pearlCooldownReturnTask = null;
+    private BlockPos _pearlCooldownReturnAnchor = null;
+
+    /** 假锚点拒绝日志节流。 */
+    private long _lastFakeAnchorRejectMs = 0;
+    private static final long PEARL_FAKE_ANCHOR_LOG_INTERVAL_MS = 10_000;
     private static final long PEARL_FOREST_SCAN_INTERVAL_MS = 1000;
     // (2026-09-19 20:0x) [PEARL-NEAR] 日志节流: 看不见林子时 10s 一条就够 —— 否则
     // 主线跑几十分钟, diag.log 被每秒一条的 anchor=none 刷爆 (195218 会话 3 分钟 200+ 条)。
@@ -2893,13 +2904,29 @@ public class BeatMinecraft2Task extends Task {
             // 林子。改为原地小步等待: 冷却结束 getForestPearlCampTask 自然重开蹲守;
             // 等待期间末影人若被感知, 上面的 entityFound 分支照样接管击杀。
             if (_pearlForestAnchor != null) {
+                // (2026-09-20 现场 20260920-155006 实锤) 纯随机 wander(6 格)在 120s
+                // 冷却里约 20 段随机方向, 净漂移可达几十格 → bot 漂出林子可感知范围 →
+                // 冷却结束 anchor=none → 落入区块搜索兜底跑远 ("在完全非诡异森林的
+                // 地方 wander")。改为: 离锚点 >10 格先走回去 (GetToBlockTask), 近锚点
+                // 才原地小步等待 —— 漂移被 pull-back 兜住, 冷却结束时 bot 仍在林中,
+                // 群系快路径 O(1) 重锚, 不再跑远。
+                double holdDistSq = mod.getPlayer().getBlockPos().getSquaredDistance(_pearlForestAnchor);
+                long reCampIn = Math.max(0, (_pearlCampBlockedUntilMs - System.currentTimeMillis()) / 1000);
+                if (holdDistSq > PEARL_HOLD_PULL_RADIUS * PEARL_HOLD_PULL_RADIUS) {
+                    if (_pearlCooldownReturnTask == null || _pearlCooldownReturnTask.isFinished(mod)
+                            || !_pearlForestAnchor.equals(_pearlCooldownReturnAnchor)) {
+                        _pearlCooldownReturnTask = new GetToBlockTask(_pearlForestAnchor.up());
+                        _pearlCooldownReturnAnchor = _pearlForestAnchor;
+                    }
+                    setDebugState("Pearl camp cooldown; returning to forest anchor (re-camp in " + reCampIn + "s)");
+                    return _pearlCooldownReturnTask;
+                }
                 if (_pearlCooldownHoldTask == null) {
                     _pearlCooldownHoldTask = new TimeoutWanderTask(6);
                 } else if (_pearlCooldownHoldTask.isFinished(mod)) {
                     _pearlCooldownHoldTask.resetForReuse(mod);
                 }
-                setDebugState("Pearl camp cooldown; holding near forest (re-camp in "
-                        + Math.max(0, (_pearlCampBlockedUntilMs - System.currentTimeMillis()) / 1000) + "s)");
+                setDebugState("Pearl camp cooldown; holding near forest (re-camp in " + reCampIn + "s)");
                 return _pearlCooldownHoldTask;
             }
             // 看不见任何林子 → 才逐区块去远处找 (老路径, 现在降级为兜底)。
@@ -3059,11 +3086,27 @@ public class BeatMinecraft2Task extends Task {
         //    (静默注册: 进集合但不当场讨债), 数据由近区 5Hz / 远区 4s 的常规后台扫描
         //    自然填充; 后台扫描所有类型共用同一遍遍历 (HashSet 判定), 多这 4 类的
         //    边际成本≈0, 主线程只剩查表 + 几条射线。
-        return CollectEnderPearlsInForestTask.findVisibleSignal(
-                        mod,
-                        mod.getModSettings().getOpportunisticPearlSightRange(),
-                        PEARL_FOREST_LOS_CANDIDATES)
-                .orElse(null);
+        BlockPos seen = CollectEnderPearlsInForestTask.findVisibleSignal(
+                mod,
+                mod.getModSettings().getOpportunisticPearlSightRange(),
+                PEARL_FOREST_LOS_CANDIDATES).orElse(null);
+        if (seen == null) return null;
+        // (2026-09-20 假林子锚点, 现场 20260920-155006 实锤) 缓存里 2 个散落信号
+        // 方块 ≠ 一片林子: 路过 354,53,-389 时近区扫描收进 2 个菌菇(玩家脚下 6 格
+        // 的坑里, 周围全是地狱岩), findVisibleSignal 命中 → 蹲守锚在非林区, 巡逻
+        // 60s 零收获。语义校验: 真林子里的信号方块, 其所在群系必然是 WARPED_FOREST;
+        // 散落菌菇(废墟/洞穴)不是。O(1) 查询, 拒绝时 10s 节流日志。
+        var anchorBiome = mod.getWorld().getBiome(seen);
+        if (anchorBiome == null || !anchorBiome.matchesKey(BiomeKeys.WARPED_FOREST)) {
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastFakeAnchorRejectMs > PEARL_FAKE_ANCHOR_LOG_INTERVAL_MS) {
+                _lastFakeAnchorRejectMs = nowMs;
+                Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tREJECT fake anchor="
+                        + seen.toShortString() + " biome-not-warped-forest (散落信号方块, 非林区)");
+            }
+            return null;
+        }
+        return seen;
     }
 
     private int getTargetBeds(AltoClef mod) {

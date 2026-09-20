@@ -765,6 +765,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 }
                 if (_visited.contains(p.asLong())) continue;
                 double d = p.getSquaredDistance(bot);
+                // (2026-09-20 现场 20260920-155006 实锤) 到达半径内的点不是"目标":
+                // 缓存只有正脚下 1 个候选时, 三档降级的最下档(无下限)会选中它 →
+                // 出生即 target-reached → visited 清空重选同一点 → 50ms 振荡刷屏
+                // (15:54:16 起 target-reached 每秒 20 条, 巡逻 60s 零位移)。
+                // floor=到达半径: 站着的点永远跳过; 没有别的候选就 target=null 原地等扫描。
+                if (d < PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS) continue;
                 if (d < minHopSq) continue;
                 // (2026-09-20 用户预判"目标别定在空气导致爬高") 可站立校验:
                 // 寻路格无碰撞 (空气/植物) 且脚下格有碰撞支撑。缓存是记忆, 方块可能
