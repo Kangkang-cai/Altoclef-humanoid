@@ -574,6 +574,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         return _giveUpReason;
     }
 
+    /**
+     * (2026-09-20 用户"同时只打一只") 是否持有激活的单目标锁。父任务的贪婪击杀 /
+     * 兜底击杀分支据此不对第二只末影人开火 —— 锁定期间无锁的 KillAndLootTask
+     * 顶掉蹲守 (tasks.log 15:07:39 实锤 Greedy enderman kill 打断 ENGAGED-STUCK)
+     * 就是"打一只传走后放弃换目标"的根源。
+     */
+    public boolean hasActiveEndermanLock() {
+        return _engagedId != null;
+    }
+
     @Override
     protected void onResourceStop(AltoClef mod, Task interruptTask) {
         Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tSTOP pearls="

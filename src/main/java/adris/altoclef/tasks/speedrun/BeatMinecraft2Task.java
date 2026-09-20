@@ -2843,6 +2843,15 @@ public class BeatMinecraft2Task extends Task {
      * 防火药水/挖金/烈焰棒等主线)。
      */
     private Task getGreedyEndermanKillTask(AltoClef mod) {
+        // (2026-09-20 单目标锁, 用户"同时只打一只") 蹲守已锁定一只末影人时, 贪婪
+        // 击杀不得对第二只开火。现场 20260920-150652 实锤: 蹲守正处 ENGAGED-STUCK
+        // 等待 (锁定那只传走藏了), 另一只走进 8 格 → 贪婪分支的【无锁】
+        // KillAndLootTask 整个顶掉蹲守 → 打最近的那只 → 传走 → 十几秒放弃 → 换
+        // 下一只, 用户观感"单目标锁没生效"。锁定目标走近时蹲守自己的 killLocked
+        // 会处理, 贪婪无需代劳。
+        if (_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp && camp.hasActiveEndermanLock()) {
+            return null;
+        }
         if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) >= 16) return null;
         Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
         if (enderman.isEmpty() || !enderman.get().isInRange(mod.getPlayer(), 8)) return null;
@@ -2868,7 +2877,14 @@ public class BeatMinecraft2Task extends Task {
             if (nearCamp != null) {
                 return nearCamp;
             }
-            if (mod.getEntityTracker().entityFound(EndermanEntity.class) || mod.getEntityTracker().itemDropped(Items.ENDER_PEARL)) {
+            if (mod.getEntityTracker().itemDropped(Items.ENDER_PEARL)) {
+                // 捡掉落珍珠不受单目标锁约束 (锁定的末影人死后掉 pearl, 必须能捡)。
+                return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
+            }
+            // (2026-09-20 单目标锁) 锁定存在期间, 无锁击杀分支不得开第二只。
+            if (mod.getEntityTracker().entityFound(EndermanEntity.class)
+                    && !(_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp
+                        && camp.hasActiveEndermanLock())) {
                 return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
             }
             // (2026-09-20) 看得见/刚看过林子却进不了蹲守 = 蹲守冷却中 (60s 没见末影人

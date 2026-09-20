@@ -60,6 +60,14 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     private static final int COUNTER_COOLDOWN_TICKS = 26;
     // (2026-08-30 多怪自适应格挡节奏, 用户) 每次反击段连挥几下而已。
     private static final int COUNTER_HITS_PER_PHASE = 2;
+
+    // (2026-09-20 挥剑扫溅守卫, 用户"范围性伤害砍到旁边一只, 多惹怒一只") 目标
+    // 末影人与另一只末影人中心距 ≤ 此值 = "贴着", 此时不挥刀 (vanilla 扫溅
+    // sweep box = 目标碰撞箱外扩 1 格, 2.5 格中心距覆盖全部波及场景), 只保持
+    // 瞄准与贴近, 等两只拉开距离再出手。
+    private static final double ENDERMAN_SWEEP_GUARD_RANGE = 2.5;
+    // 扫溅守卫日志节流 (3s 一条)。
+    private long _lastSweepGuardLogMs = 0;
     // (2026-09-14 烈焰人 3 刀, 用户实测) 烈焰人一波连发结束后进 ~3s 装填冷却, 放盾
     // 窗口时间上够连砍 3 刀 (3 × 0.75s 攻击冷却 ≈ 45t < 60t 装填); 小白箭冷却是
     // ~1s 级别, 放盾打 3 刀会白漏 2 箭, 所以只给烈焰人加长, 小白维持 2 刀。
@@ -418,7 +426,12 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             return move;
         }
         float hitProg = mod.getPlayer().getAttackCooldownProgress(0);
-        if (inReach && hitProg >= 0.75f) {
+        // (2026-09-20 挥剑扫溅守卫) 目标末影人旁边贴着另一只 → 本 tick 不出刀,
+        // 挥剑的扫溅伤害会波及相邻末影人, 凭空多激怒一只。保持贴近与瞄准
+        // (上方 lookAt 已做), 蹲守的锁定与失联节奏不受影响。
+        boolean sweepGuarded = entity instanceof EndermanEntity && hasAdjacentEnderman(mod, entity);
+        if (sweepGuarded) logSweepGuard(mod, entity);
+        if (inReach && hitProg >= 0.75f && !sweepGuarded) {
             // (2026-09-13 被拦刀诊断) 出刀前先记录准心是否真在目标身上: attack()
             // 内部 isCrosshairOn 不通过就只登记瞄准、不挥刀, 而旧日志写在调用之后
             // 且不分"出手/被拦" —— 现场无法区分。这里补一条被拦记录。
@@ -433,6 +446,24 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             }
         }
         return move;
+    }
+
+    /** (2026-09-20) 目标末影人附近是否贴着另一只末影人 (挥剑扫溅会波及 → 不出刀)。 */
+    private boolean hasAdjacentEnderman(AltoClef mod, Entity target) {
+        double sq = ENDERMAN_SWEEP_GUARD_RANGE * ENDERMAN_SWEEP_GUARD_RANGE;
+        for (EndermanEntity e : mod.getEntityTracker().getTrackedEntities(EndermanEntity.class)) {
+            if (e == target || !e.isAlive()) continue;
+            if (e.squaredDistanceTo(target) <= sq) return true;
+        }
+        return false;
+    }
+
+    private void logSweepGuard(AltoClef mod, Entity entity) {
+        long now = System.currentTimeMillis();
+        if (now - _lastSweepGuardLogMs < 3000) return;
+        _lastSweepGuardLogMs = now;
+        Debug.logToFile("altoclef_diag.log", "[MELEE-FIX]\tSWEEP-GUARD hold swing on enderman at "
+                + entity.getBlockPos().toShortString() + " (旁边贴着另一只, 挥剑会扫溅激怒)");
     }
 
     /**
