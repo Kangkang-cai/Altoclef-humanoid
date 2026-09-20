@@ -3060,7 +3060,12 @@ public class BeatMinecraft2Task extends Task {
             // 记忆全被误滤, 记忆直航退化成远征 (此前 21:39 直航成功恰因离得近、
             // 区块已加载)。remember 侧已守群系, 未加载时信任记忆; 真踩进 24 格
             // 时区块必然已加载, 下面的 discredit 兜底照常生效。
-            if (mod.getWorld().isChunkLoaded(c.getX() >> 4, c.getZ() >> 4)) {
+            // (2026-09-20 22:52 二次修正, 反编译实锤) 【不能用 World.isChunkLoaded(II)】:
+            // ClientWorld 覆写为无条件 return true (MC 1.18.2 反编译字节码:
+            // iconst_1/ireturn, f0265ea5 的守卫因此从未生效, 224205 会话 n=8
+            // 仍判空)。改 ClientChunkManager.getWorldChunk(II, false) —— 远处
+            // 区块不在视距半径内时真实返回 null。
+            if (mod.getWorld().getChunkManager().getWorldChunk(c.getX() >> 4, c.getZ() >> 4, false) != null) {
                 var biome = mod.getWorld().getBiome(c);
                 if (biome == null || !biome.matchesKey(BiomeKeys.WARPED_FOREST)) continue;
             }
