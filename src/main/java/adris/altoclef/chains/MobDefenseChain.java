@@ -539,14 +539,25 @@ public class MobDefenseChain extends SingleTaskChain {
             retreat = true;
         }
         // (2026-09-19 18:55 用户"有药水效果还逃跑应该避免"/"墙完工坚守到8分钟") 安全
-        // 屋豁免: 威胁只有烈焰人时 (火伤被防火效果免疫 / 被围场墙挡), 人在自己的完工
-        // 围场里不撤 —— 留在墙里打到收药冷却到点, 由 CollectBlazeRodsTask 主动出去收药。
-        // 低血量硬闸同样豁免: 墙内撤退只会把自己暴露在更多火球下。骷髅/苦力怕/猪灵
-        // 围殴/末影人×2 等其他威胁照旧撤 (safeHaven 口径见 CollectBlazeRodsTask)。
+        // 屋豁免: 威胁只有烈焰人时 (火伤被防火效果免疫 / 被围场墙挡), 人在自己的围场
+        // 里不撤 —— 留在墙里打到收药冷却到点, 由 CollectBlazeRodsTask 主动出去收药。
+        //
+        // (2026-09-20 10:26 用户"有药水还错误触发了举盾和逃跑"/"bot 跑了, 他没有反击")
+        // 扩容到【建墙期】: 原判据复用 isEnclosureSafeHaven → 要求围场【完工 95%】,
+        // 于是"边建墙边被追"整段都判不了坚守。20260920-102209 实锤 10:24:02:
+        //   [RETREAT-DEC] ... isRanged=true health=11.1 safeHavenHold=false decide=retreat
+        // 当时墙只到 75.7% (18 缺块, 10:23:39 扫描)、bot 10:23:37 刚喝过防火药水、
+        // 威胁清一色烈焰人 → 仍撤退, 一路跑出 45 格。而建墙期恰恰最需要留在原地:
+        // 跑掉以后墙永远建不完, 下一轮回来还得从头挨打。改判"有自己的刷怪笼围场 +
+        // 有防火效果"即可坚守。
+        // 保命底线: 血量 ≤ LOW_HEALTH_FORCE_RETREAT(6) 时【不豁免】照旧撤 (用户原话
+        // "血量还没到很低的时候", 真残血撤离是对的)。骷髅/苦力怕/猪灵围殴/末影人×2
+        // 等其他威胁照旧撤。
         boolean safeHavenHold = false;
         if (retreat && !anyCreeper && bruteCount == 0 && piglinSwarm <= 2
                 && meleeCount < RETREAT_MELEE_THRESHOLD && endermanCount < 2
-                && CollectBlazeRodsTask.isEnclosureSafeHaven(mod)) {
+                && mod.getPlayer().getHealth() > LOW_HEALTH_FORCE_RETREAT
+                && CollectBlazeRodsTask.isBlazeFarmHold(mod)) {
             boolean allRangedBlaze = hostiles.stream()
                     .filter(h -> h != null && h.isAlive() && isRangedThreat(h))
                     .allMatch(h -> h instanceof BlazeEntity);

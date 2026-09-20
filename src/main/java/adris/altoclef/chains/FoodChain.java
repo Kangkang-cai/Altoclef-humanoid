@@ -376,6 +376,47 @@ public class FoodChain extends SingleTaskChain {
     }
 
     /**
+     * (2026-09-20 10:26 用户"拿着盾发愣, 不吃东西") 光标被占时的自愈: 把光标上的
+     * 【任意】物品放回背包 (放不进就换一摞可丢垃圾, 垃圾丢地上)。
+     *
+     * 与 {@link #restoreShieldFromCursor} 同源, 差别是①不限盾 ②不优先副手 (副手
+     * 很可能正被那块停不下来的盾占着)。20260920-102209 实锤: 10:23:44~10:23:53
+     * 光标上卡着一把钻石剑 (换武器序列被槽位节流吞掉一步留下的中间态), 副手又有盾
+     * → {@link #parkShieldOffHands} 判"光标被占"直接放弃 → 进食整段干等 9 秒。
+     * 原实现只有"干等"(等别的模块把光标清掉), 没有任何自愈路径 —— 本方法补上。
+     *
+     * @return true = 光标已清空 (可以继续停盾/进食)。
+     */
+    public static boolean restoreCursorItemToInventory(AltoClef mod) {
+        if (StorageHelper.getItemStackInCursorSlot().isEmpty()) {
+            return true;
+        }
+        adris.altoclef.util.slots.Slot emptySlot = StorageHelper.getRealBackpackSlots().stream()
+                .filter(s -> StorageHelper.getItemStackInSlot(s).isEmpty())
+                .findFirst().orElse(null);
+        if (emptySlot != null) {
+            mod.getSlotHandler().clickSlotForced(emptySlot, 0,
+                    net.minecraft.screen.slot.SlotActionType.PICKUP);
+            return StorageHelper.getItemStackInCursorSlot().isEmpty();
+        }
+        // 背包满: 找一摞可丢弃的垃圾换位 (光标物品入背包, 垃圾上光标), 再把垃圾丢地。
+        for (adris.altoclef.util.slots.Slot s : StorageHelper.getRealBackpackSlots()) {
+            ItemStack stack = StorageHelper.getItemStackInSlot(s);
+            if (!stack.isEmpty() && ItemHelper.canThrowAwayStack(mod, stack)) {
+                mod.getSlotHandler().clickSlotForced(s, 0,
+                        net.minecraft.screen.slot.SlotActionType.PICKUP);
+                mod.getSlotHandler().clickSlotForced(adris.altoclef.util.slots.Slot.UNDEFINED, 0,
+                        net.minecraft.screen.slot.SlotActionType.PICKUP);
+                return StorageHelper.getItemStackInCursorSlot().isEmpty();
+            }
+        }
+        Debug.logToFile("altoclef_diag.log",
+                "[FOOD-EAT] cursor item stuck, no empty slot / junk to toss: "
+                        + StorageHelper.getItemStackInCursorSlot());
+        return false;
+    }
+
+    /**
      * (2026-09-06 前台进食) 当前背包里"最优可吃食物" (排除受保护物品与蜘蛛眼,
      * 按恢复量优先排序)。空 = 没有可吃的。
      */

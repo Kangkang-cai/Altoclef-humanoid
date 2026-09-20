@@ -108,12 +108,22 @@ public class EatItemTask extends Task {
         // (2026-09-06 21:38 重构) 副手盾 → 光标 (一把 forced PICKUP, 光标不是
         // 手不挡右键; 不再依赖多步 SWAP 序列 —— 那会被槽位节流静默丢弃出中间态)。
         if (off.getItem() == net.minecraft.item.Items.SHIELD && !FoodChain.parkShieldOffHands(mod)) {
-            // 停盾失败 (光标被占): 本 tick 绝不 hold 右键 (右键 = 举盾 → 卡死)。
-            releaseEat(mod);
-            _lastShieldStuckLogMs = logThrottled(mod, _lastShieldStuckLogMs,
-                    "[FOOD-EAT] shield PARK FAILED (cursor busy), waiting");
-            setDebugState("Shield park failed (cursor busy), waiting");
-            return null;
+            // (2026-09-20 10:26 用户"拿着盾发愣, 不吃东西") 先自愈"光标被占"的中间态,
+            // 再谈放弃。20260920-102209 实锤: 10:23:44~10:23:53 光标上卡着一把钻石剑
+            // (换武器序列丢步留下的中间态), 副手的盾因此停不下来 → 这 9 秒里只有
+            // "Shield park failed (cursor busy), waiting" 反复刷, 没有任何出路,
+            // 用户看到的就是"拿着盾发愣不吃东西"。自愈成功 → 同 tick 直接继续进食。
+            if (FoodChain.restoreCursorItemToInventory(mod) && FoodChain.parkShieldOffHands(mod)) {
+                off = mod.getPlayer().getOffHandStack();
+                setDebugState("Recovering: cursor item -> inventory, shield parked, eating");
+            } else {
+                // 停盾失败 (光标被占): 本 tick 绝不 hold 右键 (右键 = 举盾 → 卡死)。
+                releaseEat(mod);
+                _lastShieldStuckLogMs = logThrottled(mod, _lastShieldStuckLogMs,
+                        "[FOOD-EAT] shield PARK FAILED (cursor busy), waiting");
+                setDebugState("Shield park failed (cursor busy), waiting");
+                return null;
+            }
         }
 
         // 装备食物到主手 (unInterruptable=true: 本任务拥有 bot)。

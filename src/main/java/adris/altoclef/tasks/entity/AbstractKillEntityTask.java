@@ -9,6 +9,7 @@ import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.CombatMemory;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.PlayerSlot;
@@ -358,23 +359,21 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         Vec3d aim = getVisibleAimPoint() != null ? getVisibleAimPoint() : aimPoint(entity);
         LookHelper.lookAt(mod, aim);
 
-        // (2026-08-28 战斗中即刻装盾) 盾通常只在背包、未必已换到副手。
-        // 开战瞬间若副手没盾, 旧代码 isOffHand 判定 false → 整段走"直接
-        // 攻击"分支, 根本不用盾格挡, 打骷髅白吃箭。每次交互先 try 装盾
-        // (已在副手则立即返回), 再判定 —— 只要背包有盾, 战斗 tick 就
-        // 能进盾战格挡。
-        tryEquipShield(mod);
         // Shield combat: block, wait for the enemy to strike, then counter-attack.
         // (2026-08-23 rev3) 盾牌只用于小白 (骷髅/凋零骷髅射箭)、苦力怕 (爆炸) 和
         // 烈焰人 (火球, 2026-09-06 用户加入 — 落单烈焰人不浪费防火药水, 改走盾战)。
         // 盾牌本质是防远程投射物和爆炸; 纯近战怪 (僵尸/末影人) 直接剑砍。
         // 烈焰人与小白节奏不同: 一轮连发 3 球, 走"波内只格挡、波次间反击"分支
         // (见 shieldCombatTick 内 blazeTarget 处理)。
-        boolean hasShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
-        // (2026-09-14 防火免盾, 用户实测) 烈焰人的威胁几乎全是火球火焰伤害, 身上带
-        // FIRE_RESISTANCE 时被命中完全不掉血 (用户确认) → 举盾纯属空转: 盾战一轮
-        // 只放 3 刀, 而有防火时贴身连砍效率高得多。有防火效果时烈焰人直接落到下面
-        // 的无盾近战并行分支; 小白/苦力怕不受影响 (它们的伤害与防火无关)。
+        //
+        // (2026-09-20 10:26 用户"有药水还错误触发了举盾" + "拿着盾发愣, 不吃东西")
+        // 【装盾必须后置到"这一轮到底用不用盾"判定之后】。原顺序是无条件
+        // tryEquipShield 先塞盾、再判 shieldTarget —— 于是两类【明确不用盾】的
+        // 情形也被塞了一块盾进副手, 唯一副作用是挡住进食 (EatItemTask 进食前必须
+        // 先把副手盾"停"到光标上)。20260920-102209 实锤: 10:23:44~10:23:53
+        // (9 秒) 光标上卡着一把钻石剑 (换武器序列被槽位节流吞掉一步留下的中间态),
+        // 副手又被塞了盾 → parkShieldOffHands 因"光标被占"连续失败 4 次
+        // → 整段没吃上东西, 用户看到的就是"拿着盾发愣"。
         boolean blazeShieldPointless = entity instanceof BlazeEntity
                 && mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE);
         boolean shieldTarget = entity instanceof AbstractSkeletonEntity || entity instanceof CreeperEntity
@@ -384,8 +383,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 需要的转头, 搭路中断 → 半空坠落 (0919 搭路靠近烈焰人摔死实锤)。
         // 寻路搭建期间整体落到下面的无盾近战并行分支 (贴近+侧写出刀不受影响)。
         boolean baritoneBuilding = BaritoneHelper.isBaritoneBuilding();
-        if (hasShield && shieldTarget && !baritoneBuilding) {
-            return shieldCombatTick(mod, entity);
+        if (shieldTarget && !baritoneBuilding) {
+            // (2026-08-28 战斗中即刻装盾, 保留原意) 盾通常只在背包、未必已换到副手。
+            // 开战瞬间若副手没盾, 旧代码 isOffHand 判定 false → 整段走"直接攻击"
+            // 分支, 根本不用盾格挡, 打骷髅白吃箭。确认要用盾时再装 (已在副手则立即
+            // 返回) —— 只要背包有盾, 战斗 tick 就能进盾战格挡。
+            tryEquipShield(mod);
+            if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) {
+                return shieldCombatTick(mod, entity);
+            }
         }
         if (baritoneBuilding) {
             // 清掉上一 tick 盾战可能残留的举盾, 否则 Blocking 状态下出不了刀。
@@ -545,6 +551,11 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
      */
     private void tryEquipShield(AltoClef mod) {
         if (mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD) return;
+        // (2026-09-20 10:26) 光标被占时【一步都不动】: 换盾是多步槽位交互, 在光标
+        // 非空时插入会与光标上的物品交换, 再叠上 containerItemMoveDelay 节流丢步,
+        // 就落在"光标卡着一件东西"的中间态 (20260920-102209 实锤: 光标卡钻石剑 9 秒,
+        // 期间副手的盾停不下来 → 吃不了东西)。光标空才动手, 让它自己先走完。
+        if (!StorageHelper.getItemStackInCursorSlot().isEmpty()) return;
         List<Slot> shieldSlots = mod.getItemStorage().getSlotsWithItemScreen(Items.SHIELD);
         if (shieldSlots.isEmpty()) return;
         mod.getSlotHandler().clickSlot(PlayerSlot.OFFHAND_SLOT, shieldSlots.get(0).getInventorySlot(), SlotActionType.SWAP);

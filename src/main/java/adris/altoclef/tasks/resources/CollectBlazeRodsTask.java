@@ -429,7 +429,16 @@ public class CollectBlazeRodsTask extends ResourceTask {
         _returnCheckTimer.reset();
         // (2026-09-19 21:50) 节拍照同步清零 —— 实例/分支二次进入时不许沿用上一拍的
         // 锁定动作 (否则会带着旧的 BUILD/CLEAR/FIRE 直接返回旧目标)。
-        _beatTimer.reset();
+        //
+        // (2026-09-20 10:26 用户"墙还没改好就触发 waiting to respawn" 根因修复)
+        // 这里必须用 forceElapse() 而不是 reset(): reset() 只是把 prevTime 推到当下,
+        // 于是之后 ENCLOSURE_BEAT_SECONDS(8s) 内 elapsed() 恒 false, 而 _beatAction
+        // 又被清成 NONE ⇒ 实例重建后的【首拍】(最长 8 秒) 整个围场维护分支什么都不做,
+        // 一路落到 "Waiting inside our enclosure for blazes to spawn" —— 明明还有
+        // 18 块缺口。20260920-102209 实锤: 10:23:54.715 BeatMinecraft2Task.onStart
+        // 重建实例, 下一 tick 就显示"等待烈焰人刷新", 直到 10:23:57.665 被贴脸杀抢走。
+        // forceElapse() 把 prevTime 归零 ⇒ 下一 tick 必须重新决策本拍动作。
+        _beatTimer.forceElapse();
         _beatAction = EnclosureAction.NONE;
         _skipBuildThisBeat = false;
         _beatFireTarget = null;
@@ -703,6 +712,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
                 }
             }
 
+            if (missing != null && !missing.isEmpty()) {
+                // (2026-09-20 10:26) 墙上还有缺口却落到这里 = 误报态 (20260920-102209
+                // 用户实锤): 显示"等待烈焰人刷新"会让现场完全误判成"墙建好了在等怪"。
+                // 给一条诚实的状态, 下一 tick enclosureBeat 会重新决策。
+                setDebugState("Enclosure gaps left (" + missing.size() + "), no maintenance action this tick");
+                return null;
+            }
             setDebugState("Waiting inside our enclosure for blazes to spawn");
             return null;
         } else {
@@ -1078,7 +1094,13 @@ public class CollectBlazeRodsTask extends ResourceTask {
      * 1s+ 才能生效"的动作永远跑不完, 形成自锁环。
      */
     private Task enclosureBeat(AltoClef mod, List<BlockPos> missing) {
-        if (_beatTimer.elapsed()) {
+        // (2026-09-20 10:26) 兜底重决策: 锁定动作是 NONE 而墙上还有缺口, 立刻重新决策,
+        // 不许等下一拍 —— NONE 只该在"补墙/清障/灭火全都没活"时出现, 有缺口却停在 NONE
+        // 就是异常态 (onResourceStart 那次曾经的 _beatTimer.reset() 让首拍整整 8 秒如此)。
+        // 判据本身是 O(1) (只看缺块数), 不引入清障的 5x5x3 扫描开销。
+        boolean repick = _beatTimer.elapsed()
+                || (_beatAction == EnclosureAction.NONE && missing != null && !missing.isEmpty());
+        if (repick) {
             settleBeatOutcome(mod);
             _beatTimer.reset();
             _skipBuildThisBeat = false;
@@ -1393,6 +1415,27 @@ public class CollectBlazeRodsTask extends ResourceTask {
         if (mod == null || mod.getPlayer() == null) return false;
         if (_protectedSpawnerPos == null || !_enclosureCompleteFlag) return false;
         if (!isInsideProtectedEnclosure(mod.getPlayer().getBlockPos())) return false;
+        return mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
+                || System.currentTimeMillis() < BeatMinecraft2Task.getFireResReopenAtMs();
+    }
+
+    /**
+     * (2026-09-20 10:26 用户"有药水还错误触发了举盾和逃跑" / "bot 跑了, 他没有反击")
+     * 烈焰人农场【坚守资格】—— 与 {@link #isEnclosureSafeHaven} 的区别是**不要求围场
+     * 完工**, 只看"已经确立了自己的刷怪笼围场 + 身上有防火效果(或收药宽限窗口)"。
+     *
+     * 为什么必须拆开: 原实现把"墙完工 95%"当作坚守前置, 于是【边建墙边被追】的整个
+     * 阶段都判不了坚守 —— 20260920-102209 实锤 10:24:02: 墙只到 75.7% (18 缺块)、
+     * bot 10:23:37 刚喝过防火药水、威胁清一色烈焰人, 判据仍返回 safeHavenHold=false
+     * → RETREAT 一路跑出 45 格 (用户"bot 跑了, 他没有反击")。而建墙期恰恰是最需要
+     * 留在原地的时候: 跑掉以后墙永远建不完, 下一轮回来还得从头挨打。
+     *
+     * 只用于 MobDefenseChain 的"纯烈焰人威胁不撤退"分支; 保命底线(低血量硬闸)
+     * 仍在 MobDefenseChain 里独立生效, 不受本方法影响。
+     */
+    public static boolean isBlazeFarmHold(AltoClef mod) {
+        if (mod == null || mod.getPlayer() == null) return false;
+        if (_protectedSpawnerPos == null) return false;
         return mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
                 || System.currentTimeMillis() < BeatMinecraft2Task.getFireResReopenAtMs();
     }
