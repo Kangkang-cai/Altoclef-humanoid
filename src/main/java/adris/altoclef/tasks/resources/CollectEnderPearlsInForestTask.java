@@ -167,6 +167,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final int LOST_WALK_ARRIVE_RADIUS = 3;
     /** 每轮方向抖动幅度 (度): 大体同向续走, 微调避免沿直线越走越偏出搜索带。 */
     private static final double LOST_WALK_BEARING_JITTER_DEG = 30.0;
+    // (2026-09-20 用户拍板) 失联远走的目标必须落在诡异森林地形上, 不能乱跑:
+    // 优先从信号方块缓存里选"方位角走廊内最远的未访问落点" (与巡逻共用 ±60°
+    // 走廊口径); 缓存里没有够得着的森林点才退回盲走 (打日志可观测)。
+    private static final double LOST_WALK_CORRIDOR_COS = 0.5;
+    /** 森林落点候选与 bot 的最小距离 (格): 保住"远 3 倍引出"的语义, 别在原地打转。 */
+    private static final double LOST_WALK_MIN_DIST = 12.0;
 
     private final int _count;
     private BlockPos _anchor;
@@ -605,15 +611,24 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             }
             double rad = Math.toRadians(_lostBearingDeg);
             Vec3d p = mod.getPlayer().getPos();
-            BlockPos walkTarget = new BlockPos(
-                    (int) Math.floor(p.x + Math.cos(rad) * step),
-                    (int) Math.floor(p.y),
-                    (int) Math.floor(p.z + Math.sin(rad) * step));
+            // (2026-09-20 用户拍板) 目标必须落在诡异森林地形: 先从信号方块缓存里
+            // 挑"方位角走廊内最远、且不超过本轮步长"的森林落点; 缓存够不着才
+            // 退回盲走几何点 (旧行为, 打 fallback 标记供观测)。
+            BlockPos walkTarget = pickLostWalkForestTarget(mod, step, rad);
+            String targetKind = "forest-cache";
+            if (walkTarget == null) {
+                walkTarget = new BlockPos(
+                        (int) Math.floor(p.x + Math.cos(rad) * step),
+                        (int) Math.floor(p.y),
+                        (int) Math.floor(p.z + Math.sin(rad) * step));
+                targetKind = "blind-fallback";
+            }
             _lostWalk = new GetWithinRangeOfBlockTask(walkTarget, LOST_WALK_ARRIVE_RADIUS);
             Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK-WALK id=" + engaged.getUuid()
                     + " cycle=" + (_lostCycles + 1) + " step=" + (int) step
                     + " bearing=" + (int) (double) _lostBearingDeg
                     + " target=" + walkTarget.toShortString()
+                    + " kind=" + targetKind
                     + " (定向远走扫视线找那只愤怒末影人 — 3 倍步长版)");
         }
         if (_lostWalk.isFinished(mod)) {
@@ -627,6 +642,55 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         setDebugState("Angry enderman hidden; walking out to lure it (cycle "
                 + (_lostCycles + 1) + ")");
         return _lostWalk;
+    }
+
+    /**
+     * (2026-09-20 用户拍板"失联远走不能乱跑") 失联远走目标的森林落点选点:
+     * 4 类信号方块缓存中, 方位角走廊 (±60°, 与巡逻同口径) 内、距 bot
+     * ≥ {@link #LOST_WALK_MIN_DIST} 且 ≤ 本轮步长 1.25 倍、可站立 (寻路格无
+     * 碰撞 + 脚下有支撑) 的候选, 取【最远】者 —— 净位移大且全程落在林子上。
+     * 两遍降级: 先保 ≥12 格 (远走引出语义), 没有再放宽到任意距离;
+     * 缓存里完全没有够得着的森林点 → 返回 null (调用方退回盲走几何点,
+     * 日志打 kind=blind-fallback 供观测)。
+     */
+    private BlockPos pickLostWalkForestTarget(AltoClef mod, float step, double rad) {
+        BlockPos bot = mod.getPlayer().getBlockPos();
+        double maxDistSq = (step * 1.25) * (step * 1.25);
+        double bX = Math.cos(rad), bZ = Math.sin(rad);
+        double[] minDistTiers = {LOST_WALK_MIN_DIST * LOST_WALK_MIN_DIST, 0.0};
+        for (double minSq : minDistTiers) {
+            BlockPos best = null;
+            double bestDistSq = -1;
+            for (int yOff = 1; yOff >= 0; yOff--) {
+                // yOff=1: 菌岩 (站其上); yOff=0: 菌菇/菌索 (站进所在格)。
+                List<BlockPos> list = (yOff == 1)
+                        ? mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM)
+                        : mod.getBlockTracker().getKnownLocations(
+                                Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS);
+                if (list == null) continue;
+                for (BlockPos c : list) {
+                    double d = c.getSquaredDistance(bot);
+                    if (d < minSq || d > maxDistSq) continue;
+                    double dx = c.getX() + 0.5 - bot.getX() - 0.5;
+                    double dz = c.getZ() + 0.5 - bot.getZ() - 0.5;
+                    double len = Math.sqrt(dx * dx + dz * dz);
+                    if (len < 1e-6) continue;
+                    if ((dx * bX + dz * bZ) / len < LOST_WALK_CORRIDOR_COS) continue;
+                    BlockPos standPos = c.up(yOff);
+                    if (mod.getWorld().getBlockState(standPos).isSolidBlock(mod.getWorld(), standPos)
+                            || !mod.getWorld().getBlockState(standPos.down())
+                                    .isSolidBlock(mod.getWorld(), standPos.down())) {
+                        continue;
+                    }
+                    if (d > bestDistSq) {
+                        bestDistSq = d;
+                        best = c;
+                    }
+                }
+            }
+            if (best != null) return best;
+        }
+        return null;
     }
 
     /** 清失联节奏状态 (重新看见锁定目标 / 解锁 / onStart 重开)。方位角一并清:
