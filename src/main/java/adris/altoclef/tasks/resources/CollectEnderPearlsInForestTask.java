@@ -4,10 +4,14 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
+import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetWithinRangeOfBlockTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.EntityHelper;
+import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -16,7 +20,9 @@ import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * (2026-09-18 顺手收珍珠) 下界诡异森林蹲守打末影人。
@@ -105,6 +111,17 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     // 单步巡逻距离: TimeoutWanderTask 走够这个距离即结束, 由本任务重新起算。
     private static final float PATROL_STEP = 10;
 
+    // ------------------------------------------------------------------
+    // (2026-09-20 用户机制) 锁定末影人"卡住不露面"的失联节奏: 先原地等一会儿,
+    // 再小步 wander 几步; 每空一轮, 等得更久、步子更大 ("多等一会儿, 多 wander
+    // 几步")。全程不对失联目标做任何寻路 —— 刻意不用 tracker 里穿墙可见的坐标。
+    private static final double LOST_WAIT_BASE_SECONDS = 4.0;
+    private static final double LOST_WAIT_GROWTH_SECONDS = 3.0;
+    private static final double LOST_WAIT_MAX_SECONDS = 16.0;
+    private static final float LOST_WANDER_STEP_BASE = 8f;
+    private static final float LOST_WANDER_STEP_GROWTH = 4f;
+    private static final float LOST_WANDER_STEP_MAX = 20f;
+
     private final int _count;
     private BlockPos _anchor;
 
@@ -117,6 +134,18 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
 
     private boolean _gaveUp = false;
     private String _giveUpReason = null;
+
+    // (2026-09-20 用户机制) 单目标锁: 吸引了一只末影人 (它已愤怒) 之后, 在击杀
+    // 掉它之前绝不再吸引/去杀第二只 —— 例外是【已经愤怒】的末影人 (反正已经在
+    // 打我们)。锁 = 锁定目标的 UUID。
+    private UUID _engagedId = null;
+    // 失联 (锁定的愤怒末影人卡在视线外) 的等待/游走节奏状态。
+    private TimerGame _lostWaitTimer = null;
+    private TimeoutWanderTask _lostWander = null;
+    private int _lostCycles = 0;
+    // 锁定目标击杀子任务的实例缓存 (Task 框架: 每 tick 新建实例会被去重/重置)。
+    private KillEntityTask _singleKillTask = null;
+    private UUID _singleKillTargetId = null;
 
     /**
      * (2026-09-19 19:5x 横跳修复) 拉回模式的<b>闩 (latch)</b>。
@@ -170,6 +199,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 把上一条命的闩/实例级状态清干净, 否则"带着上一次的拉回模式开局")。
         _returning = false;
         _lastEndermanSeenMs = System.currentTimeMillis();
+        // (2026-09-20 单目标锁) 实例复用/二次进入时清零 (Task 框架铁律: onStart
+        // 必须把上一条命的锁/失联节奏清干净, 不能带着上一场的锁定开局)。
+        _engagedId = null;
+        _singleKillTask = null;
+        _singleKillTargetId = null;
+        clearLostChase();
         Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tSTART anchor="
                 + (_anchor == null ? "none" : _anchor.toShortString())
                 + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count
@@ -191,11 +226,73 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return null;
         }
 
-        // 2) 有末影人就打 (KillEntitiesTask 内部含末影人激怒/瞄准的专门处理)
+        // 2) 末影人接战 —— 单目标锁 (2026-09-20 用户机制):
+        //    吸引了一只末影人之后, 在击杀掉它之前绝不再吸引/去杀第二只;
+        //    例外 = 【已经愤怒】的末影人 (它已经在攻击我们, 打它是自保不是招新)。
+        //    锁定的那只卡在某处不露面时: 等 + 小步 wander, 不透视它的坐标去追。
+        List<EndermanEntity> endermen = mod.getEntityTracker().getTrackedEntities(EndermanEntity.class);
+
+        // 锚点拉回闩的【判定】前置: 战斗与失联游走同样不能走出蹲守半径。
+        updateReturningLatch(mod);
+
+        // 2a) 解锁: 锁定的末影人已死 / 彻底从感知里消失 (EntityTracker 的 20s 感知
+        //     记忆里都没了 = 真没了; 只是藏在墙后时它仍会留在感知里)。
+        EndermanEntity engaged = findTrackedById(endermen, _engagedId);
+        if (_engagedId != null && engaged == null) {
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGE-UNLOCK id=" + _engagedId
+                    + " (锁定的末影人已死/彻底消失, 锁释放)");
+            _engagedId = null;
+            clearLostChase();
+        }
+
+        // 2b) 上锁: 出现【已愤怒】的末影人 (多半是被我们盯出来的) → 锁死最近的
+        //     那只。激怒判据复用 EntityHelper.isGenerallyHostileToPlayer —— 1.18.2
+        //     反编译: HostileEntity.isAngryAt 恒 true, 实际就等于 EndermanEntity
+        //     的 dataTracker ANGRY (客户端同步, 紫眼渲染同源), 不新写口径。
+        if (_engagedId == null) {
+            EndermanEntity angry = nearestAngry(mod, endermen);
+            if (angry != null) {
+                _engagedId = angry.getUuid();
+                engaged = angry;
+                _lastEndermanSeenMs = System.currentTimeMillis();
+                clearLostChase();
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGE-LOCK id=" + _engagedId
+                        + " dist=" + String.format("%.1f", angry.distanceTo(mod.getPlayer()))
+                        + " (吸引成功; 击杀它之前不再吸引/攻击第二只)");
+            }
+        }
+
+        if (engaged != null) {
+            // 有愤怒末影人在场 ≠ 枯竭: 它卡在墙后也要耐心等, 不触发 no-enderman-seen。
+            _dryTimer.reset();
+            if (VisibilityHelper.isEntityVisible(mod, engaged)) {
+                _lastEndermanSeenMs = System.currentTimeMillis();
+                clearLostChase();
+                setDebugState("Killing the LOCKED angry enderman ("
+                        + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
+                return killLocked(mod, engaged);
+            }
+            // 例外条款: 锁定的不露面时, 其它【已愤怒】且看得见的可以打。
+            EndermanEntity otherAngry = nearestVisibleAngry(mod, endermen);
+            if (otherAngry != null) {
+                _lastEndermanSeenMs = System.currentTimeMillis();
+                setDebugState("Locked enderman hidden; killing another ALREADY-angry one");
+                return killLocked(mod, otherAngry);
+            }
+            // 锁定的卡住了: 出了蹲守半径先回锚点, 否则进入失联节奏 (等 + wander)。
+            if (_anchor != null && _returning) {
+                return taskReturnToAnchor(mod);
+            }
+            return lostChaseBeat(mod, engaged);
+        }
+
+        // 2c) 无人接战: 吸引最近的一只 (原行为, KillEntitiesTask 内含盯眼激怒处理)。
+        //     这只被盯愤怒后下一 tick 走 2b 上锁, 本分支在锁定存在期间不会再进入
+        //     —— "吸引第二只"被结构性禁止。
         if (mod.getEntityTracker().entityFound(EndermanEntity.class)) {
             _dryTimer.reset();
             _lastEndermanSeenMs = System.currentTimeMillis();
-            setDebugState("Killing enderman for pearls ("
+            setDebugState("Attracting enderman for pearls ("
                     + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
             return _killTask;
         }
@@ -206,45 +303,15 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return null;
         }
 
-        // 4) 没末影人: 回到锚点 / 在林子里小步巡逻等刷新
+        // 4) 没末影人: 回到锚点 / 在林子里小步巡逻等刷新。
         //
         //    (2026-09-19 横跳修复) 双阈值迟滞: 出界(> CAMP_RADIUS)上闩, 走到
         //    RETURN_RADIUS 内才解锁。中间 8~24 格是死区, 保持当前模式 —— 否则拉回
         //    任务刚跨过 24 就被巡逻换掉, bot 永远停在边界打转 (见 _returning 注释)。
-        if (_anchor != null) {
-            double distSq = mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor));
-            if (distSq > CAMP_RADIUS * CAMP_RADIUS) {
-                _returning = true;
-            } else if (distSq <= RETURN_RADIUS * RETURN_RADIUS) {
-                if (_returning) {
-                    _returning = false;
-                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-ARRIVED dist="
-                            + String.format("%.0f", Math.sqrt(distSq))
-                            + " anchor=" + _anchor.toShortString()
-                            + " (真正走进林心 " + RETURN_RADIUS + " 格内, 解锁回巡逻)");
-                }
-            }
-        }
+        //    (2026-09-20) 闩的【判定】已前置到末影人接战之前 (updateReturningLatch,
+        //    战斗/失联游走也不能走出蹲守半径), 这里只消费 _returning。
         if (_anchor != null && _returning) {
-            setDebugState("Returning to warped forest camp");
-            long nowMs = System.currentTimeMillis();
-            if (nowMs - _lastReturnLogMs > RETURN_LOG_INTERVAL_MS) {
-                _lastReturnLogMs = nowMs;
-                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN dist="
-                        + String.format("%.0f", Math.sqrt(mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor))))
-                        + " anchor=" + _anchor.toShortString()
-                        + " (巡逻走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回中 — 闩住直到走进 "
-                        + RETURN_RADIUS + " 格内)");
-            }
-            // 回林子用现成的 GetWithinRangeOfBlockTask (GoalNear, 进到 RETURN_RADIUS 内
-            // 即算到), 而不是 GetToBlockTask (GoalBlock, 必须精确站到 _anchor.up()
-            // 那一格): 锚点可能是菌菇/菌索这类非实体植被, "它上面那一格"未必站得住,
-            // GoalBlock 够不着就永不 finished, 会把整段蹲守耗在绕圈上。顺带复用
-            // CustomBaritoneGoalTask 的进度失败两豁免 (8d570054)。
-            if (_goToAnchor == null || _goToAnchor.isFinished(mod)) {
-                _goToAnchor = new GetWithinRangeOfBlockTask(_anchor, RETURN_RADIUS);
-            }
-            return _goToAnchor;
+            return taskReturnToAnchor(mod);
         }
 
         // 林内巡逻: TimeoutWanderTask 每段走 PATROL_STEP 格换一次方向, 是【无偏置随机
@@ -274,6 +341,173 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     + " dryLimit=" + (int) mod.getModSettings().getOpportunisticPearlDrySeconds() + "s");
         }
         return _patrol;
+    }
+
+    // ------------------------------------------------------------------
+    // (2026-09-20 单目标锁) 末影人接战辅助
+    // ------------------------------------------------------------------
+
+    /**
+     * 锚点拉回闩的判定 (从主流程前置抽出, 2026-09-20): 战斗/失联游走期间同样
+     * 出界上闩 / 进 RETURN_RADIUS 解锁, 保证任何分支都不会走出蹲守半径。
+     */
+    private void updateReturningLatch(AltoClef mod) {
+        if (_anchor == null) return;
+        double distSq = mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor));
+        if (distSq > CAMP_RADIUS * CAMP_RADIUS) {
+            _returning = true;
+        } else if (distSq <= RETURN_RADIUS * RETURN_RADIUS && _returning) {
+            _returning = false;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-ARRIVED dist="
+                    + String.format("%.0f", Math.sqrt(distSq))
+                    + " anchor=" + _anchor.toShortString()
+                    + " (真正走进林心 " + RETURN_RADIUS + " 格内, 解锁回巡逻)");
+        }
+    }
+
+    /**
+     * 拉回锚点的移动 (从主流程抽出, 2026-09-20): 战斗线 (2) 与巡逻线 (4) 共用。
+     * 回林子用现成的 GetWithinRangeOfBlockTask (GoalNear, 进到 RETURN_RADIUS 内
+     * 即算到), 而不是 GetToBlockTask (GoalBlock, 必须精确站到 _anchor.up()
+     * 那一格): 锚点可能是菌菇/菌索这类非实体植被, "它上面那一格"未必站得住,
+     * GoalBlock 够不着就永不 finished, 会把整段蹲守耗在绕圈上。顺带复用
+     * CustomBaritoneGoalTask 的进度失败两豁免 (8d570054)。
+     */
+    private Task taskReturnToAnchor(AltoClef mod) {
+        setDebugState("Returning to warped forest camp");
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - _lastReturnLogMs > RETURN_LOG_INTERVAL_MS) {
+            _lastReturnLogMs = nowMs;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN dist="
+                    + String.format("%.0f", Math.sqrt(mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor))))
+                    + " anchor=" + _anchor.toShortString()
+                    + " (走出了 " + (int) CAMP_RADIUS + " 格蹲守半径, 拉回中 — 闩住直到走进 "
+                    + RETURN_RADIUS + " 格内)");
+        }
+        if (_goToAnchor == null || _goToAnchor.isFinished(mod)) {
+            _goToAnchor = new GetWithinRangeOfBlockTask(_anchor, RETURN_RADIUS);
+        }
+        return _goToAnchor;
+    }
+
+    private static EndermanEntity findTrackedById(List<EndermanEntity> list, UUID id) {
+        if (id == null) return null;
+        for (EndermanEntity e : list) {
+            if (e != null && e.isAlive() && id.equals(e.getUuid())) return e;
+        }
+        return null;
+    }
+
+    /** 感知里最近的【已愤怒】末影人 (不管看不看得见)。判据见 2b 注释 (客户端可读)。 */
+    private static EndermanEntity nearestAngry(AltoClef mod, List<EndermanEntity> list) {
+        EndermanEntity best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (EndermanEntity e : list) {
+            if (e == null || !e.isAlive()) continue;
+            if (!EntityHelper.isGenerallyHostileToPlayer(mod, e)) continue;
+            double d = e.squaredDistanceTo(mod.getPlayer());
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                best = e;
+            }
+        }
+        return best;
+    }
+
+    /** 感知里最近且【亲眼可见】的已愤怒末影人 —— 给锁定失联时的例外条款用。 */
+    private static EndermanEntity nearestVisibleAngry(AltoClef mod, List<EndermanEntity> list) {
+        EndermanEntity best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (EndermanEntity e : list) {
+            if (e == null || !e.isAlive()) continue;
+            if (!EntityHelper.isGenerallyHostileToPlayer(mod, e)) continue;
+            if (!VisibilityHelper.isEntityVisible(mod, e)) continue;
+            double d = e.squaredDistanceTo(mod.getPlayer());
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                best = e;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 只打指定的这一只 (killLocked = "锁定击杀")。实例缓存避免每 tick 新建。
+     * 关键约束: 本方法只允许对 {@link VisibilityHelper#isEntityVisible} 通过的
+     * 目标调用 —— KillEntityTask 会朝目标实体坐标寻路, 而 EntityTracker 的坐标
+     * 是穿墙可知的; 对看不见的目标调用它就是透视寻路 (用户明令禁止)。
+     */
+    private Task killLocked(AltoClef mod, EndermanEntity target) {
+        UUID id = target.getUuid();
+        if (_singleKillTask == null || !id.equals(_singleKillTargetId)) {
+            _singleKillTask = new KillEntityTask(target);
+            _singleKillTargetId = id;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGE-KILL id=" + id
+                    + " dist=" + String.format("%.1f", target.distanceTo(mod.getPlayer()))
+                    + " (锁定击杀; 冷静的末影人不看/不接近/不打)");
+        }
+        return _singleKillTask;
+    }
+
+    /**
+     * (2026-09-20 用户机制) 锁定的愤怒末影人卡在某处不露面的失联节奏:
+     * 原地等一会儿 → 小步 wander 几步 → 再等 → 再走, 每空一轮等得更久
+     * (4s → 7s → … 封顶 16s)、步子更大 (8 格 → 12 格 → … 封顶 20 格)。
+     *
+     * <p>刻意【不】对它做任何寻路: tracker 里它穿墙可见的坐标不能用 (透视)。
+     * 只靠走动把视线扫回来, 一旦 {@link VisibilityHelper#isEntityVisible} 重新
+     * 通过 (主流程每 tick 判定), 立刻回到 {@link #killLocked}。
+     *
+     * <p>等待阶段低头: 原地等时把准心压向地面, 防止路过的【冷静】末影人撞进
+     * 准心被激怒 —— 那等于违规"吸引第二只" (vanilla 准心扫过末影人头部 1 tick
+     * 即激怒)。游走阶段沿寻路方向看, 与普通巡逻同样口径。
+     */
+    private Task lostChaseBeat(AltoClef mod, EndermanEntity engaged) {
+        // —— 等待阶段 ——
+        if (_lostWaitTimer == null) {
+            double waitSec = Math.min(
+                    LOST_WAIT_BASE_SECONDS + _lostCycles * LOST_WAIT_GROWTH_SECONDS,
+                    LOST_WAIT_MAX_SECONDS);
+            _lostWaitTimer = new TimerGame(waitSec);
+            _lostWander = null;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK id=" + engaged.getUuid()
+                    + " dist=" + String.format("%.1f", engaged.distanceTo(mod.getPlayer()))
+                    + " cycle=" + (_lostCycles + 1) + " wait=" + (int) waitSec + "s"
+                    + " (已愤怒末影人不露面: 先原地等, 不透视它的坐标)");
+        }
+        if (!_lostWaitTimer.elapsed()) {
+            setDebugState("Angry enderman hidden; waiting " + (int) _lostWaitTimer.getDuration()
+                    + "s (cycle " + (_lostCycles + 1) + ")");
+            LookHelper.lookAt(mod, mod.getPlayer().getPos().add(0, -1.5, 0));
+            return null; // 原地站住等
+        }
+        // —— wander 阶段 ——
+        if (_lostWander == null) {
+            float step = (float) Math.min(
+                    LOST_WANDER_STEP_BASE + _lostCycles * LOST_WANDER_STEP_GROWTH,
+                    LOST_WANDER_STEP_MAX);
+            _lostWander = new TimeoutWanderTask(step);
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK-WANDER id=" + engaged.getUuid()
+                    + " cycle=" + (_lostCycles + 1) + " step=" + (int) step
+                    + " (小步游走扫视线找那只愤怒末影人)");
+        }
+        if (_lostWander.isFinished(mod)) {
+            _lostCycles++;
+            _lostWaitTimer = null;
+            _lostWander = null;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK cycle-done cycles=" + _lostCycles
+                    + " (仍未见 → 下一轮等更久/走更多, 依旧不透视)");
+            return null; // 空一拍, 下一 tick 进入新一轮更长的等待
+        }
+        setDebugState("Angry enderman hidden; wandering (cycle " + (_lostCycles + 1) + ")");
+        return _lostWander;
+    }
+
+    /** 清失联节奏状态 (重新看见锁定目标 / 解锁 / onStart 重开)。 */
+    private void clearLostChase() {
+        _lostCycles = 0;
+        _lostWaitTimer = null;
+        _lostWander = null;
     }
 
     private void giveUp(AltoClef mod, String reason) {
