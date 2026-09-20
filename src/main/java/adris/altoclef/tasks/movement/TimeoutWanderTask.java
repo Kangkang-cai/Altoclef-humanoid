@@ -196,8 +196,11 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        // Why the heck did I add this in?
-        //if (_origin == null) return true;
+        // (2026-09-20 崩溃修复 14.20.15) _origin 只在 onStart 赋值; 调用方在创建当拍
+        // 探测 isFinished 时 onStart 还没跑, _origin == null → squaredDistanceTo(null)
+        // NPE 崩溃 (CollectEnderPearlsInForestTask.lostChaseBeat 实锤)。未启动 = 未完成。
+        // 原作者注释 //if (_origin == null) return true; 语义应为 return false (未启动不算走完)。
+        if (_origin == null) return false;
 
         if (Float.isInfinite(_distanceToWander)) return false;
 
