@@ -128,6 +128,12 @@ public class MLGBucketFallChain extends SingleTaskChain implements ITaskOverride
         if (!mod.getModSettings().shouldAutoMLGBucket()) {
             return false;
         }
+        // (2026-09-20 22:20 摔死事故复盘) 下界 (ultrawarm) 放不了水, MLGBucketTask
+        // 内部 hasClutch=false 什么都不做却先以 prio 100 占坑再让位 — 无用抢占。
+        // 维度级直接不激活 (致哀: 该次坠落本就无解, 26 格)。
+        if (mod.getWorld().getDimension().isUltrawarm()) {
+            return false;
+        }
         if (mod.getPlayer().isSwimming() || mod.getPlayer().isTouchingWater() || mod.getPlayer().isOnGround() || mod.getPlayer().isClimbing()) {
             // We're grounded.
             return false;

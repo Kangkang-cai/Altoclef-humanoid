@@ -671,6 +671,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 for (BlockPos c : list) {
                     double d = c.getSquaredDistance(bot);
                     if (d < minSq || d > maxDistSq) continue;
+                    // (2026-09-20 22:20 摔死事故) Y 带宽: 巨型菌菇【顶】上的菌岩也算
+                    // "可站立森林点", bot 在地面时被选中 → 引出路变成爬树冠
+                    // (target y=98 vs bot y≈70), 卡树冠后滑落 26 格摔死。引出走
+                    // 贴地行进, 与巡逻同带宽 (相对 bot 而非锚点 — 引走可能漂出锚盘)。
+                    if (Math.abs(c.getY() - bot.getY()) > PATROL_Y_BAND) continue;
                     double dx = c.getX() + 0.5 - bot.getX() - 0.5;
                     double dz = c.getZ() + 0.5 - bot.getZ() - 0.5;
                     double len = Math.sqrt(dx * dx + dz * dz);
