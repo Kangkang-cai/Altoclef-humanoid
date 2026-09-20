@@ -141,6 +141,10 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final double PATROL_FAR_HOP = 12.0;
     /** 候选菌岩与锚点的 Y 带宽: 排除洞里/头顶上不相关的菌岩 (下界洞穴偶有)。 */
     private static final int PATROL_Y_BAND = 8;
+    // (2026-09-20 远征化漂移) 锚点推进的方位角走廊与抖动: 走廊 = 锁定方位角 ±60°
+    // (cos60°=0.5); 扇形内没有候选才退化为任意方向。抖动同远征 ±5~10° 纪律。
+    private static final double PATROL_ADVANCE_CORRIDOR_COS = 0.5;
+    private static final double PATROL_BEARING_JITTER_DEG = 10.0;
     /** 已访问集合的硬上限 (防无限增长; 到顶整体清空, 覆盖率语义不变)。 */
     private static final int PATROL_VISITED_CAP = 400;
 
@@ -677,12 +681,17 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         private BlockPos _pathedTarget = null;
         private final TimerGame _targetTimer = new TimerGame(PATROL_TARGET_TIMEOUT_SECONDS);
         private final Set<Long> _visited = new HashSet<>();
+        // (2026-09-20 远征化漂移) 巡逻的行进方位角 (度, 数学坐标系 x=cos/z=sin):
+        // onStart 随机初始化, 每次锚点推进成功后 ±10° 微抖 —— 净位移持续朝一个方向,
+        // 同 TimeoutWanderTask/远征的方向纪律 (detail/04 随机方向=打转总根源)。
+        private double _bearingDeg = Double.NaN;
 
         @Override
         protected void onStart(AltoClef mod) {
             _target = null;
             _pathedTarget = null;
             _visited.clear();
+            _bearingDeg = Math.random() * 360.0;
             _targetTimer.reset();
         }
 
@@ -767,6 +776,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL anchor-advance old="
                             + (old == null ? "none" : old.toShortString())
                             + " new=" + next.toShortString()
+                            + " bearing=" + (int) _bearingDeg
                             + " visitedKept=" + _visited.size());
                     _target = next;
                     return;
@@ -776,34 +786,63 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         }
 
         /**
-         * (2026-09-20 锚点漂移) 盘内候选全部访问完时的推进选点: 4 类信号方块缓存中
-         * 距 bot 最远的未访问候选 (可站立 + 相对当前锚点 Y 带宽内), 【不受】
-         * CAMP_RADIUS 约束 —— 约束住就永远走不出当前盘, 正是打转根源。
+         * (2026-09-20 锚点漂移·远征化) 盘内候选全部访问完时的推进选点: 借鉴远征
+         * {@code BearingExpeditionTask} 的【方位角纪律】—— 新锚点优先选锁定方位角
+         * 前方 ±60° 扇形内【最远】的未访问候选 (可站立 + Y 带宽), 使巡逻的净位移
+         * 持续朝一个方向推进 (远征式扫掠), 而不是四面八方乱跳; 扇形内没有才退化为
+         * 任意方向最远。推进成功后方位角 ±10° 微抖 (同远征抖动纪律)。
+         * 【不受】CAMP_RADIUS 约束 —— 约束住就永远走不出当前盘, 正是打转根源。
          * 缓存里没有盘外未访问点 → 返回 null, 外层原地等远区扫描填充。
          */
         private BlockPos pickAdvanceAnchor(AltoClef mod) {
+            if (Double.isNaN(_bearingDeg)) {
+                _bearingDeg = Math.random() * 360.0;
+            }
             BlockPos anchor = _anchor;
             BlockPos bot = mod.getPlayer().getBlockPos();
             // 复用 scanCandidates 的成员承载 (注意: 这里取"最远", 判距方向相反)。
             _bestPos = null;
             _bestDist = -1;
             _nextGoalYOffset = 1;
-            advanceFromList(mod, anchor, bot,
-                    mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
-            advanceFromList(mod, anchor, bot,
-                    mod.getBlockTracker().getKnownLocations(
-                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
+            // 第一遍: 方位角走廊 (cos60°=0.5, 即 ±60° 扇形); 第二遍: 任意方向。
+            double[] corridorCos = {PATROL_ADVANCE_CORRIDOR_COS, -2.0};
+            for (double cos : corridorCos) {
+                advanceFromList(mod, anchor, bot, cos,
+                        mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
+                advanceFromList(mod, anchor, bot, cos,
+                        mod.getBlockTracker().getKnownLocations(
+                                Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
+                if (_bestPos != null) {
+                    // (远征纪律) 推进成功才抖方向: 下一段走廊跟着微调, 避免走廊锁死。
+                    _bearingDeg = (_bearingDeg + (Math.random() * 2.0 - 1.0) * PATROL_BEARING_JITTER_DEG) % 360.0;
+                    break;
+                }
+            }
             return _bestPos;
         }
 
-        /** 锚点漂移选点: 未访问 + Y 带宽 + 非脚下 + 可站立, 取离 bot 最【远】者。 */
-        private void advanceFromList(AltoClef mod, BlockPos anchor, BlockPos bot,
+        /**
+         * 锚点漂移选点: 未访问 + Y 带宽 + 非脚下 + 可站立 (+ 方位角走廊), 取离 bot
+         * 最【远】者。corridorCos < -1 表示不限方向 (第二遍兜底)。
+         */
+        private void advanceFromList(AltoClef mod, BlockPos anchor, BlockPos bot, double corridorCos,
                                      List<BlockPos> candidates, int yOffset) {
+            double rad = Math.toRadians(_bearingDeg);
+            double bX = Math.cos(rad), bZ = Math.sin(rad);
             for (BlockPos p : candidates) {
                 if (_visited.contains(p.asLong())) continue;
                 if (anchor != null && Math.abs(p.getY() - anchor.getY()) > PATROL_Y_BAND) continue;
                 double d = p.getSquaredDistance(bot);
                 if (d < PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS) continue;
+                if (corridorCos > -1.0) {
+                    // 方位角走廊: 候选方向与锁定方位角的夹角余量 (归一化点积)。
+                    double len = Math.sqrt(d);
+                    if (len < 1e-6) continue;
+                    double dx = p.getX() + 0.5 - bot.getX() - 0.5;
+                    double dz = p.getZ() + 0.5 - bot.getZ() - 0.5;
+                    double dot = (dx * bX + dz * bZ) / len;
+                    if (dot < corridorCos) continue;
+                }
                 BlockPos standPos = p.up(yOffset);
                 if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
                     continue;
