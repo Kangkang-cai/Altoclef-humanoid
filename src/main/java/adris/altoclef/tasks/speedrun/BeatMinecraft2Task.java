@@ -3005,9 +3005,14 @@ public class BeatMinecraft2Task extends Task {
     private BlockPos findPerceivedWarpedForest(AltoClef mod) {
         // 1) 脚下群系就是诡异森林 → "身处林中", O(1) 且零代价。
         //    (2026-09-18 22:46 卡死事故) 走过这条 O(1) 路径很重要: 见下。
+        //    (2026-09-20 现场 20260920-123212 实锤) 这条快路径必须顺带静默注册信号
+        //    方块: 它绕过了 findVisibleSignal (注册只在那里面做), 站在林缘群系命中时
+        //    4 类信号方块从未进追踪集合 → 扫描不扫它们 → 缓存恒空 → 蹲守巡逻
+        //    "no candidates" 原地站死。trackBlockQuiet 不触发全量重扫, 零风险。
         BlockPos playerPos = mod.getPlayer().getBlockPos();
         var biome = mod.getWorld().getBiome(playerPos);
         if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
+            CollectEnderPearlsInForestTask.ensureSignalBlocksTracked(mod);
             return playerPos;
         }
         // 2) 否则看能不能真的看见一片林子 (远处森林): 走 CollectEnderPearlsInForestTask

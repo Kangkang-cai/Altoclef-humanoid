@@ -106,6 +106,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         mod.getBlockTracker().trackBlockQuiet(WARPED_FOREST_SIGNAL_BLOCKS);
     }
 
+    /**
+     * (2026-09-20 现场 20260920-123212 实锤) 公共注册入口 —— 供"脚下群系=诡异森林"
+     * 的 O(1) 快路径调用: 那条路径不经过 findVisibleSignal, 若只在 findVisibleSignal
+     * 里注册, 站在林缘 (群系命中) 时 4 类信号方块永远不进追踪集合 → 扫描不扫它们 →
+     * 缓存恒空 → 巡逻永远 "no candidates" 原地站死。蹲守任务 onStart 也调一次兜底。
+     */
+    public static void ensureSignalBlocksTracked(AltoClef mod) {
+        ensureSignalsTracked(mod);
+    }
+
     // 蹲守半径: 离锚点超过这个距离就先走回林子, 防止巡逻把 bot 带出林子。
     private static final double CAMP_RADIUS = 24;
     // 走回林子的"到位"判据: 进到锚点这么多格内就算回到林子, 交给巡逻接管。
@@ -228,6 +238,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // Task 框架铁律"onStart 必须清零实例级状态"同一条。
         _campTimer.reset();
         _dryTimer.reset();
+        // (2026-09-20 现场 20260920-123212 实锤) 静默注册信号方块兜底: 上层锚点可能
+        // 来自"脚下群系=诡异森林"的 O(1) 快路径 (不经 findVisibleSignal), 那条路径
+        // 不做注册 → 4 类信号方块不在追踪集合 → 扫描不扫它们 → 缓存恒空 → 巡逻
+        // "no candidates" 原地站死。这里 trackBlockQuiet 注册 (不触发全量重扫),
+        // 近区扫描 0.2s 填数据, 巡逻/拉回判据就有缓存可查了。
+        ensureSignalsTracked(mod);
         // (2026-09-19) 实例复用/二次进入时清零可变状态 (Task 框架铁律: onStart 必须
         // 把上一条命的闩/实例级状态清干净, 否则"带着上一次的拉回模式开局")。
         _returning = false;
