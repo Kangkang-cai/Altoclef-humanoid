@@ -13,6 +13,7 @@ import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.time.TimerGame;
+import baritone.api.pathing.goals.GoalBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.mob.EndermanEntity;
@@ -125,8 +126,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final double PATROL_ARRIVE_RADIUS = 2.0;
     /** 单个目标的兜底超时 (真实秒): 到不了也换下一个, 防一个硬目标卡死探索率。 */
     private static final double PATROL_TARGET_TIMEOUT_SECONDS = 20;
-    /** 换目标时的最小步距 (格): 保证每一步都净推进, 杜绝原地打转。 */
-    private static final double PATROL_MIN_HOP = 8.0;
+    /** 换目标时的最小步距 (格): 保证每一步都净推进, 杜绝原地打转。缓存稀疏时降级放行。 */
+    private static final double PATROL_MIN_HOP = 6.0;
     /** 候选菌岩与锚点的 Y 带宽: 排除洞里/头顶上不相关的菌岩 (下界洞穴偶有)。 */
     private static final int PATROL_Y_BAND = 16;
     /** 已访问集合的硬上限 (防无限增长; 到顶整体清空, 覆盖率语义不变)。 */
@@ -148,7 +149,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
 
     private final Task _killTask = new KillEntitiesTask(EndermanEntity.class);
     private Task _goToAnchor = null;
-    private TimeoutWanderTask _patrol = null;
+    private NyliumPatrolTask _patrol = null;
 
     private TimerGame _campTimer = null;
     private TimerGame _dryTimer = null;
@@ -643,14 +644,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 pickNextTarget(mod);
             }
             if (_target == null) {
-                setDebugState("Patrol: no nylium candidates in cache; waiting for scans");
+                setDebugState("Patrol: no signal-block candidates in cache; waiting for scans");
                 return null;
             }
             if (_target != _pathedTarget) {
                 _pathedTarget = _target;
                 _targetTimer.reset();
+                // 菌岩站其上 (y+1); 菌菇/菌索/疣块是可穿过的植物, 站进所在格 (y+0)
+                // = 站在承载它的菌岩顶面。
                 mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(
-                        new GoalBlock(_target.getX(), _target.getY() + 1, _target.getZ()));
+                        new GoalBlock(_target.getX(), _target.getY() + _nextGoalYOffset, _target.getZ()));
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL target="
                         + _target.toShortString() + " visited=" + _visited.size()
                         + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count);
@@ -660,25 +663,61 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return null;
         }
 
-        /** 从缓存选下一个菌岩目标: 锚点半径 + Y 带宽 + 未访问 + 最小步距, 取离 bot 最近者。 */
+        /**
+         * (2026-09-20 现场 20260920-121907 实锤修复) 候选不能只搜 WARPED_NYLIUM:
+         * 远区扫描 {@code yStep=2 从 y=0 起只采偶数 Y} —— 菌岩层在 y=63 (奇数) 被
+         * 结构性漏掉; 近区扫描半径只有 16, bot 站林缘外时 16 格内没菌岩 ⇒ 缓存
+         * nylium=0, 巡逻原地等 55s ("no nylium candidates")。
+         * 改搜 4 类信号方块: 菌菇/菌索/疣块长在菌岩上, 站上它们 = 站在菌岩顶面,
+         * 语义与"停在菌岩上"等价 (寻路目标: 菌岩用 y+1, 植物用其所在格 y)。
+         */
         private void pickNextTarget(AltoClef mod) {
-            BlockPos best = null;
-            for (int attempt = 0; attempt < 2 && best == null; attempt++) {
-                if (attempt > 0 && !_visited.isEmpty()) {
-                    // 一轮覆盖走完 (或候选全被访问) → 清空访问集合进入下一轮。
-                    _visited.clear();
+            BlockPos best = scanCandidates(mod, true);
+            if (best == null) {
+                // 降级: 缓存太稀 (边缘场景), 近处也去 —— 动起来总比站着好。
+                best = scanCandidates(mod, false);
+            }
+            if (best == null && !_visited.isEmpty()) {
+                // 一轮覆盖走完 (或候选全被访问) → 清空访问集合进入下一轮。
+                _visited.clear();
+                best = scanCandidates(mod, true);
+                if (best == null) {
+                    best = scanCandidates(mod, false);
                 }
-                best = scanCandidates(mod);
             }
             _target = best;
         }
 
-        private BlockPos scanCandidates(AltoClef mod) {
+        /**
+         * 从缓存选下一个目标: 锚点半径 + Y 带宽 + 未访问 (+ 可选最小步距), 取离 bot 最近者。
+         * 菌岩优先于植物 (脚下更"实"): 同距离比较下菌岩先入为主。
+         */
+        private BlockPos scanCandidates(AltoClef mod, boolean enforceMinHop) {
             BlockPos anchor = _anchor;
             BlockPos bot = mod.getPlayer().getBlockPos();
-            List<BlockPos> candidates = mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM);
-            BlockPos best = null;
-            double bestDist = Double.MAX_VALUE;
+            double minHopSq = enforceMinHop ? PATROL_MIN_HOP * PATROL_MIN_HOP : 0;
+            // 两次缓存查表 (纯查表, 无扫描): 先菌岩 (y+1), 后植物 (y+0)。
+            // 结果统一放在成员里, 保证植物列表的比较基线继承菌岩列表的结果。
+            _bestPos = null;
+            _bestDist = Double.MAX_VALUE;
+            _nextGoalYOffset = 1;
+            pickFromList(anchor, bot, minHopSq,
+                    mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
+            pickFromList(anchor, bot, minHopSq,
+                    mod.getBlockTracker().getKnownLocations(
+                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS, Blocks.WARPED_WART_BLOCK), 0);
+            return _bestPos;
+        }
+
+        // scanCandidates 的选择结果 (成员承载, 避免多返回值)。
+        private BlockPos _bestPos = null;
+        private double _bestDist = Double.MAX_VALUE;
+        // 选中目标相对缓存格的 Y 偏移 (0/1): 寻路与到达判定共用。
+        private int _nextGoalYOffset = 1;
+
+        /** 在一类缓存位置里挑更近的候选; yOffset: 菌岩 +1 (站其上), 植物 +0 (站进所在格)。 */
+        private void pickFromList(BlockPos anchor, BlockPos bot, double minHopSq,
+                                  List<BlockPos> candidates, int yOffset) {
             for (BlockPos p : candidates) {
                 if (anchor != null) {
                     if (p.getSquaredDistance(anchor) > CAMP_RADIUS * CAMP_RADIUS) continue;
@@ -686,21 +725,21 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 }
                 if (_visited.contains(p.asLong())) continue;
                 double d = p.getSquaredDistance(bot);
-                if (d < PATROL_MIN_HOP * PATROL_MIN_HOP) continue;
-                if (d < bestDist) {
-                    bestDist = d;
-                    best = p;
+                if (d < minHopSq) continue;
+                if (d < _bestDist) {
+                    _bestDist = d;
+                    _bestPos = p;
+                    _nextGoalYOffset = yOffset;
                 }
             }
-            return best;
         }
 
-        /** 水平进入目标半径且脚下高度对得上 → 算"已站上菌岩"。 */
+        /** 水平进入目标半径且脚下高度对得上 → 算"已站上"。 */
         private boolean isArrived(AltoClef mod, BlockPos target) {
             Vec3d pos = mod.getPlayer().getPos();
             double dx = pos.x - (target.getX() + 0.5);
             double dz = pos.z - (target.getZ() + 0.5);
-            double dy = Math.abs(pos.y - (target.getY() + 1));
+            double dy = Math.abs(pos.y - (target.getY() + _nextGoalYOffset));
             return dx * dx + dz * dz <= PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS && dy <= 3;
         }
 
