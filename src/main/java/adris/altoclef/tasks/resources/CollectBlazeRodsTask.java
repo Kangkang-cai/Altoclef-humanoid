@@ -18,6 +18,7 @@ import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.CombatMemory;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.StorageHelper;
@@ -269,12 +270,29 @@ public class CollectBlazeRodsTask extends ResourceTask {
     /**
      * (2026-09-19 22:59 用户"刷怪区就是我们自己围上的区域") 围场【区域内】最近的
      * 烈焰人 —— 墙建好后的唯一击杀口径, **不看距离**。
+     *
+     * (2026-09-20 10:16 用户"为什么在刷怪区刷完怪后会错误触发 wander, 应该继续在
+     * 刷怪区里面等待生成") 候选过滤必须与子任务 `KillEntitiesTask` **完全同口径**,
+     * 否则出现"父任务说有目标、子任务说没有"的分裂:
+     *   父任务(这里) → 返回 KillEntitiesTask, 不放手;
+     *   子任务(DoToClosestEntityTask.getClosestTo) → 候选被 CombatMemory 拉黑 → 空
+     *     → 走 {@code "Waiting for calculations I think (wandering)"}
+     *     → {@code getWanderTask} = `TimeoutWanderTask(true)` **无限距离探索**
+     *     → bot 溜出围场乱走。
+     * 实锤 20260920-101131: 10:13:35~10:14:00 连续 24.2s 的
+     * `<Killing hostiles> Waiting for calculations (wandering)` + `Wander for
+     * Infinity blocks`, 期间刚杀完一只、围场里没有可打的目标。
+     * 修: 这里也按 {@link CombatMemory#isUnreachable} 与 {@link #isInsideEnclosureBox}
+     * 过滤 → 无可打目标时 toKill 为空 → 父任务走 "Waiting inside our enclosure"
+     * 原地等下一轮刷新 (用户要的行为)。
      */
     private Optional<Entity> closestBlazeInEnclosure(AltoClef mod, Vec3d ref) {
         BlazeEntity best = null;
         double bestSq = Double.POSITIVE_INFINITY;
         for (BlazeEntity b : blazesInEnclosure(mod)) {
             if (b == null || !b.isAlive()) continue;
+            if (CombatMemory.isUnreachable(b.getUuid())) continue;
+            if (!isInsideEnclosureBox(b.getBlockPos())) continue;
             double sq = b.squaredDistanceTo(ref);
             if (sq < bestSq) {
                 bestSq = sq;
@@ -357,7 +375,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
         Vec3d botPos = mod.getPlayer().getPos();
         BlazeEntity locked = _meleeTarget;
         if (locked != null) {
-            if (locked.isAlive() && locked.squaredDistanceTo(botPos)
+            // (2026-09-20 10:16) 与子任务同口径: 拉黑中的目标不算数, 否则子任务空转 wander。
+            if (locked.isAlive() && !CombatMemory.isUnreachable(locked.getUuid())
+                    && locked.squaredDistanceTo(botPos)
                     <= BLAZE_MELEE_STICKY_RELEASE * BLAZE_MELEE_STICKY_RELEASE) {
                 return Optional.of(locked);
             }
@@ -379,6 +399,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
         BlazeEntity best = null;
         double bestSq = range * range;
         for (BlazeEntity b : mod.getWorld().getEntitiesByClass(BlazeEntity.class, box, Entity::isAlive)) {
+            // (2026-09-20 10:16) 排除被判定不可达(冷却中)的, 与子任务口径保持一致。
+            if (CombatMemory.isUnreachable(b.getUuid())) continue;
             double sq = b.squaredDistanceTo(pos);
             if (sq <= bestSq) {
                 bestSq = sq;
