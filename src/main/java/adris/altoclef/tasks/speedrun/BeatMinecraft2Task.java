@@ -599,6 +599,24 @@ public class BeatMinecraft2Task extends Task {
     // 决定要不要花。
     // (2026-09-19 18:55 改 public) CollectBlazeRodsTask 断药转收药时引用同一目标数。
     public static final int FIRE_RES_POTION_TARGET = 2;
+
+    // (2026-09-20 用户"还差的烈焰棒 ≤3 时只触发一瓶需求") 缺口小就别囤 2 瓶 ——
+    // 马上就能收够棒合粉, 1 瓶防火足够覆盖最后一小段烈焰人战斗。
+    public static final int FIRE_RES_POTION_TARGET_FEW_RODS_LEFT = 1;
+    private static final int FEW_RODS_LEFT_THRESHOLD = 3;
+
+    /**
+     * (2026-09-20) 动态药水目标: getEyesOfEnderTask 每 tick 按当前棒缺口刷新,
+     * CollectBlazeRodsTask 断药转收药时读同一口径, 两处永不打架。
+     */
+    public static volatile int _dynamicFireResPotionTarget = FIRE_RES_POTION_TARGET;
+
+    public static int fireResPotionTargetForRodDeficit(int blazeRodDeficit) {
+        return blazeRodDeficit <= FEW_RODS_LEFT_THRESHOLD
+                ? FIRE_RES_POTION_TARGET_FEW_RODS_LEFT
+                : FIRE_RES_POTION_TARGET;
+    }
+
     private boolean _fireResPhaseActive = false;
     private boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(45 * 60);
@@ -615,16 +633,15 @@ public class BeatMinecraft2Task extends Task {
     private static final long FIRE_RES_REOPEN_COOLDOWN_MS = 180_000;
     private static long _fireResReopenAtMs = 0;
 
-    // (2026-09-19 用户"喝完两瓶药后8分钟内不再触发获取药水") 冷却以【喝完】为锚:
-    // 背包药水从有到无 (最后一瓶下肚) 的那一刻起算 8 分钟, 期间收药阶段不得重开。
-    // 与上面的 180s 取 max —— 谁更晚用谁, 保证"喝完→8 分钟"严格成立。
-    // 同样必须 static: 实例重建会洗掉"刚喝完药"这个事实。
-    private static final long FIRE_RES_DRINK_REOPEN_COOLDOWN_MS = 8 * 60_000;
-    private static int _lastSeenFireResPotions = -1;
+    // (2026-09-20 用户"干脆就不要这 8 分钟了") 0919 曾加过"喝完两瓶药 → 8 分钟内
+    // 不重开收药阶段"的冷却 (以背包药水 有→无 跳变为锚), 已整体废除: 用户复核后
+    // 认为"没药还死撑硬打"本身不对, 断药就该去收 (期间低血量逃跑逻辑独立生效)。
+    // 现在重开冷却只看上面的 180s (阶段关闭起算)。
 
     /**
-     * (2026-09-19 18:55 用户三条特殊规则) 收药冷却到期时刻, 供 CollectBlazeRodsTask /
+     * (2026-09-20 更新) 收药冷却到期时刻 (= 收药阶段关闭 + 180s), 供 CollectBlazeRodsTask /
      * MobDefenseChain 查询: 墙已完工且冷却未到 → 在墙里坚守开打; 到点 → 出墙收药。
+     * (原"喝完药再 +8 分钟"的扩展锚已废除, 见 _fireResReopenAtMs 上方注释。)
      */
     public static long getFireResReopenAtMs() {
         return _fireResReopenAtMs;
@@ -1682,9 +1699,19 @@ public class BeatMinecraft2Task extends Task {
         // "targetEyes" : 14 曾把目标压成 7)。只改源码常量无效。
         int blazeRodTarget = (int)Math.ceil((double)targetEyes / 2.0);
         int enderPearlTarget = targetEyes - eyeCount;
-        boolean needsBlazeRods = blazeRodCount < blazeRodTarget;
+        // (2026-09-20 用户"8 根棒已换成 16 粉后还在继续收 8 根") 一次性门: 棒只为补
+        // 粉缺口而收。旧行为 needsBlazeRods 只看棒计数 (rods < 8), 而棒一旦合成粉就
+        // 归零 → 恒真, 形成 收8根 → 合16粉 → 再收8根 的死循环。现在粉缺口 (眼 + 粉
+        // 等效折算, 眼 1 个 = 2 粉) 达标即 needsBlazePowder=false → 棒收集停止;
+        // 已有的眼/粉自动计入 ("同时要考虑已有的眼睛等情况")。之后只有眼/粉真被
+        // 消耗出缺口 (如插门框/定位丢眼) 才会重启, 属正常补货语义。
         boolean needsBlazePowder = eyeCount + blazePowderCount < targetEyes;
+        boolean needsBlazeRods = needsBlazePowder && blazeRodCount < blazeRodTarget;
         boolean needsEnderPearls = mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < enderPearlTarget;
+        // (2026-09-20 用户) 还差的烈焰棒 ≤ 3 → 药水需求降为 1 瓶; 缺口大 → 2 瓶。
+        // 写 static 镜像每 tick 刷新, 供 CollectBlazeRodsTask 断药转收药时取同一口径。
+        int blazeRodDeficit = Math.max(0, blazeRodTarget - blazeRodCount);
+        _dynamicFireResPotionTarget = fireResPotionTargetForRodDeficit(blazeRodDeficit);
 
         if (needsBlazePowder && !needsBlazeRods) {
             // We have enough blaze rods.
@@ -2304,29 +2331,17 @@ public class BeatMinecraft2Task extends Task {
                     }
                     // (2026-08-23 防火药水保命) 打烈焰人前先搞防火药水
                     // (用户设计: 下界挖金 → 猪灵交易 → 打烈焰人时喝)。
-                    // (2026-09-06 用户) 目标提为 2 瓶 (FIRE_RES_POTION_TARGET); 花不花由
-                    // CollectBlazeRodsTask 的喝药门槛管。
+                    // (2026-09-06 用户) 目标 2 瓶起步; (2026-09-20 用户) 棒缺口 ≤3 时
+                    // 降为 1 瓶 (_dynamicFireResPotionTarget, 每 tick 按棒缺口刷新)。
+                    // 花不花由 CollectBlazeRodsTask 的喝药门槛管。
                     // (2026-09-14 用户"要重收, 但加冷却, 不要马上触发") 旧注释写的
                     // "_fireResPhaseDone 闩保证之后喝掉也不会重新进本阶段"已废除 ——
                     // 那等于两瓶喝完后下界全程裸奔 (本次事故: 09:56 药效到期后 7 秒烧死,
-                    // 背包 0 瓶, 且此后再也不会去收)。现在阶段可重开, 但必须过冷却。
-                    // (2026-09-19 用户) 喝完两瓶药 (背包药水归零) → 8 分钟内不重开收药阶段。
-                    // 每 tick 观测药水计数, 捕捉 "有→无" 跳变并把重开时间推到 now+8min。
-                    int fireResPotionCountNow = ItemHelper.countFireResPotions(mod);
-                    if (_lastSeenFireResPotions > 0 && fireResPotionCountNow == 0) {
-                        long drinkCooldownUntil = System.currentTimeMillis() + FIRE_RES_DRINK_REOPEN_COOLDOWN_MS;
-                        if (drinkCooldownUntil > _fireResReopenAtMs) {
-                            _fireResReopenAtMs = drinkCooldownUntil;
-                            Debug.logMessage("(FireRes) Last potion drunk — acquisition cooldown "
-                                    + (FIRE_RES_DRINK_REOPEN_COOLDOWN_MS / 60000) + "min");
-                            Debug.logToFile("altoclef_diag.log", "[FireRes] last potion drunk, acquisition cooldown "
-                                    + (FIRE_RES_DRINK_REOPEN_COOLDOWN_MS / 60000) + "min");
-                        }
-                    }
-                    _lastSeenFireResPotions = fireResPotionCountNow;
+                    // 背包 0 瓶, 且此后再也不会去收)。现在阶段可重开, 但必须过 180s 冷却。
+                    // (2026-09-20 用户) 0919 的"喝完药 → 8 分钟不重开"已废除, 断药即收。
                     if (!_fireResPhaseDone) {
                         if (!_fireResPhaseActive) {
-                            if (ItemHelper.countFireResPotions(mod) < FIRE_RES_POTION_TARGET) {
+                            if (ItemHelper.countFireResPotions(mod) < _dynamicFireResPotionTarget) {
                                 _fireResPhaseActive = true;
                                 _fireResPhaseTimer.reset();
                             } else {
@@ -2334,8 +2349,8 @@ public class BeatMinecraft2Task extends Task {
                             }
                         }
                         if (_fireResPhaseActive) {
-                            if (ItemHelper.countFireResPotions(mod) >= FIRE_RES_POTION_TARGET) {
-                                Debug.logMessage("(FireRes) Target reached: " + FIRE_RES_POTION_TARGET
+                            if (ItemHelper.countFireResPotions(mod) >= _dynamicFireResPotionTarget) {
+                                Debug.logMessage("(FireRes) Target reached: " + _dynamicFireResPotionTarget
                                         + " fire resistance potions. Proceeding to blaze rods.");
                                 closeFireResPotionPhase();
                             } else if (_fireResPhaseTimer.elapsed()) {
@@ -2346,7 +2361,7 @@ public class BeatMinecraft2Task extends Task {
                                 closeFireResPotionPhase();
                             } else {
                                 setDebugState("Getting fire resistance potions (gold + piglin trading)");
-                                return new CollectFireResPotionsTask(FIRE_RES_POTION_TARGET);
+                                return new CollectFireResPotionsTask(_dynamicFireResPotionTarget);
                             }
                         }
                     } else if (shouldReopenFireResPotionPhase(mod)) {

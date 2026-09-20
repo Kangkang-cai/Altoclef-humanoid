@@ -480,17 +480,19 @@ public class CollectBlazeRodsTask extends ResourceTask {
         // 见下方 isEnclosureStructureDone 分支。顺带省掉每 tick 一次
         // isSpawnerWorkPending 里的内圈全扫 (它会调 findInteriorObstructor)。
 
-        // (2026-09-19 18:55 用户三条特殊规则) 无防火效果且背包无药水时:
-        //  ① 墙未完工 → 停止造墙, 转去获得药水 (不裸奔硬撑);
-        //  ② 墙已完工且 8 分钟收药冷却未到 → 留在墙里继续打 (不逃);
+        // (2026-09-19 18:55 用户特殊规则; 2026-09-20 更新) 无防火效果且背包无药水时:
+        //  ① 没有确立的笼 / 围场未完工 → 停止造墙, 转去获得药水 (不裸奔硬撑);
+        //  ② 围场完工且收药冷却 (阶段关闭起算 180s) 未到 → 留在墙里继续打 (不逃);
         //  ③ 冷却到点 → 出墙去收药。
+        // (0919 的"喝完药再 +8 分钟"扩展锚已于 0920 废除 —— 用户"没药还死撑硬打
+        // 本身不对, 断药就去收"。)
         // 判定放在最顶上 (战斗/逃跑逻辑之前), 统一接管两个场景。
         if (!mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)
                 && ItemHelper.countFireResPotions(mod) == 0
                 && shouldAbandonForPotions()) {
             _enclosureBuildActive = false;
             setDebugState("No fire res effect & no potions -> getting potions");
-            return new CollectFireResPotionsTask(BeatMinecraft2Task.FIRE_RES_POTION_TARGET);
+            return new CollectFireResPotionsTask(BeatMinecraft2Task._dynamicFireResPotionTarget);
         }
 
         Optional<Entity> toKill = Optional.empty();
@@ -1380,9 +1382,11 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private static volatile boolean _enclosureCompleteFlag = false;
 
     /**
-     * (2026-09-19 18:55 用户) 断药 (无效果且无药水) 时是否该放弃当前动作去收药:
+     * (2026-09-19 18:55 用户; 2026-09-20 更新) 断药 (无效果且无药水) 时是否该放弃
+     * 当前动作去收药:
      * ① 没有确立的笼 / 围场未完工 → true (规则①, 停止造墙去收药);
-     * ② 围场完工 → 收药冷却 (8 分钟) 到点才 true (规则③), 未到点留在墙里打 (规则②)。
+     * ② 围场完工 → 收药冷却 (阶段关闭起算 180s; 0919 的"+8 分钟"锚已废除)
+     *    到点才 true (规则③), 未到点留在墙里打 (规则②)。
      */
     private boolean shouldAbandonForPotions() {
         if (_protectedSpawnerPos == null || !_enclosureCompleteFlag) return true;
@@ -1406,8 +1410,8 @@ public class CollectBlazeRodsTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-19 18:55 用户"有药水效果还逃跑应该避免") 完工围场 = 安全屋:
-     * 人在自己盖好的 7x7 围场里, 且 (有防火效果 或 8 分钟收药冷却未到) →
+     * (2026-09-19 18:55 用户"有药水效果还逃跑应该避免"; 2026-09-20 更新) 完工围场 =
+     * 安全屋: 人在自己盖好的 7x7 围场里, 且 (有防火效果 或 收药冷却未到) →
      * MobDefenseChain 对纯烈焰人威胁不撤退, 留在墙里打到冷却到点。
      * 换笼/失效/离开围场自动失效。
      */
@@ -1432,6 +1436,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
      *
      * 只用于 MobDefenseChain 的"纯烈焰人威胁不撤退"分支; 保命底线(低血量硬闸)
      * 仍在 MobDefenseChain 里独立生效, 不受本方法影响。
+     *
+     * (2026-09-20 更新) "收药宽限窗口"现只指收药阶段关闭起算的 180s 冷却
+     * (0919 的"喝完药 +8 分钟"锚已废除, 用户"没药还死撑硬打本身不对")。
      */
     public static boolean isBlazeFarmHold(AltoClef mod) {
         if (mod == null || mod.getPlayer() == null) return false;
