@@ -72,7 +72,21 @@ public final class KnowledgeMemory {
         //   结构级消费, 理由见 INFERENCE_TYPES 注释。
         BLAZE_SPAWNER(
                 new Block[]{Blocks.SPAWNER},
-                0, 2, 1, false);
+                0, 2, 1, false),
+        // (2026-09-20 林子记忆, 用户"记忆中有森林就直接过去, 不要只刷出 chunk 就
+        // wander") 记你【亲眼看见过】的诡异森林信号方块 (菌岩/菌菇/菌索/疣块),
+        // 供收珍珠时直接奔回去, 不再逐区块透视搜索。与堡垒"同行同款"处理。
+        // ⚠ inference=false: 森林中心不该给挖金探索当"这里有矿"的假线索, 也不
+        //   该触发"结构邻近推理可见" (菌岩成片不等于有箱子)。
+        // ⚠ mergeDistance=64: 森林是无边界大片结构, 全局 8 格合并会让一片林子
+        //   刷爆 MAX_CENTERS_PER_TYPE=20 的额度; 64 格合并 = 一片林子只留沿路
+        //   少数几个中心, "回去"语义足够。
+        // ⚠ remember 侧有群系守卫: 散落菌菇 (废墟/洞穴, 群系非 WARPED_FOREST)
+        //   不入账 —— 20260920-155006 实锤 2 个坑底菌菇曾被当成"最近的林子"。
+        WARPED_FOREST(
+                new Block[]{Blocks.WARPED_NYLIUM, Blocks.WARPED_FUNGUS,
+                        Blocks.WARPED_ROOTS, Blocks.WARPED_WART_BLOCK},
+                0, 0, 1, false, 64);
 
         final Block[] landmarks;
         final double minCandidateRadius;
@@ -84,13 +98,25 @@ public final class KnowledgeMemory {
          */
         final boolean inference;
 
+        /**
+         * (2026-09-20) 同类型两个中心的合并距离。大片无边界结构 (森林) 需要大
+         * 合并距离, 否则沿路刷爆中心额度; 点状结构用全局默认。
+         */
+        final double mergeDistance;
+
         StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
                       boolean inference) {
+            this(landmarks, minRadius, maxRadius, candidatesPerCenter, inference, MERGE_DISTANCE);
+        }
+
+        StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
+                      boolean inference, double mergeDistance) {
             this.landmarks = landmarks;
             this.minCandidateRadius = minRadius;
             this.maxCandidateRadius = maxRadius;
             this.candidatesPerCenter = candidatesPerCenter;
             this.inference = inference;
+            this.mergeDistance = mergeDistance;
         }
     }
 
@@ -344,10 +370,20 @@ public final class KnowledgeMemory {
     }
 
     private void remember(StructureType type, BlockPos pos) {
+        // (2026-09-20 森林记忆) 散落信号方块守卫: 真林子里的菌岩/菌菇所在群系
+        // 必然是 WARPED_FOREST; 废墟/洞穴里的零星菌菇不是林子, 不入账
+        // (20260920-155006 实锤 2 个坑底菌菇曾被当成"最近的林子"蹲守)。
+        // 只对森林做 —— 其余类型的地标 (下界砖/黑曜石/刷怪笼) 本身就是结构本体。
+        if (type == StructureType.WARPED_FOREST) {
+            var biome = _mod.getWorld().getBiome(pos);
+            if (biome == null || !biome.matchesKey(net.minecraft.world.biome.BiomeKeys.WARPED_FOREST)) {
+                return;
+            }
+        }
         Set<BlockPos> centers = _knownStructures.computeIfAbsent(type, t -> new HashSet<>());
         // Merge with an existing nearby center if we have one.
         for (BlockPos existing : centers) {
-            if (existing.isWithinDistance(pos, MERGE_DISTANCE)) {
+            if (existing.isWithinDistance(pos, type.mergeDistance)) {
                 return;
             }
         }

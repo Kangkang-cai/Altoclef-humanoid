@@ -20,6 +20,7 @@ import adris.altoclef.tasks.misc.LootDesertTempleTask;
 import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.movement.*;
+import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.tasks.resources.*;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask;
 import adris.altoclef.tasksystem.Task;
@@ -335,6 +336,16 @@ public class BeatMinecraft2Task extends Task {
     /** 假锚点拒绝日志节流。 */
     private long _lastFakeAnchorRejectMs = 0;
     private static final long PEARL_FAKE_ANCHOR_LOG_INTERVAL_MS = 10_000;
+
+    // ===== (2026-09-20 记忆直航 + 远征) 见 pickNearestRememberedForest 注释 =====
+    /** 记忆直航任务缓存实例 (同目标复用, 目标变化/完成才重建)。 */
+    private GetToBlockTask _forestMemoryGotoTask = null;
+    private BlockPos _forestMemoryGotoTarget = null;
+    /** 远征任务缓存实例 (超时后重建, 方位角在基类 static 里跨实例续走)。 */
+    private WarpedForestExpeditionTask _forestExpeditionTask = null;
+    /** 本会话拉黑的过期林子记忆中心 (走到 24 格内却无林子)。 */
+    private final java.util.Set<BlockPos> _discreditedForestCenters = new java.util.HashSet<>();
+    private static final double FOREST_MEMORY_DISCREDIT_RADIUS = 24;
     private static final long PEARL_FOREST_SCAN_INTERVAL_MS = 1000;
     // (2026-09-19 20:0x) [PEARL-NEAR] 日志节流: 看不见林子时 10s 一条就够 —— 否则
     // 主线跑几十分钟, diag.log 被每秒一条的 anchor=none 刷爆 (195218 会话 3 分钟 200+ 条)。
@@ -2929,16 +2940,68 @@ public class BeatMinecraft2Task extends Task {
                 setDebugState("Pearl camp cooldown; holding near forest (re-camp in " + reCampIn + "s)");
                 return _pearlCooldownHoldTask;
             }
-            // 看不见任何林子 → 才逐区块去远处找 (老路径, 现在降级为兜底)。
-            // (2026-09-20 口径对齐, 判据一致性) 原来只搜 WARPED_NYLIUM 一种, 而
-            // "看见林子"的判据是 4 类信号方块 (CollectEnderPearlsInForestTask
-            // .WARPED_FOREST_SIGNAL_BLOCKS: 菌岩/菌菇/菌索/疣块) —— 两套口径会让
-            // "看得见林子却 matched=0"的分裂成为可能 (蹲守判据说有林子, 区块搜索
-            // 判据说没有)。现在统一引用同一个数组, 一处改两处同步。搜的方块类型
-            // 变多不增扫描成本: scanChunk 是同一次遍历里做 HashSet.contains。
-            // Search for warped forests this way...
-            return new SearchChunkForBlockTask(CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS);
+            // (2026-09-20 用户需求落位) 看不见任何林子 → 两级兜底, 取代原
+            // SearchChunkForBlockTask 的"chunk 全方块透视 + 无方向 wander"
+            // (堡垒 09-04 已淘汰同款机制, 森林按"堡垒行, 森林就做同样处理"跟进):
+            // ① 记忆中有林子 (KnowledgeMemory.WARPED_FOREST, 只记亲眼看见 +
+            //    跨会话落盘) → 直接奔【最近的】记忆中心, 不再"刷出 chunk 就 wander";
+            // ② 无记忆 → 方位角锁定远征 (复用 BearingExpeditionTask 基类)。
+            // 途中就近原则天然成立: 本方法每 tick 先跑 getForestPearlCampTask,
+            // 赶路途中一旦看见林子 (findVisibleSignal 就近) 或踩进林子 (群系
+            // 快路径), 蹲守立刻接管, 赶路任务被打断是预期行为。
+            BlockPos rememberedForest = pickNearestRememberedForest(mod);
+            if (rememberedForest != null) {
+                if (_forestMemoryGotoTask == null || _forestMemoryGotoTarget == null
+                        || !_forestMemoryGotoTarget.equals(rememberedForest)
+                        || _forestMemoryGotoTask.isFinished(mod)) {
+                    _forestMemoryGotoTask = new GetToBlockTask(rememberedForest.up());
+                    _forestMemoryGotoTarget = rememberedForest;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tMEMORY-GOTO forest center="
+                            + rememberedForest.toShortString() + " dist=" + String.format("%.0f",
+                            Math.sqrt(mod.getPlayer().getBlockPos().getSquaredDistance(rememberedForest))));
+                }
+                setDebugState("Going to remembered warped forest at "
+                        + rememberedForest.toShortString());
+                return _forestMemoryGotoTask;
+            }
+            if (_forestExpeditionTask == null || _forestExpeditionTask.isFinished(mod)) {
+                _forestExpeditionTask = new WarpedForestExpeditionTask();
+            }
+            setDebugState("No forest known; expedition (locked bearing)");
+            return _forestExpeditionTask;
         }
+    }
+
+    /**
+     * (2026-09-20 记忆直航) 取【最近的】未失信的诡异森林记忆中心。
+     * 失信机制: 走到中心 24 格内却仍无林子 (此分支前置条件 anchor==null 已保证
+     * 看不见/不在林中) → 该中心本会话拉黑, 换次近的 —— 防过期记忆死磕。
+     * 双重保险: 消费时再过一遍群系校验 (remember 侧已守, 这里防手动改档/脏数据)。
+     */
+    private BlockPos pickNearestRememberedForest(AltoClef mod) {
+        List<BlockPos> centers = mod.getKnowledgeMemory().getRememberedCenters(
+                KnowledgeMemory.StructureType.WARPED_FOREST, mod.getPlayer().getPos(), 4096);
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (BlockPos c : centers) {
+            if (_discreditedForestCenters.contains(c)) continue;
+            var biome = mod.getWorld().getBiome(c);
+            if (biome == null || !biome.matchesKey(BiomeKeys.WARPED_FOREST)) continue;
+            double sq = c.getSquaredDistance(mod.getPlayer().getBlockPos());
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = c;
+            }
+        }
+        if (best != null && best.isWithinDistance(mod.getPlayer().getBlockPos(), FOREST_MEMORY_DISCREDIT_RADIUS)) {
+            // 中心近在眼前却仍无林子 → 过期记忆, 拉黑; 下 tick 重新选次近。
+            _discreditedForestCenters.add(best.toImmutable());
+            _forestMemoryGotoTask = null;
+            Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tMEMORY-STALE discredit center="
+                    + best.toShortString() + " (24 格内无林子)");
+            return null;
+        }
+        return best;
     }
 
     /**
