@@ -728,11 +728,14 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             _bestPos = null;
             _bestDist = Double.MAX_VALUE;
             _nextGoalYOffset = 1;
-            pickFromList(anchor, bot, minHopSq,
+            pickFromList(mod, anchor, bot, minHopSq,
                     mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
-            pickFromList(anchor, bot, minHopSq,
+            // (2026-09-20 用户预判核实) WARPED_WART_BLOCK 是【实心方块】不是植物 ——
+            // 站进其所在格不可达, baritone 会挖块/爬团顶。候选只留真正可站的:
+            // 菌岩(站其上) + 菌菇/菌索(无碰撞植物, 站进所在格=站在承载菌岩顶面)。
+            pickFromList(mod, anchor, bot, minHopSq,
                     mod.getBlockTracker().getKnownLocations(
-                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS, Blocks.WARPED_WART_BLOCK), 0);
+                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
             return _bestPos;
         }
 
@@ -743,7 +746,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         private int _nextGoalYOffset = 1;
 
         /** 在一类缓存位置里挑更近的候选; yOffset: 菌岩 +1 (站其上), 植物 +0 (站进所在格)。 */
-        private void pickFromList(BlockPos anchor, BlockPos bot, double minHopSq,
+        private void pickFromList(AltoClef mod, BlockPos anchor, BlockPos bot, double minHopSq,
                                   List<BlockPos> candidates, int yOffset) {
             for (BlockPos p : candidates) {
                 if (anchor != null) {
@@ -753,12 +756,25 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 if (_visited.contains(p.asLong())) continue;
                 double d = p.getSquaredDistance(bot);
                 if (d < minHopSq) continue;
+                // (2026-09-20 用户预判"目标别定在空气导致爬高") 可站立校验:
+                // 寻路格无碰撞 (空气/植物) 且脚下格有碰撞支撑。缓存是记忆, 方块可能
+                // 已被炸掉/变更 —— 过期的空中目标会让 baritone 垫柱爬高。主线程查
+                // 本地世界方块状态, 每个候选 2 次 getBlockState, 选点频率低, 便宜。
+                BlockPos standPos = p.up(yOffset);
+                if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
+                    continue;
+                }
                 if (d < _bestDist) {
                     _bestDist = d;
                     _bestPos = p;
                     _nextGoalYOffset = yOffset;
                 }
             }
+        }
+
+        /** 该格是否不可穿过 (有碰撞箱): 空气/植物/菌索均可穿过, 返回 false。 */
+        private boolean isCollidable(AltoClef mod, BlockPos pos) {
+            return mod.getWorld().getBlockState(pos).isSolidBlock(mod.getWorld(), pos);
         }
 
         /** 水平进入目标半径且脚下高度对得上 → 算"已站上"。 */
