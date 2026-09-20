@@ -136,10 +136,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final double PATROL_ARRIVE_RADIUS = 2.0;
     /** 单个目标的兜底超时 (真实秒): 到不了也换下一个, 防一个硬目标卡死探索率。 */
     private static final double PATROL_TARGET_TIMEOUT_SECONDS = 20;
-    /** 换目标时的最小步距 (格): 保证每一步都净推进, 杜绝原地打转。缓存稀疏时降级放行。 */
+    /** 换目标时的理想最小步距 (格): 每步净推进, 杜绝原地打转; 缓存稀疏时逐档降级。 */
     private static final double PATROL_MIN_HOP = 6.0;
+    /** 理想远推进步距 (格): 优先选这么远的目标, 观感是跨步巡游而非小圈折返。 */
+    private static final double PATROL_FAR_HOP = 12.0;
     /** 候选菌岩与锚点的 Y 带宽: 排除洞里/头顶上不相关的菌岩 (下界洞穴偶有)。 */
-    private static final int PATROL_Y_BAND = 16;
+    private static final int PATROL_Y_BAND = 8;
     /** 已访问集合的硬上限 (防无限增长; 到顶整体清空, 覆盖率语义不变)。 */
     private static final int PATROL_VISITED_CAP = 400;
 
@@ -688,30 +690,39 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
          * 语义与"停在菌岩上"等价 (寻路目标: 菌岩用 y+1, 植物用其所在格 y)。
          */
         private void pickNextTarget(AltoClef mod) {
-            BlockPos best = scanCandidates(mod, true);
+            // (2026-09-20 现场 20260920-135557 实锤) "取最近的合格候选" + 近区扫描
+            // 持续填充的 16 格候选池 = 每步只挪 5~8 格就换向, 1 秒一个 target-reached
+            // (visited 一秒 +1), 用户观感"原地 5~6 格疯狂打转"。
+            // 改三档远推进: 优先 ≥12 格 (跨出小圈) → ≥6 → 无下限, 都没有才清 visited 重来。
+            BlockPos best = scanCandidates(mod, PATROL_FAR_HOP * PATROL_FAR_HOP);
+            if (best == null) {
+                best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP);
+            }
             if (best == null) {
                 // 降级: 缓存太稀 (边缘场景), 近处也去 —— 动起来总比站着好。
-                best = scanCandidates(mod, false);
+                best = scanCandidates(mod, 0);
             }
             if (best == null && !_visited.isEmpty()) {
                 // 一轮覆盖走完 (或候选全被访问) → 清空访问集合进入下一轮。
                 _visited.clear();
-                best = scanCandidates(mod, true);
+                best = scanCandidates(mod, PATROL_FAR_HOP * PATROL_FAR_HOP);
                 if (best == null) {
-                    best = scanCandidates(mod, false);
+                    best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP);
+                }
+                if (best == null) {
+                    best = scanCandidates(mod, 0);
                 }
             }
             _target = best;
         }
 
         /**
-         * 从缓存选下一个目标: 锚点半径 + Y 带宽 + 未访问 (+ 可选最小步距), 取离 bot 最近者。
+         * 从缓存选下一个目标: 锚点半径 + Y 带宽 + 未访问 + 最小步距, 取离 bot 最近者。
          * 菌岩优先于植物 (脚下更"实"): 同距离比较下菌岩先入为主。
          */
-        private BlockPos scanCandidates(AltoClef mod, boolean enforceMinHop) {
+        private BlockPos scanCandidates(AltoClef mod, double minHopSq) {
             BlockPos anchor = _anchor;
             BlockPos bot = mod.getPlayer().getBlockPos();
-            double minHopSq = enforceMinHop ? PATROL_MIN_HOP * PATROL_MIN_HOP : 0;
             // 两次缓存查表 (纯查表, 无扫描): 先菌岩 (y+1), 后植物 (y+0)。
             // 结果统一放在成员里, 保证植物列表的比较基线继承菌岩列表的结果。
             _bestPos = null;
