@@ -6,7 +6,6 @@ import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetWithinRangeOfBlockTask;
-import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.EntityHelper;
@@ -147,14 +146,23 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
 
     // ------------------------------------------------------------------
     // (2026-09-20 用户机制) 锁定末影人"卡住不露面"的失联节奏: 先原地等一会儿,
-    // 再小步 wander 几步; 每空一轮, 等得更久、步子更大 ("多等一会儿, 多 wander
-    // 几步")。全程不对失联目标做任何寻路 —— 刻意不用 tracker 里穿墙可见的坐标。
+    // 再【定向远走】一段; 每空一轮, 等得更久、走得更远。全程不对失联目标做
+    // 任何寻路 —— 刻意不用 tracker 里穿墙可见的坐标。
+    // (2026-09-20 下午用户实测反馈) 原 8~20 格小步 wander 引不出藏起来的
+    // 末影人 —— "必须远个 3 倍才大概率能引出来"; 且 TimeoutWanderTask 走
+    // baritone ExploreProcess 方向随机, 观感"原地方向来回走"。现改为:
+    // 步长 3 倍 (24 → 36 → … 封顶 60), 每集锁定一个方位角持续往一个方向走
+    // (每轮 ±30° 抖动), 走出去是净位移而非绕圈。
     private static final double LOST_WAIT_BASE_SECONDS = 4.0;
     private static final double LOST_WAIT_GROWTH_SECONDS = 3.0;
     private static final double LOST_WAIT_MAX_SECONDS = 16.0;
-    private static final float LOST_WANDER_STEP_BASE = 8f;
-    private static final float LOST_WANDER_STEP_GROWTH = 4f;
-    private static final float LOST_WANDER_STEP_MAX = 20f;
+    private static final float LOST_WANDER_STEP_BASE = 24f;
+    private static final float LOST_WANDER_STEP_GROWTH = 12f;
+    private static final float LOST_WANDER_STEP_MAX = 60f;
+    /** 定向远走"到位"半径: GoalNear 进到目标点这么多格内即算走完这一轮。 */
+    private static final int LOST_WALK_ARRIVE_RADIUS = 3;
+    /** 每轮方向抖动幅度 (度): 大体同向续走, 微调避免沿直线越走越偏出搜索带。 */
+    private static final double LOST_WALK_BEARING_JITTER_DEG = 30.0;
 
     private final int _count;
     private BlockPos _anchor;
@@ -175,7 +183,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private UUID _engagedId = null;
     // 失联 (锁定的愤怒末影人卡在视线外) 的等待/游走节奏状态。
     private TimerGame _lostWaitTimer = null;
-    private TimeoutWanderTask _lostWander = null;
+    // (2026-09-20 下午) 失联游走 = 定向远走: 每集锁定一个方位角, 每轮沿它走
+    // 3 倍步长 (24~60), 不再用 TimeoutWanderTask 的随机方向 (观感"原地来回走")。
+    private GetWithinRangeOfBlockTask _lostWalk = null;
+    /** 本集失联的行进方位角 (度, 数学坐标系); null = 尚未选定。 */
+    private Double _lostBearingDeg = null;
     private int _lostCycles = 0;
     // 锁定目标击杀子任务的实例缓存 (Task 框架: 每 tick 新建实例会被去重/重置)。
     private KillEntityTask _singleKillTask = null;
@@ -330,10 +342,14 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 setDebugState("Locked enderman hidden; killing another ALREADY-angry one");
                 return killLocked(mod, otherAngry);
             }
-            // 锁定的卡住了: 出了蹲守半径先回锚点, 否则进入失联节奏 (等 + wander)。
-            if (_anchor != null && _returning) {
-                return taskReturnToAnchor(mod);
-            }
+            // 锁定的卡住了 → 失联节奏 (等 + 定向远走)。
+            // (2026-09-20 下午) 刻意【不】消费 _returning 拉回闩: 失联远走本来
+            // 就要走出蹲守半径去引它 (步长 24~60 > CAMP_RADIUS 24), 若在这里
+            // 拉回, 就是"走一步被拽回来一步"的永久振荡 (tasks.log 16:48~49 实锤:
+            // Get within 8 blocks of 1274,82,-1346 与 Wander 8→12→16→20 互相
+            // 打断, 每段 3 秒)。失联期间闩照常置位 (updateReturningLatch 仍在
+            // 前置判定), 只是这行分支不消费它 —— 接战结束 (击杀/解锁) 落回
+            // 巡逻线时统一拉回, 那才是"回营地"的正确时机。
             return lostChaseBeat(mod, engaged);
         }
 
@@ -499,7 +515,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     /**
      * (2026-09-20 用户机制) 锁定的愤怒末影人卡在某处不露面的失联节奏:
      * 原地等一会儿 → 小步 wander 几步 → 再等 → 再走, 每空一轮等得更久
-     * (4s → 7s → … 封顶 16s)、步子更大 (8 格 → 12 格 → … 封顶 20 格)。
+     * (4s → 7s → … 封顶 16s)、走得更远 (定向远走 24 → 36 → … 封顶 60 格,
+     * 大体同向 ±30° 抖动续走)。
      *
      * <p>刻意【不】对它做任何寻路: tracker 里它穿墙可见的坐标不能用 (透视)。
      * 只靠走动把视线扫回来, 一旦 {@link VisibilityHelper#isEntityVisible} 重新
@@ -516,7 +533,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     LOST_WAIT_BASE_SECONDS + _lostCycles * LOST_WAIT_GROWTH_SECONDS,
                     LOST_WAIT_MAX_SECONDS);
             _lostWaitTimer = new TimerGame(waitSec);
-            _lostWander = null;
+            _lostWalk = null;
             Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK id=" + engaged.getUuid()
                     + " dist=" + String.format("%.1f", engaged.distanceTo(mod.getPlayer()))
                     + " cycle=" + (_lostCycles + 1) + " wait=" + (int) waitSec + "s"
@@ -528,33 +545,55 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             LookHelper.lookAt(mod, mod.getPlayer().getPos().add(0, -1.5, 0));
             return null; // 原地站住等
         }
-        // —— wander 阶段 ——
-        if (_lostWander == null) {
+        // —— 定向远走阶段 (2026-09-20 下午重写) ——
+        // 旧版 TimeoutWanderTask(baritone ExploreProcess): 方向随机 → "原地方向
+        // 来回走", 且步长 8~20 太近, 引不出藏起来的末影人 (用户: "必须远个 3 倍
+        // 才大概率能引出来")。现改为每集锁定一个方位角, 每轮沿它走 24~60 格
+        // (净位移 = 步长, 而非随机游走的 ~√步长), 到点即进入下一轮更长的等待。
+        if (_lostWalk == null) {
             float step = (float) Math.min(
                     LOST_WANDER_STEP_BASE + _lostCycles * LOST_WANDER_STEP_GROWTH,
                     LOST_WANDER_STEP_MAX);
-            _lostWander = new TimeoutWanderTask(step);
-            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK-WANDER id=" + engaged.getUuid()
+            if (_lostBearingDeg == null) {
+                // 本集首次: 随机选方向 (避开纯回头路没有意义, 随机即均匀)。
+                _lostBearingDeg = Math.random() * 360.0;
+            } else {
+                // 后续轮: 大体同向续走 + ±30° 抖动, 铺成一条搜索带。
+                _lostBearingDeg += (Math.random() * 2.0 - 1.0) * LOST_WALK_BEARING_JITTER_DEG;
+            }
+            double rad = Math.toRadians(_lostBearingDeg);
+            Vec3d p = mod.getPlayer().getPos();
+            BlockPos walkTarget = new BlockPos(
+                    (int) Math.floor(p.x + Math.cos(rad) * step),
+                    (int) Math.floor(p.y),
+                    (int) Math.floor(p.z + Math.sin(rad) * step));
+            _lostWalk = new GetWithinRangeOfBlockTask(walkTarget, LOST_WALK_ARRIVE_RADIUS);
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK-WALK id=" + engaged.getUuid()
                     + " cycle=" + (_lostCycles + 1) + " step=" + (int) step
-                    + " (小步游走扫视线找那只愤怒末影人)");
+                    + " bearing=" + (int) (double) _lostBearingDeg
+                    + " target=" + walkTarget.toShortString()
+                    + " (定向远走扫视线找那只愤怒末影人 — 3 倍步长版)");
         }
-        if (_lostWander.isFinished(mod)) {
+        if (_lostWalk.isFinished(mod)) {
             _lostCycles++;
             _lostWaitTimer = null;
-            _lostWander = null;
+            _lostWalk = null; // 方位角 _lostBearingDeg 保留: 下一轮大体同向续走
             Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tENGAGED-STUCK cycle-done cycles=" + _lostCycles
-                    + " (仍未见 → 下一轮等更久/走更多, 依旧不透视)");
+                    + " (仍未见 → 下一轮等更久/走更远, 依旧不透视)");
             return null; // 空一拍, 下一 tick 进入新一轮更长的等待
         }
-        setDebugState("Angry enderman hidden; wandering (cycle " + (_lostCycles + 1) + ")");
-        return _lostWander;
+        setDebugState("Angry enderman hidden; walking out to lure it (cycle "
+                + (_lostCycles + 1) + ")");
+        return _lostWalk;
     }
 
-    /** 清失联节奏状态 (重新看见锁定目标 / 解锁 / onStart 重开)。 */
+    /** 清失联节奏状态 (重新看见锁定目标 / 解锁 / onStart 重开)。方位角一并清:
+     *  下一集失联重新随机选方向, 避免每集都往同一侧越走越远。 */
     private void clearLostChase() {
         _lostCycles = 0;
         _lostWaitTimer = null;
-        _lostWander = null;
+        _lostWalk = null;
+        _lostBearingDeg = null;
     }
 
     private void giveUp(AltoClef mod, String reason) {
