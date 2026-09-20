@@ -8,7 +8,7 @@ import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.pathing.goals.Goal;
-import baritone.api.pathing.goals.GoalRunAway;
+import baritone.api.pathing.goals.GoalXZ;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
@@ -19,6 +19,12 @@ import java.util.HashSet;
 
 /**
  * Call this when the place you're currently at is bad for some reason and you just wanna get away.
+ *
+ * <p>(2026-09-20 用户拍板) 游走方向从 baritone ExploreProcess 的【随机方向】改为
+ * 【方位角锁定】: 本实例 onStart 时随机选一个方位角, 之后一直沿它走 (resetForReuse
+ * 仅 ±5° 微抖, 同远征 BearingExpeditionTask 的方向纪律)。原因: 随机方向净位移≈0,
+ * 是"原地打转/来回走"的总根源 (detail/04 偏置探索折返、0920 三次拉回振荡同族)。
+ * 到达一段目标点后自动从当前位置续发下一段 —— 无限模式下即"一直朝一个方向走"。
  */
 public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
 
@@ -49,6 +55,14 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final boolean _increaseRange;
     //private DistanceProgressChecker _distanceProgressChecker = new DistanceProgressChecker(10, 0.1f);
+
+    // (2026-09-20 方向持久化) 本实例的行进方位角 (度, 数学坐标系 x=cos/z=sin)。
+    // null = onStart 时随机初始化; resetForReuse 只 ±5° 微抖 —— "尽量持续一个方向"。
+    private Double _bearingDeg = null;
+    /** 每次复用重开时的方向抖动幅度 (度), 同远征 ±5° 纪律。 */
+    private static final double BEARING_JITTER_DEG = 5.0;
+    /** 无限游走模式的单段步长: 走完即从当前位置续发同方位下一段 (直线接力)。 */
+    private static final double INFINITE_LEG_LENGTH = 128.0;
 
     private Vec3d _origin;
     private boolean _executingPlanB = false;
@@ -111,6 +125,10 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         if (mod.getPlayer() != null && mod.getPlayer().getPos() != null) {
             _origin = mod.getPlayer().getPos();
         }
+        // (2026-09-20 方向持久化) 方位角保留, 仅微抖 —— 复用实例不换大方向。
+        if (_bearingDeg != null) {
+            _bearingDeg += (Math.random() * 2.0 - 1.0) * BEARING_JITTER_DEG;
+        }
         _progressChecker.reset();
         _failCounter = 0;
         _giveUpLogged = false;
@@ -119,6 +137,9 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected void onStart(AltoClef mod) {
         _origin = mod.getPlayer().getPos();
+        if (_bearingDeg == null) {
+            _bearingDeg = Math.random() * 360.0;
+        }
         _progressChecker.reset();
         _failCounter = 0;
         _giveUpLogged = false;
@@ -137,14 +158,17 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (_executingPlanB) {
-            setDebugState("Plan B: Random direction.");
+            setDebugState("Plan B: Bearing-locked direction.");
             if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
-                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(getRandomDirectionGoal(mod));
+                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(getBearingGoal(mod));
             }
         } else {
-            setDebugState("Exploring.");
-            if (!mod.getClientBaritone().getExploreProcess().isActive()) {
-                mod.getClientBaritone().getExploreProcess().explore((int) _origin.getX(), (int) _origin.getZ());
+            // (2026-09-20 方向持久化) ExploreProcess 方向随机 (净位移≈0, 打转根源),
+            // 改为沿锁定方位角直线走; 一段走完 (goal 进程失活) 自动从当前位置续发
+            // 下一段 —— 无限模式即一直朝一个方向走。
+            setDebugState("Exploring (bearing-locked).");
+            if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(getBearingGoal(mod));
             }
         }
 
@@ -177,9 +201,21 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         return null;
     }
 
-    private Goal getRandomDirectionGoal(AltoClef mod) {
-        double distance = Float.isInfinite(_distanceToWander) ? _distanceToWander : _distanceToWander + _wanderDistanceExtension;
-        return new GoalRunAway(distance, mod.getPlayer().getBlockPos());
+    /** (2026-09-20 方向持久化) 沿锁定方位角的前方目标点: 从【当前位置】起算,
+     *  有限模式步长 = 游走距离 (+扩距), 无限模式用固定段长接力直线走。 */
+    private Goal getBearingGoal(AltoClef mod) {
+        double distance = Float.isInfinite(_distanceToWander)
+                ? INFINITE_LEG_LENGTH
+                : (_distanceToWander + _wanderDistanceExtension);
+        if (_bearingDeg == null) {
+            // 防御: 调用方跳过 onStart 直接 onTick 的路径 (理论上没有, #18 同族守卫)。
+            _bearingDeg = Math.random() * 360.0;
+        }
+        Vec3d p = mod.getPlayer().getPos();
+        double rad = Math.toRadians(_bearingDeg);
+        return new GoalXZ(
+                (int) Math.floor(p.x + Math.cos(rad) * distance),
+                (int) Math.floor(p.z + Math.sin(rad) * distance));
     }
 
     @Override
@@ -231,7 +267,9 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected String toDebugString() {
-        return "Wander for " + (_distanceToWander + _wanderDistanceExtension) + " blocks";
+        String bearing = (_bearingDeg == null) ? "?" : String.valueOf((int) (double) _bearingDeg);
+        return "Wander for " + (_distanceToWander + _wanderDistanceExtension)
+                + " blocks (bearing=" + bearing + ")";
     }
 
     // This happens all the time in mineshafts and swamps/jungles
