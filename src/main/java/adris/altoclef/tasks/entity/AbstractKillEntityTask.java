@@ -28,7 +28,6 @@ import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.entity.mob.WitherSkeletonEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
-import net.minecraft.tag.BlockTags;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
@@ -211,6 +210,9 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // 单槽位冷却 100 tick (5s) 内不重试同一点。
     private BlockPos _lastClearedObstruction = null;
     private long _lastClearAttemptTick = Long.MIN_VALUE;
+    // (2026-09-20) 正在撸开遮挡方块的豁免截止 tick: 该时刻前 kill timeout 不判负
+    // (挖掘期间无命中无接近, 不豁免会被 15s 兜底掐死在清障半路)。
+    private long _clearingObstructionThroughTick = Long.MIN_VALUE;
     // (2026-09-06 烈焰人波次) 最近一次"有弹射物逼近"的 tick — 判定一波连发是否结束。
     private long _lastInboundTick = Long.MIN_VALUE;
     // Last tick we actually swung back, to pace our counter-attacks.
@@ -275,16 +277,21 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             _prevDistSq = distSq;
             if (closingIn) _lastHitTick = now;
             if (!_gaveUp && now - _lastHitTick > giveUpSeconds * 20L) {
-                int cooldown = mod.getModSettings().getUnreachableCooldownSeconds();
-                CombatMemory.markUnreachable(id, cooldown * 20);
-                _gaveUp = true;
-                _lastHitTick = now; // 防冷却期内每 tick 刷日志
-                setDebugState("Kill timeout: target unreachable, giving up");
-                adris.altoclef.util.helpers.TimeoutLog.hit("AbstractKillEntityTask.killGiveUp",
-                        "no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s");
-                Debug.logMessage("[KillTimeout] giving up on " + target.get().getType().getTranslationKey()
-                        + " (no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s)");
-                return null;
+                // (2026-09-20) 正在撸开遮挡方块 → 刷新止损窗口, 不给 up。
+                if (now <= _clearingObstructionThroughTick) {
+                    _lastHitTick = now;
+                } else {
+                    int cooldown = mod.getModSettings().getUnreachableCooldownSeconds();
+                    CombatMemory.markUnreachable(id, cooldown * 20);
+                    _gaveUp = true;
+                    _lastHitTick = now; // 防冷却期内每 tick 刷日志
+                    setDebugState("Kill timeout: target unreachable, giving up");
+                    adris.altoclef.util.helpers.TimeoutLog.hit("AbstractKillEntityTask.killGiveUp",
+                            "no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s");
+                    Debug.logMessage("[KillTimeout] giving up on " + target.get().getType().getTranslationKey()
+                            + " (no hit and no progress for " + giveUpSeconds + "s, cooldown " + cooldown + "s)");
+                    return null;
+                }
             }
         }
         return super.onTick(mod);
@@ -304,10 +311,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
 
     /**
      * (2026-09-11 树叶清障, 用户"猪躲在树叶下 bot 只会干瞄准然后放弃") 视线被挡
-     * 绕位 8s 仍无效时 (父类 AbstractDoToEntityTask 钩子), 若遮挡方块是树叶类
-     * → 直接砍掉 (拟人: 玩家遇到挡路的树叶会顺手砍掉, 而不是绕着树打转)。
+     * 绕位 8s 仍无效时 (父类 AbstractDoToEntityTask 钩子) → 砍掉遮挡方块
+     * (拟人: 玩家遇到挡路的方块会顺手撸开, 而不是绕着打转)。
      * 走 DestroyBlockTask 标准挖方块管线, 全局 avoidBlockBreaking 谓词 (含黑曜石
-     * 门保护等禁挖层) 依然生效; 非树叶遮挡 (墙/石头) 返回 null 维持绕位, 不挖墙。
+     * 门保护等禁挖层) 依然生效。
+     *
+     * <p>(2026-09-20 用户拍板"这是攻击的通病, 被方块隔开射线就要撸开") 从"只挖
+     * 树叶"扩为【凡可破块都挖】—— 诡异森林挡视线的是菌柄/菌疣块/菌岩, 不在
+     * 树叶 tag, 旧判据下钩子返回 null 继续绕位到 kill timeout (现场 213856
+     * 实锤 3 次超时)。硬拒绝仅不可破/自家材料: 基岩/屏障/黑曜石(含哭泣)。
      */
     @Override
     protected Task onObstructionPersistent(AltoClef mod, Entity entity, BlockPos obstruction) {
@@ -315,12 +327,20 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         if (obstruction.equals(_lastClearedObstruction) && now - _lastClearAttemptTick < 100) {
             return null; // 同一点刚试过失败, 冷却期内继续绕位
         }
-        if (mod.getWorld().getBlockState(obstruction).isIn(BlockTags.LEAVES)) {
+        var state = mod.getWorld().getBlockState(obstruction);
+        boolean unbreakable = state.isOf(net.minecraft.block.Blocks.BEDROCK)
+                || state.isOf(net.minecraft.block.Blocks.BARRIER)
+                || state.isOf(net.minecraft.block.Blocks.OBSIDIAN)
+                || state.isOf(net.minecraft.block.Blocks.CRYING_OBSIDIAN);
+        if (!unbreakable) {
             _lastClearedObstruction = obstruction;
             _lastClearAttemptTick = now;
-            setDebugState("Clearing leaves blocking target at " + obstruction.toShortString());
-            Debug.logToFile("altoclef_diag.log", "[LOS-Clear]\tkill target blocked by leaves at "
-                    + obstruction.toShortString() + ", destroying");
+            // (2026-09-20) 正在撸方块: 5s 内豁免 kill timeout (挖掘期间无命中无接近,
+            // 不豁免会被 15s 兜底掐死在清障半路)。
+            _clearingObstructionThroughTick = now + 100;
+            setDebugState("Clearing block blocking target at " + obstruction.toShortString());
+            Debug.logToFile("altoclef_diag.log", "[LOS-Clear]\tkill target blocked by "
+                    + state.getBlock().toString() + " at " + obstruction.toShortString() + ", destroying");
             return new DestroyBlockTask(obstruction);
         }
         return null;
@@ -348,6 +368,7 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         _lastInboundTick = Long.MIN_VALUE;
         _lastClearedObstruction = null;
         _lastClearAttemptTick = Long.MIN_VALUE;
+        _clearingObstructionThroughTick = Long.MIN_VALUE;
         // (2026-09-13 草挡准心) 清草按下的左键要松开, 否则残留长按变成持续挖方块。
         // 清草计数与冷却都是 static (跨实例), 这里不动 —— 上层重建实例时不重置,
         // 冷却从"放弃那一刻"起算, 不被 START/STOP 洗掉。

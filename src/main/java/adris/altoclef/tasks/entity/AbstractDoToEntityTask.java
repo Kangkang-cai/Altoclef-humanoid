@@ -52,6 +52,12 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     // =========================================================================
     private static final double OBSTRUCTION_PERSIST_SECONDS = 8;
     private long _losBlockedSinceTick = Long.MIN_VALUE;
+    // (2026-09-20 计时器加固) 连续可见满这个时长才重置"持续被挡"计时 —— 末影人
+    // 瞬移/探头制造的单拍可见不再把计时器打回零 (现场 20260920-213856 实锤:
+    // 3 次 KillTimeout 全程 LOS-Obstruction 0 条 = 8s 持续条件永远凑不满,
+    // 遮挡消除钩子死路, 用户设计的对策从未生效)。
+    private static final double LOS_CLEAR_GRACE_SECONDS = 2;
+    private long _losClearSinceTick = Long.MIN_VALUE;
     private long _lastObstructionLogTick = Long.MIN_VALUE;
 
     // (2026-09-14 接近失败诊断, 232015 场次) wander 两个触发点的取证日志节流
@@ -215,6 +221,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             if (result == null || result.getType() != HitResult.Type.ENTITY || blockObstruction != null) {
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
+                _losClearSinceTick = Long.MIN_VALUE;
                 // (2026-09-09 遮挡消除钩子) 绕位 8s 仍被挡 → 交子类决定是否挖除。
                 long now = WorldHelper.getTicks();
                 if (_losBlockedSinceTick == Long.MIN_VALUE) {
@@ -235,7 +242,14 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 return repositionForLineOfSight(mod, entity);
             }
             _progress.reset();
-            _losBlockedSinceTick = Long.MIN_VALUE;
+            // (2026-09-20 计时器加固) 可见需连续保持 LOS_CLEAR_GRACE_SECONDS 才重置
+            // "持续被挡"计时; 单拍可见 (瞬移/探头掠过) 不清零。
+            long clearNow = WorldHelper.getTicks();
+            if (_losClearSinceTick == Long.MIN_VALUE) {
+                _losClearSinceTick = clearNow;
+            } else if (clearNow - _losClearSinceTick > (long) (LOS_CLEAR_GRACE_SECONDS * 20)) {
+                _losBlockedSinceTick = Long.MIN_VALUE;
+            }
             return onEntityInteract(mod, entity);
         } else {
             _withinInteract = false;
@@ -421,6 +435,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         mod.getMobDefenseChain().resetForceField();
         _repositionTarget = null; // (2026-08-31) 长任务停止时清掉绕位记忆, 避免遗留下次误用
         _losBlockedSinceTick = Long.MIN_VALUE; // (2026-09-09) 遮挡计时一并清掉
+        _losClearSinceTick = Long.MIN_VALUE; // (2026-09-20) 可见宽限计时一并清掉
         _visibleAimPoint = null; // (2026-09-12) 可见瞄准点一并清掉
         // (2026-09-18) _lastChaseTarget 故意不清: 任务实例长期复用 (如 _tradeTask),
         // 进食抢占等打断恢复后还能续上最后已知追击; 残留无风险 —— 追击仅在
