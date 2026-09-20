@@ -2870,8 +2870,14 @@ public class BeatMinecraft2Task extends Task {
                 return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
             }
             // 看不见任何林子 → 才逐区块去远处找 (老路径, 现在降级为兜底)。
+            // (2026-09-20 口径对齐, 判据一致性) 原来只搜 WARPED_NYLIUM 一种, 而
+            // "看见林子"的判据是 4 类信号方块 (CollectEnderPearlsInForestTask
+            // .WARPED_FOREST_SIGNAL_BLOCKS: 菌岩/菌菇/菌索/疣块) —— 两套口径会让
+            // "看得见林子却 matched=0"的分裂成为可能 (蹲守判据说有林子, 区块搜索
+            // 判据说没有)。现在统一引用同一个数组, 一处改两处同步。搜的方块类型
+            // 变多不增扫描成本: scanChunk 是同一次遍历里做 HashSet.contains。
             // Search for warped forests this way...
-            return new SearchChunkForBlockTask(Blocks.WARPED_NYLIUM);
+            return new SearchChunkForBlockTask(CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS);
         }
     }
 
