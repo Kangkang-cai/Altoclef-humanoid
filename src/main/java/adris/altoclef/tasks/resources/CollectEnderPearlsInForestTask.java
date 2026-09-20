@@ -20,8 +20,10 @@ import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -37,7 +39,7 @@ import java.util.UUID;
  * <p>{@code KillAndLootTask} 在"没有末影人"时走 {@code BiasedExploreTask} 到处游荡
  * (偏向记忆里的动物位置), 会直接走出林子、把主线拖走 —— 那不是"顺手"。本任务
  * 改为<b>锚点驻留</b>: 以一块看得见的林子信号方块为锚点, 离锚点太远就走回去,
- * 在锚点附近做小步巡逻(TimeoutWanderTask, 每次 10 格就重新起算, 由锚点半径拉回),
+ * 在锚点附近做菌岩目标点巡逻 (走到缓存里的 WARPED_NYLIUM 方块上, 由锚点半径拉回),
  * 感知到末影人才开打。这样"顺手"的边界是明确的: 不会为了珍珠走到地平线以外。
  *
  * <h3>两条放弃线(防止蹲守吃掉主线)</h3>
@@ -108,8 +110,27 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     // 走回林子的"到位"判据: 进到锚点这么多格内就算回到林子, 交给巡逻接管。
     // 必须 < CAMP_RADIUS, 否则会出现"到位后仍在拉回半径外"的自相矛盾。
     private static final int RETURN_RADIUS = 8;
-    // 单步巡逻距离: TimeoutWanderTask 走够这个距离即结束, 由本任务重新起算。
-    private static final float PATROL_STEP = 10;
+    // ------------------------------------------------------------------
+    // (2026-09-20 用户机制) 林内巡逻 = 菌岩目标点巡逻。
+    // 用户拍板两点: ① "至少应该停在菌岩上, 不然会走出去" —— 原来的
+    // TimeoutWanderTask 走 baritone ExploreProcess, 方向无约束也不挑地形, 从林缘
+    // 锚点出发一段 10 格的 wander 可以整段踩在林外; ② "要保证一定量的探索率,
+    // 不然容易原地打转" —— 随机方向 wander 净位移可能≈0 (detail/04 偏置探索折返
+    // 同款症状)。
+    // 现在的巡逻: 目标点直接取 BlockTracker 缓存里的 WARPED_NYLIUM 方块 (信号方块
+    // 已 trackBlockQuiet 注册, 缓存查表零重扫风险, 近区 5Hz/远区 4s 持续供数),
+    // 走到该方块【上面】; 用"最小步距 + 已访问集合 + 覆盖轮换"保证探索率。
+    // ------------------------------------------------------------------
+    /** 判定"已站上目标菌岩"的水平半径 (格)。 */
+    private static final double PATROL_ARRIVE_RADIUS = 2.0;
+    /** 单个目标的兜底超时 (真实秒): 到不了也换下一个, 防一个硬目标卡死探索率。 */
+    private static final double PATROL_TARGET_TIMEOUT_SECONDS = 20;
+    /** 换目标时的最小步距 (格): 保证每一步都净推进, 杜绝原地打转。 */
+    private static final double PATROL_MIN_HOP = 8.0;
+    /** 候选菌岩与锚点的 Y 带宽: 排除洞里/头顶上不相关的菌岩 (下界洞穴偶有)。 */
+    private static final int PATROL_Y_BAND = 16;
+    /** 已访问集合的硬上限 (防无限增长; 到顶整体清空, 覆盖率语义不变)。 */
+    private static final int PATROL_VISITED_CAP = 400;
 
     // ------------------------------------------------------------------
     // (2026-09-20 用户机制) 锁定末影人"卡住不露面"的失联节奏: 先原地等一会儿,
@@ -325,22 +346,18 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return taskReturnToAnchor(mod);
         }
 
-        // 林内巡逻: TimeoutWanderTask 每段走 PATROL_STEP 格换一次方向, 是【无偏置随机
-        // 游荡】—— 刻意没用 BiasedExploreTask (步长 48 且会朝记忆目标连走多步, 本
-        // 项目已有"偏置探索折返、净位移≈0"的前科, 见 detail/04-symptoms.md)。末影人
-        // 在诡异森林刷新率本来就高, 靠小步游荡扫视野足够, 且永远被锚点半径兜住。
+        // 林内巡逻 (2026-09-20 改版): 菌岩目标点巡逻, 替换原 TimeoutWanderTask 的
+        // 【无偏置随机游荡】—— 那个走 baritone ExploreProcess, 方向不挑地形, 从林缘
+        // 锚点出发会整段踩到林外 (用户: "至少应该停在菌岩上"); 且随机方向净位移可能
+        // ≈0 原地打转 (用户: "要保证一定量的探索率")。现在目标=缓存里的菌岩方块,
+        // 最小步距 + 已访问集合保证推进与覆盖, 详见 NyliumPatrolTask 与常量区注释。
         setDebugState("Patrolling warped forest for endermen ("
                 + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
         if (_patrol == null) {
-            _patrol = new TimeoutWanderTask(PATROL_STEP);
+            _patrol = new NyliumPatrolTask();
             Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL begin anchor="
                     + (_anchor == null ? "none" : _anchor.toShortString())
-                    + " radius=" + (int) CAMP_RADIUS + " step=" + (int) PATROL_STEP);
-        } else if (_patrol.isFinished(mod)) {
-            // 实例级任务: 不 reset 的话原点停在上一次的位置, 一开局就"走够了"空转。
-            _patrol.resetForReuse(mod);
-            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL step-done pearls="
-                    + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + " (换方向继续找)");
+                    + " radius=" + (int) CAMP_RADIUS + " mode=nylium-targets");
         }
         // 心跳: 证明是在"等刷新 / 找末影人"而不是卡死原地 (30s 一条)。
         long beatNow = System.currentTimeMillis();
@@ -563,5 +580,144 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     @Override
     protected String toDebugStringName() {
         return "Camp warped forest for " + _count + " ender pearls";
+    }
+
+    // ------------------------------------------------------------------
+    // (2026-09-20 用户机制) 林内巡逻子任务: 菌岩目标点巡逻
+    // ------------------------------------------------------------------
+
+    /**
+     * 巡逻目标 = BlockTracker 缓存里的 {@code WARPED_NYLIUM} 方块, 走到该方块
+     * 【上面】(脚在 y+1)。三个保证:
+     * <ul>
+     *   <li><b>不出林</b> (用户: "至少应该停在菌岩上"): 目标本身是菌岩, 且被锚点
+     *       半径 + Y 带宽双重过滤, 结构上不存在"踩着非菌岩地形乱走"的路径;</li>
+     *   <li><b>探索率</b> (用户: "保证一定量的探索率, 不然容易原地打转"): 最小步距
+     *       {@code PATROL_MIN_HOP} 保证每步净推进; 已访问集合排除走过的点, 一轮
+     *       覆盖走完清空进入下一轮;</li>
+     *   <li><b>兜底</b>: 单目标超时强制换点防硬目标卡死; 缓存无候选时原地等
+     *       (信号方块已 trackBlockQuiet, 近区 5Hz/远区 4s 持续供数), 刻意不随机
+     *       乱走 —— 没数据就乱走正是"走出林子"的老路。</li>
+     * </ul>
+     * 实例缓存: 外层持有单例 {@code _patrol} (Task 框架: 每 tick 新建实例会被
+     * 去重/重置, 见铁律 #6)。
+     */
+    private class NyliumPatrolTask extends Task {
+
+        private BlockPos _target = null;
+        // 已经 setGoalAndPath 过的目标: 目标变了才重新寻路, 避免每 tick 重启 baritone。
+        private BlockPos _pathedTarget = null;
+        private final TimerGame _targetTimer = new TimerGame(PATROL_TARGET_TIMEOUT_SECONDS);
+        private final Set<Long> _visited = new HashSet<>();
+
+        @Override
+        protected void onStart(AltoClef mod) {
+            _target = null;
+            _pathedTarget = null;
+            _visited.clear();
+            _targetTimer.reset();
+        }
+
+        @Override
+        protected void onStop(AltoClef mod, Task interruptTask) {
+            // 交战/拉回/放弃时把寻路进程交还给下家 (TimeoutWanderTask.onStop 同款)。
+            mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        }
+
+        @Override
+        protected Task onTick(AltoClef mod) {
+            // 到达/超时 → 记入已访问, 换下一个目标。
+            boolean arrived = _target != null && isArrived(mod, _target);
+            boolean timedOut = _target != null && _targetTimer.elapsed();
+            if (arrived || timedOut) {
+                _visited.add(_target.asLong());
+                if (_visited.size() > PATROL_VISITED_CAP) {
+                    _visited.clear();
+                }
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL "
+                        + (timedOut ? "target-timeout" : "target-reached") + " at "
+                        + _target.toShortString() + " visited=" + _visited.size());
+                _target = null;
+            }
+            if (_target == null) {
+                pickNextTarget(mod);
+            }
+            if (_target == null) {
+                setDebugState("Patrol: no nylium candidates in cache; waiting for scans");
+                return null;
+            }
+            if (_target != _pathedTarget) {
+                _pathedTarget = _target;
+                _targetTimer.reset();
+                mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(
+                        new GoalBlock(_target.getX(), _target.getY() + 1, _target.getZ()));
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL target="
+                        + _target.toShortString() + " visited=" + _visited.size()
+                        + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count);
+            }
+            setDebugState("Patrolling warped forest on nylium ("
+                    + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count + ")");
+            return null;
+        }
+
+        /** 从缓存选下一个菌岩目标: 锚点半径 + Y 带宽 + 未访问 + 最小步距, 取离 bot 最近者。 */
+        private void pickNextTarget(AltoClef mod) {
+            BlockPos best = null;
+            for (int attempt = 0; attempt < 2 && best == null; attempt++) {
+                if (attempt > 0 && !_visited.isEmpty()) {
+                    // 一轮覆盖走完 (或候选全被访问) → 清空访问集合进入下一轮。
+                    _visited.clear();
+                }
+                best = scanCandidates(mod);
+            }
+            _target = best;
+        }
+
+        private BlockPos scanCandidates(AltoClef mod) {
+            BlockPos anchor = _anchor;
+            BlockPos bot = mod.getPlayer().getBlockPos();
+            List<BlockPos> candidates = mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM);
+            BlockPos best = null;
+            double bestDist = Double.MAX_VALUE;
+            for (BlockPos p : candidates) {
+                if (anchor != null) {
+                    if (p.getSquaredDistance(anchor) > CAMP_RADIUS * CAMP_RADIUS) continue;
+                    if (Math.abs(p.getY() - anchor.getY()) > PATROL_Y_BAND) continue;
+                }
+                if (_visited.contains(p.asLong())) continue;
+                double d = p.getSquaredDistance(bot);
+                if (d < PATROL_MIN_HOP * PATROL_MIN_HOP) continue;
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = p;
+                }
+            }
+            return best;
+        }
+
+        /** 水平进入目标半径且脚下高度对得上 → 算"已站上菌岩"。 */
+        private boolean isArrived(AltoClef mod, BlockPos target) {
+            Vec3d pos = mod.getPlayer().getPos();
+            double dx = pos.x - (target.getX() + 0.5);
+            double dz = pos.z - (target.getZ() + 0.5);
+            double dy = Math.abs(pos.y - (target.getY() + 1));
+            return dx * dx + dz * dz <= PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS && dy <= 3;
+        }
+
+        @Override
+        public boolean isFinished(AltoClef mod) {
+            // 本任务没有自己的完成条件: 末影人出现/枯竭线/总时长由外层蹲守状态机裁决。
+            return false;
+        }
+
+        @Override
+        protected boolean isEqual(Task other) {
+            return other instanceof NyliumPatrolTask;
+        }
+
+        @Override
+        protected String toDebugString() {
+            return "Patrol warped forest (nylium targets)";
+        }
     }
 }
