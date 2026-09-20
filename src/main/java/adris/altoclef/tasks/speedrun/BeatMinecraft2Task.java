@@ -1731,8 +1731,23 @@ public class BeatMinecraft2Task extends Task {
         // 1 棒 = 2 粉, 别混) 达标即 needsBlazePowder=false → 棒收集停止;
         // 已有的眼/粉自动计入 ("同时要考虑已有的眼睛等情况")。之后只有眼/粉真被
         // 消耗出缺口 (如插门框/定位丢眼) 才会重启, 属正常补货语义。
+        // (2026-09-20 21:27 用户"有 4 烈焰棒 10 末影之眼就不该再收棒") 粉当量口径:
+        // 判【要不要收棒】必须把手里已有的粉当量一起折算 —— 眼 1 个 = 1 粉
+        // (合 1 眼吃 1 粉), 棒 1 根 = 2 粉。旧判据只看 blazeRodCount <
+        // blazeRodTarget(8) 这个【固定绝对值】, 于是 10 眼 + 4 棒 (棒折 8 粉,
+        // 合计当量 18 ≥ 16) 也被判成"还差 4 根棒" → 进 needsBlazeRods 分支先收
+        // 2 瓶防火药水 (棒缺口 4 > FEW_RODS_LEFT_THRESHOLD) 再回下界打烈焰人。
+        // 现场 20260920-212215 实锤: tasks.log 21:24:27 蹲守森林收珍珠被
+        // "Collecting 2 fire resistance potions" 顶掉; chat.log (GoldDiag) 与
+        // 药水目标 2 瓶反解出棒=4/目标 8, 末影之眼目标 6 (16-10) 反解出眼=10。
+        // 真缺口只有 6 粉 (= 3 棒), 手里 4 棒足够 → 应走下面 "Crafting blaze
+        // powder" 分支把 3 根棒合成 6 粉, 然后去收 6 个末影珍珠合眼。
+        // ⚠ 与 0919 22:59 "固定满额 8 根" 的分工: 那条约束【要收棒时收几根】
+        // (blazeRodTarget 仍是 8, 多出的当余量), 本处约束的是【要不要收】;
+        // 当量够就不再为棒去下界, 更不会先囤防火药水。两者不冲突。
+        int blazePowderEquivalent = eyeCount + blazePowderCount + blazeRodCount * 2;
         boolean needsBlazePowder = eyeCount + blazePowderCount < targetEyes;
-        boolean needsBlazeRods = needsBlazePowder && blazeRodCount < blazeRodTarget;
+        boolean needsBlazeRods = needsBlazePowder && blazePowderEquivalent < targetEyes;
         boolean needsEnderPearls = mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < enderPearlTarget;
         // (2026-09-20 用户) 还差的烈焰棒 ≤ 3 → 药水需求降为 1 瓶; 缺口大 → 2 瓶。
         // 写 static 镜像每 tick 刷新, 供 CollectBlazeRodsTask 断药转收药时取同一口径。
