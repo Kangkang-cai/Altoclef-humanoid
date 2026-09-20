@@ -374,18 +374,31 @@ public class LocateStrongholdCoordinatesTask extends Task {
 
         // 丢末影之眼。
         if (_strongholdEstimatePos == null) {
+            // (2026-09-20 用户"寻找地牢的远征不该在地下派发") 地表硬前置闸。
+            // 旧实现把 isDeepUnderground 塞在 isThrowSurroundingsOpen 的【内层】:
+            // 投掷环境一旦通过 (大溶洞/深板岩大厅/大峡谷底 —— 头顶 3 格是空气、
+            // 20 格内也没有 16 格以上山体) 就再也查不到地表判据 → bot 就地丢眼,
+            // 紧接着 setupWalk 派 240 格远征, 全程在地下 (GetToXZ 走 GoalXZ, 无 Y
+            // 约束 → baritone 只能挖穿/贴墙, 跨海段还依赖水面)。
+            // 现在前移为硬前置: 只要判在地下, 先回地表再谈投掷环境/远征。
+            // 判据复用全项目唯一口径 WorldHelper.isDeepUnderground (= SurfaceHelper
+            // 迟滞版), 与 GoToSurfaceTask.isFinished 同源, 不会来回乒乓。
+            // 已知代价: 地牢就在正下方 (眼睛本会垂直向下直接确认) 时会先回地表再
+            // 下来, 多一次往返; 若实测往返过多, 回退点 = 把本闸移到 setupWalk
+            // (只拦"确实要远征"的那一步)。
+            if (WorldHelper.isDeepUnderground(mod)) {
+                setDebugState("Digging up to open sky before stronghold expedition.");
+                return new GoToSurfaceTask();
+            }
             if (!mod.getItemStorage().hasItem(Items.ENDER_EYE)) {
                 setDebugState("Collecting eye of ender.");
                 return TaskCatalogue.getItemTask(Items.ENDER_EYE, 1);
             }
             // (2026-08-25 用户要求) 不需要固定高度: 只要四周空旷 (头顶无遮挡 +
-            // 20 格内无巨大山体) 就丢, 不再强制爬升到固定高度。深地下 → 挖回
-            // 地表; 山脚/峡谷 → 短暂 wander 找开阔地 (眼睛是实体不受方块碰撞)。
+            // 20 格内无巨大山体) 就丢, 不再强制爬升到固定高度。山脚/峡谷 →
+            // 短暂 wander 找开阔地 (眼睛是实体不受方块碰撞)。
+            // (深地下分支已上移到本块开头的地表硬闸, 此处不再重复判。)
             if (!isThrowSurroundingsOpen(mod)) {
-                if (WorldHelper.isDeepUnderground(mod)) {
-                    setDebugState("Digging up to open sky to throw eye.");
-                    return new GoToSurfaceTask();
-                }
                 setDebugState("Wandering to find open area to throw eye.");
                 return new TimeoutWanderTask(5);
             }
