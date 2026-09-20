@@ -751,18 +751,69 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 // 降级: 缓存太稀 (边缘场景), 近处也去 —— 动起来总比站着好。
                 best = scanCandidates(mod, 0);
             }
-            if (best == null && !_visited.isEmpty()) {
-                // 一轮覆盖走完 (或候选全被访问) → 清空访问集合进入下一轮。
-                _visited.clear();
-                best = scanCandidates(mod, PATROL_FAR_HOP * PATROL_FAR_HOP);
-                if (best == null) {
-                    best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP);
-                }
-                if (best == null) {
-                    best = scanCandidates(mod, 0);
+            if (best == null) {
+                // 一轮覆盖走完 (盘内可站立候选全部已访问)。原做法: 清 visited 后在
+                // 【同一个盘】里重转 —— 锚点永不移动, 用户观感"原地转圈, 没走开"
+                // (现场 20260920-194207 实锤: 11 个目标全落锚点 17x19 格小盒内,
+                // 28s 转完 11 点又回同片区)。改【锚点漂移】: 取缓存中盘外的未访问
+                // 候选作新锚点走过去, 途中感知登记新方块形成新候选池。visited 保留
+                // (旧盘点持续被排除, 防走回头); 拉回闩/拉回任务同步换锚, 防新振荡。
+                BlockPos next = pickAdvanceAnchor(mod);
+                if (next != null) {
+                    BlockPos old = _anchor;
+                    _anchor = next;
+                    _returning = false;
+                    _goToAnchor = null;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL anchor-advance old="
+                            + (old == null ? "none" : old.toShortString())
+                            + " new=" + next.toShortString()
+                            + " visitedKept=" + _visited.size());
+                    _target = next;
+                    return;
                 }
             }
             _target = best;
+        }
+
+        /**
+         * (2026-09-20 锚点漂移) 盘内候选全部访问完时的推进选点: 4 类信号方块缓存中
+         * 距 bot 最远的未访问候选 (可站立 + 相对当前锚点 Y 带宽内), 【不受】
+         * CAMP_RADIUS 约束 —— 约束住就永远走不出当前盘, 正是打转根源。
+         * 缓存里没有盘外未访问点 → 返回 null, 外层原地等远区扫描填充。
+         */
+        private BlockPos pickAdvanceAnchor(AltoClef mod) {
+            BlockPos anchor = _anchor;
+            BlockPos bot = mod.getPlayer().getBlockPos();
+            // 复用 scanCandidates 的成员承载 (注意: 这里取"最远", 判距方向相反)。
+            _bestPos = null;
+            _bestDist = -1;
+            _nextGoalYOffset = 1;
+            advanceFromList(mod, anchor, bot,
+                    mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
+            advanceFromList(mod, anchor, bot,
+                    mod.getBlockTracker().getKnownLocations(
+                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
+            return _bestPos;
+        }
+
+        /** 锚点漂移选点: 未访问 + Y 带宽 + 非脚下 + 可站立, 取离 bot 最【远】者。 */
+        private void advanceFromList(AltoClef mod, BlockPos anchor, BlockPos bot,
+                                     List<BlockPos> candidates, int yOffset) {
+            for (BlockPos p : candidates) {
+                if (_visited.contains(p.asLong())) continue;
+                if (anchor != null && Math.abs(p.getY() - anchor.getY()) > PATROL_Y_BAND) continue;
+                double d = p.getSquaredDistance(bot);
+                if (d < PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS) continue;
+                BlockPos standPos = p.up(yOffset);
+                if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
+                    continue;
+                }
+                if (d > _bestDist) {
+                    _bestDist = d;
+                    _bestPos = p;
+                    _nextGoalYOffset = yOffset;
+                }
+            }
         }
 
         /**
