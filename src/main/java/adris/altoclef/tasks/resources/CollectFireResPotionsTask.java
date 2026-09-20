@@ -65,6 +65,15 @@ public class CollectFireResPotionsTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _phaseTimeout.reset();
+        // (2026-09-20 21:27 首拍误报修复) _deathsAtStart 必须在这里落基线 ——
+        // 字段初值是 -1 (:56), 而 onTick 的死亡检测是 `count != _deathsAtStart`
+        // (:126), 不落基线则"进入本任务的当拍"就满足 -1 != N (N = 之前累积的
+        // 连续死亡数) → 立刻误报 "(FireRes) Died during potion phase — phase
+        // timer refreshed." 并把刚 reset 的计时器再清一次。现场 20260920-212215
+        // 实锤: chat.log 21:24:27 (FireRes) Died during potion phase 与阶段开启
+        // 同毫秒打出, 那次并没有死。注释 (:54-55) 本来就写明"onStart 记录当时的
+        // 连续死亡计数", 属实现漏写。
+        _deathsAtStart = mod.getWorldMemory().getConsecutiveDeathCount();
         // (2026-08-24 保命) 阶段内保护合成台 (金粒→金锭必须用, 别被丢物逻辑
         // 扔了) 和防火药水 (POTION/SPLASH_POTION, 阶段内背包里不会想要水瓶,
         // 保护比丢了好)。
