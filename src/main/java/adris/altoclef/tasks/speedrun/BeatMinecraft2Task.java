@@ -642,6 +642,54 @@ public class BeatMinecraft2Task extends Task {
                 : FIRE_RES_POTION_TARGET;
     }
 
+    // (2026-09-20 21:34 用户"一并收敛, 智能点") 贪婪打末影人的触发半径: 末影人靠到
+    // 这个距离就已经"躲也躲不掉"(进入攻击距离), 直接击杀攒珍珠。原先三处各写一个
+    // 字面量 8, 现统一到此处。
+    public static final int GREEDY_ENDERMAN_RANGE = 8;
+
+    /**
+     * (2026-09-20 21:34 用户"一并收敛, 智能点") 珍珠仍缺数 —— 【要不要继续攒珍珠】的
+     * 唯一口径。
+     *
+     * 合 1 个末影之眼 = 1 颗珍珠 + 1 份烈焰粉, 所以"还要多少珍珠" = targetEyes − 已有眼数。
+     * 已持有的珍珠不在本值里扣减, 由调用方统一用 "pearls >= 本值" 作停止条件
+     * (等价于 "眼 + 珍珠 ≥ targetEyes")。
+     *
+     * 与 {@code blazePowderEquivalent} 同源: 目标量必须把背包里已有的同类资源折算进来,
+     * 不能用固定绝对值。旧代码三处各自写死 16 (本类贪婪分支 / CollectFireResPotionsTask:125 /
+     * CollectObsidianByBarterTask:109) —— 手里 10 眼时仍要打到 16 颗粒珍珠, 多收 10 颗;
+     * 更糟的是贪婪分支优先级高于主线, 珍珠不满 16 就一直不归还控制权, 收药/交易/蹲守被顶着走。
+     *
+     * 眼数走真实背包扫描 (与 getStrongholdPhase 的防缓存陈旧口径一致) —— 本判据决定
+     * "要不要放弃正在跑的主线", 容不得 tracker 缓存陈旧。
+     */
+    public static int remainingPearlTarget(AltoClef mod) {
+        int targetEyes = (_config != null) ? _config.targetEyes : 16;
+        int eyes = StorageHelper.countItemInInventoryReal(mod, Items.ENDER_EYE);
+        return Math.max(0, targetEyes - eyes);
+    }
+
+    /**
+     * (2026-09-20 21:34 用户"一并收敛, 智能点") 贪婪打末影人的统一判据 + 统一构造:
+     * 珍珠未达标 且 {@link #GREEDY_ENDERMAN_RANGE} 格内有末影人 → 返回"清末影人攒珍珠"
+     * 任务 (KillAndLootTask), 否则 null。三处调用点共用此方法, 口径只此一份。
+     *
+     * 调用方只负责各自的 debug 文案与额外前置 (BeatMinecraft2Task 还叠加"蹲守单目标锁"
+     * 守卫, 见 {@code getGreedyEndermanKillTask})。注意 KillAndLootTask 的目标值在构造时
+     * 快照 (ResourceTask 持有 ItemTarget), 期间眼数变化不会重建任务 —— 上限即构造时的缺口,
+     * 不会多收。
+     */
+    public static Task greedyEndermanKillTask(AltoClef mod) {
+        int pearlDeficit = remainingPearlTarget(mod);
+        if (pearlDeficit <= 0) return null;
+        if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) >= pearlDeficit) return null;
+        Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
+        if (enderman.isEmpty() || !enderman.get().isInRange(mod.getPlayer(), GREEDY_ENDERMAN_RANGE)) {
+            return null;
+        }
+        return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, pearlDeficit));
+    }
+
     private boolean _fireResPhaseActive = false;
     private boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(45 * 60);
@@ -2872,13 +2920,17 @@ public class BeatMinecraft2Task extends Task {
         return new CollectBlazeRodsTask(count);
     }
     /**
-     * (2026-08-23 贪婪打末影人 rev2) 珍珠 <16 且感知到 8 格内末影人时,
-     * 返回"清末影人攒珍珠"任务 (KillAndLootTask), 否则 null。
+     * (2026-08-23 贪婪打末影人 rev2) 珍珠还缺 且感知到 {@link #GREEDY_ENDERMAN_RANGE}
+     * 格内末影人时, 返回"清末影人攒珍珠"任务 (KillAndLootTask), 否则 null。
      *
      * 8 格阈值: 用户设计 "末影人距离自己非常近比如 8 格时就把它视为击杀
      * 目标 (触发贪婪任务), 这时候末影人就不可能放过我了"。一旦触发,
      * KillAndLootTask 子树内专注击杀 + 拾取珍珠, 不切换 (优先级高于
      * 防火药水/挖金/烈焰棒等主线)。
+     *
+     * (2026-09-20 21:34 口径收敛) 判据/构造整体下沉到静态
+     * {@link #greedyEndermanKillTask(AltoClef)}, 与火抗药水阶段、交易黑曜石阶段
+     * 共用一份口径 (旧: 三处各写死 16)。本方法只剩"蹲守单目标锁"这条本类独有的守卫。
      */
     private Task getGreedyEndermanKillTask(AltoClef mod) {
         // (2026-09-20 单目标锁, 用户"同时只打一只") 蹲守已锁定一只末影人时, 贪婪
@@ -2890,11 +2942,11 @@ public class BeatMinecraft2Task extends Task {
         if (_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp && camp.hasActiveEndermanLock()) {
             return null;
         }
-        if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) >= 16) return null;
-        Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
-        if (enderman.isEmpty() || !enderman.get().isInRange(mod.getPlayer(), 8)) return null;
-        setDebugState("Greedy enderman kill (within 8 blocks, pearls < 16)");
-        return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, 16));
+        Task kill = greedyEndermanKillTask(mod);
+        if (kill == null) return null;
+        setDebugState("Greedy enderman kill (within " + GREEDY_ENDERMAN_RANGE + " blocks, pearls "
+                + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + remainingPearlTarget(mod) + ")");
+        return kill;
     }
 
     private Task getEnderPearlTask(AltoClef mod, int count) {

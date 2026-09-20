@@ -6,6 +6,7 @@ import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.misc.EquipArmorTask;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
@@ -15,7 +16,6 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.item.Items;
 
 import java.util.Optional;
@@ -118,16 +118,16 @@ public class CollectFireResPotionsTask extends Task {
             return new DefaultGoToDimensionTask(Dimension.NETHER);
         }
 
-        // ①.5 (2026-08-23 贪婪打末影人) 防火药水阶段 (挖金/交易) 里,
-        // 8 格内末影人优先击杀攒珍珠 — 用户设计: 末影人靠近到不可能无视
-        // 我们的距离就直接打, 高优先级不切换 (否则挖金/交易时看到末影人
-        // 只躲不打, 它反复骚扰)。
-        if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < 16) {
-            Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
-            if (enderman.isPresent() && enderman.get().isInRange(mod.getPlayer(), 8)) {
-                setDebugState("Greedy enderman kill (within 8 blocks, during fire-res phase)");
-                return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, 16));
-            }
+        // ①.5 (2026-08-23 贪婪打末影人; 2026-09-20 21:34 口径收敛) 防火药水阶段
+        // (挖金/交易) 里, 8 格内末影人优先击杀攒珍珠 — 用户设计: 末影人靠近到不可能
+        // 无视我们的距离就直接打, 高优先级不切换 (否则挖金/交易时看到末影人只躲不打,
+        // 它反复骚扰)。判据统一走 BeatMinecraft2Task.greedyEndermanKillTask: 旧处写死
+        // "珍珠 < 16", 手里已有 10 眼时仍会为凑满 16 颗珍珠而顶着挖金/交易跑。
+        Task greedyKill = BeatMinecraft2Task.greedyEndermanKillTask(mod);
+        if (greedyKill != null) {
+            setDebugState("Greedy enderman kill (within " + BeatMinecraft2Task.GREEDY_ENDERMAN_RANGE
+                    + " blocks, pearls still needed, during fire-res phase)");
+            return greedyKill;
         }
 
         // ② 超时兜底: 放弃本阶段 (不阻塞主线, 打烈焰人回到原流程)

@@ -6,6 +6,7 @@ import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.misc.EquipArmorTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
@@ -14,7 +15,6 @@ import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.item.Items;
 
 import java.util.Optional;
@@ -104,14 +104,15 @@ public class CollectObsidianByBarterTask extends Task {
             return new DefaultGoToDimensionTask(Dimension.NETHER);
         }
 
-        // ③ (贪婪打末影人, 与防火药水阶段同款) 珍珠 <16 且 8 格内末影人 → 优先击杀。
-        //    长时间挖金难免被末影人骚扰, 只躲不打会反复蹭血。
-        if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < 16) {
-            Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
-            if (enderman.isPresent() && enderman.get().isInRange(mod.getPlayer(), 8)) {
-                setDebugState("Greedy enderman kill (within 8 blocks, during obsidian barter)");
-                return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, 16));
-            }
+        // ③ (贪婪打末影人, 与防火药水阶段同款; 2026-09-20 21:34 口径收敛) 珍珠还缺
+        //    且 8 格内末影人 → 优先击杀。长时间挖金难免被末影人骚扰, 只躲不打会反复
+        //    蹭血。判据统一走 BeatMinecraft2Task.greedyEndermanKillTask —— 旧处写死
+        //    "珍珠 < 16", 手里已有 10 眼时仍会为凑满 16 颗珍珠而顶着交易跑。
+        Task greedyKill = BeatMinecraft2Task.greedyEndermanKillTask(mod);
+        if (greedyKill != null) {
+            setDebugState("Greedy enderman kill (within " + BeatMinecraft2Task.GREEDY_ENDERMAN_RANGE
+                    + " blocks, pearls still needed, during obsidian barter)");
+            return greedyKill;
         }
 
         // ④ 穿金靴 (猪灵敌对判定, 项目统一金靴)
