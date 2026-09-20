@@ -19,6 +19,8 @@ import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.registry.RegistryKey;
+import net.minecraft.world.World;
 
 import java.util.HashSet;
 import java.util.List;
@@ -137,8 +139,6 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final double PATROL_TARGET_TIMEOUT_SECONDS = 20;
     /** 换目标时的理想最小步距 (格): 每步净推进, 杜绝原地打转; 缓存稀疏时逐档降级。 */
     private static final double PATROL_MIN_HOP = 6.0;
-    /** 理想远推进步距 (格): 优先选这么远的目标, 观感是跨步巡游而非小圈折返。 */
-    private static final double PATROL_FAR_HOP = 12.0;
     /** 候选菌岩与锚点的 Y 带宽: 排除洞里/头顶上不相关的菌岩 (下界洞穴偶有)。 */
     private static final int PATROL_Y_BAND = 8;
     // (2026-09-20 远征化漂移) 锚点推进的方位角走廊与抖动: 走廊 = 锁定方位角 ±60°
@@ -225,10 +225,48 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final long RETURN_LOG_INTERVAL_MS = 5000;
     private static final long PATROL_BEAT_INTERVAL_MS = 30000;
 
-    public CollectEnderPearlsInForestTask(int count, BlockPos anchor) {
+    /**
+     * (2026-09-20 打完末影人回头修复) 巡逻会话状态: 蹲守实例被上层重建时
+     * ({@code BeatMinecraft2Task} 每次接战结束都 {@code new}), 锚点重找 + visited
+     * 清零 + 方位角重掷 = "角度转向接近回头" (现场 20260920-201533 实锤: 20:17:39
+     * 与 20:17:56 两次 PATROL begin, 间隔恰好一次末影人接战)。会话状态由【上层
+     * 持有】跨实例传递, 重建不重掷; 维度变化时自动清空 (visited 的 asLong 跨维度
+     * 会撞 key, detail/10 跨维度残留同族)。
+     */
+    public static class PatrolSession {
+        /** 巡逻行进方位角 (度): 会话创建时随机定一次, 之后只在锚点推进时 ±10° 微抖。 */
+        public double bearingDeg = Math.random() * 360.0;
+        /** 已访问目标点 (BlockPos.asLong): 跨实例重建保留, 防重走旧盘。 */
+        public final Set<Long> visited = new HashSet<>();
+        private RegistryKey<World> _dim = null;
+
+        /** 维度守卫: 换维度即清空状态。 */
+        public void ensureDimension(AltoClef mod) {
+            RegistryKey<World> cur = mod.getWorld().getRegistryKey();
+            if (_dim == null) {
+                _dim = cur;
+                return;
+            }
+            if (!cur.equals(_dim)) {
+                visited.clear();
+                bearingDeg = Math.random() * 360.0;
+                _dim = cur;
+            }
+        }
+    }
+
+    // 巡逻会话 (上层持有, 跨实例重建保留)。
+    private PatrolSession _patrolSession;
+
+    public CollectEnderPearlsInForestTask(int count, BlockPos anchor, PatrolSession session) {
         super(new ItemTarget(Items.ENDER_PEARL, count));
         _count = count;
         _anchor = anchor;
+        _patrolSession = (session != null) ? session : new PatrolSession();
+    }
+
+    public CollectEnderPearlsInForestTask(int count, BlockPos anchor) {
+        this(count, anchor, null);
     }
 
     @Override
@@ -680,18 +718,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 已经 setGoalAndPath 过的目标: 目标变了才重新寻路, 避免每 tick 重启 baritone。
         private BlockPos _pathedTarget = null;
         private final TimerGame _targetTimer = new TimerGame(PATROL_TARGET_TIMEOUT_SECONDS);
-        private final Set<Long> _visited = new HashSet<>();
-        // (2026-09-20 远征化漂移) 巡逻的行进方位角 (度, 数学坐标系 x=cos/z=sin):
-        // onStart 随机初始化, 每次锚点推进成功后 ±10° 微抖 —— 净位移持续朝一个方向,
-        // 同 TimeoutWanderTask/远征的方向纪律 (detail/04 随机方向=打转总根源)。
-        private double _bearingDeg = Double.NaN;
+        // (2026-09-20 会话化) visited/方位角挂到 PatrolSession (上层持有, 跨实例
+        // 重建保留) —— 实例重建不再清 visited、不再重掷方位角。
+        private PatrolSession _session;
 
         @Override
         protected void onStart(AltoClef mod) {
+            _session = _patrolSession;
+            _session.ensureDimension(mod);
             _target = null;
             _pathedTarget = null;
-            _visited.clear();
-            _bearingDeg = Math.random() * 360.0;
             _targetTimer.reset();
         }
 
@@ -707,13 +743,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             boolean arrived = _target != null && isArrived(mod, _target);
             boolean timedOut = _target != null && _targetTimer.elapsed();
             if (arrived || timedOut) {
-                _visited.add(_target.asLong());
-                if (_visited.size() > PATROL_VISITED_CAP) {
-                    _visited.clear();
+                _session.visited.add(_target.asLong());
+                if (_session.visited.size() > PATROL_VISITED_CAP) {
+                    _session.visited.clear();
                 }
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL "
                         + (timedOut ? "target-timeout" : "target-reached") + " at "
-                        + _target.toShortString() + " visited=" + _visited.size());
+                        + _target.toShortString() + " visited=" + _session.visited.size());
                 _target = null;
             }
             if (_target == null) {
@@ -731,7 +767,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 mod.getClientBaritone().getCustomGoalProcess().setGoalAndPath(
                         new GoalBlock(_target.getX(), _target.getY() + _nextGoalYOffset, _target.getZ()));
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL target="
-                        + _target.toShortString() + " visited=" + _visited.size()
+                        + _target.toShortString() + " visited=" + _session.visited.size()
                         + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL) + "/" + _count);
             }
             setDebugState("Patrolling warped forest on nylium ("
@@ -748,25 +784,25 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
          * 语义与"停在菌岩上"等价 (寻路目标: 菌岩用 y+1, 植物用其所在格 y)。
          */
         private void pickNextTarget(AltoClef mod) {
-            // (2026-09-20 现场 20260920-135557 实锤) "取最近的合格候选" + 近区扫描
-            // 持续填充的 16 格候选池 = 每步只挪 5~8 格就换向, 1 秒一个 target-reached
-            // (visited 一秒 +1), 用户观感"原地 5~6 格疯狂打转"。
-            // 改三档远推进: 优先 ≥12 格 (跨出小圈) → ≥6 → 无下限, 都没有才清 visited 重来。
-            BlockPos best = scanCandidates(mod, PATROL_FAR_HOP * PATROL_FAR_HOP);
+            // (2026-09-20 现场 20260920-201533 实锤) "取最近的合格候选"不限方向 =
+            // 每步都转向最近的未访问点, 东西向来回蹦 (1284→1273→1285→1275...),
+            // 净位移≈0, 用户观感"角度转向接近回头"。
+            // 改【走廊优先两档】: 盘内选点也遵守方位角纪律 —— 只在锁定方位角 ±60°
+            // 扇形里挑 (优先 ≥6 格, 退到无下限), 后半球候选结构性排除; 扇形内没有
+            // → 锚点沿走廊推进 (pickAdvanceAnchor), 不再有"任意方向近点"档。
+            BlockPos best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP, true);
             if (best == null) {
-                best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP);
+                // 降级: 走廊内近处也去 (≥到达半径), 动起来总比站着好。
+                best = scanCandidates(mod, 0, true);
             }
             if (best == null) {
-                // 降级: 缓存太稀 (边缘场景), 近处也去 —— 动起来总比站着好。
-                best = scanCandidates(mod, 0);
-            }
-            if (best == null) {
-                // 一轮覆盖走完 (盘内可站立候选全部已访问)。原做法: 清 visited 后在
-                // 【同一个盘】里重转 —— 锚点永不移动, 用户观感"原地转圈, 没走开"
+                // 一轮覆盖走完 (走廊内盘内可站立候选全部已访问)。原做法: 清 visited
+                // 后在【同一个盘】里重转 —— 锚点永不移动, 用户观感"原地转圈, 没走开"
                 // (现场 20260920-194207 实锤: 11 个目标全落锚点 17x19 格小盒内,
-                // 28s 转完 11 点又回同片区)。改【锚点漂移】: 取缓存中盘外的未访问
-                // 候选作新锚点走过去, 途中感知登记新方块形成新候选池。visited 保留
-                // (旧盘点持续被排除, 防走回头); 拉回闩/拉回任务同步换锚, 防新振荡。
+                // 28s 转完 11 点又回同片区)。改【锚点漂移】: 沿方位角走廊取盘外
+                // 未访问候选作新锚点走过去, 途中感知登记新方块形成新候选池。
+                // visited 保留 (旧盘点持续被排除, 防走回头); 拉回闩/拉回任务同步
+                // 换锚, 防新振荡。
                 BlockPos next = pickAdvanceAnchor(mod);
                 if (next != null) {
                     BlockPos old = _anchor;
@@ -776,8 +812,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL anchor-advance old="
                             + (old == null ? "none" : old.toShortString())
                             + " new=" + next.toShortString()
-                            + " bearing=" + (int) _bearingDeg
-                            + " visitedKept=" + _visited.size());
+                            + " bearing=" + (int) _session.bearingDeg
+                            + " visitedKept=" + _session.visited.size());
                     _target = next;
                     return;
                 }
@@ -795,9 +831,6 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
          * 缓存里没有盘外未访问点 → 返回 null, 外层原地等远区扫描填充。
          */
         private BlockPos pickAdvanceAnchor(AltoClef mod) {
-            if (Double.isNaN(_bearingDeg)) {
-                _bearingDeg = Math.random() * 360.0;
-            }
             BlockPos anchor = _anchor;
             BlockPos bot = mod.getPlayer().getBlockPos();
             // 复用 scanCandidates 的成员承载 (注意: 这里取"最远", 判距方向相反)。
@@ -814,7 +847,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                                 Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
                 if (_bestPos != null) {
                     // (远征纪律) 推进成功才抖方向: 下一段走廊跟着微调, 避免走廊锁死。
-                    _bearingDeg = (_bearingDeg + (Math.random() * 2.0 - 1.0) * PATROL_BEARING_JITTER_DEG) % 360.0;
+                    _session.bearingDeg = (_session.bearingDeg
+                            + (Math.random() * 2.0 - 1.0) * PATROL_BEARING_JITTER_DEG) % 360.0;
                     break;
                 }
             }
@@ -827,22 +861,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
          */
         private void advanceFromList(AltoClef mod, BlockPos anchor, BlockPos bot, double corridorCos,
                                      List<BlockPos> candidates, int yOffset) {
-            double rad = Math.toRadians(_bearingDeg);
-            double bX = Math.cos(rad), bZ = Math.sin(rad);
             for (BlockPos p : candidates) {
-                if (_visited.contains(p.asLong())) continue;
+                if (_session.visited.contains(p.asLong())) continue;
                 if (anchor != null && Math.abs(p.getY() - anchor.getY()) > PATROL_Y_BAND) continue;
                 double d = p.getSquaredDistance(bot);
                 if (d < PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS) continue;
-                if (corridorCos > -1.0) {
-                    // 方位角走廊: 候选方向与锁定方位角的夹角余量 (归一化点积)。
-                    double len = Math.sqrt(d);
-                    if (len < 1e-6) continue;
-                    double dx = p.getX() + 0.5 - bot.getX() - 0.5;
-                    double dz = p.getZ() + 0.5 - bot.getZ() - 0.5;
-                    double dot = (dx * bX + dz * bZ) / len;
-                    if (dot < corridorCos) continue;
-                }
+                if (!corridorAllows(bot, p, corridorCos)) continue;
                 BlockPos standPos = p.up(yOffset);
                 if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
                     continue;
@@ -856,23 +880,26 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         }
 
         /**
-         * 从缓存选下一个目标: 锚点半径 + Y 带宽 + 未访问 + 最小步距, 取离 bot 最近者。
+         * 从缓存选下一个目标: 锚点半径 + Y 带宽 + 未访问 + 最小步距 + 方位角走廊,
+         * 取离 bot 最近者。corridorOnly=true 时只取方位角 ±60° 扇形内的候选
+         * (后半球结构性排除 —— 这是"选点不回头"的判据本体)。
          * 菌岩优先于植物 (脚下更"实"): 同距离比较下菌岩先入为主。
          */
-        private BlockPos scanCandidates(AltoClef mod, double minHopSq) {
+        private BlockPos scanCandidates(AltoClef mod, double minHopSq, boolean corridorOnly) {
             BlockPos anchor = _anchor;
             BlockPos bot = mod.getPlayer().getBlockPos();
+            double corridorCos = corridorOnly ? PATROL_ADVANCE_CORRIDOR_COS : -2.0;
             // 两次缓存查表 (纯查表, 无扫描): 先菌岩 (y+1), 后植物 (y+0)。
             // 结果统一放在成员里, 保证植物列表的比较基线继承菌岩列表的结果。
             _bestPos = null;
             _bestDist = Double.MAX_VALUE;
             _nextGoalYOffset = 1;
-            pickFromList(mod, anchor, bot, minHopSq,
+            pickFromList(mod, anchor, bot, minHopSq, corridorCos,
                     mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
             // (2026-09-20 用户预判核实) WARPED_WART_BLOCK 是【实心方块】不是植物 ——
             // 站进其所在格不可达, baritone 会挖块/爬团顶。候选只留真正可站的:
             // 菌岩(站其上) + 菌菇/菌索(无碰撞植物, 站进所在格=站在承载菌岩顶面)。
-            pickFromList(mod, anchor, bot, minHopSq,
+            pickFromList(mod, anchor, bot, minHopSq, corridorCos,
                     mod.getBlockTracker().getKnownLocations(
                             Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS), 0);
             return _bestPos;
@@ -884,23 +911,38 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 选中目标相对缓存格的 Y 偏移 (0/1): 寻路与到达判定共用。
         private int _nextGoalYOffset = 1;
 
+        /**
+         * 方位角走廊判定: 候选相对 bot 的方向与锁定方位角的归一化点积 ≥ cos。
+         * corridorCos < -1 恒放行 (不限方向兜底档用)。
+         */
+        private boolean corridorAllows(BlockPos bot, BlockPos p, double corridorCos) {
+            if (corridorCos < -1.0 || Double.isNaN(_session.bearingDeg)) return true;
+            double dx = p.getX() + 0.5 - bot.getX() - 0.5;
+            double dz = p.getZ() + 0.5 - bot.getZ() - 0.5;
+            double len = Math.sqrt(dx * dx + dz * dz);
+            if (len < 1e-6) return false;
+            double rad = Math.toRadians(_session.bearingDeg);
+            double dot = (dx * Math.cos(rad) + dz * Math.sin(rad)) / len;
+            return dot >= corridorCos;
+        }
+
         /** 在一类缓存位置里挑更近的候选; yOffset: 菌岩 +1 (站其上), 植物 +0 (站进所在格)。 */
         private void pickFromList(AltoClef mod, BlockPos anchor, BlockPos bot, double minHopSq,
-                                  List<BlockPos> candidates, int yOffset) {
+                                  double corridorCos, List<BlockPos> candidates, int yOffset) {
             for (BlockPos p : candidates) {
                 if (anchor != null) {
                     if (p.getSquaredDistance(anchor) > CAMP_RADIUS * CAMP_RADIUS) continue;
                     if (Math.abs(p.getY() - anchor.getY()) > PATROL_Y_BAND) continue;
                 }
-                if (_visited.contains(p.asLong())) continue;
+                if (_session.visited.contains(p.asLong())) continue;
                 double d = p.getSquaredDistance(bot);
                 // (2026-09-20 现场 20260920-155006 实锤) 到达半径内的点不是"目标":
-                // 缓存只有正脚下 1 个候选时, 三档降级的最下档(无下限)会选中它 →
-                // 出生即 target-reached → visited 清空重选同一点 → 50ms 振荡刷屏
-                // (15:54:16 起 target-reached 每秒 20 条, 巡逻 60s 零位移)。
+                // 缓存只有正脚下 1 个候选时, 降级档(无下限)会选中它 → 出生即
+                // target-reached → 50ms 振荡刷屏 (15:54:16 起每秒 20 条, 60s 零位移)。
                 // floor=到达半径: 站着的点永远跳过; 没有别的候选就 target=null 原地等扫描。
                 if (d < PATROL_ARRIVE_RADIUS * PATROL_ARRIVE_RADIUS) continue;
                 if (d < minHopSq) continue;
+                if (!corridorAllows(bot, p, corridorCos)) continue;
                 // (2026-09-20 用户预判"目标别定在空气导致爬高") 可站立校验:
                 // 寻路格无碰撞 (空气/植物) 且脚下格有碰撞支撑。缓存是记忆, 方块可能
                 // 已被炸掉/变更 —— 过期的空中目标会让 baritone 垫柱爬高。主线程查

@@ -321,6 +321,8 @@ public class BeatMinecraft2Task extends Task {
     // "看见林子"扫描的节流时间戳与缓存锚点 (扫描要过 LOS 射线, 不能每 tick 跑)。
     private long _pearlForestScanMs = 0;
     private BlockPos _pearlForestAnchor = null;
+    // (2026-09-20) 珍珠蹲守的巡逻会话 (visited/方位角), 跨蹲守实例重建保留。
+    private CollectEnderPearlsInForestTask.PatrolSession _pearlPatrolSession = null;
     // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
     private long _pearlCampBlockedUntilMs = 0;
     // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
@@ -3084,7 +3086,15 @@ public class BeatMinecraft2Task extends Task {
         if (_pearlForestAnchor == null) return null;
 
         setDebugState("Camping warped forest for ender pearls (nearest visible forest)");
-        _opportunisticPearlTask = new CollectEnderPearlsInForestTask(enderPearlTarget, _pearlForestAnchor);
+        // (2026-09-20 打完末影人回头修复) 蹲守实例每次接战结束都会被这里重建,
+        // 但巡逻的 visited/方位角必须跨重建保留 —— 否则每打完一只末影人, 巡逻就
+        // 带全新随机方向从头再来 = "角度转向接近回头" (20260920-201533 实锤:
+        // 两次 PATROL begin 间隔恰好一次接战, 锚点 1271,-1383 → 1286,-1364)。
+        // 会话状态由本类持有; 维度变化由 PatrolSession.ensureDimension 自清。
+        if (_pearlPatrolSession == null) {
+            _pearlPatrolSession = new CollectEnderPearlsInForestTask.PatrolSession();
+        }
+        _opportunisticPearlTask = new CollectEnderPearlsInForestTask(enderPearlTarget, _pearlForestAnchor, _pearlPatrolSession);
         return _opportunisticPearlTask;
     }
 
