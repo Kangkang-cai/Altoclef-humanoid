@@ -322,6 +322,8 @@ public class BeatMinecraft2Task extends Task {
     private BlockPos _pearlForestAnchor = null;
     // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
     private long _pearlCampBlockedUntilMs = 0;
+    // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
+    private TimeoutWanderTask _pearlCooldownHoldTask = null;
     private static final long PEARL_FOREST_SCAN_INTERVAL_MS = 1000;
     // (2026-09-19 20:0x) [PEARL-NEAR] 日志节流: 看不见林子时 10s 一条就够 —— 否则
     // 主线跑几十分钟, diag.log 被每秒一条的 anchor=none 刷爆 (195218 会话 3 分钟 200+ 条)。
@@ -2868,6 +2870,21 @@ public class BeatMinecraft2Task extends Task {
             }
             if (mod.getEntityTracker().entityFound(EndermanEntity.class) || mod.getEntityTracker().itemDropped(Items.ENDER_PEARL)) {
                 return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
+            }
+            // (2026-09-20) 看得见/刚看过林子却进不了蹲守 = 蹲守冷却中 (60s 没见末影人
+            // giveup → 120s 冷却)。此时去别处逐区块找"身处的林子"是语义倒置 —— 现场
+            // 20260920-145211 实锤: 冷却一生效 bot 立刻被派去 Get to chunk [49,15] 离开
+            // 林子。改为原地小步等待: 冷却结束 getForestPearlCampTask 自然重开蹲守;
+            // 等待期间末影人若被感知, 上面的 entityFound 分支照样接管击杀。
+            if (_pearlForestAnchor != null) {
+                if (_pearlCooldownHoldTask == null) {
+                    _pearlCooldownHoldTask = new TimeoutWanderTask(6);
+                } else if (_pearlCooldownHoldTask.isFinished(mod)) {
+                    _pearlCooldownHoldTask.resetForReuse(mod);
+                }
+                setDebugState("Pearl camp cooldown; holding near forest (re-camp in "
+                        + Math.max(0, (_pearlCampBlockedUntilMs - System.currentTimeMillis()) / 1000) + "s)");
+                return _pearlCooldownHoldTask;
             }
             // 看不见任何林子 → 才逐区块去远处找 (老路径, 现在降级为兜底)。
             // (2026-09-20 口径对齐, 判据一致性) 原来只搜 WARPED_NYLIUM 一种, 而
