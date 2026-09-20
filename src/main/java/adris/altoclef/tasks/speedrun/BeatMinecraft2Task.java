@@ -3054,8 +3054,16 @@ public class BeatMinecraft2Task extends Task {
         double bestSq = Double.MAX_VALUE;
         for (BlockPos c : centers) {
             if (_discreditedForestCenters.contains(c)) continue;
-            var biome = mod.getWorld().getBiome(c);
-            if (biome == null || !biome.matchesKey(BiomeKeys.WARPED_FOREST)) continue;
+            // (2026-09-20 22:31 现场 221717 实锤) 群系校验只对【区块已加载】的中心做:
+            // 重生后从传送门出来离森林 1000+ 格, 远处记忆中心区块未加载, 客户端
+            // getBiome 对未加载区块恒返回默认群系 → knowledge.log 里 8 条下界森林
+            // 记忆全被误滤, 记忆直航退化成远征 (此前 21:39 直航成功恰因离得近、
+            // 区块已加载)。remember 侧已守群系, 未加载时信任记忆; 真踩进 24 格
+            // 时区块必然已加载, 下面的 discredit 兜底照常生效。
+            if (mod.getWorld().isChunkLoaded(c.getX() >> 4, c.getZ() >> 4)) {
+                var biome = mod.getWorld().getBiome(c);
+                if (biome == null || !biome.matchesKey(BiomeKeys.WARPED_FOREST)) continue;
+            }
             double sq = c.getSquaredDistance(mod.getPlayer().getBlockPos());
             if (sq < bestSq) {
                 bestSq = sq;
