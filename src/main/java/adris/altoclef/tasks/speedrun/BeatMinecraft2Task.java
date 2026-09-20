@@ -324,7 +324,6 @@ public class BeatMinecraft2Task extends Task {
     // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
     private long _pearlCampBlockedUntilMs = 0;
     // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
-    private TimeoutWanderTask _pearlCooldownHoldTask = null;
 
     /** (2026-09-20 冷却 hold 拉回) 离林锚点超过该半径就走回去, 防随机 wander 漂离林子。 */
     private static final double PEARL_HOLD_PULL_RADIUS = 10;
@@ -2932,13 +2931,14 @@ public class BeatMinecraft2Task extends Task {
                     setDebugState("Pearl camp cooldown; returning to forest anchor (re-camp in " + reCampIn + "s)");
                     return _pearlCooldownReturnTask;
                 }
-                if (_pearlCooldownHoldTask == null) {
-                    _pearlCooldownHoldTask = new TimeoutWanderTask(6);
-                } else if (_pearlCooldownHoldTask.isFinished(mod)) {
-                    _pearlCooldownHoldTask.resetForReuse(mod);
-                }
-                setDebugState("Pearl camp cooldown; holding near forest (re-camp in " + reCampIn + "s)");
-                return _pearlCooldownHoldTask;
+                // (2026-09-20 19:05 现场 20260920-190542 实锤) 小步等待用随机
+                // wander(6) 会漂出 10 格拉回半径 → 与 GetToBlockTask 拉回形成
+                // "wander 2.7s → 拉回 2s" 永久振荡 (用户观感"原地转圈", 与 17:01
+                // 修的失联/拉回振荡同族: 拉回门槛内的自由移动迟早越界)。冷却期
+                // 等待没有任何移动需求 → 直接原地站住 (return null), 漂移源清零;
+                // 末影人出现仍由上方 entityFound 分支接管击杀。
+                setDebugState("Pearl camp cooldown; holding still near forest (re-camp in " + reCampIn + "s)");
+                return null;
             }
             // (2026-09-20 用户需求落位) 看不见任何林子 → 两级兜底, 取代原
             // SearchChunkForBlockTask 的"chunk 全方块透视 + 无方向 wander"
