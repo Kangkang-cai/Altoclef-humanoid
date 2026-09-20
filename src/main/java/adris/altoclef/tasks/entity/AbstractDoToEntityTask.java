@@ -48,9 +48,12 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     // (2026-09-09 遮挡消除钩子, 用户"猪灵交易被挡时先走动, 绕不开就挖掉眼前方块")
     // LOS 被挡先走既有绕位逻辑; 持续 OBSTRUCTION_PERSIST_SECONDS 仍没绕开 → 调
     // onObstructionPersistent 钩子, 子类可接管消除遮挡 (如挖方块)。默认返回 null
+    // (2026-09-20 22:08 用户拍板"被挡两秒就应该挖了"): 8 → 2 秒。绕位先行意义
+    // 不大 (绕位常绕不开墙), 快挖快打; 同拍 2s 宽限可见重置 (LOS_CLEAR_GRACE_SECONDS)
+    // 与 persist 相同量级, 探头一瞬仍不清零。
     // = 维持绕位, 战斗等其他任务行为完全不变 (scope 收敛)。
     // =========================================================================
-    private static final double OBSTRUCTION_PERSIST_SECONDS = 8;
+    private static final double OBSTRUCTION_PERSIST_SECONDS = 2;
     private long _losBlockedSinceTick = Long.MIN_VALUE;
     // (2026-09-20 计时器加固) 连续可见满这个时长才重置"持续被挡"计时 —— 末影人
     // 瞬移/探头制造的单拍可见不再把计时器打回零 (现场 20260920-213856 实锤:
@@ -222,7 +225,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
                 _losClearSinceTick = Long.MIN_VALUE;
-                // (2026-09-09 遮挡消除钩子) 绕位 8s 仍被挡 → 交子类决定是否挖除。
+                // (2026-09-09 遮挡消除钩子) 绕位持续被挡 (2026-09-20 起 2s) → 交子类决定是否挖除。
                 long now = WorldHelper.getTicks();
                 if (_losBlockedSinceTick == Long.MIN_VALUE) {
                     _losBlockedSinceTick = now;
