@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.compound.ConstructNetherPortalBucketTask;
 import adris.altoclef.tasks.construction.compound.ConstructNetherPortalObsidianTask;
 import adris.altoclef.tasksystem.Task;
@@ -23,6 +24,21 @@ public class DefaultGoToDimensionTask extends Task {
     private final Dimension _target;
     // Cached to keep build properties alive if this task pauses/resumes.
     private final Task _cachedNetherBucketConstructionTask = new ConstructNetherPortalBucketTask();
+
+    // (2026-09-20 搭了两块就跑去翻旧门) 下界回家"直接造门"的粘滞闩。
+    // canBuildPortalHome 是**瞬时**判据 (背包黑曜石 ≥ 10), 而搭门本身会消耗黑曜石;
+    // 内层 ConstructNetherPortalObsidianTask 用的是另一个口径 (还需要 10 - 已就位),
+    // 两者在搭门过程中必然分叉。实测 20260920-205755:
+    //   21:02:09.489 背包 11 块过闸 "building portal home directly"
+    //   21:02:09.539 放第 1 块 (剩 10)
+    //   21:02:11.585 放第 2 块 (剩 9)
+    //   21:02:13.291 外层重判 canBuildPortalHome=false → 撤回构造任务转
+    //                "Going to last nether portal pos" (跑去 -18,72,32 的旧门)
+    // 门只搭了两块就永远搭不完。修 = 一旦过闸决定直造就锁住该决策, 仅超时兜底
+    // 释放 (门已建好时由维度切换自然结束本任务)。
+    private boolean _buildingPortalHome = false;
+    private long _portalHomeBuildStartMs = 0L;
+    private static final long PORTAL_HOME_BUILD_TIMEOUT_MS = 180_000;
 
     public DefaultGoToDimensionTask(Dimension target) {
         _target = target;
@@ -101,13 +117,33 @@ public class DefaultGoToDimensionTask extends Task {
         // 材料闸收死: 黑曜石 ≥10, 且有打火石或"铁锭+燧石"能现场合成 ——
         // 绝不让 ConstructNetherPortalObsidianTask 在下界触发黑曜石收集
         // (那条路绕猪灵交易, 是另一个阶段的事)。
-        if (canBuildPortalHome(mod)) {
+        // 粘滞闩 (见字段 _buildingPortalHome 注释): 过闸后不再因背包数量下降撤回。
+        // 超时兜底: 锁了这么久还没进主世界, 放弃直造回到旧的找门链。
+        if (_buildingPortalHome && System.currentTimeMillis() - _portalHomeBuildStartMs > PORTAL_HOME_BUILD_TIMEOUT_MS) {
+            Debug.logMessage("(PortalHome) Direct build latched for " + (PORTAL_HOME_BUILD_TIMEOUT_MS / 1000)
+                    + "s without finishing; falling back to portal search chain.");
+            Debug.logToFile("altoclef_diag.log", "[PortalHome]\tlatch TIMEOUT " + PORTAL_HOME_BUILD_TIMEOUT_MS
+                    + "ms, release to portal search chain");
+            _buildingPortalHome = false;
+        }
+
+        if (_buildingPortalHome || canBuildPortalHome(mod)) {
             Optional<BlockPos> litNearby = mod.getBlockTracker().getNearestTracking(mod.getPlayer().getPos(), Blocks.NETHER_PORTAL);
             if (litNearby.isEmpty() || !litNearby.get().isWithinDistance(mod.getPlayer().getPos(), 64)) {
+                if (!_buildingPortalHome) {
+                    _buildingPortalHome = true;
+                    _portalHomeBuildStartMs = System.currentTimeMillis();
+                    int obsidian = mod.getItemStorage().getItemCount(Items.OBSIDIAN);
+                    Debug.logMessage("(PortalHome) Materials available (obsidian=" + obsidian
+                            + ") — latching direct build until portal is finished.");
+                    Debug.logToFile("altoclef_diag.log", "[PortalHome]\tlatch ON, obsidian=" + obsidian
+                            + " — sticky until built (timeout " + (PORTAL_HOME_BUILD_TIMEOUT_MS / 1000) + "s)");
+                }
                 setDebugState("Has obsidian + flint&steel (or materials), building portal home directly");
                 return new ConstructNetherPortalObsidianTask();
             }
             setDebugState("Lit nether portal within 64 blocks, entering instead of building");
+            _buildingPortalHome = false;
         }
 
         if (netherPortalIsClose(mod)) {
