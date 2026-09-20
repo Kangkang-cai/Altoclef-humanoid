@@ -1702,7 +1702,8 @@ public class BeatMinecraft2Task extends Task {
         // (2026-09-20 用户"8 根棒已换成 16 粉后还在继续收 8 根") 一次性门: 棒只为补
         // 粉缺口而收。旧行为 needsBlazeRods 只看棒计数 (rods < 8), 而棒一旦合成粉就
         // 归零 → 恒真, 形成 收8根 → 合16粉 → 再收8根 的死循环。现在粉缺口 (眼 + 粉
-        // 等效折算, 眼 1 个 = 2 粉) 达标即 needsBlazePowder=false → 棒收集停止;
+        // 等效折算, 眼 1 个 = 1 粉 —— 合 1 眼耗 1 粉 + 1 珍珠; "2" 是 棒→粉 的折算,
+        // 1 棒 = 2 粉, 别混) 达标即 needsBlazePowder=false → 棒收集停止;
         // 已有的眼/粉自动计入 ("同时要考虑已有的眼睛等情况")。之后只有眼/粉真被
         // 消耗出缺口 (如插门框/定位丢眼) 才会重启, 属正常补货语义。
         boolean needsBlazePowder = eyeCount + blazePowderCount < targetEyes;
