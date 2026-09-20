@@ -100,9 +100,39 @@ public abstract class SearchChunksExploreTask extends Task {
         //Debug.logMessage("Search reset");
         _searcher = null;
         _alreadyExplored.clear();
-        // We want to search the currently loaded chunks too!!!
+        // (2026-09-20 就近选起点, 预存行为修正) 原实现按 getLoadedChunks() 的
+        // HashSet 迭代顺序取【第一个】匹配区块当搜索起点 —— 顺序等于随机, 会把
+        // bot 派到渲染区对角的零星匹配块, 而放着眼前的目标区域不管。现场
+        // 20260920-112716: bot 站在诡异森林边缘 (玩家区块 [57,1]), searcher 却从
+        // [72,-11] (对角 ~300 格外的角落块) 起步, blob 秒耗尽 → 无限 wander 到
+        // 别的区块。改为扫描全部已加载区块取离玩家最近的匹配块。
+        // 代价: resetSearch 只在任务启动时跑一次, 原"无匹配"分支本来就要全扫;
+        // 每块扫描命中即短路, 全量实测 <100ms (20260920-112716 79ms 跑完)。
+        ChunkPos best = null;
+        double bestDistSq = Double.POSITIVE_INFINITY;
+        int loadedCount = 0, matchedCount = 0;
         for (ChunkPos start : mod.getChunkTracker().getLoadedChunks()) {
-            onChunkLoad(start);
+            loadedCount++;
+            if (!isChunkWithinSearchSpace(mod, start)) continue;
+            matchedCount++;
+            double cx = start.getStartX() + 8, cz = start.getStartZ() + 8;
+            double dx = cx - mod.getPlayer().getX(), dz = cz - mod.getPlayer().getZ();
+            double distSq = dx * dx + dz * dz;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = start;
+            }
+        }
+        // 零行为诊断: 起点选了谁、离玩家多远、玩家在哪 —— 下次"往别的区块跑"
+        // 一眼可判 (若 best 恒为 none 而眼前明明有目标, 说明扫描判据本身漏了)。
+        Debug.logMessage("[ChunkSearch] start selection: loaded=" + loadedCount
+                + " matched=" + matchedCount
+                + " best=" + (best == null ? "none" : best.toString())
+                + " playerChunk=[" + (mod.getPlayer().getBlockPos().getX() >> 4) + ", "
+                + (mod.getPlayer().getBlockPos().getZ() >> 4) + "]"
+                + (best == null ? "" : " dist=" + (int) Math.sqrt(bestDistSq) + " blocks"));
+        if (best != null) {
+            onChunkLoad(best);
         }
     }
 

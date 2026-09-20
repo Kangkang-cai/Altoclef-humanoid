@@ -195,6 +195,17 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 不需要 BlockTracker 追踪, 蹲守也就不会再触发全量重扫。
         _campTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlCampMaxSeconds());
         _dryTimer = new TimerGame(mod.getModSettings().getOpportunisticPearlDrySeconds());
+        // (2026-09-20 实锤修复, 预存 bug —— 本任务 0918 创建起就没跑通过) BaseTimer
+        // 的 _prevTime 初始为 0, 而 TimerGame.currentTime() = ClientConnection.ticks/20
+        // (会话已进行的真实秒数)。开局才 new 出来的计时器 getDuration() 直接就是
+        // "会话已跑时长", 60s 枯竭线 3 分钟后的会话里【出生即到点】→ onResourceTick
+        // 第一拍就 giveUp("no-enderman-seen") → 上层起 120s 冷却 → "看得见的林子"
+        // 拱手让给逐区块搜索/wander。现场 20260920-112716: [PEARL-OPP] START
+        // 11:30:44.840 与 GIVEUP 11:30:44.840 同毫秒 (campMax=300 未到点而 dry=60
+        // 已到点, 与"连接已跑 208s"完全吻合)。修法 = onStart 显式归零, 与
+        // Task 框架铁律"onStart 必须清零实例级状态"同一条。
+        _campTimer.reset();
+        _dryTimer.reset();
         // (2026-09-19) 实例复用/二次进入时清零可变状态 (Task 框架铁律: onStart 必须
         // 把上一条命的闩/实例级状态清干净, 否则"带着上一次的拉回模式开局")。
         _returning = false;

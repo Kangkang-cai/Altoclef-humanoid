@@ -38,6 +38,8 @@ abstract class ChunkSearchTask extends Task {
     private boolean _finished = false;
 
     private Subscription<ChunkLoadEvent> _onChunkLoad;
+    // (2026-09-20 sticky target, 预存行为修正) 上一拍选中的目标区块。见 onTick。
+    private ChunkPos _currentTarget = null;
 
     public ChunkSearchTask(BlockPos startPoint) {
         _startPoint = startPoint;
@@ -62,6 +64,7 @@ abstract class ChunkSearchTask extends Task {
         if (_first) {
             _finished = false;
             _first = false;
+            _currentTarget = null;
             ChunkPos startPos = mod.getWorld().getChunk(_startPoint).getPos();
             synchronized (_searchMutex) {
                 searchChunkOrQueueSearch(mod, startPos);
@@ -100,10 +103,25 @@ abstract class ChunkSearchTask extends Task {
         }
 
         // Now that we have an updated map, go to the nearest
-        ChunkPos closest = getBestChunk(mod, _searchLater);
+        // (2026-09-20 sticky target, 预存行为修正) 原实现每 tick 重算 getBestChunk:
+        // 新邻块入队 / 玩家位置一变, best 就可能换成别的区块 → GetToChunkTask 每次换
+        // 目标都被重建 (onStart → onLostControl) → baritone 作废当前路径整段重算。
+        // 现场 20260920-112716 tasks.log: 目标 3~10s 一换 ([69,-10]→[70,-10]→[71,-10]
+        // →[71,-11]→[72,-11], 全程没走到任何一个), 用户观感 = "远距离目标走十几格就
+        // 停下来重算路径"。修法: 目标粘滞 —— 当前目标只要还在 _searchLater (未被
+        // 搜过/未失效) 就不换, 真正走进并搜完该块后才重选最近的下一块。途经新加载
+        // 的区块不受影响: 它们照常经 _justLoaded 被扫描入队。
+        ChunkPos closest;
+        if (_currentTarget != null && _searchLater.contains(_currentTarget)) {
+            closest = _currentTarget;
+        } else {
+            closest = getBestChunk(mod, _searchLater);
+            _currentTarget = closest;
+        }
 
         if (closest == null) {
             _finished = true;
+            _currentTarget = null;
             Debug.logWarning("Failed to find any chunks to go to. If we finish, that means we scanned all possible chunks.");
             //Debug.logMessage("wtf??????: " + _finished);
             return null;
