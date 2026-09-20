@@ -488,7 +488,24 @@ public class AltoClef implements ModInitializer {
             int y = pos.getY();
             if (y < world.getBottomY() || y >= world.getTopY()) return false;
             BlockState state = world.getBlockState(pos);
-            if (state.getBlock() == Blocks.SOUL_SAND) return true;
+            if (state.getBlock() == Blocks.SOUL_SAND) {
+                // (2026-09-20 灵魂沙边缘浸岩浆) 09-13 的**无条件**放行有个副作用: baritone
+                // 会心安理得地把路径规划到"紧贴岩浆的灵魂沙"上 —— 判定链是 09-13 自己
+                // 留下的 (灵魂沙 canWalkOn=false ⇒ 全局放行), 但放行时没人问过
+                // "站上去脚下会不会被浇到"。
+                //   灵魂沙顶面 = 0.875 (14/16), 站上去脚比正常方块低 0.125; 相邻同层
+                //   岩浆的液面高度 ≥0.875 ⇒ 身体 AABB 与岩浆相交 ⇒ 持续着火, 并触发
+                //   EscapeFromLavaTask 的原地弹跳 (20260920-155006 现场: 站 (17,31,71)
+                //   12.5s, netXZ=0.00 / yRange=1.67, 血 20→0, cause=lava)。
+                // 处置: 邻域有岩浆的灵魂沙不再作为**导航落点** —— 从上游不让 bot 站上去。
+                // 例外: bot 自己当前站位仍放行。否则"已经站在上面"会退化成
+                //   canWalkOn=false → A* 起点判据全灭 → Open set size: 0 → 站桩
+                //   (与 09-13 那次事故同构), 连走开的机会都没有。
+                //   语义与 09-19 栅栏"只解冻当前站位"完全同构: 放行"我要走开"这个事实,
+                //   不放行"我要走过去"这个意图。
+                if (isOwnCurrentSupport(pos)) return true;
+                return !hasAdjacentLava(world, pos);
+            }
             // (2026-09-19 栅栏/墙/栏杆"解冻站位") MovementHelper.canWalkOn 是硬编码
             // 白名单 —— isBlockNormalCube(整格满立方) 之后只放行
             // LADDER/VINE/FARMLAND/DIRT_PATH/CHEST/ENDER_CHEST/TRAPPED_CHEST/GLASS/
@@ -611,6 +628,30 @@ public class AltoClef implements ModInitializer {
         if (p == null) return false;
         BlockPos feet = p.getBlockPos();
         return pos.equals(feet) || pos.equals(feet.down());
+    }
+
+    /**
+     * (2026-09-20 灵魂沙边缘浸岩浆) pos 的"同层 8 邻域(含对角)"或"上方一层"是否存在
+     * 岩浆方块。用于把灵魂沙的 canWalkOnForce 放行收窄到"不会把脚浇到岩浆里"的位置。
+     *
+     * 为什么要查上一层的对角: 玩家 AABB 半宽 0.3, 站在灵魂沙边缘时身体会横向探出到
+     * 相邻列; 相邻列 y+1 的岩浆液面(0.888~1.0)同样能浸到脚(灵魂沙顶面仅 0.875)。
+     * 下方一层刻意不查 —— 脚底就在站立方块顶面, 物理上不可能浸到下一层。
+     *
+     * 开销: 本谓词被 baritone 的 A* 在热路径上调用, 但只有"该方块确实是灵魂沙"时
+     * 才会进到这里(前面已早退), 且 16 次 getBlockState 全部命中即返回, 可忽略。
+     * 只读世界、不回调 baritone(避免谓词自递归)。
+     */
+    private static boolean hasAdjacentLava(ClientWorld world, BlockPos pos) {
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) continue;
+                    if (world.getBlockState(pos.add(dx, dy, dz)).getBlock() == Blocks.LAVA) return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ==== (2026-09-19 岩浆里 baritone 起点判据同步) ====

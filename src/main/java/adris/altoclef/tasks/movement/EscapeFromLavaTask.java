@@ -5,7 +5,6 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
-import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
@@ -14,6 +13,7 @@ import baritone.pathing.movement.MovementHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
@@ -59,6 +59,31 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
     // BaseTimer 初始 _prevTime=0 会误判 elapsed —— onStart 没跑过绝不判完成。
     private boolean _started = false;
 
+    // ===== (2026-09-20 灵魂沙边缘浸岩浆) "贴地锚点" latch =====
+    // 危险判据 (EscapeFromLavaGoal) 必须跑在一个**稳定**的坐标上。用
+    // player.getBlockPos() 会撞上"瞬时判据横跳":
+    //   本任务的求生动作 (上浮) 把 bot 从 y=31 (危险 —— 同层相邻格正是岩浆, 脚因
+    //   灵魂沙矮 0.125 而被液面浸到) 抬到 y=32/33 (同一套判据看那些 y 层却是"空气
+    //   邻格", 于是判安全) → checkEscapeStall 的豁免条件每周期被满足一次 →
+    //   _stuckSinceMs 反复清零 → 12.5 秒里 forceCancel 与岸边垫块一次都没触发。
+    //   现场 20260920-155006 实锤: 15:51:57.528 进入 Escaping lava, 到 15:52:10.578
+    //   死亡 (cause=lava), 全程 [LavaEscape-Stuck] 与 "岸边垫块上岸" 日志双双 0 条,
+    //   而 NAV-STUCK 记录 netXZ=0.00 / yRange=1.67。
+    // 口径 = "最近一次贴地 / 身处流体时的格", 只在 onGround() 或 isInLava() 时更新;
+    // 空中飞行的帧不更新 (日志里 y=32.29/32.40/32.71/32.78 那些采样均落在此类)。
+    // 对灵魂沙场景等价于"我就站在 (17,31,71) 这个事实", 上浮全过程恒定。
+    private BlockPos _anchor = null;
+
+    /** 见 _anchor 字段注释。返回 null 表示玩家尚未就绪。 */
+    private BlockPos standingAnchor(AltoClef mod) {
+        ClientPlayerEntity p = mod.getPlayer();
+        if (p == null) return null;
+        if (_anchor == null || p.isOnGround() || p.isInLava()) {
+            _anchor = p.getBlockPos();
+        }
+        return _anchor;
+    }
+
     // ===== (2026-09-14 岸边垫块上岸, 用户"差一步上岸爬不上去, 岸边放方块走上去
     //       就逃生") =====
     // 20260914-205250 场次实锤: bot 贴岸 y=31.20 零位移 40s+, baritone
@@ -97,12 +122,27 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
         // (2026-09-14 横跳修复) 离场滞回计时从"进任务"起算。
         _started = true;
         _outOfLavaTimer.reset();
+        _anchor = null;
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
-        // Sprint through lava + jump, it's faster
-        if (mod.getPlayer().isInLava() || mod.getWorld().getBlockState(mod.getPlayer().getBlockPos().down()).getBlock() == Blocks.LAVA) {
+        // (2026-09-20 灵魂沙边缘浸岩浆) 上浮条件由 "isInLava()"(AABB 接触口径) 收紧为
+        // "脚所在格 / 脚下方格是岩浆方块"(格子口径) —— 两者之差正是"擦到"与"泡在":
+        //   · 泡在岩浆里 / 悬在岩浆面上 → 上浮有意义 (在流体内按住 JUMP = 上浮)。
+        //   · 站在实心面上、仅脚部被相邻岩浆浸到 → 上浮不但无意义, 而且有害:
+        //     isInLava() 为真时 MC 走流体移动分支, JUMP 被当作上浮 → 抬升 1.6 格
+        //     (远超普通跳跃 1.25) → 脱离岩浆 → isInLava()=false → 掉回原位 → 再上浮,
+        //     形成"原地上下跳"死循环 (20260920-155006: netXZ=0.00 / yRange=1.67 /
+        //     inputs[jump=true] 对 bIn[jump=false], 12.5s 烧死)。
+        //   · 更致命的是它把 bot 抬进"看起来安全"的 y 层, 使危险判据横跳 (见 _anchor)。
+        //   收紧后, 站在灵魂沙上时不再自锁弹跳, 脱险完全交给 baritone 走位 +
+        //   tryPlaceBankStep 盖掉脚边岩浆格这两条正路。
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        boolean feetIsLava = mod.getWorld().getBlockState(feet).getBlock() == Blocks.LAVA;
+        boolean belowIsLava = mod.getWorld().getBlockState(feet.down()).getBlock() == Blocks.LAVA;
+        if (feetIsLava || belowIsLava) {
+            // Sprint through lava + jump, it's faster
             mod.getInputControls().hold(Input.JUMP);
             mod.getInputControls().hold(Input.SPRINT);
         }
@@ -129,14 +169,21 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
                 .filter(item -> item instanceof BlockItem).toArray(Item[]::new);
         if (mats.length == 0 || mod.getItemStorage().getItemCount(mats) == 0) return null;
 
-        BlockPos feet = mod.getPlayer().getBlockPos();
+        BlockPos feet = standingAnchor(mod);
+        if (feet == null) return null;
         for (Direction dir : HORIZONTALS) {
             BlockPos t = feet.offset(dir);
             BlockState ts = mod.getWorld().getBlockState(t);
             boolean replaceable = ts.isAir() || ts.getBlock() == Blocks.LAVA || ts.getMaterial().isReplaceable();
             if (!replaceable) continue;
             BlockPos bank = t.offset(dir);
-            if (!WorldHelper.isSolid(mod, bank)) continue;
+            // (2026-09-20 灵魂沙边缘浸岩浆) 原判据 `WorldHelper.isSolid(bank)` 走的是
+            // BlockState.isSolidBlock, 对灵魂沙口径存疑 (灵魂沙碰撞盒 0.875、非满立方);
+            // 而灵魂沙谷恰恰是本逻辑最需要生效的场景 (脚边岩浆 + 前方灵魂沙岸)。
+            // 放宽为"是个实体方块 (非空气、非流体)"——比原判据更宽, 不会收窄任何原有
+            // 可放置面, 零回归。
+            BlockState bs = mod.getWorld().getBlockState(bank);
+            if (bs.isAir() || !bs.getFluidState().isEmpty()) continue;
             // 垫完要能站上 T (T 上方空气), 并从 T 踏上 B 顶 (B 上方两格通行)。
             if (!mod.getWorld().getBlockState(t.up()).isAir()) continue;
             if (!isPassableForStand(mod, bank.up()) || !isPassableForStand(mod, bank.up(2))) continue;
@@ -162,15 +209,33 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
 
     /**
      * (2026-09-14 逃生僵持兜底) 见字段区 LAVA_STUCK_MS 注释。
-     * 这里补一道占位检查: 仅水平方向判僵硬 —— 垂直不动不算 (原地跳处理岩浆是合法的、
-     * 站在方块上/下坠都可能), 只看"没往外挪"。
+     * 仅水平方向判僵硬 —— 垂直位移不计入"有进展"(下坠与浮沉都不算脱险), 只看"有没有
+     * 往外挪"。
+     *
+     * (2026-09-20 更正) 本注释原文是"垂直不动不算 (原地跳处理岩浆是合法的)" —— **这句
+     * 是错的**, 且正是 20260920-155006 那次 12.5s 烧死的帮凶:
+     *   · 站在灵魂沙上被相邻岩浆浸到时, 上浮只是"抬起→脱离→掉回"的死循环, 12.5s 零水平
+     *     位移, 从来不是"合法的处理岩浆方式";
+     *   · 更糟的是上浮把 bot 抬进 y=32/33 的"安全 y 层", 使下面的豁免条件每周期成立,
+     *     本方法 12.5s 内一次都没走到 forceCancel —— 所谓"不判垂直"直接变成了"不判"。
+     * 现在豁免必须同时满足 goal 判据与身体判据 (见下方 "两道加固")。
      */
     private void checkEscapeStall(AltoClef mod) {
         long now = System.currentTimeMillis();
         // 已经站在"不在岩浆里、四邻也没岩浆"的位置: 剩下只是等火灭 (isFinished 的
         // 判据), 站着不动是对的, 不该重算路径刷日志。
-        BlockPos here = mod.getPlayer().getBlockPos();
-        if (newGoal(mod).isInGoal(here.getX(), here.getY(), here.getZ())) {
+        //
+        // (2026-09-20 灵魂沙边缘浸岩浆) 两道加固, 缺一条就会回到 12.5s 烧死的现场:
+        //   ① 判据坐标改用**贴地锚点** (见 _anchor 注释)。原来用 getBlockPos(), 本任务
+        //      自己的上浮动作会把它抬到 y=32/33 的"安全 y 层", 使这里每周期豁免一次。
+        //   ② 加**身体状态闸门**: 仍在着火 / 仍被岩浆浸 (isInLava) 时不得清零计时。
+        //      这两个信号是"我还没脱险"的硬事实, 身份高于 goal 的格子推断 ——
+        //      goal 说安全而身体在烧, 恰恰是"判据没覆盖到真实危险"的签名。
+        BlockPos here = standingAnchor(mod);
+        if (here == null) return;
+        boolean goalSaysSafe = newGoal(mod).isInGoal(here.getX(), here.getY(), here.getZ());
+        boolean bodySaysSafe = !mod.getPlayer().isOnFire() && !mod.getPlayer().isInLava();
+        if (goalSaysSafe && bodySaysSafe) {
             _stuckSinceMs = 0;
             return;
         }
