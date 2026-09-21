@@ -1106,6 +1106,25 @@ public class MineAndCollectTask extends ResourceTask {
             return false;
         }
 
+        /**
+         * (2026-09-21 床/木挖完必捡掉落, 用户"第一张打完不去拾取") 掉落最优先
+         * 判定写在 getClosestTo (isCollectDropsImmediately 分支), 但父类 pursuit
+         * 粘滞在更上游覆盖它 —— 20260921-154115 实锤: 挖掉门口床 (9833,18,-10693)
+         * 同帧锁定村庄床 (9829,69,-10662); 掉落物注册后 getClosestTo 已返回脚下
+         * 掉落, 但 bot 走向村庄床距离在缩 → "Closing in on target, keeping
+         * pursuit" / "Sticking with current pursuit" (debugstate 15:42:00.316/.365
+         * 两行) 把掉落永远否决, 掉落躺在原地等 despawn。
+         * 修复: 仅当本目标属"挖完立刻捡"族且【场上确实存在掉落物】时开放粘滞
+         * 击穿 (与 2026-09-18 战斗近距优先同一钩子) —— 此时 getClosestTo 必然
+         * 返回该掉落 (掉落最优先), isSignificantlyCloser 的 0.85 系数天然满足
+         * (刚挖完掉落在脚下)。无掉落时防横跳语义原样保留。
+         */
+        @Override
+        protected boolean closerTargetMayBreakSticky(AltoClef mod) {
+            if (!isCollectDropsImmediately()) return false;
+            return mod.getEntityTracker().itemDropped(_targets);
+        }
+
         // =========================================================================
         // (2026-09-19 垫脚补货贴地选择) 20260919-102254 实锤: 下界垫脚补货挖到
         // 的下界岩大量【悬空】生成 (下 8 格全空/岩浆湖上空的漂浮团块) —— ① 掉落
