@@ -234,6 +234,9 @@ public class ExploreStrongholdTask extends Task {
     /** 看到门框的统一出口: 登记 BlockTracker + 记忆落盘 (要塞+门都记)。 */
     private boolean portalSeen(AltoClef mod, BlockPos framePos, String how) {
         mod.getBlockTracker().addBlock(Blocks.END_PORTAL_FRAME, framePos);
+        // (2026-09-21) 记下亲眼确认的门框, 供父任务链回填 BeatMinecraft2Task
+        // 的 _endPortalCenterLocation (修复"看到门后挂机" — 131443 实锤)。
+        _portalFramePos = framePos.toImmutable();
         // (2026-09-21 要塞/末地门记忆) 门框亲眼确认 → END_PORTAL 中心落盘
         // knowledge.log, 跨会话重启后 GoToStrongholdPortalTask 直接导航过来,
         // 不再丢眼定位。
@@ -377,6 +380,14 @@ public class ExploreStrongholdTask extends Task {
     @Override
     public boolean isFinished(AltoClef mod) {
         return _foundPortal;
+    }
+
+    // (2026-09-21) portalSeen 记下的门框位置 (未见过 → null)。
+    private BlockPos _portalFramePos;
+
+    /** 探索阶段亲眼确认的门框位置 (FOV+LOS 看到, 非 8 分钟兜底透视)。 */
+    public BlockPos getPortalFramePos() {
+        return _portalFramePos;
     }
 
     @Override

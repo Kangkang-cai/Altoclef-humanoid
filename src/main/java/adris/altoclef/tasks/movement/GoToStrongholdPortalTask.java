@@ -359,6 +359,14 @@ public class GoToStrongholdPortalTask extends Task {
         return _exploreTask != null && _exploreTask.isFinished(mod);
     }
 
+    /**
+     * (2026-09-21) 探索阶段亲眼确认的门框位置 (未确认 → null)。
+     * 供 BeatMinecraft2Task 回填 _endPortalCenterLocation, 修"看到门后挂机"。
+     */
+    public BlockPos getDiscoveredPortalFrame() {
+        return _exploreTask != null ? _exploreTask.getPortalFramePos() : null;
+    }
+
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
     }

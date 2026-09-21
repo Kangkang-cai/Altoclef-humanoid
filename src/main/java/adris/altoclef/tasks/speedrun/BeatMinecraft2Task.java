@@ -1407,6 +1407,31 @@ public class BeatMinecraft2Task extends Task {
         }
         switch (WorldHelper.getCurrentDimension()) {
             case OVERWORLD -> {
+                // (2026-09-21 修复"看到门后挂机", 131443 实锤: 13:15:13 Found the
+                // end portal! 后空转 12s 直到 Mob Defense 抢占) 探索任务 FOV/LOS
+                // 看见门框完成时, _endPortalCenterLocation 还是 null —— 它原本只在
+                // 内联丢眼分支赋值 (:1254/1261), 而 1014 锁定后该分支被永久旁路 →
+                // endPortalFound(null) 恒 false → 返回已完成实例 → 其 onTick 恒
+                // null = 挂机。回填: 用探索确认的门框在 ±2 邻域试出满足
+                // endPortalFound 语义 (12 框全 world-valid) 的真中心。
+                if (_endPortalCenterLocation == null && _locateStrongholdTask.isFinished(mod)) {
+                    BlockPos seenFrame = _locateStrongholdTask.getDiscoveredPortalFrame();
+                    if (seenFrame != null) {
+                        for (int dx = -2; dx <= 2 && _endPortalCenterLocation == null; dx++) {
+                            for (int dz = -2; dz <= 2; dz++) {
+                                BlockPos cand = seenFrame.add(dx, 0, dz);
+                                if (endPortalFound(mod, cand)) {
+                                    _endPortalCenterLocation = cand;
+                                    Debug.logMessage("[PortalMemory] explore-confirmed portal center "
+                                            + cand.toShortString() + " (from seen frame "
+                                            + seenFrame.toShortString() + ").");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // If we found our end portal...
                 if (endPortalFound(mod, _endPortalCenterLocation)) {
                     // (2026-08-27 修复: 处理传送门阶段锁定) 找到门后整段(拆刷怪笼/

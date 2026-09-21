@@ -868,6 +868,14 @@ public class MobDefenseChain extends SingleTaskChain {
                 boolean yieldBlazes = shouldYieldBlazesToEnclosureBuild(mod);
                 for (Entity hostile : hostiles) {
                     if (yieldBlazes && hostile instanceof BlazeEntity) continue;
+                    // (2026-09-21 用户"距离传送门6格远的虫子就不下杀死死命令") 威胁
+                    // 公式路径不走 getNearbyHostiles 漏斗, 必须在这里同款剔除 ——
+                    // 否则蠹虫照样进 _closeAnnoyingEntities 计时 → FIGHT (131443
+                    // 实锤: nearbyHostiles=0 仍提交 FIGHT enemies=1)。
+                    if (hostile instanceof SilverfishEntity
+                            && isNearEndPortalAnchor(mod, hostile.getBlockPos())) {
+                        continue;
+                    }
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
                     int annoyingRange = hostile instanceof SkeletonEntity
                             ? SKELETON_KILL_TRIGGER_RANGE
@@ -1029,8 +1037,11 @@ public class MobDefenseChain extends SingleTaskChain {
         doForceField(mod);
 
         // 1. Drop targets that died, despawned, or genuinely fled.
+        // (2026-09-21) 已进批次的蠹虫若落在传送门 6 格内 → 立即弃杀 (用户规则),
+        // 否则 KillEntitiesTask 会对着豁免目标 wander 空转找怪 (131443 实锤)。
         _fightTargets.removeIf(e -> e == null || !e.isAlive()
                 || !mod.getEntityTracker().isEntityReachable(e)
+                || (e instanceof SilverfishEntity && isNearEndPortalAnchor(mod, e.getBlockPos()))
                 || Math.sqrt(e.squaredDistanceTo(mod.getPlayer())) > FIGHT_MAX_CHASE_DISTANCE);
 
         // 2. Absorb hostiles that joined the fight (集中击杀: since we're
@@ -1054,6 +1065,11 @@ public class MobDefenseChain extends SingleTaskChain {
                 for (Entity hostile : mod.getEntityTracker().getHostiles()) {
                     if (_fightTargets.contains(hostile)) continue;
                     if (yieldBlazes && hostile instanceof BlazeEntity) continue;
+                    // (2026-09-21) 已开打的批次也不吸收传送门 6 格内的蠹虫。
+                    if (hostile instanceof SilverfishEntity
+                            && isNearEndPortalAnchor(mod, hostile.getBlockPos())) {
+                        continue;
+                    }
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
                     int annoyingRange = hostile instanceof SkeletonEntity
                             ? SKELETON_KILL_TRIGGER_RANGE
