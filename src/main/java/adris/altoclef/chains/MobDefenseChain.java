@@ -7,6 +7,7 @@ import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.PathReachabilityHelper;
@@ -26,6 +27,7 @@ import baritone.api.utils.RotationUtils;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.AbstractFireBlock;
 import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.boss.WitherEntity;
@@ -609,14 +611,49 @@ public class MobDefenseChain extends SingleTaskChain {
             hostiles = mod.getEntityTracker().getHostiles();
         }
         List<Entity> near = new ArrayList<>();
+        boolean anySilverfish = false;
         for (Entity hostile : hostiles) {
             if (hostile.isAlive() && hostile.isInRange(mod.getPlayer(), 16)) {
+                if (hostile instanceof SilverfishEntity) anySilverfish = true;
                 near.add(hostile);
             }
+        }
+        // (2026-09-21 用户"距离传送门6格远的虫子就不下杀死死命令") 传送门锚点
+        // 6 格内的蠹虫从威胁清单剔除: 开门/拆笼作业不被 FIGHT 批次抢占 (蠹虫
+        // 威胁极低, 误杀方向代价 >> 忽略方向)。锚点 = BlockTracker 已登记的门框
+        // + KnowledgeMemory 的 END_PORTAL 中心 (跨会话也生效); 附近无蠹虫时
+        // 零成本跳过。只剔蠹虫, 骷髅等远程威胁照常处理 (must-kill 语义不变)。
+        if (anySilverfish && near.removeIf(h -> h instanceof SilverfishEntity
+                && isNearEndPortalAnchor(mod, h.getBlockPos()))) {
+            Debug.logMessage("[MOB-DIAG] silverfish within " + SILVERFISH_PORTAL_IGNORE_RADIUS
+                    + " of end portal anchor dropped from threat list (user rule).");
         }
         // [MOB-DIAG] #1 只读: 该触发点的威胁清单 (0.5s 节流)。
         logNearbyHostilesDiag(mod, near);
         return near;
+    }
+
+    /** (2026-09-21) 传送门 6 格内蠹虫豁免的判定半径 (用户指定 6 格)。 */
+    private static final double SILVERFISH_PORTAL_IGNORE_RADIUS = 6.0;
+
+    /**
+     * 传送门锚点 = BlockTracker 已登记的 END_PORTAL_FRAME (本会话亲眼见过)
+     * ∪ KnowledgeMemory 的 END_PORTAL 中心 (跨会话记忆)。都没有 → false。
+     */
+    private static boolean isNearEndPortalAnchor(AltoClef mod, BlockPos mobPos) {
+        for (BlockPos frame : mod.getBlockTracker().getKnownLocations(Blocks.END_PORTAL_FRAME)) {
+            if (frame != null && frame.isWithinDistance(mobPos, SILVERFISH_PORTAL_IGNORE_RADIUS)) {
+                return true;
+            }
+        }
+        Vec3d player = mod.getPlayer().getPos();
+        for (BlockPos center : mod.getKnowledgeMemory().getRememberedCenters(
+                KnowledgeMemory.StructureType.END_PORTAL, player, SILVERFISH_PORTAL_IGNORE_RADIUS + 16)) {
+            if (center != null && center.isWithinDistance(mobPos, SILVERFISH_PORTAL_IGNORE_RADIUS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
