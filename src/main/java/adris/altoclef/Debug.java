@@ -123,6 +123,15 @@ public class Debug {
      * an IO hiccup can never break the game tick.
      */
     public static void logToFile(String filename, String message) {
+        // (2026-09-21 录制同步) 诊断日志单点入流: 本方法是全项目诊断 (diag/chat 镜像/
+        // trace) 的唯一汇聚点, 本轮通关优化 (JumpStuckResolver 强制干预 / [VOID-GUARD]
+        // 虚空列拒绝 / 巡逻缓存候选诊断 / ChunkSearch 零行为诊断) 的决策依据几乎全
+        // 走这里。在这里喂给录制事件流, 一处收全部 —— 训练时不再"行为转折查无因果"。
+        // 节流与异常隔离都在 RecordManager.onDiagLog 内部; 未录制时 isRecording()
+        // 只是一次静态读, 零成本。
+        if (adris.altoclef.record.RecordManager.isRecording()) {
+            adris.altoclef.record.RecordManager.onDiagLog(filename, message);
+        }
         synchronized (_fileLogMutex) {
             try {
                 pruneOldSessionsOnce();

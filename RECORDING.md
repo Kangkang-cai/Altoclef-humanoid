@@ -162,7 +162,8 @@ AltoClef.onClientTick()
 
 类型: `memory_write` / `memory_read` / `damage` / `heal` / `death` / `respawn` /
 `chain_switch` / `leaf_switch` / `blacklist` / `anomaly` /
-`fireball_evade` / `fireball_repath` / `breath_touch` / `breath_clear` / `breath_near` / `breath_near_clear`
+`fireball_evade` / `fireball_repath` / `breath_touch` / `breath_clear` / `breath_near` / `breath_near_clear` /
+`diag` / `diag_dropped`
 
 - `blacklist` (2026-09-17 决策知识入流): `AbstractObjectBlacklist.blackListItem` 是方块
   (`WorldLocateBlacklist`) + 实体 (`EntityLocateBlacklist`) 黑名单的**唯一写入汇聚点**。
@@ -181,6 +182,15 @@ AltoClef.onClientTick()
   AreaEffectCloudEntity.tick 语义) 与进/出"云贴脸 10 格"主动规避圈。data: pos。
   云的逐帧 p/r 在 perception 通道 (AreaEffectCloudEntity 带 radius) —— 离线可复原
   危险区随时间的生长 (云半径 0→5 动态增长)。
+- `diag` / `diag_dropped` (2026-09-21 诊断日志单点入流): `Debug.logToFile` 是全项目
+  诊断 (altoclef_diag.log / altoclef_chat.log 聊天镜像 / altoclef_trace.log) 的**唯一
+  汇聚点**, 在落盘的同时喂进事件流 —— 一处收全部。data: file/msg 原文。
+  覆盖的决策依据: `[JumpStuck]` 强制干预全套 (order/forceCancel/wander 拽离/豁免)、
+  `[DigGuard]`/`[LavaGuard]`/`[LavaEscape]`、`[VOID-GUARD]` 虚空列拒绝、巡逻缓存候选
+  与锚点漂移、ChunkSearch 零行为诊断、末影人失联引出 (`[EndermanLure]` 族)、
+  `[Portal-*]` 门链路。**节流: 每文件 250ms 一条 + 全局 25 条每秒**, 超限丢弃只计数,
+  `diag_dropped` 5s 至多汇报一次累计条数 —— 稀疏决策日志远低于阈值不会被节,
+  刷屏型日志 ([Liquid-avoid] 类) 恰好被压掉。异常静默吞掉, 绝不反噬行为。
 
 ---
 
@@ -318,6 +328,7 @@ tick 的真值**。
 | 缺口 | 说明 | 影响 |
 |---|---|---|
 | ~~听觉通道基本为空~~ **(2026-09-17 已修)** | 改为 `SoundSystemMixin` 在声音引擎总入口截获 (服务端广播/实体语音/自己动作音/环境音), 缓冲 8s+128, 可闻过滤 `d≤16×volume`。SoundTracker 决策语义零改动。 | 已解决 |
+| ~~决策诊断日志不入流~~ **(2026-09-21 已修)** | `Debug.logToFile` 单点汇聚插桩 → `diag` 事件 (每文件 250ms + 全局 25 条/s 节流, `diag_dropped` 汇报丢弃)。JumpStuckResolver 强制干预/虚空列拒绝/巡逻候选等决策依据全入流。 | 已解决 |
 | 无地形/可达性输入 | 感知通道给的是"可见方块", 但 baritone 寻路直接读世界 (可走性/阻挡)。这部分没进数据。 | L3 移动原语学不完整 |
 | 合成/物品变化不可直接查 | 依赖背包逐帧 diff (见 §5.7) | 关 `recordInventoryPerTick` 即失效 |
 | 瞬时记忆是两套 | 录制器自持的视觉记忆与 `MineAndCollectTask._recentlySeen`/`_seenOreTick` 口径一致但**不同步** | 数据里看不到"任务自己记的那份" |
@@ -370,6 +381,8 @@ $fr[0] | ConvertFrom-Json
 `EntityTracker.getAllPerceivedEntities()` · `SoundTracker.dumpRecentSounds()` · `Settings.isRecordDatasetEnabled()` 等录制设置
 
 ### 插桩点 (行为代码里被录制器调用的位置)
+- 诊断日志: `Debug.logToFile` (全项目唯一汇聚点) → `RecordManager.onDiagLog` →
+  `diag` 事件 (内部节流, 未录制零成本早退)
 - 记忆写入: `WorldMemory.rememberOre/rememberAnimal/rememberPortal/rememberBed/rememberLostPortal/rememberDeathGrave`
   → `bumpRevision` → `RecordManager.event("memory_write", ...)`
 - 记忆读取: `WorldMemory.getNearestOre/Animal/Portal/Bed`、`KnowledgeMemory.getRememberedCenters`

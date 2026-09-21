@@ -221,6 +221,79 @@ public final class RecordManager {
         }
     }
 
+    // ===== (2026-09-21 录制同步) 诊断日志入流 =====
+    // Debug.logToFile 是全项目诊断 (diag / chat 镜像 / trace) 的唯一汇聚点。这里按
+    // (每文件 250ms 一条 + 全局 25 条每秒) 节流入 events 通道, 超限丢弃只计数,
+    // 每 5s 汇报一次 (diag_dropped)。稀疏决策日志 ([JumpStuck] ORDER/forceCancel、
+    // [VOID-GUARD]、巡逻候选、ChunkSearch 零行为诊断) 频率远低于阈值, 不会被节流。
+    private static final Object _diagMutex = new Object();
+    private static final java.util.HashMap<String, Long> _diagLastMs = new java.util.HashMap<>();
+    private static long _diagSecStart = 0;
+    private static int _diagThisSec = 0;
+    private static long _diagDropped = 0;
+    private static long _diagDropLastReportMs = 0;
+    private static final long DIAG_FILE_INTERVAL_MS = 250;
+    private static final int DIAG_MAX_PER_SEC = 25;
+
+    /**
+     * (2026-09-21) 由 {@code Debug.logToFile} 在落盘的同时调用 —— 诊断日志进录制
+     * 的唯一入口。任何异常静默吞掉 (绝不走 onError, 那条路会再打日志成环)。
+     */
+    public static void onDiagLog(String filename, String message) {
+        if (_frames == null || _disabled || _events == null || _events.getError() != null) return;
+        try {
+            long now = System.currentTimeMillis();
+            synchronized (_diagMutex) {
+                if (now - _diagSecStart >= 1000) {
+                    _diagSecStart = now;
+                    _diagThisSec = 0;
+                }
+                Long last = _diagLastMs.get(filename);
+                if (last != null && now - last < DIAG_FILE_INTERVAL_MS) {
+                    _diagDropped++;
+                    reportDiagDrops(now);
+                    return;
+                }
+                if (_diagThisSec >= DIAG_MAX_PER_SEC) {
+                    _diagDropped++;
+                    reportDiagDrops(now);
+                    return;
+                }
+                _diagLastMs.put(filename, now);
+                _diagThisSec++;
+            }
+            StringBuilder sb = new StringBuilder(96 + message.length());
+            sb.append("{\"file\":");
+            Json.str(sb, filename);
+            sb.append(",\"msg\":");
+            Json.str(sb, message);
+            sb.append('}');
+            event("diag", sb.toString());
+        } catch (Throwable ignored) {
+            // 诊断入流绝不能反噬行为
+        }
+    }
+
+    /** 丢弃计数汇报: 最多 5s 一条, 让离线分析知道 diag 通道被节流了多少。 */
+    private static void reportDiagDrops(long now) {
+        if (_diagDropped > 0 && now - _diagDropLastReportMs >= 5000) {
+            long n = _diagDropped;
+            _diagDropped = 0;
+            _diagDropLastReportMs = now;
+            event("diag_dropped", "{\"n\":" + n + "}");
+        }
+    }
+
+    private static void resetDiagThrottle() {
+        synchronized (_diagMutex) {
+            _diagLastMs.clear();
+            _diagSecStart = 0;
+            _diagThisSec = 0;
+            _diagDropped = 0;
+            _diagDropLastReportMs = 0;
+        }
+    }
+
     /** 从逐帧状态派生"需要显式标出来"的稀疏事件: 受伤/死亡/任务切换。 */
     private static void emitDerivedEvents(AltoClef mod) {
         adris.altoclef.tasksystem.TaskRunner runner = mod.getTaskRunner();
@@ -347,6 +420,7 @@ public final class RecordManager {
             _sessionDir = null;
             MemoryRecorder.reset();
             PerceptionSampler.reset();
+            resetDiagThrottle();
             _tickEventKeys.clear();
         }
     }
@@ -380,6 +454,7 @@ public final class RecordManager {
         // 派生事件也不该把"上一局的最后状态"当成基线。
         MemoryRecorder.reset();
         PerceptionSampler.reset();
+        resetDiagThrottle();
         _tickEventKeys.clear();
         _lastHp = -1;
         _lastDim = null;
@@ -421,14 +496,19 @@ public final class RecordManager {
             sb.append("\"perception\":\"D可见世界: blocks/entities/sounds (每帧, 仅录 bot 真能感知的东西)\", ");
             sb.append("\"memory\":\"E记忆快照: world/knowledge/valuable 三块 (只在写版本号变化时才写)\", ");
             sb.append("\"events\":\"稀疏事件: memory_write/memory_read/damage/heal/death/respawn/chain_switch/leaf_switch/blacklist/anomaly/");
-            sb.append("fireball_evade/fireball_repath/breath_touch/breath_clear/breath_near/breath_near_clear\"}");
+            sb.append("fireball_evade/fireball_repath/breath_touch/breath_clear/breath_near/breath_near_clear/");
+            sb.append("diag/diag_dropped\"}");
             sb.append(",\n  \"eventNotes\": {\"memory_read\":\"只在决策入口 (getNearest*/getRememberedCenters) 记, ");
             sb.append("按类型同 tick 去重; 内层循环里的 getXxxLocations 不记以免淹掉事件流\", ");
             sb.append("\"craft_item_change\":\"故意不记 —— 背包逐帧全量已含该信息, 重复导出只是翻倍体积\", ");
             sb.append("\"blacklist\":\"AbstractObjectBlacklist.blackListItem 唯一汇聚点: 方块+实体的不可达判定全量, ");
             sb.append("banned=true = 该目标已被搜索排除 (bot 放弃/绕路的官方归因)\", ");
             sb.append("\"anomaly\":\"AnomalyWatchdog.emit: stall/oscillation/unreachable/idle/duration 看门狗结论, ");
-            sb.append("自带 (type,key) 冷却去重\"}");
+            sb.append("自带 (type,key) 冷却去重\", ");
+            sb.append("\"diag\":\"Debug.logToFile 全项目诊断单点入流 (diag/chat 镜像/trace): ");
+            sb.append("[JumpStuck] 强制干预 / [VOID-GUARD] / 巡逻候选 / ChunkSearch 零行为诊断等决策依据全在此; ");
+            sb.append("节流 = 每文件 250ms 一条 + 全局 25 条每秒\", ");
+            sb.append("\"diag_dropped\":\"diag 被节流丢弃的条数汇总 (5s 至多一条)\"}");
             sb.append(",\n  \"labels\": {\"levels\": [\"L1 语义\", \"L2 操作带参\", \"L3 原语\"], ");
             sb.append("\"fieldMap\": {\"c\":\"任务类简单名\", \"d\":\"toDebugString 结构文案(含参数)\", ");
             sb.append("\"s\":\"setDebugState 语义状态(L1 标签源)\", \"f\":\"isFinished\"}, ");
