@@ -101,11 +101,22 @@ public class GoToStrongholdPortalTask extends Task {
                 // 记录点是"亲眼确认"时刻 (丢眼垂直确认 / 探索看见门框), 不是推断。
                 // 末端门槛位离要塞走廊可能差几十格 → PHASE_WALK 走到 XZ 再下挖,
                 // 探索阶段自然会收敛到真门位。
-                BlockPos recalled = recallStrongholdFromKnowledge(mod);
+                // (2026-09-21 用户"看见一个传送门=全看见") END_PORTAL 命中 = 门框
+                // 精确位置, 不是要塞走廊坐标 —— 把它当"要塞估计点"走到精确 XZ,
+                // 那个点就是门框环中心, 13/16 高的门框块挡脚 → baritone 到不了
+                // 精确点在原地 wander 卡死 (150956 实锤: recall (9833,20,-10698)
+                // 后 GetToXZ wander, bot 人就在门旁边 4 格)。直接进探索: 探索
+                // 看见门框即完成, BeatMinecraft2Task 回填门中心。
+                RecallResult recalled = recallKnowledge(mod, false, true);
                 if (recalled != null) {
-                    _strongholdCoordinates = recalled;
-                    setDebugState("Recalled stronghold/portal from knowledge, going there directly.");
-                    return null; // 落到下方 PHASE_WALK 分支
+                    _strongholdCoordinates = recalled.pos;
+                    if (recalled.isEndPortal) {
+                        _phase = PHASE_EXPLORE;
+                        setDebugState("Recalled END_PORTAL from knowledge, exploring at door (skip walk-to-XZ/dig).");
+                    } else {
+                        setDebugState("Recalled stronghold/portal from knowledge, going there directly.");
+                    }
+                    return null;
                 }
                 // 直接扫世界找掉落眼睛 (32 格覆盖飞行落点), 不依赖陈旧缓存。
                 boolean ridingBoat = mod.getPlayer() != null
@@ -359,24 +370,52 @@ public class GoToStrongholdPortalTask extends Task {
      */
     private static final double KNOWLEDGE_RECALL_RANGE = 4096;
 
+    /** 记忆召回结果: 坐标 + 类型 (END_PORTAL 命中要走"门口直达"路径, 不走精确 XZ)。 */
+    private static final class RecallResult {
+        final BlockPos pos;
+        final boolean isEndPortal;
+        RecallResult(BlockPos pos, boolean isEndPortal) {
+            this.pos = pos;
+            this.isEndPortal = isEndPortal;
+        }
+    }
+
+    /** 只查 END_PORTAL 记忆 (供 BeatMinecraft2Task 每帧直认门中心用, 静默防刷屏)。 */
+    public static BlockPos recallEndPortalFromKnowledge(AltoClef mod) {
+        RecallResult r = recallKnowledge(mod, true, false);
+        return r != null ? r.pos : null;
+    }
+
     public static BlockPos recallStrongholdFromKnowledge(AltoClef mod) {
+        RecallResult r = recallKnowledge(mod, false, true);
+        return r != null ? r.pos : null;
+    }
+
+    private static RecallResult recallKnowledge(AltoClef mod, boolean endPortalOnly, boolean verbose) {
         Vec3d pos = mod.getPlayer().getPos();
         KnowledgeMemory knowledge = mod.getKnowledgeMemory();
         List<BlockPos> portals = knowledge.getRememberedCenters(
                 KnowledgeMemory.StructureType.END_PORTAL, pos, KNOWLEDGE_RECALL_RANGE);
         if (!portals.isEmpty()) {
             BlockPos best = nearestTo(pos, portals);
-            Debug.logMessage("[PortalMemory] recalled END_PORTAL center "
-                    + best.toShortString() + " (of " + portals.size() + ") -> skip eye throwing.");
-            return best;
+            if (verbose) {
+                Debug.logMessage("[PortalMemory] recalled END_PORTAL center "
+                        + best.toShortString() + " (of " + portals.size() + ") -> skip eye throwing.");
+            }
+            return new RecallResult(best, true);
+        }
+        if (endPortalOnly) {
+            return null;
         }
         List<BlockPos> strongholds = knowledge.getRememberedCenters(
                 KnowledgeMemory.StructureType.STRONGHOLD, pos, KNOWLEDGE_RECALL_RANGE);
         if (!strongholds.isEmpty()) {
             BlockPos best = nearestTo(pos, strongholds);
-            Debug.logMessage("[PortalMemory] recalled STRONGHOLD center "
-                    + best.toShortString() + " (of " + strongholds.size() + ") -> skip eye throwing.");
-            return best;
+            if (verbose) {
+                Debug.logMessage("[PortalMemory] recalled STRONGHOLD center "
+                        + best.toShortString() + " (of " + strongholds.size() + ") -> skip eye throwing.");
+            }
+            return new RecallResult(best, false);
         }
         return null;
     }

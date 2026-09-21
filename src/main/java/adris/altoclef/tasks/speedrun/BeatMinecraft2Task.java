@@ -1270,18 +1270,36 @@ public class BeatMinecraft2Task extends Task {
                 // 竞态: 1430 的"仅未知时搜索"把写入顺序变成谁先谁赢。修: 估算
                 // 只有通过 endPortalFound 验证 (12 框全真实) 才采纳 —— 验证不过
                 // 就保持 null, 让探索回填/后续感知接管。
-                BlockPos estimated = doSimpleSearchForEndPortal(mod);
-                if (estimated != null) {
-                    if (endPortalFound(mod, estimated)) {
-                        _endPortalCenterLocation = estimated;
-                        Debug.logMessage("[PortalMemory] estimate-confirmed portal center "
-                                + estimated.toShortString() + " (perceived-frames centroid passed validation).");
-                    } else if (!_centroidEstimateRejectedLogged) {
-                        // 零行为诊断: 重心被拒一次 (正常路径 —— 探索回填会接管)。
-                        _centroidEstimateRejectedLogged = true;
-                        Debug.logMessage("[PortalMemory] centroid estimate at "
-                                + estimated.toShortString() + " rejected (not a validated center); "
-                                + "waiting for explore confirmation.");
+                // (2026-09-21 用户"看见一个传送门=全看见") knowledge 记过的
+                // END_PORTAL 中心, 人已在其附近 (门厅区块已加载) 时 endPortalFound
+                // 的 12 框结构感知直接通过 —— 不必等定位任务走完全流程再回填。
+                // 近距守卫 24 格: 防远在海上时地牢区块恰好加载就误判"门已找到"
+                // (0826 同类事故口径)。记忆点未命中或验证不过 → 落回重心估算。
+                BlockPos remembered = GoToStrongholdPortalTask.recallEndPortalFromKnowledge(mod);
+                if (remembered != null
+                        && Math.abs(remembered.getX() - mod.getPlayer().getBlockPos().getX()) <= 24
+                        && Math.abs(remembered.getZ() - mod.getPlayer().getBlockPos().getZ()) <= 24) {
+                    if (endPortalFound(mod, remembered)) {
+                        _endPortalCenterLocation = remembered;
+                        Debug.logMessage("[PortalMemory] memory-validated portal center "
+                                + remembered.toShortString() + " (endPortalFound passed, "
+                                + "bot within 24 blocks).");
+                    }
+                }
+                if (_endPortalCenterLocation == null) {
+                    BlockPos estimated = doSimpleSearchForEndPortal(mod);
+                    if (estimated != null) {
+                        if (endPortalFound(mod, estimated)) {
+                            _endPortalCenterLocation = estimated;
+                            Debug.logMessage("[PortalMemory] estimate-confirmed portal center "
+                                    + estimated.toShortString() + " (perceived-frames centroid passed validation).");
+                        } else if (!_centroidEstimateRejectedLogged) {
+                            // 零行为诊断: 重心被拒一次 (正常路径 —— 探索回填会接管)。
+                            _centroidEstimateRejectedLogged = true;
+                            Debug.logMessage("[PortalMemory] centroid estimate at "
+                                    + estimated.toShortString() + " rejected (not a validated center); "
+                                    + "waiting for explore confirmation.");
+                        }
                     }
                 }
             }
@@ -1426,7 +1444,10 @@ public class BeatMinecraft2Task extends Task {
                 return bedShortage;
             }
         }
-        if (_ranStrongholdLocator && !_locateStrongholdTask.isFinished(mod)) {
+        // (2026-09-21 用户"看见一个传送门=全看见") 门中心已知 (记忆直认/回填) 时
+        // 不再等定位任务走完流程 —— 否则 locate 卡在"走到精确 XZ" (门框环上, 卡脚)
+        // 恒未完成, 已知的门中心永远走不到下面的 endPortalFound 分支 (150956 实锤)。
+        if (_ranStrongholdLocator && _endPortalCenterLocation == null && !_locateStrongholdTask.isFinished(mod)) {
             setDebugState("Locating End Portal...");
             return _locateStrongholdTask;
         }
