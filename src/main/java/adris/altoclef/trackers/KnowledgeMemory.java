@@ -86,7 +86,21 @@ public final class KnowledgeMemory {
         WARPED_FOREST(
                 new Block[]{Blocks.WARPED_NYLIUM, Blocks.WARPED_FUNGUS,
                         Blocks.WARPED_ROOTS, Blocks.WARPED_WART_BLOCK},
-                0, 0, 1, false, 64);
+                0, 0, 1, false, 64),
+        // (2026-09-21 要塞/末地门记忆, 用户"有记忆时就不用再丢眼睛了") 记
+        // 【亲眼确认过】的要塞坐标 (丢眼垂直下落确认那一刻) 与末地门框架位置
+        // (探索任务看到/近距擦过)。跨会话持久化到 knowledge.log, 消费点
+        // GoToStrongholdPortalTask: 重启后命中记忆就直接去下挖/探索,
+        // 不再从头丢眼。
+        // ⚠ landmarks 留空: 不走 KnowledgeMemory.tick 的地标自动感知 ——
+        //   要塞地标若挂石砖系方块会放大 BlockTracker 追踪面 (perf 红线:
+        //   trackBlock 新方块触发全量重扫, 0918 卡死事故), 且石砖在主世界
+        //   太常见会刷爆候选。记录只走两条显式路径 (LocateStronghold-
+        //   CoordinatesTask 眼确认 / ExploreStrongholdTask 见门)。
+        // ⚠ inference=false: 要塞/末地门是地下结构, 不给随机候选偏置与
+        //   "结构邻近推理可见"当线索 (与 BLAZE_SPAWNER 同理, 防透视)。
+        STRONGHOLD(new Block[]{}, 0, 0, 1, false),
+        END_PORTAL(new Block[]{}, 0, 0, 1, false);
 
         final Block[] landmarks;
         final double minCandidateRadius;
@@ -367,6 +381,17 @@ public final class KnowledgeMemory {
     private static void logCenterRead(StructureType type, List<BlockPos> found) {
         adris.altoclef.record.RecordManager.eventThrottled("memory_read", "centers:" + type.name(),
                 "{\"kind\":\"centers\",\"key\":\"" + type.name() + "\",\"n\":" + found.size() + "}");
+    }
+
+    /**
+     * (2026-09-21 要塞/末地门记忆) 显式记忆入口: 供任务在"亲眼确认结构"的
+     * 决定性时刻直接写入 (要塞=丢眼垂直确认, 末地门=探索任务看见/近距擦过
+     * 门框)。不走 tick 的地标自动感知 —— 这两类结构的地标不适合全局追踪
+     * (见枚举注释), 记录点收敛在任务内。
+     * 合并/落盘/录制事件与自动感知共用 {@link #remember} 一条管道。
+     */
+    public void rememberAt(StructureType type, BlockPos pos) {
+        remember(type, pos.toImmutable());
     }
 
     private void remember(StructureType type, BlockPos pos) {

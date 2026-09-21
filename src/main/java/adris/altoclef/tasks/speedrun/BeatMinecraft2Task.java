@@ -1328,6 +1328,18 @@ public class BeatMinecraft2Task extends Task {
         // 食物/木头/装备等前置任务打扰 — 否则 tracker 缓存陈旧会误判"眼睛
         // 不够/装备不够"反复打断定位 (用户实测 14:27: Locating Stronghold
         // 被 Get catalogued iron_gear 打断 → 熔铁 → 合成熔炉卡死)。
+        // (2026-09-21 要塞/末地门记忆通路, 用户"有记忆时就不用再丢眼睛了")
+        // 跨会话: knowledge.log 里记过 END_PORTAL/STRONGHOLD 中心 (都是"亲眼
+        // 确认"时刻落盘: 丢眼垂直确认 / 探索看见门框) → 直接置位地牢锁,
+        // 旁路下方内联眼睛闸 (否则重启后背包眼 <10 会被先派去收满 10 颗)。
+        // 真正的坐标注入在 GoToStrongholdPortalTask.onTick 的 recall
+        // (口径单一来源, 两处消费同一份记忆)。
+        if (!_ranStrongholdLocator && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                && GoToStrongholdPortalTask.recallStrongholdFromKnowledge(mod) != null) {
+            _ranStrongholdLocator = true;
+            Debug.logMessage("[PortalMemory] knowledge hit -> lock dungeon phase, skip eye collection.");
+        }
+
         if (_ranStrongholdLocator) {
             return getStrongholdPhase(mod);
         }

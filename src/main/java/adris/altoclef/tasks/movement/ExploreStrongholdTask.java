@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -46,6 +47,9 @@ public class ExploreStrongholdTask extends Task {
     private static final double EXPLORE_RADIUS_MAX = 96;
     // 传送门"看到"距离 (视野内 + LOS)。
     private static final int PORTAL_SEE_RANGE = 12;
+    // (2026-09-21 近距豁免) 该距离内见到门框只要区块已加载就算看到 (不要
+    // FOV/LOS) —— 站在门口 6 格内还"看不见"不是人类行为。
+    private static final int PORTAL_NEAR_RANGE = 6;
     // 扫描节流: 避免每 tick 扫 12³/20³ 个方块 (卡顿)。
     private static final int SCAN_INTERVAL_TICKS = 10;
     // (2026-08-26 只认砖块空间) 视野内多久没看到地牢砖块就认为不在地牢 (ms)。
@@ -196,20 +200,50 @@ public class ExploreStrongholdTask extends Task {
         return _navTask;
     }
 
-    /** 扫描附近传送门框架: 视野内 + LOS 可见才算"看到", 登记到 BlockTracker。 */
+    /**
+     * 扫描附近传送门框架: 视野内 + LOS 可见才算"看到", 登记到 BlockTracker。
+     *
+     * <p>(2026-09-21 近距豁免) 6 格内有门框也直接算看到 —— 只要求区块已加载,
+     * 不要 FOV 锥 + LOS。现场实锤 (20260921-120334, 用户口述 + 日志): bot 在
+     * 传送门房间门口走过 (还看见了蠹虫刷怪笼), 但相机没朝房间里扫, FOV+LOS
+     * 永不触发, 探索任务继续格栅乱走。走到 6 格内 = 站在门口, 人类必然注意到;
+     * 已加载区块的方块状态客户端本来就有, 不构成透视。原 12 格 FOV+LOS 判据
+     * 保留 (远距离仍须真看见)。
+     */
     private boolean trySeePortal(AltoClef mod) {
         BlockPos player = mod.getPlayer().getBlockPos();
+        for (BlockPos pos : WorldHelper.scanRegion(mod,
+                player.add(-PORTAL_NEAR_RANGE, -PORTAL_NEAR_RANGE, -PORTAL_NEAR_RANGE),
+                player.add(PORTAL_NEAR_RANGE, PORTAL_NEAR_RANGE, PORTAL_NEAR_RANGE))) {
+            if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.END_PORTAL_FRAME
+                    && mod.getChunkTracker().isChunkLoaded(pos)) {
+                return portalSeen(mod, pos, "near-touch");
+            }
+        }
         for (BlockPos pos : WorldHelper.scanRegion(mod,
                 player.add(-PORTAL_SEE_RANGE, -PORTAL_SEE_RANGE, -PORTAL_SEE_RANGE),
                 player.add(PORTAL_SEE_RANGE, PORTAL_SEE_RANGE, PORTAL_SEE_RANGE))) {
             if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.END_PORTAL_FRAME
                     && VisibilityHelper.isBlockInView(mod, pos)
                     && VisibilityHelper.isBlockVisible(mod, pos)) {
-                mod.getBlockTracker().addBlock(Blocks.END_PORTAL_FRAME, pos);
-                return true;
+                return portalSeen(mod, pos, "los");
             }
         }
         return false;
+    }
+
+    /** 看到门框的统一出口: 登记 BlockTracker + 记忆落盘 (要塞+门都记)。 */
+    private boolean portalSeen(AltoClef mod, BlockPos framePos, String how) {
+        mod.getBlockTracker().addBlock(Blocks.END_PORTAL_FRAME, framePos);
+        // (2026-09-21 要塞/末地门记忆) 门框亲眼确认 → END_PORTAL 中心落盘
+        // knowledge.log, 跨会话重启后 GoToStrongholdPortalTask 直接导航过来,
+        // 不再丢眼定位。
+        mod.getKnowledgeMemory().rememberAt(
+                adris.altoclef.trackers.KnowledgeMemory.StructureType.END_PORTAL, framePos);
+        Debug.logMessage("[Explore] End portal frame " + how + " at "
+                + framePos.getX() + "," + framePos.getY() + "," + framePos.getZ()
+                + " -> remembered (knowledge END_PORTAL).");
+        return true;
     }
 
     /** 视野内 + LOS 可见的地牢砖块 (区分地牢空间 vs 矿洞/洞穴), 返回位置。 */

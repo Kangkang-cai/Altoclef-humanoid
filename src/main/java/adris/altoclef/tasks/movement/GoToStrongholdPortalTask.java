@@ -1,7 +1,9 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -16,6 +18,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 public class GoToStrongholdPortalTask extends Task {
@@ -79,6 +82,18 @@ public class GoToStrongholdPortalTask extends Task {
         if (_strongholdCoordinates == null) {
             _strongholdCoordinates = _locateCoordsTask.getStrongholdCoordinates().orElse(null);
             if (_strongholdCoordinates == null) {
+                // (2026-09-21 要塞/末地门记忆通路, 用户"有记忆时就不用再丢眼睛了")
+                // 跨会话: knowledge.log 里记过的 END_PORTAL/STRONGHOLD 中心直接
+                // 当坐标用, 跳过丢眼定位 (否则每次重启游戏都从丢第一颗眼开始)。
+                // 记录点是"亲眼确认"时刻 (丢眼垂直确认 / 探索看见门框), 不是推断。
+                // 末端门槛位离要塞走廊可能差几十格 → PHASE_WALK 走到 XZ 再下挖,
+                // 探索阶段自然会收敛到真门位。
+                BlockPos recalled = recallStrongholdFromKnowledge(mod);
+                if (recalled != null) {
+                    _strongholdCoordinates = recalled;
+                    setDebugState("Recalled stronghold/portal from knowledge, going there directly.");
+                    return null; // 落到下方 PHASE_WALK 分支
+                }
                 // 直接扫世界找掉落眼睛 (32 格覆盖飞行落点), 不依赖陈旧缓存。
                 boolean ridingBoat = mod.getPlayer() != null
                         && mod.getPlayer().getVehicle() instanceof BoatEntity;
@@ -235,6 +250,51 @@ public class GoToStrongholdPortalTask extends Task {
             }
         }
         return null;
+    }
+
+    /**
+     * (2026-09-21 要塞/末地门记忆通路) 从 KnowledgeMemory 取回记忆点:
+     * 优先 END_PORTAL (门框精确位置), 其次 STRONGHOLD (丢眼确认位置)。
+     * 都没有 → null (走原丢眼定位流程)。距离上限 4096 格 (同诡异森林消费
+     * 口径) —— 记录点就是本存档实测, 太远也没意义。
+     * static 公开: BeatMinecraft2Task 在内联眼睛闸之前也用它判"是否旁路收眼"
+     * (口径单一来源, 两处消费同一份记忆)。
+     */
+    private static final double KNOWLEDGE_RECALL_RANGE = 4096;
+
+    public static BlockPos recallStrongholdFromKnowledge(AltoClef mod) {
+        Vec3d pos = mod.getPlayer().getPos();
+        KnowledgeMemory knowledge = mod.getKnowledgeMemory();
+        List<BlockPos> portals = knowledge.getRememberedCenters(
+                KnowledgeMemory.StructureType.END_PORTAL, pos, KNOWLEDGE_RECALL_RANGE);
+        if (!portals.isEmpty()) {
+            BlockPos best = nearestTo(pos, portals);
+            Debug.logMessage("[PortalMemory] recalled END_PORTAL center "
+                    + best.toShortString() + " (of " + portals.size() + ") -> skip eye throwing.");
+            return best;
+        }
+        List<BlockPos> strongholds = knowledge.getRememberedCenters(
+                KnowledgeMemory.StructureType.STRONGHOLD, pos, KNOWLEDGE_RECALL_RANGE);
+        if (!strongholds.isEmpty()) {
+            BlockPos best = nearestTo(pos, strongholds);
+            Debug.logMessage("[PortalMemory] recalled STRONGHOLD center "
+                    + best.toShortString() + " (of " + strongholds.size() + ") -> skip eye throwing.");
+            return best;
+        }
+        return null;
+    }
+
+    private static BlockPos nearestTo(Vec3d from, List<BlockPos> candidates) {
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (BlockPos p : candidates) {
+            double sq = p.getSquaredDistance(from);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = p;
+            }
+        }
+        return best;
     }
 
     /** 视野内 + LOS 可见的地牢砖块。 */

@@ -321,6 +321,12 @@ public class LocateStrongholdCoordinatesTask extends Task {
                 Debug.logMessage("[Locate] Eye flew straight down (horizontal=" + (int) horizontalDist
                         + ", verticalDelta=" + (int) verticalDelta + "): stronghold directly below, CONFIRMING at "
                         + (int) _strongholdEstimatePos.getX() + ", " + (int) _strongholdEstimatePos.getZ() + ".");
+                // (2026-09-21 要塞记忆) 丢眼确认 = 亲眼确认要塞位置, 落盘
+                // STRONGHOLD 中心 (跨会话: 重启后直接来这里下挖, 不再丢眼)。
+                mod.getKnowledgeMemory().rememberAt(
+                        adris.altoclef.trackers.KnowledgeMemory.StructureType.STRONGHOLD,
+                        new BlockPos((int) Math.floor(eyeEndPos.x), (int) Math.floor(eyeEndPos.y),
+                                (int) Math.floor(eyeEndPos.z)));
                 _currentThrownEye = null;
                 _eyeStartPos = null;
                 _eyeEndPos = null;
@@ -360,6 +366,12 @@ public class LocateStrongholdCoordinatesTask extends Task {
                     _strongholdEstimatePos = eyeEndPos;
                     Debug.logMessage("[Locate] Dive x" + _diveCount + " (max): digging here. Estimate at "
                             + (int) eyeEndPos.x + ", " + (int) eyeEndPos.z);
+                    // (2026-09-21 要塞记忆) 兜底确认同样算"亲眼确认", 一并落盘
+                    // (合并距离 8 格, 与直接确认的重合点会自动去重)。
+                    mod.getKnowledgeMemory().rememberAt(
+                            adris.altoclef.trackers.KnowledgeMemory.StructureType.STRONGHOLD,
+                            new BlockPos((int) Math.floor(eyeEndPos.x), (int) Math.floor(eyeEndPos.y),
+                                    (int) Math.floor(eyeEndPos.z)));
                 } else {
                     Vec3d target = eyeEndPos.add(dir.multiply(_diveWalkStep));
                     Debug.logMessage("[Locate] Dive (count=" + _diveCount + "), walking " + (int) _diveWalkStep
