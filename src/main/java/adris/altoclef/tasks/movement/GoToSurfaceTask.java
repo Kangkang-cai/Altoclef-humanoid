@@ -916,8 +916,30 @@ public class GoToSurfaceTask extends Task {
             }
         }
 
-        // 2) 头顶已通 + 已入水 → 交 GetToYTask (CustomBaritoneGoalTask 的 [SwimUp] 接管)。
+        // 2) 头顶已通 + 已入水 → 【先垫后挖】(2026-09-21 用户拍板: "应该先往脚底
+        //    尝试放多个方块, 然后往上挖, 挖的时候不按 space, 搭的时候正常按")。
+        //
+        //    旧实现在这里直接交 GetToYTask 让 [SwimUp] 直游上浮 —— 现场
+        //    20260921-093422 实锤它在本场景 (实心夹水道: 水腔与实心层交替) 必然空转:
+        //    头顶有实心, 直游就是撞头, 17s 内 "[SwimUp] trigger ↔ Direct swim-up
+        //    stalled (no Y gain)" 交替 4 轮, 最后缺氧被 World Survival Chain 抢走。
+        //
+        //    改: 有垫料就先垫塔 (PillarJumpHelper, 正常按 space) —— 每垫一格人抬高
+        //    1 格, 直到头顶 dy=1..2 出现实心, 那时上面的 1) 分支自然接管去挖;
+        //    挖之前会 release 跳跃键, 正好满足"挖的时候不按 space"。
+        //    垫不动 (没材料) 才退回直游上浮兜底。
         if (mod.getPlayer().isTouchingWater()) {
+            Item[] padMaterials = scaffoldMaterials();
+            if (PillarJumpHelper.hasMaterials(mod, padMaterials)) {
+                if (_scaffoldLogTimer.elapsed()) {
+                    _scaffoldLogTimer.reset();
+                    Debug.logToFile("altoclef_diag.log",
+                            "[GoToSurface] SCAFFOLD pad-first (underwater) at " + player);
+                }
+                setDebugState("Scaffold: pillaring up underwater (pad before digging)");
+                PillarJumpHelper.step(mod, padMaterials);
+                return null;
+            }
             PillarJumpHelper.release(mod);
             // (2026-09-12 重见天日) y>=58 的口袋挖穿进水时目标继续向上, 不能用
             // 固定 58 (y66 口袋挖穿进水, 58 在脚下 → 往下游)。海里 (y<58) 仍是

@@ -90,6 +90,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private boolean _directSwimUpMode = false;
     private int _directSwimLastY = Integer.MIN_VALUE;
     private static final int DIRECT_SWIM_UP_MIN_Y_GAIN = 1;
+    // (2026-09-21 头顶封锁检测) "上浮前先看头顶"的日志节流 (换场景才记)。
+    private final TimerGame _swimUpBlockedLogTimer = new TimerGame(5);
     // (2026-09-12 会话 20260912-132300) 上浮失速后的重试退避。
     // 旧版失速释放后, 下一 tick 触发条件 (inWater + goalY>y + XZ<=8) 依旧成立
     // → 立刻重新进入上浮 → 2s 一轮 "触发→失速→释放" 死循环。上浮分支在
@@ -255,8 +257,21 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         BlockPos upXZ = goalXZ();
                         boolean swimUpAllowed = upXZ == null
                                 || horizontalDist(mod, upXZ) <= DIRECT_SWIM_UP_MAX_XZ_DIST;
+                        // (2026-09-21) 上浮通道封锁检测 (现场 20260921-093422)。
+                        // 旧判据只看"Y 有没有涨" —— 撞头与"水太深游不动"在下游表现
+                        // 完全一样, 只能靠 2s 失速 + 3s 退避一轮一轮试 (实测 17s 里
+                        // 刷了 6 次 [SwimUp] trigger 全部零增益, 最后缺氧被生存链抢走)。
+                        // 头顶明确被封时直接不进上浮, 把机会留给会真正挖垫的路径。
+                        boolean blockedAbove = swimUpPathBlocked(mod);
+                        if (blockedAbove && _swimUpBlockedLogTimer.elapsed()) {
+                            _swimUpBlockedLogTimer.reset();
+                            Debug.logToFile("altoclef_diag.log", "[SwimUp] skipped (blocked above) player="
+                                    + mod.getPlayer().getBlockPos() + " goalY=" + ty
+                                    + " -> 交 GoToSurfaceTask 先垫后挖 / baritone");
+                        }
                         // (2026-09-12) 失速退避期内不再抢控制权, 让 _checker/baritone 兜底跑。
-                        if (swimUpAllowed && WorldHelper.getTicks() >= _swimUpBlockedUntilTick) {
+                        if (!blockedAbove && swimUpAllowed
+                                && WorldHelper.getTicks() >= _swimUpBlockedUntilTick) {
                             Debug.logToFile("altoclef_diag.log", "[SwimUp] trigger player="
                                     + mod.getPlayer().getBlockPos() + " goalY=" + ty
                                     + " baritoneActive=" + mod.getClientBaritone().getCustomGoalProcess().isActive());
@@ -459,6 +474,23 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getInputControls().hold(Input.SPRINT);
         mod.getInputControls().release(Input.SNEAK);
         _directSwimControl = true;
+    }
+
+    /**
+     * (2026-09-21) 垂直上浮通道是否被封: 脚上方 dy=1..2 内有实心方块。
+     *
+     * <p>现场 (会话 20260921-093422): bot 在 (10166, 49, -10991) 的"实心夹水道"
+     * (水腔与实心层交替) 里被反复触发直游上浮 —— 头上有实心, 上浮必然零增益:
+     * 17s 内 {@code [SwimUp] trigger} × 6 与 {@code Direct swim-up stalled (no Y
+     * gain)} × 4 交替空转, 直到缺氧被 World Survival Chain (prio 95) 抢走。
+     *
+     * <p>本闸门让"头顶明确被封"的这一刻就不进入上浮, 把机会留给会真正挖垫的
+     * 路径 ({@code GoToSurfaceTask} 的"先垫后挖")。只看 2 格: 玩家身位占
+     * feet 与 feet+1, 上浮撞的就是 feet+2。
+     */
+    private boolean swimUpPathBlocked(AltoClef mod) {
+        BlockPos p = mod.getPlayer().getBlockPos();
+        return WorldHelper.isSolid(mod, p.up(1)) || WorldHelper.isSolid(mod, p.up(2));
     }
 
     /**

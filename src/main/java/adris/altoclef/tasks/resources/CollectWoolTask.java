@@ -4,7 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.ShearSheepTask;
-import adris.altoclef.tasks.movement.GetToYTask;
+import adris.altoclef.tasks.movement.GoToSurfaceTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
@@ -32,10 +32,8 @@ public class CollectWoolTask extends ResourceTask {
     private final HashSet<DyeColor> _colors;
     private final Item[] _wools;
 
-    // Cached surface Y for the "return to surface" subtask (recomputed only
-    // when the bot moves far from where it was last calculated).
-    private Integer _cachedSurfaceY = null;
-    private BlockPos _cachedSurfaceAt = null;
+    // (2026-09-21 回地表口径统一) 本任务私有的 "_cachedSurfaceY/_cachedSurfaceAt"
+    // 缓存已删除 —— 见 getReturnToSurfaceTask 注释。
 
     // (2026-08-31 捡羊毛掉落优先, 同 CollectFoodTask) 地面有我们要的羊毛掉落时
     // "粘性"捡取任务: 派发后持续返回直到捡完, 不再被 Biased exploration 找下一只羊
@@ -207,23 +205,28 @@ public class CollectWoolTask extends ResourceTask {
     }
 
     /**
-     * Subtask that climbs back to the surface so sheep can actually be found.
-     * Uses the cached land-surface Y and only recomputes it when we walked far
-     * away from where it was calculated.
+     * 爬回地表, 让羊能被找到。
+     *
+     * <p>(2026-09-21 回地表口径统一) 旧实现是自建口径: 缓存
+     * {@code WorldHelper.getLandSurfaceY(x, z, 16)} 得到的陆地列站立 Y, 派
+     * {@code GetToYTask(该 Y)}。它是全项目最后一处"自建回地表"—— 其余调用点早已
+     * 统一为 {@link GoToSurfaceTask} (CollectBucketLiquidTask:414 /
+     * BeatMinecraft2Task:2189,2782 / LocateStrongholdCoordinatesTask:401)。
+     *
+     * <p>现场 20260921-093422 实锤旧口径的缺陷 (会话 tasks.log / diag.log):
+     * 床链在 (10166, 49, -10991) 派 {@code Going to y=63}, 之后 17s 里
+     * {@code [SwimUp] trigger} 与 {@code Direct swim-up stalled (no Y gain)}
+     * 交替 4 轮 (头顶是"实心夹水道", 直游上浮必然撞头), 最后缺氧被
+     * World Survival Chain (prio 95) 抢走。GetToYTask 只有"baritone 硬走 +
+     * 直游上浮"两种手段, 不看头顶是否被封, 也没有挖垫与不可达退出闸门。
+     *
+     * <p>深地下的判定口径本就同源 (本调用处的 {@code WorldHelper.isDeepUnderground}
+     * 自 09-17 起已转发 {@code SurfaceHelper.isBelowSurfaceDebounced}), 这里只把
+     * "任务本体"一并统一。GoToSurfaceTask 自带"挖一垫一 + 水场景自写爬升 +
+     * 放弃冷却", 且 (2026-09-21 起) 水中先垫后挖、挖时松开跳跃键。
      */
     private Task getReturnToSurfaceTask(AltoClef mod) {
-        BlockPos player = mod.getPlayer().getBlockPos();
-        if (_cachedSurfaceY == null || _cachedSurfaceAt == null
-                || player.getSquaredDistance(_cachedSurfaceAt) > 24 * 24) {
-            _cachedSurfaceY = WorldHelper.getLandSurfaceY(mod, player.getX(), player.getZ(), 16);
-            _cachedSurfaceAt = player.toImmutable();
-        }
-        if (_cachedSurfaceY == null || _cachedSurfaceY < 0) {
-            // No land column nearby (e.g. under an ocean): let normal
-            // exploration handle it.
-            return null;
-        }
-        return new GetToYTask(_cachedSurfaceY);
+        return new GoToSurfaceTask();
     }
 
     @Override
