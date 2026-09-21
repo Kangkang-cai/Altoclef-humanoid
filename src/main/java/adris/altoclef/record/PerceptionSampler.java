@@ -313,6 +313,13 @@ public final class PerceptionSampler {
                 Json.str(sb, StateSampler.itemId(ie.getStack().getItem()));
                 sb.append(",\"n\":").append(ie.getStack().getCount());
             }
+            // (2026-09-21 末地龙息链路) 云半径是 bot 判定"踩进云"(包围盒相交 +
+            // XZ 圆柱距离 <= radius, 对齐原版 AreaEffectCloudEntity.tick 伤害语义)
+            // 与"云贴脸 10 格"(isNearDragonBreath) 的核心参数 —— 不录的话
+            // 训练端无法从 p 复原危险区 (云半径动态增长 0→5)。
+            if (e instanceof net.minecraft.entity.AreaEffectCloudEntity aec) {
+                sb.append(",\"r\":").append(Json.f(aec.getRadius()));
+            }
             sb.append(",\"src\":");
             Json.str(sb, src);
             sb.append(",\"g\":");

@@ -2,6 +2,7 @@ package adris.altoclef.tasks.speedrun;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.record.RecordManager;
 import adris.altoclef.tasks.movement.CustomBaritoneGoalTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.baritone.CachedProjectile;
@@ -195,10 +196,20 @@ public class DragonBreathTracker {
                     _loggedStart = true;
                     Debug.logToFile("altoclef_diag.log", "[FireballEvade] incoming dragon fireball, impact~"
                             + impact.toShortString() + " bot=" + mod.getPlayer().getBlockPos().toShortString());
+                    // (2026-09-21 录制同步) 稀疏决策事件: 躲避启动 = 威胁评估首次
+                    // 为真的归因点 (撞击点/当时位置)。逐帧的火球 p/v 在 perception
+                    // 通道, 逐帧的决策标签在 frames 通道 —— 这里只把两者【链接】起来。
+                    BlockPos botPos0 = mod.getPlayer().getBlockPos();
+                    RecordManager.event("fireball_evade", "{\"impact\":[" + impact.getX() + ","
+                            + impact.getY() + "," + impact.getZ() + "],\"bot\":["
+                            + botPos0.getX() + "," + botPos0.getY() + "," + botPos0.getZ() + "]}");
                 }
                 if (!impact.equals(_impactBlock)) {
                     _impactBlock = impact;
                     forceRepath(mod);
+                    // 撞击点前移 = 新火球/同一火球弹道更新, 按撞击点同 tick 去重。
+                    RecordManager.eventThrottled("fireball_repath", impact.toShortString(),
+                            "{\"impact\":[" + impact.getX() + "," + impact.getY() + "," + impact.getZ() + "]}");
                 }
             }
             return super.onTick(mod);
@@ -217,7 +228,9 @@ public class DragonBreathTracker {
 
         @Override
         protected String toDebugString() {
-            return "EVADE Dragon Fireball (pillar up)";
+            // (2026-09-21 录制同步) 带参: 撞击点进 L2 操作标签 —— 离线训练时
+            // "躲哪个点"直接可从帧标签读, 不用反推。
+            return "EVADE Dragon Fireball (pillar up) impact=" + (_impactBlock == null ? "?" : _impactBlock.toShortString());
         }
     }
 

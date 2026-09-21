@@ -161,7 +161,8 @@ AltoClef.onClientTick()
 ```
 
 类型: `memory_write` / `memory_read` / `damage` / `heal` / `death` / `respawn` /
-`chain_switch` / `leaf_switch` / `blacklist` / `anomaly`
+`chain_switch` / `leaf_switch` / `blacklist` / `anomaly` /
+`fireball_evade` / `fireball_repath` / `breath_touch` / `breath_clear` / `breath_near` / `breath_near_clear`
 
 - `blacklist` (2026-09-17 决策知识入流): `AbstractObjectBlacklist.blackListItem` 是方块
   (`WorldLocateBlacklist`) + 实体 (`EntityLocateBlacklist`) 黑名单的**唯一写入汇聚点**。
@@ -170,6 +171,16 @@ AltoClef.onClientTick()
 - `anomaly` (2026-09-17 决策知识入流): `AnomalyWatchdog.emit` (轮询+事件式上报的唯一汇聚点,
   自带 (type,key) 冷却去重)。data: type/key/sev/sum —— stall/oscillation/unreachable/idle/
   duration 看门狗结论。
+- `fireball_evade` / `fireball_repath` (2026-09-21 末地龙息链路决策知识入流):
+  `DragonBreathTracker.FireballEvadeTask` 躲避启动 (首次威胁评估为真) 与撞击点前移重寻路。
+  data: impact/bot (撞击点与 bot 当时方块坐标)。火球的逐帧 p/v 在 perception 通道
+  (实体级, 含速度), 逐帧决策标签在 frames 通道 (`s: EVADE Dragon Fireball (pillar up)
+  impact=...`, toDebugString 已带参) —— 本事件只把"哪次威胁触发了哪个决策"链接起来。
+- `breath_touch` / `breath_clear` / `breath_near` / `breath_near_clear` (2026-09-21 同上):
+  `BeatMinecraft2Task` 末地守卫的边沿事件 —— 进/出云伤害区 (实体级判定, 对齐原版
+  AreaEffectCloudEntity.tick 语义) 与进/出"云贴脸 10 格"主动规避圈。data: pos。
+  云的逐帧 p/r 在 perception 通道 (AreaEffectCloudEntity 带 radius) —— 离线可复原
+  危险区随时间的生长 (云半径 0→5 动态增长)。
 
 ---
 

@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.chains.FoodChain;
+import adris.altoclef.record.RecordManager;
 import adris.altoclef.tasks.CraftInInventoryTask;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
@@ -847,6 +848,8 @@ public class BeatMinecraft2Task extends Task {
     private final DragonBreathTracker _dragonBreathTracker = new DragonBreathTracker();
     // (2026-09-21) 触碰逃逸的边沿检测, 仅用于诊断日志 (进入/离开"踩进云"各记一条)。
     private boolean _wasTouchingBreath;
+    // (2026-09-21 录制同步) "云贴脸 10 格"主动规避的边沿检测 (诊断日志 + 稀疏事件)。
+    private boolean _wasNearBreath;
 
     public BeatMinecraft2Task() {
         _locateStrongholdTask = new GoToStrongholdPortalTask(_config.targetEyes);
@@ -1233,6 +1236,12 @@ public class BeatMinecraft2Task extends Task {
                 Debug.logToFile("altoclef_diag.log", "[BreathEscape] "
                         + (breathTouch ? "touch (entity-level, vanilla semantics)" : "clear")
                         + " pos=" + mod.getPlayer().getBlockPos());
+                // (2026-09-21 录制同步) 边沿事件: 进/出云伤害区的归因点。逐帧状态
+                // 可从 frames 的 labels.s 推出, 这里显式记一条让训练分段/索引便宜。
+                RecordManager.event(breathTouch ? "breath_touch" : "breath_clear",
+                        "{\"pos\":[" + mod.getPlayer().getBlockPos().getX() + ","
+                                + mod.getPlayer().getBlockPos().getY() + ","
+                                + mod.getPlayer().getBlockPos().getZ() + "]}");
             }
             _wasTouchingBreath = breathTouch;
             if (breathTouch) {
@@ -1243,7 +1252,17 @@ public class BeatMinecraft2Task extends Task {
             // 紫云贴脸 (未踩进, 10 格内) 也逃 —— 旧链路只在踩进云格才触发,
             // 走位擦着云边持续吃伤害 (183333 实锤)。末地收集材料/走位阶段
             // 同样被这段顶层守卫抢占。
-            if (_dragonBreathTracker.isNearDragonBreath(mod, 10)) {
+            boolean breathNear = _dragonBreathTracker.isNearDragonBreath(mod, 10);
+            if (breathNear != _wasNearBreath) {
+                Debug.logToFile("altoclef_diag.log", "[BreathEscape] near-"
+                        + (breathNear ? "start" : "end") + " pos=" + mod.getPlayer().getBlockPos());
+                RecordManager.event(breathNear ? "breath_near" : "breath_near_clear",
+                        "{\"pos\":[" + mod.getPlayer().getBlockPos().getX() + ","
+                                + mod.getPlayer().getBlockPos().getY() + ","
+                                + mod.getPlayer().getBlockPos().getZ() + "]}");
+            }
+            _wasNearBreath = breathNear;
+            if (breathNear) {
                 setDebugState("ESCAPE dragons breath (cloud nearby)");
                 return _dragonBreathTracker.getRunAwayTask(12);
             }

@@ -420,7 +420,8 @@ public final class RecordManager {
             sb.append(",\n  \"channels\": {\"frames\":\"A时间+环境(env)/B标签/C自身/G动作+容器槽位(slots) (每帧, 一行一 tick)\", ");
             sb.append("\"perception\":\"D可见世界: blocks/entities/sounds (每帧, 仅录 bot 真能感知的东西)\", ");
             sb.append("\"memory\":\"E记忆快照: world/knowledge/valuable 三块 (只在写版本号变化时才写)\", ");
-            sb.append("\"events\":\"稀疏事件: memory_write/memory_read/damage/heal/death/respawn/chain_switch/leaf_switch/blacklist/anomaly\"}");
+            sb.append("\"events\":\"稀疏事件: memory_write/memory_read/damage/heal/death/respawn/chain_switch/leaf_switch/blacklist/anomaly/");
+            sb.append("fireball_evade/fireball_repath/breath_touch/breath_clear/breath_near/breath_near_clear\"}");
             sb.append(",\n  \"eventNotes\": {\"memory_read\":\"只在决策入口 (getNearest*/getRememberedCenters) 记, ");
             sb.append("按类型同 tick 去重; 内层循环里的 getXxxLocations 不记以免淹掉事件流\", ");
             sb.append("\"craft_item_change\":\"故意不记 —— 背包逐帧全量已含该信息, 重复导出只是翻倍体积\", ");
