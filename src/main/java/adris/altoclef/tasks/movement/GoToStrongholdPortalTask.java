@@ -2,6 +2,7 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.tasksystem.Task;
@@ -23,10 +24,17 @@ import java.util.Set;
 
 public class GoToStrongholdPortalTask extends Task {
 
-    // (2026-08-26 用户修改: 地牢高度不确定, y=45 在当前版本不对) 到达判定 =
-    // 看到地牢砖块, 不再按固定深度。俯冲高度约在 Y=0, 挖到 Y<=0 还没见砖块 →
-    // 转水平随机探索 (地牢在别处)。
-    private static final int STRONGHOLD_BOTTOM_Y = 0;
+    // (2026-09-21 用户拍板: 鱼骨窗口 [25,-55]) 1.18.2 生成数学 (StrongholdFeature
+    // → StructurePiecesCollector.shiftInto(63,-64,rand,10)): 要塞最高点 Y∈
+    // [heightY-63,53), 传送门房在起点下方 10~50 格 → 实际分布约 [45,-55],
+    // 主体 0~40。窗口以上直挖+近扫足够; 窗口内每降 FISHBONE_LEVEL_STEP 格
+    // 四向各挖 5 格支道 (FishboneLevelTask); 扫穿窗口仍无砖 → 转水平探索。
+    private static final int FISHBONE_TOP_Y = 25;
+    private static final int FISHBONE_BOTTOM_Y = -55;
+    private static final int FISHBONE_LEVEL_STEP = 5;
+    // 鱼骨层间近扫半径 (无视 LOS/FOV, 仅限已加载区块; 支道长 5 + 层深 5,
+    // 8 格半径正好覆盖"隔壁支道擦过要塞墙"的情形)。
+    private static final int FISHBONE_SCAN_RADIUS = 8;
     // (2026-08-26 用户设计: 8 分钟探索兜底) 格栅探索超过 8 分钟还没找到传送门
     // → 直接回估计坐标深挖找传送门 (传送门就在估计位置正下方, 不再瞎转)。
     private static final long EXPLORE_FALLBACK_MS = 8 * 60 * 1000L;
@@ -38,11 +46,12 @@ public class GoToStrongholdPortalTask extends Task {
     // 扫描节流: 下挖/探索期间扫描砖块避免每 tick 扫 20³=8000 个方块卡顿。
     private static final int SCAN_INTERVAL_TICKS = 10;
 
-    // 阶段: 0=走到估计XZ, 1=下挖找砖块, 2=挖进地牢(暴露空气), 3=格栅探索。
+    // 阶段: 0=走到估计XZ, 1=直挖到窗口顶, 2=鱼骨下挖, 3=挖进地牢(暴露空气), 4=格栅探索。
     private static final int PHASE_WALK = 0;
     private static final int PHASE_DIG = 1;
-    private static final int PHASE_ENTER = 2;
-    private static final int PHASE_EXPLORE = 3;
+    private static final int PHASE_FISHBONE = 2;
+    private static final int PHASE_ENTER = 3;
+    private static final int PHASE_EXPLORE = 4;
 
     private final LocateStrongholdCoordinatesTask _locateCoordsTask;
     private BlockPos _strongholdCoordinates;
@@ -66,6 +75,10 @@ public class GoToStrongholdPortalTask extends Task {
     private static final int PROBE_SCAN_RADIUS = 4;
     // 下挖起点 Y: 用于统计已挖深度, 判断何时探路。
     private int _digStartY = Integer.MAX_VALUE;
+    // 鱼骨当前层 (2026-09-21 鱼骨下挖)。
+    private FishboneLevelTask _fishboneLevelTask = null;
+    // 近扫导航完成后连续几轮扫描仍未见砖的计数 (防同目标反复重建导航)。
+    private int _probeNavMiss = 0;
 
     public GoToStrongholdPortalTask(int targetEyes){
         _targetEyes = targetEyes;
@@ -143,9 +156,25 @@ public class GoToStrongholdPortalTask extends Task {
             _phase = PHASE_DIG;
         }
 
-        // 阶段 1: 下挖找砖块 (持久)。下挖过程中看到地牢砖块 → 挖进地牢 (阶段 2);
-        // 挖到 Y<=0 还没见砖 → 转水平探索 (阶段 3, 地牢在别处)。
+        // 阶段 1: 直挖到鱼骨窗口顶 (持久)。下挖过程中看到地牢砖块 → 挖进地牢;
+        // Y<=FISHBONE_TOP_Y → 转鱼骨下挖 (阶段 2)。
         if (_phase == PHASE_DIG) {
+            // (2026-09-21 鱼骨硬前置, 用户"必须保证背包里有水桶") 窗口内任何
+            // 坠落都靠 MLGBucketFallChain 放水接住 — 没水桶不许挖, 先收集;
+            // 收集卡住会显式暴露在 debug state 上, 不静默裸挖。
+            if (!mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
+                setDebugState("Dig precondition: fetching water bucket (fishbone fall protection).");
+                return TaskCatalogue.getItemTask(Items.WATER_BUCKET, 1);
+            }
+            // 直挖只负责到鱼骨窗口顶, 窗口内交给鱼骨。
+            if (mod.getPlayer().getBlockPos().getY() <= FISHBONE_TOP_Y) {
+                Debug.logMessage("[Fishbone] entered window at y="
+                        + mod.getPlayer().getBlockPos().getY() + ", switching to fishbone.");
+                _digTask = null;
+                _fishboneLevelTask = null;
+                _phase = PHASE_FISHBONE;
+                return null;
+            }
             if (_digStartY == Integer.MAX_VALUE) {
                 _digStartY = mod.getPlayer().getBlockPos().getY();
             }
@@ -171,7 +200,7 @@ public class GoToStrongholdPortalTask extends Task {
                             // 旁边的可站立空气, 不是砖块本身 (定位到墙里会乱挖)。
                             _digTask = new GetToBlockTask(WorldHelper.findStandableAirNear(mod, probeBrick));
                         } else {
-                            _digTask = new GetToYTask(STRONGHOLD_BOTTOM_Y);
+                            _digTask = new GetToYTask(FISHBONE_TOP_Y);
                         }
                     }
                 }
@@ -182,13 +211,81 @@ public class GoToStrongholdPortalTask extends Task {
                 _phase = PHASE_ENTER;
                 return null;
             }
-            if (mod.getPlayer().getY() <= STRONGHOLD_BOTTOM_Y) {
-                setDebugState("Dug to y=" + STRONGHOLD_BOTTOM_Y + " without seeing stronghold, horizontal search.");
+            _digTask = new GetToYTask(FISHBONE_TOP_Y);
+            return _digTask;
+        }
+
+        // 阶段 2: 鱼骨下挖 (2026-09-21 用户设计, 窗口 [25,-55])。
+        // 每降 FISHBONE_LEVEL_STEP 格 → 四向各挖 5 格支道; 视野+LOS 看到砖
+        // 或近扫 (半径 8) 命中 → 挖入 (阶段 3)。感知全在父任务节流扫描,
+        // FishboneLevelTask 只负责移动; 支道里挖出砖块时, 近扫天然覆盖。
+        if (_phase == PHASE_FISHBONE) {
+            // 水桶硬前置同直挖 (MLG 中途耗水后补)。
+            if (!mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
+                setDebugState("Fishbone precondition: refetching water bucket.");
+                return TaskCatalogue.getItemTask(Items.WATER_BUCKET, 1);
+            }
+            // 感知优先 (节流): 视野砖 → 挖入; 近扫砖 → 导航过去 (sticky)。
+            if (++_scanTicks >= SCAN_INTERVAL_TICKS) {
+                _scanTicks = 0;
+                if (findVisibleStrongholdBrick(mod) != null) {
+                    setDebugState("Fishbone saw stronghold brick, entering stronghold.");
+                    _fishboneLevelTask = null;
+                    _digTask = null;
+                    _phase = PHASE_ENTER;
+                    return null;
+                }
+                BlockPos probe = findNearbyStrongholdBrick(mod, FISHBONE_SCAN_RADIUS);
+                if (probe != null) {
+                    // 贴脸 (<3 格) 直接进挖入阶段 (凿墙); 否则导航到砖旁空气。
+                    if (probe.isWithinDistance(mod.getPlayer().getBlockPos(), 3)) {
+                        setDebugState("Fishbone adjacent to stronghold brick, opening passage.");
+                        _fishboneLevelTask = null;
+                        _digTask = null;
+                        _phase = PHASE_ENTER;
+                        return null;
+                    }
+                    Debug.logMessage("[Fishbone] probe found stronghold brick at "
+                            + probe.toShortString() + ", digging to it.");
+                    _fishboneLevelTask = null;
+                    _probeNavMiss = 0;
+                    _digTask = new GetToBlockTask(WorldHelper.findStandableAirNear(mod, probe));
+                    return _digTask;
+                }
+            }
+            // 近扫导航完成但连续 2 轮扫描仍未见砖 (砖在背后/被挡) → 放弃探扫,
+            // 从当前位置转格栅探索 (已在要塞隔壁, EXPLORE 有砖 cell 偏好)。
+            if (_digTask != null && _digTask.isFinished(mod)) {
+                _probeNavMiss++;
+                if (_probeNavMiss >= 2) {
+                    Debug.logMessage("[Fishbone] probe navigation finished without direct sight, falling to explore.");
+                    _digTask = null;
+                    _fishboneLevelTask = null;
+                    _phase = PHASE_EXPLORE;
+                    return null;
+                }
+            } else {
+                _probeNavMiss = 0;
+            }
+            if (_digTask != null && !_digTask.isFinished(mod)) {
+                return _digTask;
+            }
+            _digTask = null;
+            // 层循环: 上一层走完 → 井底继续降一层; 扫穿窗口 → 水平探索。
+            if (_fishboneLevelTask != null && !_fishboneLevelTask.isFinished(mod)) {
+                return _fishboneLevelTask;
+            }
+            _fishboneLevelTask = null;
+            int playerY = mod.getPlayer().getBlockPos().getY();
+            if (playerY <= FISHBONE_BOTTOM_Y) {
+                Debug.logMessage("[Fishbone] window exhausted (y=" + playerY
+                        + " <= " + FISHBONE_BOTTOM_Y + ") without bricks, horizontal search.");
                 _phase = PHASE_EXPLORE;
                 return null;
             }
-            _digTask = new GetToYTask(STRONGHOLD_BOTTOM_Y);
-            return _digTask;
+            _fishboneLevelTask = new FishboneLevelTask(
+                    Math.max(playerY - FISHBONE_LEVEL_STEP, FISHBONE_BOTTOM_Y));
+            return _fishboneLevelTask;
         }
 
         // 阶段 2: 挖进地牢 (打掉可见砖块, 暴露地牢空气, 打开通道)。
