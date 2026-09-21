@@ -18,6 +18,7 @@
     "WorldBlockModifiedMixin"
   ],
   "client": [
+    "AnimalDeathMixin",
     "AttackEntityMixin",
     "BuilderProcessMixin",
     "ChatInputMixin",

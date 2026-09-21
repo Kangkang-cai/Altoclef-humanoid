@@ -1,6 +1,7 @@
 package adris.altoclef.trackers;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -50,6 +51,10 @@ public final class WorldMemory {
     // Don't add a new animal memory if there's already one of the same type within this radius.
     // Animal memory is regional ("there are sheep there"), not precise ("one sheep stood here").
     private static final int ANIMAL_DEDUP_RADIUS = 10;
+
+    // (2026-09-21 杀死动物清记忆) 动物死亡时, 清击杀点附近该半径内同类型记忆。
+    // 与 ANIMAL_DEDUP_RADIUS 的口径差异见 forgetAnimalNear 注释。
+    private static final double ANIMAL_FORGET_ON_DEATH_RADIUS = 16;
 
     // ==== 记忆检索距离上限（2026-08-21 用户原则：距离过远就舍弃）====
     // 记住的矿/动物/床若离玩家太远，就不再作为"直接走向它"的获取目标
@@ -432,6 +437,56 @@ public final class WorldMemory {
         if (set.size() < MAX_PER_CATEGORY && set.add(pos)) {
             bumpRevision("animal", type.getSimpleName(), pos);
         }
+    }
+
+    /** 便捷入口: 半径用 {@link #ANIMAL_FORGET_ON_DEATH_RADIUS}（口径单一来源）。 */
+    public int forgetAnimalNear(Entity deadEntity) {
+        return forgetAnimalNear(deadEntity, ANIMAL_FORGET_ON_DEATH_RADIUS);
+    }
+
+    /**
+     * (2026-09-21 杀死动物清记忆) 一只动物死亡时, 清掉击杀点附近
+     * {@link #ANIMAL_FORGET_ON_DEATH_RADIUS} 格内该类型的记忆点。
+     *
+     * <p>根因背景 (20260921-112922 场实锤): {@code _animalMemory} 此前只有
+     * {@link #rememberAnimal} 一条写入路径、没有任何删除路径 —— 村庄里的羊被
+     * 杀光后, "羊坟场"坐标永久留档, {@code BiasedExploreTask} (找羊链
+     * KillAndLootTask 的探索兜底, 不走 BearingExpeditionTask 的方位角锁定)
+     * 就一直被最近的记忆点拽回村里逐点爬 (BiasStep 日志: 目标全是 2~10 格远,
+     * 每 1~2s "REACHED, next", 净位移≈0 = 用户看到的"原地打转/老回头")。
+     *
+     * <p>语义: 记忆说"这里有羊", 现在羊在这里死了 → 该区域记忆过期, 删除。
+     * 死因不限 (bot 杀的/狼咬的/摔死的), 反正"这里没有活羊了"都是事实。
+     * 非记忆动物类型 (敌对怪/玩家等) 零成本早退。
+     *
+     * <p>调用链: {@code AnimalDeathMixin} (LivingEntity#onDeath, 服务端线程)
+     * → {@code AnimalMemoryJanitor.onEntityDeath} (marshaling 回客户端线程)
+     * → 本方法。半径与 {@link #ANIMAL_DEDUP_RADIUS} 不同源是有意的:
+     * 去重 10 是"同一群"的记档口径, 清理 16 要覆盖一群羊的散布宽度。
+     *
+     * @return 本次实际删除的记忆点数 (诊断用)。
+     */
+    public int forgetAnimalNear(Entity deadEntity, double radius) {
+        if (deadEntity == null) return 0;
+        Class<?> type = matchAnimalType(deadEntity);
+        if (type == null) return 0;
+        Dimension dim = WorldHelper.getCurrentDimension();
+        Map<Class<?>, Set<BlockPos>> byType = _animalMemory.get(dim);
+        if (byType == null) return 0;
+        Set<BlockPos> set = byType.get(type);
+        if (set == null || set.isEmpty()) return 0;
+        BlockPos deathPos = deadEntity.getBlockPos();
+        int before = set.size();
+        set.removeIf(p -> p.isWithinDistance(deathPos, radius));
+        int removed = before - set.size();
+        if (removed > 0) {
+            bumpRevision("animal", type.getSimpleName(), deathPos);
+            Debug.logToFile("altoclef_diag.log", "[AnimalForget]\t" + type.getSimpleName()
+                    + " died at " + deathPos.toShortString()
+                    + " -> cleared " + removed + " memory point(s) within " + (int) radius
+                    + " (remaining " + set.size() + ")");
+        }
+        return removed;
     }
 
     private void rememberPortal(Dimension dim, BlockPos pos) {
