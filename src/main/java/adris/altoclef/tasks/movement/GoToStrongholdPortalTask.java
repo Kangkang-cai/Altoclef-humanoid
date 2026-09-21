@@ -16,6 +16,7 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.HashSet;
@@ -80,7 +81,12 @@ public class GoToStrongholdPortalTask extends Task {
     // (2026-09-21 记忆门框直达) END_PORTAL 记忆命中后, 先走到门框旁可站立格
     // 再进格栅探索 —— 否则人在门旁 5 格还在反方向扫格子 (174359 实锤:
     // recall (9833,20,-10698), 人 (9834,18,-10693), 探索却 heading
-    // (9840,24,-10662) 越走越远)。
+    // (9840,24,-10662) 越走越远)。不限距离: 区块未加载先走区块 (GetToChunkTask),
+    // 加载后再选可站立格。24 格只是 BeatMinecraft2Task "锁定门中心"的验证半径。
+    private BlockPos _recallFramePos = null;
+    // 已解析的可站立格 (区块加载后才有; null = 还在走区块阶段)。
+    private BlockPos _recallStandTarget = null;
+    // 接近任务缓存实例 (每 tick 新建 = 寻路横跳, 0920 实锤)。
     private Task _recallApproachTask = null;
     // 近扫导航完成后连续几轮扫描仍未见砖的计数 (防同目标反复重建导航)。
     private int _probeNavMiss = 0;
@@ -119,22 +125,14 @@ public class GoToStrongholdPortalTask extends Task {
                         _phase = PHASE_EXPLORE;
                         // (2026-09-21 记忆门框直达) 记忆点 = 亲眼看到的门框方块
                         // (ExploreStrongholdTask.portalSeen 存 framePos), 不是环中心。
-                        // 先走到框旁可站立格再探索; 目标绝不能是框本身 (实心,
-                        // GoalBlock 永不满足 — 150956 框心卡脚同族)。区块未加载时
-                        // findStandableAirNear 退化成 target 本身 → 跳过直达, 交给
-                        // 探索 + BeatMinecraft2Task 的 24 格记忆直认闸接管。
-                        if (mod.getChunkTracker().isChunkLoaded(recalled.pos)) {
-                            BlockPos stand = WorldHelper.findStandableAirNear(mod, recalled.pos);
-                            if (!stand.equals(recalled.pos)) {
-                                _recallApproachTask = new GetToBlockTask(stand);
-                                setDebugState("Recalled END_PORTAL from knowledge, walking to door frame at "
-                                        + stand.toShortString() + ".");
-                            } else {
-                                setDebugState("Recalled END_PORTAL from knowledge, exploring at door (no standable spot near frame yet).");
-                            }
-                        } else {
-                            setDebugState("Recalled END_PORTAL from knowledge, exploring at door (frame chunk not loaded yet).");
-                        }
+                        // 不限距离先走向门框: 区块未加载 → GetToChunkTask 朝区块走;
+                        // 加载后 → 框旁选【有头部空间】的可站立格 (175921 实锤:
+                        // findStandableAirNear 选中框正下方一格, 头顶实心框,
+                        // 两格高 bot 站不进去 → baritone 冻结 NAV-STUCK)。目标绝不
+                        // 能是框本身 (实心, GoalBlock 永不满足 — 150956 卡脚同族)。
+                        _recallFramePos = recalled.pos;
+                        setDebugState("Recalled END_PORTAL from knowledge, heading to door frame at "
+                                + recalled.pos.toShortString() + ".");
                     } else {
                         setDebugState("Recalled stronghold/portal from knowledge, going there directly.");
                     }
@@ -338,12 +336,45 @@ public class GoToStrongholdPortalTask extends Task {
         // 阶段 3: 格栅探索 (12×12 前重, 只认砖块空间, 8 分钟兜底)。
         if (_phase == PHASE_EXPLORE) {
             // (2026-09-21 记忆门框直达) 先走到记忆门框旁, 再进格栅探索。
-            if (_recallApproachTask != null) {
-                if (!_recallApproachTask.isFinished(mod)) {
-                    setDebugState("Walking to remembered door frame");
-                    return _recallApproachTask;
+            if (_recallFramePos != null) {
+                if (_recallApproachTask != null) {
+                    if (!_recallApproachTask.isFinished(mod)) {
+                        setDebugState("Walking to remembered door frame"
+                                + (_recallStandTarget != null
+                                        ? " at " + _recallStandTarget.toShortString()
+                                        : " (frame chunk loading)"));
+                        return _recallApproachTask;
+                    }
+                    if (_recallStandTarget != null) {
+                        // 走到了框旁 → 直达完成, 交回探索 (探索会 LOS 看到门框收尾)。
+                        Debug.logMessage("[PortalApproach] arrived at remembered door frame.");
+                        _recallApproachTask = null;
+                        _recallStandTarget = null;
+                        _recallFramePos = null;
+                    } else {
+                        // 区块到达 → 重析可站立格 (下一轮分支处理)。
+                        _recallApproachTask = null;
+                    }
                 }
-                _recallApproachTask = null;
+                if (_recallFramePos != null) {
+                    if (mod.getChunkTracker().isChunkLoaded(_recallFramePos)) {
+                        BlockPos stand = findStandableWithHeadroom(mod, _recallFramePos);
+                        if (stand != null) {
+                            _recallStandTarget = stand;
+                            _recallApproachTask = new GetToBlockTask(stand);
+                            setDebugState("Walking to remembered door frame at " + stand.toShortString());
+                            return _recallApproachTask;
+                        }
+                        // 框旁找不到可站立格 → 放弃直达, 交回探索。
+                        Debug.logMessage("[PortalApproach] no standable spot with headroom near "
+                                + _recallFramePos.toShortString() + ", falling to explore.");
+                        _recallFramePos = null;
+                    } else {
+                        _recallApproachTask = new GetToChunkTask(new ChunkPos(_recallFramePos));
+                        setDebugState("Walking toward remembered door frame (loading chunks)");
+                        return _recallApproachTask;
+                    }
+                }
             }
             if (_exploreTask == null) {
                 _exploreTask = new ExploreStrongholdTask(_strongholdCoordinates);
@@ -458,6 +489,36 @@ public class GoToStrongholdPortalTask extends Task {
             if (sq < bestSq) {
                 bestSq = sq;
                 best = p;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * (2026-09-21) 门框旁【有头部空间】的可站立格: 脚、头两格空气 (排除框块/
+     * 岩浆/水 — {@code isAir} 双保险), 脚下实心。175921 实锤教训:
+     * {@link WorldHelper#findStandableAirNear} 不查头部空间, 选中框正下方一格
+     * (头顶实心框, 两格高 bot 站不进去) → baritone 冻结 NAV-STUCK。
+     * 框 ±2 水平邻域、y±1 内找离玩家最近者; 找不到返回 null。
+     */
+    private BlockPos findStandableWithHeadroom(AltoClef mod, BlockPos frame) {
+        Vec3d player = mod.getPlayer().getPos();
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos c = frame.add(dx, dy, dz);
+                    if (!mod.getChunkTracker().isChunkLoaded(c)) continue;
+                    if (!mod.getWorld().getBlockState(c).isAir()) continue;
+                    if (!mod.getWorld().getBlockState(c.up()).isAir()) continue;
+                    if (!WorldHelper.isSolid(mod, c.down())) continue;
+                    double sq = c.getSquaredDistance(player);
+                    if (sq < bestSq) {
+                        bestSq = sq;
+                        best = c;
+                    }
+                }
             }
         }
         return best;
