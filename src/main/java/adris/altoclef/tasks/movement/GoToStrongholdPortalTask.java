@@ -4,9 +4,11 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.resources.CollectFoodTask;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
@@ -32,6 +34,11 @@ public class GoToStrongholdPortalTask extends Task {
     // 四向各挖 5 格支道 (FishboneLevelTask); 扫穿窗口仍无砖 → 转水平探索。
     private static final int FISHBONE_TOP_Y = 25;
     private static final int FISHBONE_BOTTOM_Y = -55;
+    // (2026-09-21 用户"丢眼睛任务前应派发 restock 食物") 丢眼远征硬前置:
+    // 背包食物分低于该值 → 先 CollectFoodTask 收满一次再丢第一只眼。
+    // 口径与进下界前食物硬闸 (BeatMinecraft2Task.getPreNetherFoodTask) 一致:
+    // 判定用 StorageHelper.calculateInventoryFoodScore, 目标 150 units。
+    private static final int EXPEDITION_FOOD_UNITS = 150;
     private static final int FISHBONE_LEVEL_STEP = 5;
     // 鱼骨层间近扫半径 (无视 LOS/FOV, 仅限已加载区块; 支道长 5 + 层深 5,
     // 8 格半径正好覆盖"隔壁支道擦过要塞墙"的情形)。
@@ -90,6 +97,11 @@ public class GoToStrongholdPortalTask extends Task {
     private Task _recallApproachTask = null;
     // 近扫导航完成后连续几轮扫描仍未见砖的计数 (防同目标反复重建导航)。
     private int _probeNavMiss = 0;
+    // (2026-09-21) 丢眼前补粮一次性 gate: 收满 150 units 后置位, 本会话不再闸。
+    // 与 0825 地牢锁定 ("开始定位后不被食物打扰") 兼容 —— 闸只拦丢第一只眼之前。
+    // 任务实例 sticky: 一旦派发持续返回同一实例直到收满, 不被当 1-tick 任务打断。
+    private boolean _expeditionFoodDone = false;
+    private CollectFoodTask _expeditionFoodTask = null;
 
     public GoToStrongholdPortalTask(int targetEyes){
         _targetEyes = targetEyes;
@@ -158,6 +170,37 @@ public class GoToStrongholdPortalTask extends Task {
                     _strongholdCoordinates = mod.getPlayer().getBlockPos();
                     _phase = PHASE_EXPLORE;
                     return null;
+                }
+                // (2026-09-21 用户"丢眼睛任务前应派发 restock 食物") 丢眼远征硬
+                // 前置: 食物分 < 150 units → 先收满再丢第一只眼。只拦这条"真要
+                // 丢眼"的分支 —— 记忆直达/见砖直进探索的路径不补粮 (用户口径:
+                // 闸在"丢眼睛任务前")。ignoreExpeditionReduction=true: 与进下界
+                // 前食物硬闸同口径, 远征长, 不许"超时降低"砍目标。
+                if (!_expeditionFoodDone) {
+                    double foodScore = StorageHelper.calculateInventoryFoodScore(mod);
+                    if (foodScore >= EXPEDITION_FOOD_UNITS) {
+                        _expeditionFoodDone = true; // 够了直接放行, 不建任务
+                    } else {
+                        if (_expeditionFoodTask == null) {
+                            Debug.logMessage("[ExpeditionFood] food=" + (int) foodScore
+                                    + " < " + EXPEDITION_FOOD_UNITS
+                                    + " — restocking food before eye expedition.");
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[MAIN-FIX]\t[ExpeditionFood]\tfood=" + (int) foodScore
+                                            + " < " + EXPEDITION_FOOD_UNITS
+                                            + " -> CollectFoodTask(150, ignoreReduction) before eye throwing");
+                            _expeditionFoodTask = new CollectFoodTask(EXPEDITION_FOOD_UNITS, true);
+                        }
+                        if (_expeditionFoodTask.isFinished(mod)) {
+                            _expeditionFoodDone = true;
+                            _expeditionFoodTask = null;
+                            Debug.logMessage("[ExpeditionFood] restock complete, starting eye expedition.");
+                        } else {
+                            setDebugState("Restocking food before eye expedition ("
+                                    + (int) foodScore + "/" + EXPEDITION_FOOD_UNITS + " units)");
+                            return _expeditionFoodTask;
+                        }
+                    }
                 }
                 setDebugState("Triangulating stronghold...");
                 return _locateCoordsTask;
