@@ -1328,6 +1328,9 @@ public class BeatMinecraft2Task extends Task {
 
         // Do we need more eyes?
         boolean noEyesPlease = (endPortalOpened(mod, _endPortalCenterLocation) || WorldHelper.getCurrentDimension() == Dimension.END);
+        // (2026-09-21) 门框是否已实测。实测时 filledPortalFrames 才是真实已插数, 收集目标
+        // 才钉得住"刚好够插" (见下面 requestTarget)。出发前 (没看见门) 恒为 false。
+        boolean framesMeasured = portalFramesMeasured(mod, _endPortalCenterLocation);
         int filledPortalFrames = getFilledPortalFrames(mod, _endPortalCenterLocation);
         int eyesNeededMin = noEyesPlease ? 0 : _config.minimumEyes - filledPortalFrames;
         int eyesNeeded    = noEyesPlease ? 0 : _config.targetEyes  - filledPortalFrames;
@@ -1341,7 +1344,13 @@ public class BeatMinecraft2Task extends Task {
             // targetEyes-filledPortalFrames 当收集目标, 把收集和门框状态耦合:
             // 珍珠/棒/粉目标全部跟着门框浮动 (实测 pearls 14/棒 7), 真人玩家
             // 根本不会这么算 —— 就按满额收集, 多出来的当余量, 简单可靠。
-            return getEyesOfEnderTask(mod, _config.targetEyes);
+            // (2026-09-21) 例外: 已经把门框实测出来了 (就在门厅里, 此时多半是任务重启后
+            // 重新进入) → 按【空框数】补, 不再按满额 16 多收: 门厅里多收 = 空跑一趟。
+            // 未实测 (出发前) 保持上面的满额口径不变。
+            int requestTarget = (framesMeasured && !noEyesPlease)
+                    ? Math.max(1, Math.min(_config.targetEyes, END_PORTAL_FRAME_COUNT - filledPortalFrames))
+                    : _config.targetEyes;
+            return getEyesOfEnderTask(mod, requestTarget);
         } else {
             _collectingEyes = false;
         }
@@ -1460,6 +1469,20 @@ public class BeatMinecraft2Task extends Task {
                         // 一格】的空气格, 走到那一步就踏进门传走。
                         return new GetToBlockTask(_endPortalCenterLocation.up());
                     } else {
+
+                        // (2026-09-21 用户"只有看到末影门后才能知道自己够不够") 门前结算空框。
+                        // 出发前的 12 眼下限管不到途中丢掉的眼: 定位阶段每丢一次,
+                        // LocateStrongholdCoordinatesTask 只保证手里 ≥ MIN_EYES_BEFORE_RECOLLECT
+                        // (=10, 补到 10 为止), 最后一次丢完通常只剩 9; 而 12 个框里只有约 1 个
+                        // 天生带眼, 实际要 11 颗左右。更关键的是 _ranStrongholdLocator 一旦
+                        // 置位, onTick 开头的锁定分支直接 return getStrongholdPhase ——
+                        // 上面的眼睛收集闸被永久旁路, "不够"再没有任何地方兜。
+                        // 现在走到门厅里 (12 个框全加载 = 能实测) 就按【未插框数】结算一次:
+                        // 不够先去补眼, 够了才插。测不准则放行 (见 eyeShortageAtPortalTask)。
+                        Task eyeShortage = eyeShortageAtPortalTask(mod);
+                        if (eyeShortage != null) {
+                            return eyeShortage;
+                        }
 
                         // Open the portal! (we have enough eyes, do it)
                         setDebugState("Opening End Portal");
@@ -1721,22 +1744,63 @@ public class BeatMinecraft2Task extends Task {
         }
         return true;
     }
+    /**
+     * (2026-09-21) 12 个传送门框是否已"实测": 全部区块已加载 且 位置上确实是
+     * {@code END_PORTAL_FRAME} 方块。后者是关键 —— {@code doSimpleSearchForEndPortal}
+     * 只要看见 3 个框就返回近似中心, 按那个中心推出来的 12 个偏移位置大多不是门框,
+     * 直接照它算会得出"12 个框全是空的"的假缺口, 把 bot 从地牢里打发出去收集。
+     */
+    private boolean portalFramesMeasured(AltoClef mod, BlockPos endPortalCenter) {
+        if (endPortalCenter == null) return false;
+        for (BlockPos frame : getFrameBlocks(endPortalCenter)) {
+            if (!mod.getChunkTracker().isChunkLoaded(frame)) return false;
+            if (mod.getWorld().getBlockState(frame).getBlock() != Blocks.END_PORTAL_FRAME) return false;
+        }
+        return true;
+    }
+
+    /**
+     * (2026-09-21 用户"只有看到末影门后才能知道自己够不够") 门前结算空框。
+     * 只有站到门厅里 (12 个框全部加载且确实是门框 = 能实测) 才结算: 手里末影之眼数
+     * &lt; 未插框数 → 返回补眼任务 (目标 = 空框数, 不按满额 16 多收); 否则 null 放行去插。
+     * 测不准 (框块未全加载 / 中心是估算的) 一律 null —— 维持旧行为, 不能把 bot 从地牢
+     * 里打发去收集。
+     */
+    private Task eyeShortageAtPortalTask(AltoClef mod) {
+        if (_endPortalCenterLocation == null || endPortalOpened(mod, _endPortalCenterLocation)) {
+            return null;
+        }
+        if (!portalFramesMeasured(mod, _endPortalCenterLocation)) {
+            return null;
+        }
+        int emptyFrames = END_PORTAL_FRAME_COUNT - getFilledPortalFrames(mod, _endPortalCenterLocation);
+        int eyes = StorageHelper.countItemInInventoryReal(mod, Items.ENDER_EYE);
+        if (eyes >= emptyFrames) {
+            return null;
+        }
+        setDebugState("Collecting eyes for portal frames (" + eyes + "/" + emptyFrames + ")");
+        // 与定位阶段的重收闸同款轻量口径 (TaskCatalogue: 手里有粉/珍珠直接合成, 缺料才去
+        // mob 珍珠/下界收棒)。刻意不用 getEyesOfEnderTask —— 它的 OVERWORLD 分支带木头
+        // 硬前置/装备/挖矿整条主链, 在门厅里跑那些是明显跑题。
+        return TaskCatalogue.getItemTask(Items.ENDER_EYE, emptyFrames);
+    }
+
     private int getFilledPortalFrames(AltoClef mod, BlockPos endPortalCenter) {
-        // If we have our end portal, this doesn't matter.
-        if (endPortalFound(mod, endPortalCenter)) {
+        // 门已开 (或已在末地): 12 个框不再需要插眼, 视为"全满"。调用方另有 noEyesPlease 兜底。
+        if (endPortalOpened(mod, endPortalCenter)) {
             return END_PORTAL_FRAME_COUNT;
         }
-        if (endPortalFound(mod, endPortalCenter)) {
-            List<BlockPos> frameBlocks = getFrameBlocks(endPortalCenter);
-            // If EVERY portal frame is loaded, consider updating our cached filled portal count.
-            if (frameBlocks.stream().allMatch(blockPos -> mod.getChunkTracker().isChunkLoaded(blockPos))) {
-                _cachedFilledPortalFrames = frameBlocks.stream().reduce(0, (count, blockPos) ->
-                        count + (isEndPortalFrameFilled(mod, blockPos) ? 1 : 0),
-                        Integer::sum);
-            }
-            return _cachedFilledPortalFrames;
+        // (2026-09-21 修死代码) 旧实现这里写的是 `if (endPortalFound(...)) return 12;` ——
+        // endPortalFound 只表示"12 个框块都被 trackBlock 到" (= 区块加载了), 与插没插眼
+        // 无关, 于是地牢一加载就恒报"12 个框已插", 眼睛闸 eyesNeededMin = minimumEyes-12
+        // = 0 直接失效。紧随其后的第二个 if 与它同条件 = 永不可达的死代码, 真数逻辑从来
+        // 没跑过。现在: 能实测就按【真实方块状态】数已插眼数, 测不准沿用上次缓存。
+        if (portalFramesMeasured(mod, endPortalCenter)) {
+            _cachedFilledPortalFrames = getFrameBlocks(endPortalCenter).stream().reduce(0,
+                    (count, blockPos) -> count + (isEndPortalFrameFilled(mod, blockPos) ? 1 : 0),
+                    Integer::sum);
         }
-        return 0;
+        return _cachedFilledPortalFrames;
     }
 
     private boolean canBeLootablePortalChest(AltoClef mod, BlockPos blockPos) {
