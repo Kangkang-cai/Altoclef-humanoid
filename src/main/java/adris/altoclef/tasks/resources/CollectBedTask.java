@@ -61,6 +61,46 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
     // 闸门命中诊断(5s 节流): 记录选中的床坐标与距离, 复现"切了挖床却锁不到"时直接定位。
     private static long s_lastGateDiagMs = 0;
 
+    // (2026-09-21 合成优先, 用户"爬上去 vs 自己做, bot 选了更费劲的, 似乎跳过了制作床")
+    // 160148 实锤: 地下 y≈18, 背包 27 原木+羊毛够做全部缺口床, 合成链刚起了头
+    // (Crafting 12 planks → Receiving output) 就被挖床分支抢走 → "Baritone pillar
+    // to 9829,69,-10662" 垫塔 51 格去拆村庄床。根因: 挖床分支闸门只看
+    // "12s 滞回 + 96 格内可挖床", 不看合成可行性 → 原料够也永远优先挖床。
+    // 修复: 缺口床原料够就地合成 → 一律走合成分支; 床在 BED_GRAB_NEAR_RANGE 内
+    // 仍优先挖 (走两步的事, 不必耗合成台)。合成完床数达标任务自然结束, 无回摆。
+    private static final double BED_GRAB_NEAR_RANGE = 16.0;
+    private static long s_lastCraftOverrideLogMs = 0;
+
+    /** 缺口床数 = 目标 − 背包床 (本任务内口径; 自放床/末地掉落床由上层 getBedGap 管)。 */
+    private int bedGapHere(AltoClef mod) {
+        return Math.max(0, _visualBedTarget.getTargetCount()
+                - mod.getItemStorage().getItemCount(ItemHelper.BED));
+    }
+
+    /**
+     * 背包原料够不够就地合成 {@code gap} 张床: 床配方 = 同色羊毛 3 + 木板 3
+     * (按任一单色计), 木板可由原木合成 (1 原木→4 木板)。合成台缺失不阻断
+     * (原木能造合成台)。与 BeatMinecraft2Task.canCraftBedsFromInventory 同口径。
+     */
+    private boolean canCraftBedsFromInventory(AltoClef mod, int gap) {
+        if (gap <= 0) return false;
+        int woolNeeded = 3 * gap;
+        int bestSingleColor = 0;
+        for (Item wool : ItemHelper.WOOL) {
+            bestSingleColor = Math.max(bestSingleColor, mod.getItemStorage().getItemCount(wool));
+        }
+        if (bestSingleColor < woolNeeded) return false;
+        int planks = 0;
+        for (Item plank : ItemHelper.PLANKS) {
+            planks += mod.getItemStorage().getItemCount(plank);
+        }
+        int logs = 0;
+        for (Item log : ItemHelper.LOG) {
+            logs += mod.getItemStorage().getItemCount(log);
+        }
+        return planks + logs * 4 >= woolNeeded;
+    }
+
     // (2026-09-09 23:20 判别日志, 用户"别废话了直接加日志, 我复现一遍你亲自部署")
     // 22:58 场次三个事实互相矛盾, 无法用当前源码解释:
     //   ① 挖床分支已派发 (tasks log t=3 -> <Mine And Collect [[beds]]> 持续 13s)
@@ -184,6 +224,23 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
                 Debug.logToFile("altoclef_diag.log", "[CollectBed]\tGATE-CHANGE\t-> "
                         + gateBed.toShortString() + " dist="
                         + (int) Math.sqrt(gateBed.getSquaredDistance(playerPos)));
+            }
+            // (2026-09-21 合成优先) 原料够就地合成且床不在顺手距离内 → 走合成,
+            // 不为挖现成床垫塔/远征 (160148 实锤: 合成刚起头被挖床分支抢走,
+            // 垫塔 51 格爬去拆村庄床)。
+            int gapHere = bedGapHere(mod);
+            if (gapHere > 0 && canCraftBedsFromInventory(mod, gapHere)
+                    && !gateBed.isWithinDistance(playerPos, BED_GRAB_NEAR_RANGE)) {
+                if (nowMs - s_lastCraftOverrideLogMs > 5000) {
+                    s_lastCraftOverrideLogMs = nowMs;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[CollectBed]\t[CraftPriority]\tgap=" + gapHere
+                                    + " gateBed=" + gateBed.toShortString() + " dist="
+                                    + (int) Math.sqrt(gateBed.getSquaredDistance(playerPos))
+                                    + " -> craft branch (inventory materials suffice)");
+                }
+                markProtectedBedsUnreachable(mod);
+                return super.onResourceTick(mod);
             }
             // (B修诊断) 闸门命中: 打出选中的床与距离, 便于对账挖床子任务是否真锁到了它。
             if (nowMs - s_lastGateDiagMs > 5000) {
