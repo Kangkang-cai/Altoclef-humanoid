@@ -345,6 +345,9 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
      * (0.85 身高, 小白/僵尸探头过方块沿时最先露出的就是这一段) → 包围盒
      * 中心。返回第一个从玩家相机无方块遮挡的点; 全被挡返回 null。
      * 这是"用自己的眼睛看" (相机射线), 不违反反透视。
+     * (2026-09-21 末影人例外, 用户"盯脚打防吸旁人") 末影人候选压到脚/小腿
+     * (0.10/0.25 身高) — 原版盯头激怒只查头部包围盒与视线相交, 瞄头 =
+     * 每次走位都可能在激怒新末影人。
      */
     private Vec3d computeVisibleAimPoint(AltoClef mod, Entity entity) {
         Vec3d from = mod.getPlayer().getCameraPosVec(1.0F);
@@ -352,7 +355,9 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         double cx = (box.minX + box.maxX) / 2.0;
         double cz = (box.minZ + box.maxZ) / 2.0;
         double height = box.maxY - box.minY;
-        double[] fractions = {0.85, 0.5};
+        double[] fractions = entity instanceof net.minecraft.entity.mob.EndermanEntity
+                ? new double[]{0.10, 0.25}
+                : new double[]{0.85, 0.5};
         for (double frac : fractions) {
             Vec3d p = new Vec3d(cx, box.minY + height * frac, cz);
             BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(from, p,

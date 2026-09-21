@@ -207,6 +207,13 @@ public class PlayerExtraController {
         Vec3d cam = MinecraftClient.getInstance().player.getCameraPosVec(1.0F);
         Box box = entity.getBoundingBox();
         Vec3d center = box.getCenter();
+        // (2026-09-21 末影人瞄脚, 用户"盯脚打防吸旁人") 排序基准从身体中心换成
+        // 脚部中心 (minY+0.3): 原版盯头激怒只查头部包围盒与视线相交, 瞄脚让
+        // 准心离开头区, 走位时不至于把旁边末影人吸过来。攻击判定扫整个包围盒,
+        // 打脚照常掉血。
+        Vec3d sortBase = entity instanceof net.minecraft.entity.mob.EndermanEntity
+                ? new Vec3d(center.x, box.minY + 0.3, center.z)
+                : center;
 
         List<Vec3d> candidates = new ArrayList<>();
         for (double x : new double[]{box.minX, center.x, box.maxX}) {
@@ -216,8 +223,8 @@ public class PlayerExtraController {
                 }
             }
         }
-        // 拟人优先级: 越接近身体中段的点越优先瞄。
-        candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(center)));
+        // 拟人优先级: 越接近身体中段的点越优先瞄 (末影人 = 越接近脚部)。
+        candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(sortBase)));
 
         for (Vec3d p : candidates) {
             if (isPointVisible(cam, p)) return Optional.of(p);

@@ -1119,6 +1119,11 @@ public class MobDefenseChain extends SingleTaskChain {
         // → 同一 KillEntitiesTask 继续追骷髅。每 tick 复查武器, 丢剑(死亡
         // 复活是主要来源)立即转逃; must-kill 也不例外 (入口闸门保证空手进
         // 不了 must-kill, 这里兜底复活后清空背包的场景)。
+        // (2026-09-21 末影人战斗到底, 用户"他还是逃跑") shouldRetreatMelee 只管
+        // 【进不进战斗】, 本步中盘复评没有末影人豁免 — 181847 实锤: 满血自信战斗
+        // 1.5s 内被打到 30.7% → "health low" RUN (prio 80), 无 RETREAT-DEC 日志
+        // (判决不在 shouldRetreatMelee)。末影人瞬移贴脸逃不掉 (0918 拍板),
+        // 全末影人批次低血量/威胁公式一律不转逃, 只由超时/无武器/清场收场。
         if (!hasWeaponToFight(mod)) {
             Debug.logMessage("Combat decision: RUN (no weapon mid-fight, enemies=%d)", _fightTargets.size());
             exitFightState();
@@ -1127,12 +1132,14 @@ public class MobDefenseChain extends SingleTaskChain {
             _defenseState = DefenseState.RETREAT;
             return 80;
         }
+        boolean allEndermen = !_fightTargets.isEmpty()
+                && _fightTargets.stream().allMatch(t -> t instanceof EndermanEntity);
         if (!_mustKillAttacker) {
             if (_confidentFight) {
                 // (2026-08-23) 自信战斗中途不走威胁公式/护甲脆弱判定 (无甲时
                 // 公式必判必输 → 刚开打就被踢去逃跑, 用户实测 "打 5 秒就跑")。
                 // 唯一撤退条件: 血量跌破 40% (苦力怕/超时保护仍然生效)。
-                if (mod.getPlayer().getHealth() < mod.getPlayer().getMaxHealth() * 0.4f) {
+                if (!allEndermen && mod.getPlayer().getHealth() < mod.getPlayer().getMaxHealth() * 0.4f) {
                     Debug.logMessage("Combat decision: RUN mid-confident-fight (health low, enemies=%d)", _fightTargets.size());
                     exitFightState();
                     _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
@@ -1146,7 +1153,7 @@ public class MobDefenseChain extends SingleTaskChain {
                     totalThreat += ThreatEvaluator.evaluate(mod, hostile);
                 }
                 double ourStrength = ThreatEvaluator.estimatePlayerStrength(mod);
-                if (!ThreatEvaluator.canWin(totalThreat, ourStrength) || isInDanger(mod)) {
+                if (!allEndermen && (!ThreatEvaluator.canWin(totalThreat, ourStrength) || isInDanger(mod))) {
                     Debug.logMessage("Combat decision: RUN mid-fight (threat=%.1f, our=%.1f, enemies=%d)", totalThreat, ourStrength, _fightTargets.size());
                     exitFightState();
                     _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);

@@ -141,10 +141,13 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // 收盾后至少等这么多 tick (0.75s) 才挥剑 — 用户要求"放下盾和反击的间隔
     // 要够大", 否则反击无效。
     private static final int SHIELD_DOWN_MIN_GAP_TICKS = 15;
-    // (2026-08-23 打末影人瞄准) 末影人身高 2.9, 眼睛在 ~2.55。用户要求瞄准时
-    // "高一格到一格半" (约 1.5 格), 让准心落在头/眼睛区域 — 激怒末影人 +
-    // 打到本体。当前 aim 点是 getPos() (脚底), 所以加 1.5。
-    private static final double ENDERMAN_AIM_OFFSET = 1.5;
+    // (2026-08-23 打末影人瞄准) 末影人身高 2.9, 眼睛在 ~2.55。原设计瞄 ~1.5
+    // (头/眼睛区域) 顺带"激怒"目标。
+    // (2026-09-21 用户"最好盯着末影人的脚打, 不然很容易吸引别的末影人") 改瞄
+    // 脚/小腿 (+0.3): 原版盯头激怒判据只查【头部包围盒】与视线相交 — 准心压在
+    // 腿部就不会盯头激怒 (已愤怒的目标照打, 攻击判定扫的是整个包围盒, 打脚
+    // 一样掉血), 也不会在转身/走位时准心扫到旁边末影人的头把旁人吸过来。
+    private static final double ENDERMAN_AIM_OFFSET = 0.3;
 
     /**
      * (2026-09-09 凋零骷髅特殊对待, 用户"打凋零靠的太近了, 必须控制靠近距离")
