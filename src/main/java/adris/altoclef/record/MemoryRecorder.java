@@ -27,20 +27,30 @@ final class MemoryRecorder {
     private static long _lastWorldRev = -1;
     private static long _lastKnowledgeRev = -1;
     private static long _lastValuableRev = -1;
+    // (2026-09-21 录制同步) BlockTracker 缓存 (决策候选集) 的版本门控。缓存变化频率
+    // 远高于记忆写入 (近区 5Hz 扫描持续喂入), 单独加 3s 最小间隔, 避免 memory 通道
+    // 被"位置只挪了一格"的快照刷屏。
+    private static long _lastBlockCacheRev = -1;
+    private static long _lastBlockCacheWriteMs = 0;
+    private static final long BLOCKCACHE_MIN_INTERVAL_MS = 3000;
 
     /** 返回 null 表示"记忆没变, 本帧不写"。 */
     static String sample(AltoClef mod) {
         long w;
         long k;
         long v;
+        long bc;
         try {
             w = mod.getWorldMemory() == null ? 0 : mod.getWorldMemory().getMemoryRevision();
             k = KnowledgeMemory.getMemoryRevision();
             v = VisibilityHelper.getValuableMemoryRevision();
+            bc = mod.getBlockTracker().getCacheRevision();
         } catch (Throwable t) {
             return null;
         }
-        if (w == _lastWorldRev && k == _lastKnowledgeRev && v == _lastValuableRev) return null;
+        long nowMs = System.currentTimeMillis();
+        boolean bcDue = bc != _lastBlockCacheRev && nowMs - _lastBlockCacheWriteMs >= BLOCKCACHE_MIN_INTERVAL_MS;
+        if (w == _lastWorldRev && k == _lastKnowledgeRev && v == _lastValuableRev && !bcDue) return null;
 
         StringBuilder sb = new StringBuilder(1024);
         sb.append('{');
@@ -48,7 +58,8 @@ final class MemoryRecorder {
         sb.append(",\"t\":").append(WorldHelper.getTicks());
         sb.append(",\"rev\":{\"world\":").append(w)
                 .append(",\"knowledge\":").append(k)
-                .append(",\"valuable\":").append(v).append('}');
+                .append(",\"valuable\":").append(v)
+                .append(",\"blockcache\":").append(bc).append('}');
 
         sb.append(",\"world\":");
         appendBuckets(sb, safeDump(() -> mod.getWorldMemory().dumpMemoryForRecord()));
@@ -56,6 +67,28 @@ final class MemoryRecorder {
         appendBuckets(sb, safeDump(() -> mod.getKnowledgeMemory().dumpMemoryForRecord()));
         sb.append(",\"valuable\":");
         appendBuckets(sb, safeDump(VisibilityHelper::dumpValuableMemory));
+
+        // (2026-09-21) BlockTracker 缓存快照: 任务决策候选集 (巡逻目标/失联远走目标/
+        // 收集材料取最近的来源)。感知通道只录视线口径, 没有这里离线无法解释
+        // "为什么朝林子/那块矿走"。只在 bcDue 时写 (其余情况 null 占位), 单类型
+        // ≤100 上限天然有界。
+        sb.append(",\"blockcache\":");
+        if (bcDue) {
+            try {
+                sb.append("{\"dim\":");
+                Json.str(sb, mod.getBlockTracker() == null ? null
+                        : adris.altoclef.util.helpers.WorldHelper.getCurrentDimension().name());
+                sb.append(",\"types\":");
+                appendBuckets(sb, safeDump(mod.getBlockTracker()::dumpCacheForRecord));
+                sb.append('}');
+            } catch (Throwable t) {
+                sb.append("null");
+            }
+            _lastBlockCacheRev = bc;
+            _lastBlockCacheWriteMs = nowMs;
+        } else {
+            sb.append("null");
+        }
 
         sb.append('}');
 
@@ -70,6 +103,8 @@ final class MemoryRecorder {
         _lastWorldRev = -1;
         _lastKnowledgeRev = -1;
         _lastValuableRev = -1;
+        _lastBlockCacheRev = -1;
+        _lastBlockCacheWriteMs = 0;
     }
 
     private interface Dump {

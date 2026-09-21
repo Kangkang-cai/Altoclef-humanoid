@@ -253,6 +253,36 @@ public class BlockTracker extends Tracker {
     }
 
     /**
+     * (2026-09-21 数据集录制) 当前维度缓存的写版本号 —— 录制通道按"变化才写"门控。
+     * 任何增/删/清/裁剪 (近/远区扫描喂入、rescanWorld 清失效项、smartPurge) 都会 +1。
+     */
+    public long getCacheRevision() {
+        synchronized (_scanMutex) {
+            return currentCache().revision;
+        }
+    }
+
+    /**
+     * (2026-09-21 数据集录制) 当前维度缓存快照: {方块注册 id → 位置列表} (只读副本)。
+     *
+     * <p>这是 bot 决策候选集的准确口径 —— 巡逻目标/失联远走目标/收集材料取最近全从
+     * 这里出, 感知通道只录视线口径, 没有它离线无法解释"为什么朝林子/那块矿走"。
+     * 全量导出天然有界: {@code maxCacheSizePerBlockType=100} (addBlock 淘汰 + smartPurge
+     * 双重保证), 类型数 = 当前被任务注册的类型 (个位数到几十), 最坏 ≈ 数千坐标。
+     */
+    public Map<String, List<BlockPos>> dumpCacheForRecord() {
+        synchronized (_scanMutex) {
+            PosCache cache = currentCache();
+            Map<String, List<BlockPos>> out = new LinkedHashMap<>();
+            for (Map.Entry<Block, List<BlockPos>> e : cache._cachedBlocks.entrySet()) {
+                out.put(net.minecraft.util.registry.Registry.BLOCK.getId(e.getKey()).toString(),
+                        new ArrayList<>(e.getValue()));
+            }
+            return out;
+        }
+    }
+
+    /**
      * Starts tracking/pay attention to some blocks.
      * <b>IMPORTANT:</b> ALWAYS pair with {@link #stopTracking(Block...) stopTracking}! Otherwise this block type will be
      * tracked forever (not the end of the world, but other block types will be lost.
@@ -728,6 +758,10 @@ public class BlockTracker extends Tracker {
 
         private final WorldLocateBlacklist _blacklist = new WorldLocateBlacklist();
 
+        // (2026-09-21 数据集录制) 缓存写版本号: 任何增/删/清/裁剪都 +1, 供录制通道按
+        // "变化才写"门控 (与 WorldMemory/KnowledgeMemory 的 revision 同一口径)。
+        long revision = 0;
+
         public boolean anyFound(Block... blocks) {
             for (Block block : blocks) {
                 if (_cachedBlocks.containsKey(block)) return true;
@@ -760,6 +794,7 @@ public class BlockTracker extends Tracker {
         }
 
         public void removeBlock(BlockPos pos, Block... blocks) {
+            revision++;
             for (Block block : blocks) {
                 if (_cachedBlocks.containsKey(block)) {
                     _cachedBlocks.get(block).remove(pos);
@@ -805,11 +840,13 @@ public class BlockTracker extends Tracker {
                 if (farthest != null) {
                     list.remove(farthest);
                     _cachedByPosition.remove(farthest);
+                    revision++;
                 }
             }
             if (!list.contains(pos)) {
                 list.add(pos);
                 _cachedByPosition.put(pos, block);
+                revision++;
             }
         }
 
@@ -819,6 +856,7 @@ public class BlockTracker extends Tracker {
             _cachedBlocks.clear();
             _cachedByPosition.clear();
             _blacklist.clear();
+            revision++;
         }
 
         public int getBlockTrackCount() {
@@ -915,6 +953,7 @@ public class BlockTracker extends Tracker {
          * Purge enough blocks so our size is small enough
          */
         public void smartPurge(AltoClef mod, Vec3d playerPos) {
+            revision++; // (2026-09-21 录制) 裁剪也是缓存内容变化, 5s 一次的节奏可接受
 
             // Clear cached by position blocks, as they can be a handful.
             try {

@@ -47,7 +47,7 @@
 |---|---|---|
 | `frames.jsonl.gz` | A 时间 + B 任务标签 + C 自身状态 + G 动作 | 每 tick 一行 |
 | `perception.jsonl.gz` | D 可见世界 (方块/实体/声音) | 每 tick 一行 |
-| `memory.jsonl.gz` | E 记忆快照 (world/knowledge/valuable) | **只在写版本号变化时** |
+| `memory.jsonl.gz` | E 记忆快照 (world/knowledge/valuable + blockcache 决策候选集) | **只在写版本号变化时** (blockcache 另有 ≥3s 间隔) |
 | `events.jsonl.gz` | 记忆读写 / 受伤 / 死亡 / 任务切换 | 稀疏 |
 | `meta.json` | 种子/维度/存档名/构建 ID/口径与分级表/设置快照/结束统计 | 开录 + 收尾各写一次 |
 
@@ -147,12 +147,22 @@ AltoClef.onClientTick()
 ### memory.jsonl.gz (E)
 
 ```json
-{"seq":1,"t":306,"rev":{"world":0,"knowledge":1,"valuable":0},
+{"seq":1,"t":306,"rev":{"world":0,"knowledge":1,"valuable":0,"blockcache":42},
  "world":{"ore:minecraft:iron_ore":[[x,y,z],...],"animal:minecraft:sheep":[...],
           "portal":[...],"portal_lost":[...],"bed":[...],"grave":[...]},
  "knowledge":{"center:FORTRESS":[...]},
- "valuable":{"valuable:minecraft:lava":[...]}}
+ "valuable":{"valuable:minecraft:lava":[...]},
+ "blockcache":{"dim":"NETHER","types":{"minecraft:warped_nylium":[[x,y,z],...],
+          "minecraft:crimson_nylium":[...]}}
 ```
+
+`blockcache` (2026-09-21 录制同步): **BlockTracker 缓存 = bot 决策候选集的准确口径**。
+巡逻目标 / 失联远走目标 / 收集材料取最近 / "看见森林"判据全从这里出, 而感知通道
+只录视线口径 —— 没有它离线无法解释"为什么朝林子/那块矿走"(含玩家没直视过的块)。
+门控: `rev.blockcache` 变化 **且** 距上次写 ≥3s 才写 (缓存被近区 5Hz 扫描持续喂入,
+不设间隔会刷屏); 未到期时该字段为 `null` 占位。天然有界: 单类型 ≤
+`maxCacheSizePerBlockType=100`, 类型数 = 当前被任务注册的类型。`dim` 用
+`WorldHelper.Dimension` 枚举名 (OVERWORLD/NETHER/END), 精确维度看 frames 的 `dim`。
 
 ### events.jsonl.gz
 
@@ -329,6 +339,7 @@ tick 的真值**。
 |---|---|---|
 | ~~听觉通道基本为空~~ **(2026-09-17 已修)** | 改为 `SoundSystemMixin` 在声音引擎总入口截获 (服务端广播/实体语音/自己动作音/环境音), 缓冲 8s+128, 可闻过滤 `d≤16×volume`。SoundTracker 决策语义零改动。 | 已解决 |
 | ~~决策诊断日志不入流~~ **(2026-09-21 已修)** | `Debug.logToFile` 单点汇聚插桩 → `diag` 事件 (每文件 250ms + 全局 25 条/s 节流, `diag_dropped` 汇报丢弃)。JumpStuckResolver 强制干预/虚空列拒绝/巡逻候选等决策依据全入流。 | 已解决 |
+| ~~BlockTracker 缓存不入流~~ **(2026-09-21 已修)** | 缓存加写版本号 + `dumpCacheForRecord` 快照 → memory 通道 `blockcache` 段 (rev 变化且 ≥3s 才写)。决策候选集 (巡逻/失联远走/收料取最近/"看见森林"判据) 离线可复原。 | 已解决 |
 | 无地形/可达性输入 | 感知通道给的是"可见方块", 但 baritone 寻路直接读世界 (可走性/阻挡)。这部分没进数据。 | L3 移动原语学不完整 |
 | 合成/物品变化不可直接查 | 依赖背包逐帧 diff (见 §5.7) | 关 `recordInventoryPerTick` 即失效 |
 | 瞬时记忆是两套 | 录制器自持的视觉记忆与 `MineAndCollectTask._recentlySeen`/`_seenOreTick` 口径一致但**不同步** | 数据里看不到"任务自己记的那份" |
@@ -378,6 +389,7 @@ $fr[0] | ConvertFrom-Json
 `Task.debugString()/debugState()` · `TaskRunner.getCachedPriorities()/getCachedWinnerPriority()/getChains()/getCurrentTaskChain()` ·
 `VisibilityHelper.perceiveSource()/getValuableMemoryRevision()/dumpValuableMemory()` ·
 `WorldMemory.getMemoryRevision()/dumpMemoryForRecord()` · `KnowledgeMemory.getMemoryRevision()/dumpMemoryForRecord()` ·
+`BlockTracker.getCacheRevision()/dumpCacheForRecord()` (2026-09-21 blockcache 快照) ·
 `EntityTracker.getAllPerceivedEntities()` · `SoundTracker.dumpRecentSounds()` · `Settings.isRecordDatasetEnabled()` 等录制设置
 
 ### 插桩点 (行为代码里被录制器调用的位置)

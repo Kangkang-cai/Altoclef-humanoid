@@ -494,7 +494,8 @@ public final class RecordManager {
             sb.append(s == null ? "null" : String.valueOf(s.getTaskTickInterval()));
             sb.append(",\n  \"channels\": {\"frames\":\"A时间+环境(env)/B标签/C自身/G动作+容器槽位(slots) (每帧, 一行一 tick)\", ");
             sb.append("\"perception\":\"D可见世界: blocks/entities/sounds (每帧, 仅录 bot 真能感知的东西)\", ");
-            sb.append("\"memory\":\"E记忆快照: world/knowledge/valuable 三块 (只在写版本号变化时才写)\", ");
+            sb.append("\"memory\":\"E记忆快照: world/knowledge/valuable 三块 + blockcache(BlockTracker 决策候选集, ");
+            sb.append("rev 变化且距上次≥3s 才写) (只在变化时才写)\", ");
             sb.append("\"events\":\"稀疏事件: memory_write/memory_read/damage/heal/death/respawn/chain_switch/leaf_switch/blacklist/anomaly/");
             sb.append("fireball_evade/fireball_repath/breath_touch/breath_clear/breath_near/breath_near_clear/");
             sb.append("diag/diag_dropped\"}");
