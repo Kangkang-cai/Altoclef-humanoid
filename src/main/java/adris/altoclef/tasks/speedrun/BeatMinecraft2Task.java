@@ -1256,7 +1256,11 @@ public class BeatMinecraft2Task extends Task {
             if (endPortal.isPresent()) {
                 _endPortalCenterLocation = endPortal.get();
                 _endPortalOpened = true;
-            } else {
+            } else if (_endPortalCenterLocation == null) {
+                // (2026-09-21 修复回填被清) "Always 检查"每 tick 跑, 原实现搜不到
+                // 就把 _endPortalCenterLocation 无条件清回 null —— 把 getStrongholdPhase
+                // 刚回填的探索确认门中心每 tick 冲掉 (141529 实锤: explore-confirmed
+                // 日志 214 条 = 每 tick 重填一遍)。只在未知时搜索。
                 // TODO: Test that this works, for some reason the bot gets stuck near the stronghold and it keeps "Searching" for the portal
                 _endPortalCenterLocation = doSimpleSearchForEndPortal(mod);
             }
@@ -3461,6 +3465,14 @@ public class BeatMinecraft2Task extends Task {
      * @return 要执行的任务 (回地表 / 收床); null = 不在主世界或床已够, 调用方继续原流程
      */
     private Task bedShortageTask(AltoClef mod, String collectReason) {
+        // (2026-09-21 设床中不抢) 设重生点任务在执行中时缺床闸让位。
+        // 141529 实锤: 放床→瞄床待睡 (aim 收敛中) 被本闸的 GoToSurfaceTask
+        // 打断 → 收床阶段把刚放的自家床当 known bed 拆回 ("放完立马拆掉",
+        // 用户现场目击) → 床数净不变而目标仍差 1 → 放/拆无限循环。任务自带
+        // 睡眠超时与放弃冷却 (SleepGiveUpCooldown), 让位不会卡死。
+        if (_setBedSpawnTask.isActive()) {
+            return null;
+        }
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD || !needsBeds(mod)) {
             _bedCollectCommitted = false;
             return null;
