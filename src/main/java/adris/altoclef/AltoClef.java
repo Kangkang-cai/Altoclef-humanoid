@@ -23,6 +23,7 @@ import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
 import adris.altoclef.util.helpers.OffhandHygiene;
+import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.TaskStackSnapshot;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
@@ -197,7 +198,28 @@ public class AltoClef implements ModInitializer {
                     .filter(item -> item instanceof BlockItem)
                     .filter(item -> item != Items.MAGMA_BLOCK)
                     .collect(Collectors.toList());
-            getClientBaritoneSettings().acceptableThrowawayItems.value.addAll(baritoneCanPlace);
+            // (2026-09-21 深板岩不用于搭路, 76c89e8d 的"计数修复"只是半截) baritone
+            // InventoryBehavior.selectThrowawayForLocation 放置选材按
+            // acceptableThrowawayItems 【清单顺序】逐项找背包 (反编译实锤: iterator
+            // 循环 + lambda$3 逐项 item.equals(stack.getItem())), 而灌入顺序 =
+            // Settings.throwawayItems 的"丢垃圾"顺序 —— 闪长岩/安山岩/花岗岩/凝灰岩/
+            // 泥土/沙砾全排在深板岩圆石前面, 主世界背包常备杂石 → 深板岩永远轮不到
+            // (用户"有深板岩却不用搭路"); 且 DEEPSLATE/STONE 本体 (BlockItem) 根本
+            // 不在 throwawayItems, 有也不用。改按 ScaffoldBlocks.SAFE_MATERIALS 的
+            // 搭路优先序重排, 清单外可放置项 (树叶等) 保持原相对顺序排在后面。
+            List<Item> ordered = new java.util.ArrayList<>(baritoneCanPlace.size());
+            for (Item scaffold : ScaffoldBlocks.SAFE_MATERIALS) {
+                if (baritoneCanPlace.remove(scaffold)) {
+                    ordered.add(scaffold);
+                } else if (scaffold instanceof BlockItem && !ordered.contains(scaffold)) {
+                    // SAFE_MATERIALS 里的放置型方块若不在 throwawayItems (深板岩/
+                    // 石头本体/哭泣黑曜石) 也补进 baritone 放置清单 —— 有就用,
+                    // 不影响 altoclef 自己"丢垃圾"清单的语义。
+                    ordered.add(scaffold);
+                }
+            }
+            ordered.addAll(baritoneCanPlace);
+            getClientBaritoneSettings().acceptableThrowawayItems.value.addAll(ordered);
             // If we should run an idle command...
             if ((!getUserTaskChain().isActive() || getUserTaskChain().isRunningIdleTask()) && getModSettings().shouldRunIdleCommandWhenNotActive()) {
                 getUserTaskChain().signalNextTaskToBeIdleTask();

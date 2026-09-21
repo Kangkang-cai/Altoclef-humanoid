@@ -181,14 +181,22 @@ public final class JumpStuckResolver {
     //
     // 与挖掘豁免 (:isBreakingBlock)/岩浆豁免 (:isInLava) 同一性质: 垂直推进中
     // 水平速度天然为 0, 不是卡死。判据 (两层, 缺一不可):
-    //   ① 最近 CLIMB_GAIN_WINDOW_TICKS 内脚下 Y 创过新高 = 垫柱在真推进
-    //     (真撞头顶棚无 Y 增益, 窗口过后检测自然恢复);
+    //   ① 最近 CLIMB_GAIN_WINDOW_TICKS 内脚下 Y 增加过 (垫柱在真推进; 真撞头顶棚
+    //     /原地弹跳无 Y 增益, 窗口过后检测自然恢复);
     //   ② 当前处于垂直姿态: 离地 (空中) 或 baritone 正强制跳跃 —— 排除
     //     "刚爬上坡就撞墙" 的水平卡死 (那种姿态在地面且强制的是前进不是跳)。
     // 长程爬升真卡死另有 CustomBaritoneGoalTask 的 20s 看门狗 (2026-09-15)
     // 兜底, 不在本件职责内。static 口径同上: 任务实例频繁重建。
-    private static int _climbBestY = Integer.MIN_VALUE;
-    private static int _climbBestYTick = 0;
+    //
+    // (2026-09-21 2043 二修) 首版用"全局历史最高 Y"当增益基准, 被会话内更高的
+    // 位置污染 (203750 会话实锤: 20:40:39 wander 到 y=74 后 _climbBestY=74,
+    // 之后 20:40:34-37 垫柱 y 67→69 明明在涨却永不算"创新高", 窗口恒过期,
+    // 豁免整个失效 = 修复失败)。正确语义是"最近窗口内 Y 是否增加过", 与绝对
+    // 高度无关 —— 改为只记"上次 Y 增加的 tick"。垫柱一格约 1.2s(24 tick) < 40
+    // tick 窗口, 豁免恒有效; 同格弹跳/撞头 Y 不增加, 2s 后检测恢复。
+    private static int _lastPlayerY = Integer.MIN_VALUE;
+    /** 上次脚下 Y【增加】的 tick (同格不动/下降不刷新 —— 增益才是推进证据)。 */
+    private static int _lastYGainTick = Integer.MIN_VALUE + 1;
     /** Y 增益新鲜窗口: 垫柱一个跳跃周期约 1.2s (+1 格), 2s 容忍一个空拍周期。 */
     private static final int CLIMB_GAIN_WINDOW_TICKS = 40;
 
@@ -211,9 +219,11 @@ public final class JumpStuckResolver {
         // 的 Y 增益会丢失, 回到主流程时 bestY 已过期。
         int nowTick0 = WorldHelper.getTicks();
         int playerY0 = mod.getPlayer().getBlockPos().getY();
-        if (_climbBestY == Integer.MIN_VALUE || playerY0 > _climbBestY) {
-            _climbBestY = playerY0;
-            _climbBestYTick = nowTick0;
+        if (playerY0 != _lastPlayerY) {
+            if (playerY0 > _lastPlayerY) {
+                _lastYGainTick = nowTick0;
+            }
+            _lastPlayerY = playerY0;
         }
         // 0) (2026-09-12) 进行中的处置任务优先续租。处置任务必须"独占"到它自己
         //    报告结束为止 —— 否则父任务下一 tick 的 SwimUp/本体 return null 会
@@ -303,7 +313,7 @@ public final class JumpStuckResolver {
         // 等落到柱顶那一刻立刻触发 forceCancel (185215 会话每秒一次的实锤节奏)。
         // 两层判据缺一不可: 只看 Y 增益会放过"爬上坡后撞墙"的水平卡死
         // (那种情况离地=false 且强制的是前进), 只看姿态会放过"原地悬停算路"。
-        if (nowTick0 - _climbBestYTick < CLIMB_GAIN_WINDOW_TICKS
+        if (nowTick0 - _lastYGainTick < CLIMB_GAIN_WINDOW_TICKS
                 && (!mod.getPlayer().isOnGround() || isInputForced(mod, Input.JUMP))) {
             resetStreak();
             return null;
