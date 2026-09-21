@@ -361,6 +361,13 @@ public class BeatMinecraft2Task extends Task {
     private static final long PEARL_SCAN_LOG_INTERVAL_MS = 10000;
     // 一次扫描最多对最近的这么多候选做 LOS 判定 (射线贵, 只验最可能的几个)。
     private static final int PEARL_FOREST_LOS_CANDIDATES = 8;
+    // (2026-09-21 用户"珍珠收到 18 个, 多两个以后有用, 不要做成末影之眼")
+    // 珍珠收集目标在补眼缺口之上多囤 2 个备份。末影之眼合成闸 (:getEyesOfEnderTask
+    // 的 "Crafting Ender Eyes" 分支) 目标仍是 targetEyes=16 个【成品眼】,
+    // 不会把多出的 2 颗也合掉 —— 合完眼后背包恒留 2 颗珍珠。
+    // 口径: enderPearlTarget = targetEyes - eyeCount + 本常量, 无论眼被丢掉
+    // (定位要塞) 消耗多少, 补齐后余量恒为 2。
+    private static final int ENDER_PEARL_SURPLUS = 2;
 
     // ==== Craft table pickup 限额 (2026-08-21 修复: "while we're at it" 死循环) ====
     // 日志实锤 (22:42-22:46): 缓存里唯一的工作台在几十格外, 任务反复派发
@@ -1964,7 +1971,10 @@ public class BeatMinecraft2Task extends Task {
         // 是 16 —— 该 JSON 在 :75-77 静态加载时【覆盖】源码默认值 (实测
         // "targetEyes" : 14 曾把目标压成 7)。只改源码常量无效。
         int blazeRodTarget = (int)Math.ceil((double)targetEyes / 2.0);
-        int enderPearlTarget = targetEyes - eyeCount;
+        // (2026-09-21 用户"珍珠收到 18, 多两个以后有用, 不要做成末影之眼")
+        // 见 ENDER_PEARL_SURPLUS 注释: 收集口径 = 补眼缺口 + 2 颗备份;
+        // 合眼分支目标仍是 targetEyes 个成品眼, 备份不会被合掉。
+        int enderPearlTarget = targetEyes - eyeCount + ENDER_PEARL_SURPLUS;
         // (2026-09-20 用户"8 根棒已换成 16 粉后还在继续收 8 根") 一次性门: 棒只为补
         // 粉缺口而收。旧行为 needsBlazeRods 只看棒计数 (rods < 8), 而棒一旦合成粉就
         // 归零 → 恒真, 形成 收8根 → 合16粉 → 再收8根 的死循环。现在粉缺口 (眼 + 粉
