@@ -1189,7 +1189,18 @@ public class Settings implements IFailableConfigFile {
     }
 
     public Item[] getThrowawayItems(AltoClef mod, boolean includeProtected) {
-        return throwawayItems.stream().filter(item -> includeProtected || !mod.getBehaviour().isProtected(item)).toArray(Item[]::new);
+        Item[] base = throwawayItems.stream().filter(item -> includeProtected || !mod.getBehaviour().isProtected(item)).toArray(Item[]::new);
+        // (2026-09-21 地牢阶段垃圾, 用户"进地牢后金/岩浆桶/打火石都可以丢")
+        // 必须在行为保护过滤【之后】追加: 搭门任务会 addProtectedItems(打火石/
+        // 岩浆桶) 且不回收, 若在过滤前追加会被这一步重新滤掉, getGarbageSlot
+        // 的候选槽列表直接查不到它们, canThrowAwayStack 的地牢放行没机会生效。
+        if (!ItemHelper.isDungeonPhaseActive()) {
+            return base;
+        }
+        Item[] dungeonJunk = {Items.GOLD_NUGGET, Items.GOLD_INGOT, Items.RAW_GOLD, Items.LAVA_BUCKET, Items.FLINT_AND_STEEL};
+        Item[] result = Arrays.copyOf(base, base.length + dungeonJunk.length);
+        System.arraycopy(dungeonJunk, 0, result, base.length, dungeonJunk.length);
+        return result;
     }
     public Item[] getThrowawayItems(AltoClef mod) {
         return getThrowawayItems(mod, false);

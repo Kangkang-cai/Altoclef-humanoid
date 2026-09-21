@@ -231,6 +231,39 @@ public class ItemHelper {
         return THROW_BOUNCE_WINDOW_MS;
     }
 
+    // =====================================================================
+    // (2026-09-21 地牢阶段垃圾升级, 用户指定) 进入地牢任务后 (BeatMinecraft2Task
+    // 地牢锁定 _ranStrongholdLocator 置位起), 金粒/金锭/生金 (猪灵交易货币,
+    // 猪灵阶段已结束)、岩浆桶(搭门液体, 门已完成)、打火石(点门刚需, 门已点燃)
+    // 全部降级为垃圾 —— 这批物品此前被 importantItems(金锭/打火石)、桶保护
+    // (岩浆桶)、行为保护(搭门任务 addProtectedItems) 三重覆盖, 永远进不了
+    // 垃圾候选, 常年占背包。
+    // 旗子由 BeatMinecraft2Task.onTick 每拍按实例状态刷新、onStop 清零,
+    // 不跨世界残留 (新任务实例 _ranStrongholdLocator=false, 首拍即回落)。
+    // =====================================================================
+    private static volatile boolean s_dungeonPhaseActive = false;
+
+    /** 地牢(要塞定位/末地)阶段是否已激活。 */
+    public static boolean isDungeonPhaseActive() {
+        return s_dungeonPhaseActive;
+    }
+
+    /** BeatMinecraft2Task 每 tick 按 _ranStrongholdLocator 刷新; onStop 清零。 */
+    public static void setDungeonPhaseActive(boolean active) {
+        s_dungeonPhaseActive = active;
+    }
+
+    /**
+     * 该物品在当前是否属于"地牢阶段垃圾" (金粒/金锭/生金/岩浆桶/打火石)。
+     * 仅在地牢阶段激活时为 true; 非地牢阶段一律 false, 保护名单原样生效。
+     */
+    public static boolean isDungeonJunkItem(Item item) {
+        if (!s_dungeonPhaseActive || item == null) return false;
+        return item == Items.GOLD_NUGGET || item == Items.GOLD_INGOT
+                || item == Items.RAW_GOLD || item == Items.LAVA_BUCKET
+                || item == Items.FLINT_AND_STEEL;
+    }
+
     public static final Item[] CARPET = new Item[]{Items.WHITE_CARPET, Items.BLACK_CARPET, Items.BLUE_CARPET, Items.BROWN_CARPET, Items.CYAN_CARPET, Items.GRAY_CARPET, Items.GREEN_CARPET, Items.LIGHT_BLUE_CARPET, Items.LIGHT_GRAY_CARPET, Items.LIME_CARPET, Items.MAGENTA_CARPET, Items.ORANGE_CARPET, Items.PINK_CARPET, Items.PURPLE_CARPET, Items.RED_CARPET, Items.YELLOW_CARPET};
 
     public static final Item[] SHULKER_BOXES = new Item[]{Items.WHITE_SHULKER_BOX, Items.BLACK_SHULKER_BOX, Items.BLUE_SHULKER_BOX, Items.BROWN_SHULKER_BOX, Items.CYAN_SHULKER_BOX, Items.GRAY_SHULKER_BOX, Items.GREEN_SHULKER_BOX, Items.LIGHT_BLUE_SHULKER_BOX, Items.LIGHT_GRAY_SHULKER_BOX, Items.LIME_SHULKER_BOX, Items.MAGENTA_SHULKER_BOX, Items.ORANGE_SHULKER_BOX, Items.PINK_SHULKER_BOX, Items.PURPLE_SHULKER_BOX, Items.RED_SHULKER_BOX, Items.YELLOW_SHULKER_BOX};
@@ -544,13 +577,21 @@ public class ItemHelper {
         // Can't throw away empty stacks!
         if (stack.isEmpty())
             return false;
+        Item item = stack.getItem();
+        // (2026-09-21 地牢阶段垃圾, 用户"进地牢后金粒/金锭/生金/岩浆桶/打火石
+        // 都可以丢, 不然太占背包") 这批物品在金锭/打火石(importantItems)、
+        // 岩浆桶(桶保护)名单里, 主垃圾路径永远锁不到; 地牢阶段在此显式放行,
+        // 优先级高于一切保护 (自定义名物品仍不丢)。
+        if (isDungeonJunkItem(item)
+                && !(stack.hasCustomName() && mod.getModSettings().getDontThrowAwayCustomNameItems())) {
+            return true;
+        }
         if (isStackProtected(mod, stack))
             return false;
         // (2026-08-27 用户要求: 水桶/盾牌绝不能丢) 打末影龙/保命关键物品,
         // 与 StorageHelper.getRandomThrowableSlot 的 NEVER_DISCARD 清单一致。
         // 旧代码这条丢垃圾路径 (getGarbageSlot) 只查 isStackProtected (按任务
         // 保护), 非相关任务激活时水桶/盾牌会被当垃圾丢掉 (用户实测)。
-        Item item = stack.getItem();
         if (item == Items.WATER_BUCKET || item == Items.LAVA_BUCKET
                 || item == Items.BUCKET || item == Items.SHIELD) {
             return false;

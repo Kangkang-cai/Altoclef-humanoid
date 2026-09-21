@@ -925,6 +925,12 @@ public class BeatMinecraft2Task extends Task {
         // By default, don't walk over end portals.
         _enterindEndPortal = false;
 
+        // (2026-09-21 地牢阶段旗) 每拍按实例锁定状态刷新 ItemHelper 的地牢阶段
+        // 标志: 置位后金粒/金锭/生金/岩浆桶/打火石降级为垃圾 (用户指定, 详见
+        // ItemHelper.isDungeonJunkItem)。放 onTick 最顶部保证所有早退分支前
+        // 旗子已刷新; onStop 清零, 不跨世界残留。
+        ItemHelper.setDungeonPhaseActive(_ranStrongholdLocator);
+
         // (2026-08-27 烧炼期间不打断) 正在烧炼 (SmeltInFurnaceTask) 时, 无论它
         // 在烧料/接燃料/做木板燃料 (2x2 合成) 哪个子阶段, 都不要用"顺手拾取合成台 /
         // 熔炉"去打断 —— 否则刚放下的熔炉被重放/掉落, 烧↔回收横跳 (用户实测
@@ -1695,6 +1701,8 @@ public class BeatMinecraft2Task extends Task {
         mod.getBlockTracker().stopTracking(TRACK_BLOCKS);
         mod.getBlockTracker().stopTracking(ItemHelper.itemsToBlocks(ItemHelper.BED));
         mod.getBehaviour().pop();
+        // (2026-09-21) 地牢阶段旗随任务停止清零 (金/岩浆桶/打火石恢复保护)。
+        ItemHelper.setDungeonPhaseActive(false);
     }
 
     @Override
