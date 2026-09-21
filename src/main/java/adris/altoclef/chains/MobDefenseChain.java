@@ -514,7 +514,13 @@ public class MobDefenseChain extends SingleTaskChain {
         // (2026-09-18 用户拍板) 末影人【跑不掉】, 不要跑: 它瞬移贴脸, retreat 时
         // bot 从 x=806 跑到 812 而末影人始终贴着 1.2~3.0 格, 逃跑只延长挨打时间
         // (22:46:50~53 实锤, 且 retreat 还因"威胁短暂离池"被假完成)。用户定: 单只
-        // 末影人 → 战斗到底。两只及以上仍走围殴判定 (打不过)。
+        // 末影人 → 战斗到底。
+        // (2026-09-21 用户"打末影人不能逃跑, 修过好几次了怎么还是触发") 删掉
+        // "两只及以上仍走围殴判定"的触发: 20260921-173522 实锤末地双末影人愤怒
+        // → RETREAT 跑了 6 秒 (17:36:08~14), 末影人瞬移始终贴 0.9~4.2 格,
+        // bot 照样死 (17:36:14 RESPAWN death #1) —— 逃跑对末影人零收益, 且末地
+        // 直线逃跑还可能跑向岛缘虚空。单目标锁 (KillEntitiesTask) 已保证一次只
+        // 接战一只, 第二只只是"在场愤怒", 不构成"正在被围殴"。
         int endermanCount = 0;
         for (Entity h : hostiles) {
             if (h == null || !h.isAlive()) continue;
@@ -532,11 +538,14 @@ public class MobDefenseChain extends SingleTaskChain {
             meleeCount++;
         }
         boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged || anyCreeper
-                || meleeCount >= RETREAT_MELEE_THRESHOLD
-                || endermanCount >= 2;
+                || meleeCount >= RETREAT_MELEE_THRESHOLD;
+        // (2026-09-21) 末影人不再参与 retreat 触发: 原判据 endermanCount>=2 已删,
+        // 理由见上方 endermanCount 声明处注释。
         // (2026-09-18 用户拍板) 低血量硬闸: 血量 ≤ 6 (3 颗心) 无条件撤 —— 一击必死
         // 的残血状态不该还在"近战少怪直接打"。末影人场景除外: 它跑不掉, 撤退只是
         // 把死亡拖长, 按用户拍板战斗到底 (至少能打死它拿珍珠)。
+        // (2026-09-21) 末影人已全数量级不触发 retreat, 本行 endermanCount==0 的
+        // 豁免保留语义不变: 场上有末影人时不因低血量强制撤 (撤也撤不掉)。
         if (!retreat && endermanCount == 0 && mod.getPlayer().getHealth() <= LOW_HEALTH_FORCE_RETREAT) {
             retreat = true;
         }
@@ -553,8 +562,8 @@ public class MobDefenseChain extends SingleTaskChain {
         // 跑掉以后墙永远建不完, 下一轮回来还得从头挨打。改判"有自己的刷怪笼围场 +
         // 有防火效果"即可坚守。
         // 保命底线: 血量 ≤ LOW_HEALTH_FORCE_RETREAT(6) 时【不豁免】照旧撤 (用户原话
-        // "血量还没到很低的时候", 真残血撤离是对的)。骷髅/苦力怕/猪灵围殴/末影人×2
-        // 等其他威胁照旧撤。
+        // "血量还没到很低的时候", 真残血撤离是对的)。骷髅/苦力怕/猪灵围殴等其他
+        // 威胁照旧撤; 末影人除外 (0921: 全数量级战斗到底, 场上有末影人时不强制撤)。
         boolean safeHavenHold = false;
         if (retreat && !anyCreeper && bruteCount == 0 && piglinSwarm <= 2
                 && meleeCount < RETREAT_MELEE_THRESHOLD && endermanCount < 2
