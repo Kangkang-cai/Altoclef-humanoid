@@ -958,6 +958,71 @@ public class MineAndCollectTask extends ResourceTask {
                 Blocks.BLACKSTONE, Blocks.BASALT, Blocks.NETHERRACK
         );
 
+        // =========================================================================
+        // (2026-09-21 21:56 用户定案"先向下挖4格深(人一定跟着下去), 再水平获取最近的方块")
+        // 收集材料族 = 地面介质方块 (石头家族/泥土/沙砾/末地石等), 不含矿/木/人造物。
+        // 与下界堡垒前的地狱岩收集是同族任务 (用户 2026-09-21 "完全是一样的任务"),
+        // 统一走两段式获取策略。修复 20260921-214102 实锤: 末地收 52 建材时每挖掉
+        // 一块, 正下方那块就成了新的 "significantly closer target", 以约 1.5s/格
+        // 打出 60,54→59,54→60,53→59,53→60,52→… 无尽阶梯坑。
+        // =========================================================================
+        private static final Set<Block> GROUND_MATERIAL_BLOCKS;
+        static {
+            java.util.HashSet<Block> ground = new java.util.HashSet<>(STONE_MEDIUM_BLOCKS);
+            ground.add(Blocks.END_STONE);
+            ground.add(Blocks.DIRT);
+            ground.add(Blocks.GRASS_BLOCK);
+            ground.add(Blocks.COARSE_DIRT);
+            ground.add(Blocks.PODZOL);
+            ground.add(Blocks.GRAVEL);
+            ground.add(Blocks.SAND);
+            ground.add(Blocks.RED_SAND);
+            ground.add(Blocks.SANDSTONE);
+            ground.add(Blocks.CLAY);
+            ground.add(Blocks.SNOW_BLOCK);
+            GROUND_MATERIAL_BLOCKS = java.util.Collections.unmodifiableSet(ground);
+        }
+
+        /** 目标全是地面介质(末地收建材/下界收地狱岩等收集材料族) → 适用竖井两段式策略。 */
+        private boolean isMaterialCollectionTarget() {
+            if (_blocks.length == 0) return false;
+            for (Block b : _blocks) {
+                if (!GROUND_MATERIAL_BLOCKS.contains(b)) return false;
+            }
+            return true;
+        }
+
+        /** 目标块集合是否包含该方块 (竖井每步/选块校验用)。 */
+        private boolean blockInTargets(Block block) {
+            for (Block t : _blocks) {
+                if (t == block) return true;
+            }
+            return false;
+        }
+
+        // 竖井状态: _shaftBaseY = 触发时的脚Y (MIN_VALUE=未触发); 到底后进 _horizontalMode。
+        private int _shaftBaseY = Integer.MIN_VALUE;
+        private boolean _horizontalMode = false;
+        private static final int SHAFT_DEPTH = 4;
+
+        /**
+         * 竖井安全闸: 脚下 1..{@link #SHAFT_DEPTH} 格连续、可挖、属目标块、不邻液体,
+         * 且第 SHAFT_DEPTH+1 格是实体底 —— 防打穿悬空柱(自己垫的塔)/岩浆上空/浮空团块
+         * (0919 悬空下界岩教训)。任一不过 → 不打井, 直接水平取料。
+         */
+        private boolean isSafeShaftColumn(AltoClef mod, BlockPos feet) {
+            for (int dy = 1; dy <= SHAFT_DEPTH; dy++) {
+                BlockPos p = feet.down(dy);
+                if (!mod.getChunkTracker().isChunkLoaded(p)) return false;
+                if (!WorldHelper.canBreak(mod, p)) return false;
+                if (!blockInTargets(mod.getWorld().getBlockState(p).getBlock())) return false;
+                if (WorldHelper.isAdjacentToLiquid(mod, p)) return false;
+            }
+            BlockPos floor = feet.down(SHAFT_DEPTH + 1);
+            if (!mod.getChunkTracker().isChunkLoaded(floor)) return false;
+            return WorldHelper.isSolid(mod, floor);
+        }
+
         // Log/stem/wood blocks only generate on the surface (or nether ceiling).
         // If we're hunting these, NEVER dig a shaft down — a human knows to climb
         // out of a cave first, then walk toward trees.
@@ -1158,7 +1223,13 @@ public class MineAndCollectTask extends ResourceTask {
 
         /** 悬空垫脚目标的选块罚距: 贴地块正常排序, 悬空块排到最后 (兜底才选)。 */
         private double scaffoldSelectionPenalty(AltoClef mod, BlockPos p) {
-            if (!isScaffoldGroundTarget()) return 0.0;
+            boolean scaffold = isScaffoldGroundTarget();
+            // (2026-09-21 2156 竖井策略) 水平阶段的材料采集目标: 脚下层(地板)重罚,
+            // 让"水平取最近方块"不被脚下/下方候选抢走。竖井阶段选择器不会被用到
+            // (getClosestTo 直接返回脚下方块), 不受影响。
+            boolean horizontalCollect = _horizontalMode && isMaterialCollectionTarget()
+                    && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource();
+            if (!scaffold && !horizontalCollect) return 0.0;
             // (2026-09-19 16:05 问题一, 用户"拿方块容易持续向下挖") 站立层以下
             // 的下界岩重罚 —— 向下挖出坑, 爬回来又要费方块。平层/以上正常排序,
             // 以下按深度递增罚 (全场上都 Below 时近的下面仍优先兜底)。
@@ -1168,8 +1239,15 @@ public class MineAndCollectTask extends ResourceTask {
             // (183333 实锤 y=42→41→40→39 阶梯坑)。阈值下移一格: 站立层
             // (feetY-1, 真正的地表) 不罚, 再往下才罚 —— 贴着地表收料, 不掘地。
             int feetY = (mod.getPlayer() != null) ? mod.getPlayer().getBlockPos().getY() : Integer.MIN_VALUE;
-            double penalty = (p.getY() < feetY - 1) ? 1.0e6 * (double)(feetY - 1 - p.getY()) : 0.0;
-            if (!scaffoldDropLandsNearby(mod, p)) penalty += 1.0e9; // 悬空照旧最重罚
+            double penalty;
+            if (scaffold) {
+                penalty = (p.getY() < feetY - 1) ? 1.0e6 * (double)(feetY - 1 - p.getY()) : 0.0;
+                if (!scaffoldDropLandsNearby(mod, p)) penalty += 1.0e9; // 悬空照旧最重罚
+            } else {
+                // 水平模式: 脚下层(含更深)一律 1e9 罚距 —— 只有水平方向一个候选都
+                // 没有时才兜底选中(等价旧"就近"行为), 宁可挖脚下也不站桩。
+                penalty = (p.getY() < feetY) ? 1.0e9 : 0.0;
+            }
             return penalty;
         }
 
@@ -1268,6 +1346,49 @@ public class MineAndCollectTask extends ResourceTask {
             // 这里只保留粘性返回; 空气/黑名单/不可挖都由 isValid 兜底放行。
             if (_miningPos != null && !_blacklist.contains(_miningPos) && isValid(mod, _miningPos)) {
                 return Optional.of(_miningPos);
+            }
+            // =========================================================================
+            // (2026-09-21 21:56 用户定案"先向下挖4格深, 人一定跟着下去, 再水平获取最近的方块")
+            // 收集材料族两段式获取 (矿/木/床/人造物/贪婪模式不适用):
+            //   ① 竖井段: 本任务实例首次采石时先垂直挖 4 格 —— 每步目标 = 脚下方块,
+            //      挖掉后 bot 随之落下(人跟着下去), 4 步到底;
+            //   ② 水平段: 到底后恢复正常"最近方块"选择, 脚下层候选被 1e9 罚距
+            //      (见 scaffoldSelectionPenalty / getNearFieldOreAt), 平层取料。
+            // 安全闸(不过 → 不打井直接水平): 未落地不决策; 竖井 4 格不连续/不可挖/
+            // 邻液体/落点无底(悬空柱、岩浆上空、浮空团块 —— 0919 悬空下界岩教训)。
+            // =========================================================================
+            if (!_greedy && !_horizontalMode && isMaterialCollectionTarget()
+                    && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource()) {
+                int feetY = mod.getPlayer().getBlockPos().getY();
+                if (_shaftBaseY == Integer.MIN_VALUE && closestDrop.isEmpty()) {
+                    if (!mod.getPlayer().isOnGround()) {
+                        // 落地前不决策不打井, 让既有流程接住这几 tick, 落地后再评估。
+                    } else if (isSafeShaftColumn(mod, mod.getPlayer().getBlockPos())) {
+                        _shaftBaseY = feetY;
+                        Debug.logMessage("[MINE-SHAFT] activate at " + mod.getPlayer().getBlockPos().toShortString()
+                                + ": dig down " + SHAFT_DEPTH + ", then horizontal nearest");
+                    } else {
+                        _horizontalMode = true;
+                        Debug.logMessage("[MINE-SHAFT] skip (unsafe column at "
+                                + mod.getPlayer().getBlockPos().toShortString() + "), horizontal nearest only");
+                    }
+                }
+                if (_shaftBaseY != Integer.MIN_VALUE) {
+                    if (_shaftBaseY - feetY >= SHAFT_DEPTH) {
+                        _horizontalMode = true;
+                        Debug.logMessage("[MINE-SHAFT] bottom reached (y=" + feetY + "), switch to horizontal nearest");
+                    } else {
+                        BlockPos below = mod.getPlayer().getBlockPos().down(1);
+                        // 每步再验: 漂位/邻液体/非目标块当场放弃竖井转水平, 不硬挖。
+                        if (mod.getChunkTracker().isChunkLoaded(below) && WorldHelper.canBreak(mod, below)
+                                && blockInTargets(mod.getWorld().getBlockState(below).getBlock())
+                                && !WorldHelper.isAdjacentToLiquid(mod, below)) {
+                            return Optional.of((Object) below);
+                        }
+                        Debug.logMessage("[MINE-SHAFT] abort at " + below.toShortString() + " (unsafe step), switch to horizontal");
+                        _horizontalMode = true;
+                    }
+                }
             }
             // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它周围的 3x3x3:
             // 紧贴刚挖穿的连位矿下一 tick 就被看到并续挖 — 完全不需要缓存/节流,
@@ -1805,6 +1926,12 @@ public class MineAndCollectTask extends ResourceTask {
                         // bot 照样掘地三层 (183333 实锤)。
                         if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY() - 1) {
                             dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - 1 - p.getY());
+                        } else if (_horizontalMode && isMaterialCollectionTarget()
+                                && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource()
+                                && p.getY() < mod.getPlayer().getBlockPos().getY()) {
+                            // (2026-09-21 2156 竖井策略) 水平阶段: 脚下层候选最后兜底,
+                            // 与 scaffoldSelectionPenalty 的 horizontalCollect 分支同口径。
+                            dSq += 1.0e9;
                         }
                         if (dSq < bestSq) {
                             bestSq = dSq;
