@@ -123,6 +123,16 @@ public class LocateStrongholdCoordinatesTask extends Task {
     private boolean _throwAreaOpen = true;
     private final TimerGame _throwAreaTimer = new TimerGame(3);
 
+    /** (2026-09-21 用户拍板) 末影之眼低于此值才触发"重收集", 且补齐到本值。 */
+    private static final int MIN_EYES_BEFORE_RECOLLECT = 10;
+    /**
+     * 缺眼确认窗 (ms): 眼数必须【持续】低于阈值这么久才派发收集链。
+     * 理由见 onTick 丢眼块注释 —— 跨维度/物品栏刷新会让 hasItem/getItemCount 瞬时读空。
+     * static: 任务实例可能被 TaskCatalogue/父任务重建, 实例字段不足以跨实例保护。
+     */
+    private static final long EYE_SHORTAGE_CONFIRM_MS = 2000;
+    private static long _eyeShortageSinceMs = 0;
+
     public LocateStrongholdCoordinatesTask(int targetEyes) {
         _targetEyes = targetEyes;
     }
@@ -390,10 +400,29 @@ public class LocateStrongholdCoordinatesTask extends Task {
                 setDebugState("Digging up to open sky before stronghold expedition.");
                 return new GoToSurfaceTask();
             }
-            if (!mod.getItemStorage().hasItem(Items.ENDER_EYE)) {
-                setDebugState("Collecting eye of ender.");
-                return TaskCatalogue.getItemTask(Items.ENDER_EYE, 1);
+            // (2026-09-21 用户拍板) 只有末影之眼 < 10 个时才触发"重收集", 且补齐到 10。
+            // 旧实现是 hasItem(≥1 就放行), 两个缺陷:
+            //   ① 只剩十几个眼时照样会丢眼(够走到地牢), 但任何一次瞬时读空 —— 跨维度后
+            //      物品栏同步空窗, 实锤 20260921-091405: 09:18:30 刚用 6 珍珠+6 粉合成到
+            //      16 眼, 09:18:46.742 hasItem 却读成 false —— 都立刻派发整条
+            //      Craft ender_eye → blaze_powder → Collect 1 blaze rods → Going to nether,
+            //      1.5s 后才自愈 (09:18:48.302 回到 Throwing eye)。bot 被白白打发去下界。
+            //   ② 收集目标 getItemTask(EYE, 1) 与判定同源: 已有 9 个眼时"至少 1 个"立刻
+            //      满足 → 任务当拍完成 → 每 tick 派发一次空收集 (死循环)。
+            // 现在: 阈值判定 + 补齐到阈值 + 确认窗 (瞬时读空不许触发)。
+            int eyesHeld = mod.getItemStorage().getItemCount(Items.ENDER_EYE);
+            if (eyesHeld < MIN_EYES_BEFORE_RECOLLECT) {
+                long nowMs = System.currentTimeMillis();
+                if (_eyeShortageSinceMs == 0) _eyeShortageSinceMs = nowMs;
+                if (nowMs - _eyeShortageSinceMs < EYE_SHORTAGE_CONFIRM_MS) {
+                    setDebugState("Ender eye count low (" + eyesHeld + "/" + MIN_EYES_BEFORE_RECOLLECT
+                            + "), re-checking before collecting...");
+                    return null;
+                }
+                setDebugState("Collecting eye of ender (" + eyesHeld + "/" + MIN_EYES_BEFORE_RECOLLECT + ").");
+                return TaskCatalogue.getItemTask(Items.ENDER_EYE, MIN_EYES_BEFORE_RECOLLECT);
             }
+            _eyeShortageSinceMs = 0;
             // (2026-08-25 用户要求) 不需要固定高度: 只要四周空旷 (头顶无遮挡 +
             // 20 格内无巨大山体) 就丢, 不再强制爬升到固定高度。山脚/峡谷 →
             // 短暂 wander 找开阔地 (眼睛是实体不受方块碰撞)。

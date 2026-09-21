@@ -159,6 +159,37 @@ public final class SurfaceHelper {
     private static BlockPos _samplePos = null;
 
     /**
+     * 上一拍判定时的维度 (2026-09-21)。
+     *
+     * <p>判据口径本身是<b>维度相关</b>的: 主世界走"埋深"(判据1/判据8), 下界/末地退化为
+     * {@code y < 58} (判据0)。跨维度后旧结论在语义上就是"另一个世界的答案", 必须整体作废
+     * —— 不能靠 5s/0.5s 确认窗慢慢纠正。
+     *
+     * <p>实锤 (20260921-091405): bot 在下界 y=69 被判 {@code surface(open)} (判据0 退化
+     * 口径, 见 chat.log 09:16:10), 09:18:46.7 穿门回主世界落在 y=19 的矿洞; 09:18:48.3
+     * 定位任务查 {@code isDeepUnderground} 仍得 false (旧结论 false + 判"地下"要 5s 确认窗,
+     * 而它只等了 1.6s) → 就地丢末影之眼, 紧接着 {@code setupWalk} 朝眼睛方向派 240 格远征。
+     *
+     * <p>为什么不能只靠 {@code WorldStateGuard}: 它比对的是<b>存档目录名</b>, 换存档才触发;
+     * 同一存档内跨维度 (下界↔主世界) 完全不经过它。
+     */
+    private static Dimension _lastDim = null;
+
+    /**
+     * 维度/世界切换后, 一切"按坐标缓存"的采样结论都失效 —— 那些坐标属于另一个世界。
+     * 不清会怎样: 采样缓存按 {@code BlockPos} 命中, 主世界与下界坐标空间不同却有重合值
+     * (下界 (1271,87,-1377) 与主世界某处同坐标), 复活后可能直接吃到上个维度的埋深。
+     */
+    private static void invalidateCoordinateCaches() {
+        _sampleCache = null;
+        _sampleAt = 0;
+        _samplePos = null;
+        _sigPos = null;
+        _sigAt = 0;
+        _sigYes = false;
+    }
+
+    /**
      * 换存档时复位 (接入 {@code WorldStateGuard})。迟滞状态属于"上个存档的结论",
      * 留着会让新存档的首个判定被旧结论拖 5s。
      */
@@ -170,9 +201,8 @@ public final class SurfaceHelper {
         _lastRaw = false;
         _rawChangedAt = 0;
         _flapCounted = false;
-        _sampleCache = null;
-        _sampleAt = 0;
-        _samplePos = null;
+        invalidateCoordinateCaches();
+        _lastDim = null;
     }
 
     // ==================================================================
@@ -502,8 +532,34 @@ public final class SurfaceHelper {
      * 提交翻面时打日志并清零 —— 判断"阈值定得对不对"的观测量。
      */
     public static boolean isBelowSurfaceDebounced(AltoClef mod) {
-        boolean raw = isBelowSurface(mod);
         long now = System.currentTimeMillis();
+        // 维度切换: 判据口径换轴 (主世界埋深 ↔ 下界 y<58), 旧迟滞结论一律作废 ——
+        // 见 _lastDim 注释。首次判定 (_lastDim == null) 不触发, 保持原首拍语义。
+        // world == null (世界重载中) 时不更新 _lastDim: 否则会吃到 getCurrentDimension()
+        // 的 OVERWORLD 兜底值, 把"重载空窗"误当成一次维度切换。
+        if (mod.getWorld() != null) {
+            Dimension dim = WorldHelper.getCurrentDimension();
+            if (dim != _lastDim) {
+                Dimension from = _lastDim;
+                _lastDim = dim;
+                invalidateCoordinateCaches();
+                if (from != null) {
+                    // 跨维度瞬间区块未加载 → 采样走 UNKNOWN, 而 UNKNOWN 分支读的是 _below。
+                    // 取"地下"让未知落在安全一侧: 丢眼/远征闸先回地表, 而真的在地表时
+                    // 同源的 GoToSurfaceTask.isFinished 也会读到 true → 任务即刻完成, 不产生
+                    // 动作; 0.5s 判地表窗后自动纠正。
+                    _init = true;
+                    _below = true;
+                    _lastRaw = true;
+                    _rawChangedAt = now;
+                    _flapCounted = false;
+                    Debug.logMessage("[Surface] dimension change " + from + " -> " + dim
+                            + ": hysteresis dropped, conservative below=true (raw re-confirms next).");
+                    return true;
+                }
+            }
+        }
+        boolean raw = isBelowSurface(mod);
         if (!_init) {
             _init = true;
             _below = raw;
