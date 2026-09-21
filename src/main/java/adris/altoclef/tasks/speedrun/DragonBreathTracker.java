@@ -16,6 +16,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 
 public class DragonBreathTracker {
