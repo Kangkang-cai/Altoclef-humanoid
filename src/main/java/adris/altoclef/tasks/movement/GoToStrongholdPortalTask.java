@@ -77,6 +77,11 @@ public class GoToStrongholdPortalTask extends Task {
     private int _digStartY = Integer.MAX_VALUE;
     // 鱼骨当前层 (2026-09-21 鱼骨下挖)。
     private FishboneLevelTask _fishboneLevelTask = null;
+    // (2026-09-21 记忆门框直达) END_PORTAL 记忆命中后, 先走到门框旁可站立格
+    // 再进格栅探索 —— 否则人在门旁 5 格还在反方向扫格子 (174359 实锤:
+    // recall (9833,20,-10698), 人 (9834,18,-10693), 探索却 heading
+    // (9840,24,-10662) 越走越远)。
+    private Task _recallApproachTask = null;
     // 近扫导航完成后连续几轮扫描仍未见砖的计数 (防同目标反复重建导航)。
     private int _probeNavMiss = 0;
 
@@ -112,7 +117,24 @@ public class GoToStrongholdPortalTask extends Task {
                     _strongholdCoordinates = recalled.pos;
                     if (recalled.isEndPortal) {
                         _phase = PHASE_EXPLORE;
-                        setDebugState("Recalled END_PORTAL from knowledge, exploring at door (skip walk-to-XZ/dig).");
+                        // (2026-09-21 记忆门框直达) 记忆点 = 亲眼看到的门框方块
+                        // (ExploreStrongholdTask.portalSeen 存 framePos), 不是环中心。
+                        // 先走到框旁可站立格再探索; 目标绝不能是框本身 (实心,
+                        // GoalBlock 永不满足 — 150956 框心卡脚同族)。区块未加载时
+                        // findStandableAirNear 退化成 target 本身 → 跳过直达, 交给
+                        // 探索 + BeatMinecraft2Task 的 24 格记忆直认闸接管。
+                        if (mod.getChunkTracker().isChunkLoaded(recalled.pos)) {
+                            BlockPos stand = WorldHelper.findStandableAirNear(mod, recalled.pos);
+                            if (!stand.equals(recalled.pos)) {
+                                _recallApproachTask = new GetToBlockTask(stand);
+                                setDebugState("Recalled END_PORTAL from knowledge, walking to door frame at "
+                                        + stand.toShortString() + ".");
+                            } else {
+                                setDebugState("Recalled END_PORTAL from knowledge, exploring at door (no standable spot near frame yet).");
+                            }
+                        } else {
+                            setDebugState("Recalled END_PORTAL from knowledge, exploring at door (frame chunk not loaded yet).");
+                        }
                     } else {
                         setDebugState("Recalled stronghold/portal from knowledge, going there directly.");
                     }
@@ -315,6 +337,14 @@ public class GoToStrongholdPortalTask extends Task {
 
         // 阶段 3: 格栅探索 (12×12 前重, 只认砖块空间, 8 分钟兜底)。
         if (_phase == PHASE_EXPLORE) {
+            // (2026-09-21 记忆门框直达) 先走到记忆门框旁, 再进格栅探索。
+            if (_recallApproachTask != null) {
+                if (!_recallApproachTask.isFinished(mod)) {
+                    setDebugState("Walking to remembered door frame");
+                    return _recallApproachTask;
+                }
+                _recallApproachTask = null;
+            }
             if (_exploreTask == null) {
                 _exploreTask = new ExploreStrongholdTask(_strongholdCoordinates);
                 _exploreStartMs = System.currentTimeMillis();

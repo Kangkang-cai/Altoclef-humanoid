@@ -1279,11 +1279,23 @@ public class BeatMinecraft2Task extends Task {
                 if (remembered != null
                         && Math.abs(remembered.getX() - mod.getPlayer().getBlockPos().getX()) <= 24
                         && Math.abs(remembered.getZ() - mod.getPlayer().getBlockPos().getZ()) <= 24) {
-                    if (endPortalFound(mod, remembered)) {
-                        _endPortalCenterLocation = remembered;
-                        Debug.logMessage("[PortalMemory] memory-validated portal center "
-                                + remembered.toShortString() + " (endPortalFound passed, "
-                                + "bot within 24 blocks).");
+                    // (2026-09-21 口径修复) knowledge 里存的 END_PORTAL 是【亲眼看到的
+                    // 门框方块】(ExploreStrongholdTask.portalSeen → rememberAt framePos),
+                    // 不是环中心 —— 拿框当中心套 12 框偏移恒验不过 (174359 实锤: 人距
+                    // 记忆点 5 格, memory-validated 0 次, bot 在门旁 5 格却反向扫格子)。
+                    // 框相对真实中心的偏移在 ±2 内 (getFrameBlocks 用 ±2/±1) → 在记忆
+                    // 框 ±2 邻域里找通过 12 框验证的真中心 (同 :1466 探索回填的试法)。
+                    for (int dx = -2; dx <= 2 && _endPortalCenterLocation == null; dx++) {
+                        for (int dz = -2; dz <= 2; dz++) {
+                            BlockPos cand = remembered.add(dx, 0, dz);
+                            if (endPortalFound(mod, cand)) {
+                                _endPortalCenterLocation = cand;
+                                Debug.logMessage("[PortalMemory] memory-validated portal center "
+                                        + cand.toShortString() + " (neighborhood of remembered frame "
+                                        + remembered.toShortString() + ", bot within 24 blocks).");
+                                break;
+                            }
+                        }
                     }
                 }
                 if (_endPortalCenterLocation == null) {
