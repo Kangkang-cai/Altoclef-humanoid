@@ -442,6 +442,8 @@ public class BeatMinecraft2Task extends Task {
     private final GoToStrongholdPortalTask _locateStrongholdTask;
     private final Task _goToNetherTask = new DefaultGoToDimensionTask(Dimension.NETHER); // To keep the portal build cache.
     private boolean _collectingEyes;
+    // (2026-09-21) 重心估算被拒的一次性诊断 latch, 防每 tick 刷屏。
+    private boolean _centroidEstimateRejectedLogged;
     // 木头是否已囤满过一次（minWoodLogs）。囤满后只有原木跌破
     // woodRestockThreshold（低水位）才重新去囤，避免 64 根用掉 1 根
     // 就被"收集 64 原木"任务拽回去挖树的优先级过高问题。
@@ -1261,8 +1263,27 @@ public class BeatMinecraft2Task extends Task {
                 // 就把 _endPortalCenterLocation 无条件清回 null —— 把 getStrongholdPhase
                 // 刚回填的探索确认门中心每 tick 冲掉 (141529 实锤: explore-confirmed
                 // 日志 214 条 = 每 tick 重填一遍)。只在未知时搜索。
-                // TODO: Test that this works, for some reason the bot gets stuck near the stronghold and it keeps "Searching" for the portal
-                _endPortalCenterLocation = doSimpleSearchForEndPortal(mod);
+                // (2026-09-21 二修: 重心估算污染) doSimpleSearch 在感知 ≥3 框时返回
+                // 框重心 —— 那是估算不是真中心。144438 实锤: 记忆召回直进要塞,
+                // ≥3 框先被感知, 重心抢先写入 → 探索回填 (== null 条件) 永不执行,
+                // endPortalFound(假中心) 恒 false → 返回已完成实例挂机 15s。
+                // 竞态: 1430 的"仅未知时搜索"把写入顺序变成谁先谁赢。修: 估算
+                // 只有通过 endPortalFound 验证 (12 框全真实) 才采纳 —— 验证不过
+                // 就保持 null, 让探索回填/后续感知接管。
+                BlockPos estimated = doSimpleSearchForEndPortal(mod);
+                if (estimated != null) {
+                    if (endPortalFound(mod, estimated)) {
+                        _endPortalCenterLocation = estimated;
+                        Debug.logMessage("[PortalMemory] estimate-confirmed portal center "
+                                + estimated.toShortString() + " (perceived-frames centroid passed validation).");
+                    } else if (!_centroidEstimateRejectedLogged) {
+                        // 零行为诊断: 重心被拒一次 (正常路径 —— 探索回填会接管)。
+                        _centroidEstimateRejectedLogged = true;
+                        Debug.logMessage("[PortalMemory] centroid estimate at "
+                                + estimated.toShortString() + " rejected (not a validated center); "
+                                + "waiting for explore confirmation.");
+                    }
+                }
             }
         }
 
