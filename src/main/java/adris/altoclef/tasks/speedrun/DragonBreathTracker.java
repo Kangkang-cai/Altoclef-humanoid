@@ -167,10 +167,9 @@ public class DragonBreathTracker {
     }
 
     /**
-     * (2026-09-21 211823 会话) 火球躲避: 对预测撞击点 GoalRunAway(9) 侧闪/后撤。
-     * 撞击点随火球前移每 tick 可能变化 → 变化时 forceRepath 重快照 (见
-     * CustomBaritoneGoalTask.forceRepath); 威胁解除 (无来袭火球) 即完成,
-     * 上层守卫自然接管 (云侧/任务链)。
+     * (2026-09-21 211823 会话) 火球躲避: 对预测撞击点垂直优先脱离
+     * (2205 改 GoalEvadeImpactUp, 原为 GoalRunAway(9) 侧闪 —— 纯 XZ 口径导致
+     * 优先水平搭路来不及)。撞击点前移 forceRepath 重寻路, 威胁解除即完成。
      */
     private class FireballEvadeTask extends CustomBaritoneGoalTask {
 
@@ -181,7 +180,11 @@ public class DragonBreathTracker {
         protected Goal newGoal(AltoClef mod) {
             BlockPos impact = findIncomingFireballImpact(mod);
             _impactBlock = impact != null ? impact : mod.getPlayer().getBlockPos();
-            return new GoalRunAway(9, _impactBlock);
+            // (2026-09-21 2205 用户"躲避魔法时 bot 优先水平搭走来不及") 每次
+            // (重)建目标都以当前 Y 为垂直基准: +UP_GAIN 格即达标。撞击点前移
+            // 重建目标时基准跟着当前 Y 走 —— 新火球瞄的是 bot 当前位置, 必须从
+            // 现在的高度再爬一格才有效, 不能沿用旧基准 (会秒判达标不躲)。
+            return new GoalEvadeImpactUp(_impactBlock, mod.getPlayer().getBlockPos().getY());
         }
 
         @Override
@@ -214,7 +217,53 @@ public class DragonBreathTracker {
 
         @Override
         protected String toDebugString() {
-            return "EVADE Dragon Fireball";
+            return "EVADE Dragon Fireball (pillar up)";
+        }
+    }
+
+    /**
+     * (2026-09-21 2205 用户"躲避魔法时 bot 优先水平搭走, 来不及, 被打了, 能不能
+     * 优先上搭") 火球躲避专用 goal: 【垂直优先】。
+     *
+     * <p>为什么不用 GoalRunAway: 反编译实锤它的 isInGoal/heuristic 是【纯 XZ
+     * 口径】(diffX²+diffZ² 与 distanceSq 比较, Y 完全不参与) —— baritone 只会
+     * 想办法拉开水平距离, 火球贴脸的 1~2 秒里水平搭路 (边走边放方块) 太慢,
+     * 来不及脱离直击包线。垂直垫柱一格一个动作、不需要先腾挪空间, 是最快的
+     * 脱离方式 (跳出火球弹道平面 + 落地云在脚下)。
+     *
+     * <p>达标 = 二选一: ①比基准 Y 高出 {@link #UP_GAIN} 格 (优先, 垫柱即达);
+     * ②水平离撞击点 ≥ {@link #XZ_RANGE} 格 (垫柱不可行时的退路, 如头顶被封)。
+     * heuristic 把"还差几格爬升"的权重压到 0.5/格、水平 2.0/格, 强偏垂直。
+     */
+    private static class GoalEvadeImpactUp implements Goal {
+
+        private static final int UP_GAIN = 4;
+        private static final int XZ_RANGE = 9;
+
+        private final int _impactX, _impactZ;
+        private final int _startY;
+
+        GoalEvadeImpactUp(BlockPos impact, int startY) {
+            _impactX = impact.getX();
+            _impactZ = impact.getZ();
+            _startY = startY;
+        }
+
+        @Override
+        public boolean isInGoal(int x, int y, int z) {
+            if (y - _startY >= UP_GAIN) return true;
+            int dx = x - _impactX;
+            int dz = z - _impactZ;
+            return dx * dx + dz * dz >= XZ_RANGE * XZ_RANGE;
+        }
+
+        @Override
+        public double heuristic(int x, int y, int z) {
+            double up = (UP_GAIN - (y - _startY)) * 0.5;
+            int dx = x - _impactX;
+            int dz = z - _impactZ;
+            double xz = XZ_RANGE - Math.sqrt(dx * (double) dx + dz * (double) dz);
+            return Math.max(0, Math.min(up, xz));
         }
     }
 
