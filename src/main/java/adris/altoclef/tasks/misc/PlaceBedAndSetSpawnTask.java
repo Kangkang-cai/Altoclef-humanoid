@@ -402,7 +402,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // 若 5 秒内既没出 "Respawn point set" 消息也没真正睡进去 (白天不能睡 /
         // 右键没生效 / 站错位), 就收尾继续走 — 不再和床死循环交互。已睡进去
         // (isSleeping) 时不触发, 让夜晚正常睡过。
-        if (_sleepTimeoutStarted && !_stayInBed && !mod.getPlayer().isSleeping()) {
+        // (2026-09-21) 右键命中床已直接置 _spawnSet (用户"右键点了就行") →
+        // 超时放弃只兜底"从没点到床"的场景, 已设点不再拉黑。
+        if (_sleepTimeoutStarted && !_spawnSet && !_stayInBed && !mod.getPlayer().isSleeping()) {
             if (_bedInteractTimeout.elapsed()) {
                 Debug.logMessage("Failed to set spawn via sleeping within timeout, moving on.");
                 _spawnSet = true;
@@ -710,6 +712,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
                             mod.getInputControls().tryPress(Input.CLICK_RIGHT);
                             // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
                             _inBedTimer.reset();
+                            // (2026-09-21 用户拍板"右键点了就行, 不用等消息") 右键命中床
+                            // 即视为设点成功: vanilla 1.18.2 trySleep 里 setSpawnPoint 在
+                            // isDay 检查之前, 白天右键床重生点已设置 (动作栏消息只是提示,
+                            // mod 侧 GameOverlayEvent 不保证收到 → 旧口径只能 12s 超时
+                            // 拉黑, 还让上级把床数目标虚增 +1 → 误判缺床回地表)。
+                            // _inBedTimer 1s 后 isFinished 干净收尾; 夜晚真睡进去走
+                            // SleepingChatScreen 分支语义一致。
+                            _spawnSet = true;
                         } else if (WorldHelper.canBreak(mod, hitPos)) {
                             Task clearTask = startBlockerClear(hitPos);
                             if (_crosshairBlockedLogTimer.elapsed()) {

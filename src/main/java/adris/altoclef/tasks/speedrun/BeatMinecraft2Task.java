@@ -3519,7 +3519,13 @@ public class BeatMinecraft2Task extends Task {
             _bedCollectCommitted = false;
             return null;
         }
-        if (!_bedCollectCommitted && isUndergroundDebounced(mod)) {
+        // (2026-09-21 用户"背包有足够原木和羊毛, 足够做床, 判断不够") 地下闸之前
+        // 先算"就地可合成": 缺 N 张床且背包任一颜色羊毛 ≥ 3N、(木板 + 原木×4) ≥ 3N
+        // → 直接派收床任务 (感知不到现成床时 CollectBedTask 的 wool path 就是
+        // 纯背包合成, 不需要杀羊/砍树/回地表), 不触发 GoToSurfaceTask。
+        // 合成台缺了也能用背包原木造, 全程无地表依赖。
+        if (!_bedCollectCommitted && isUndergroundDebounced(mod)
+                && !canCraftBedsFromInventory(mod, getBedGap(mod))) {
             setDebugState("Digging up to collect beds.");
             return new GoToSurfaceTask();
         }
@@ -3546,6 +3552,42 @@ public class BeatMinecraft2Task extends Task {
      */
     private boolean isUndergroundDebounced(AltoClef mod) {
         return WorldHelper.isDeepUnderground(mod);
+    }
+
+    /** 缺床缺口 = 目标 − (背包床 + 已放自床 + 末地掉落床), 供合成可行性判断。 */
+    private int getBedGap(AltoClef mod) {
+        int inEnd = 0;
+        for (Item item : ItemHelper.BED) {
+            inEnd += _cachedEndItemDrops.getOrDefault(item, 0);
+        }
+        int placedBed = mod.getLastSelfPlacedBed() != null ? 1 : 0;
+        return getTargetBeds(mod) - (mod.getItemStorage().getItemCount(ItemHelper.BED) + placedBed + inEnd);
+    }
+
+    /**
+     * (2026-09-21 用户"有足够原木和羊毛, 足够做床, 判断不够") 背包原料够不够
+     * 就地合成 {@code gap} 张床: 床配方 = 同色羊毛 3 + 木板 3, 木板可由原木合成
+     * (1 原木→4 木板)。羊毛按【任一单色】计数 (床配方要求同色, 合成链也是这么取)。
+     * 合成台缺失不阻断 — 原木同样能造合成台, 全程无地表依赖。
+     */
+    private boolean canCraftBedsFromInventory(AltoClef mod, int gap) {
+        if (gap <= 0) return false;
+        int woolNeeded = 3 * gap;
+        int bestSingleColor = 0;
+        for (Item wool : ItemHelper.WOOL) {
+            int count = mod.getItemStorage().getItemCount(wool);
+            if (count > bestSingleColor) bestSingleColor = count;
+        }
+        if (bestSingleColor < woolNeeded) return false;
+        int planks = 0;
+        for (Item plank : ItemHelper.PLANKS) {
+            planks += mod.getItemStorage().getItemCount(plank);
+        }
+        int logs = 0;
+        for (Item log : ItemHelper.LOG) {
+            logs += mod.getItemStorage().getItemCount(log);
+        }
+        return planks + logs * 4 >= woolNeeded;
     }
 
     /**
