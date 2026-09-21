@@ -464,7 +464,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
      */
     private void updateReturningLatch(AltoClef mod) {
         if (_anchor == null) return;
-        double distSq = mod.getPlayer().getPos().squaredDistanceTo(Vec3d.ofCenter(_anchor));
+        // (2026-09-21 现场 230958 实锤 28.6s 站桩) 判据必须与回锚任务的 baritone
+        // GoalNear 同口径 —— GoalNear.isInGoal 用【整数方块坐标】平方距离 (bot 方块
+        // (1215,55,-1334) 到锚 (1223,55,-1334) 恰 dx=8 → 64≤64 已到, baritone 不再
+        // 寻路), 旧判据用 Vec3d.ofCenter 实数 3D 距离 8.13 > 8 → 闩永远不解锁,
+        // GetWithinRangeOfBlockTask 每 tick 重建空转, bot 站桩到外层超时。
+        // 两口径统一到方块坐标 (BlockPos.getSquaredDistance)。
+        double distSq = mod.getPlayer().getBlockPos().getSquaredDistance(_anchor);
         if (distSq > CAMP_RADIUS * CAMP_RADIUS) {
             _returning = true;
         } else if (distSq <= RETURN_RADIUS * RETURN_RADIUS && _returning) {

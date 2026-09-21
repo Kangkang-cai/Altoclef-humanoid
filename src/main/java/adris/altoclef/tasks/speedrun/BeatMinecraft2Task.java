@@ -3126,14 +3126,27 @@ public class BeatMinecraft2Task extends Task {
         // 已在蹲守: 粘住同一实例 (每 tick new 会把计时器/巡逻状态清零, 见 _stoneAxeTask 教训)。
         if (_opportunisticPearlTask != null) {
             if (_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp && camp.hasGivenUp()) {
-                long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
-                _pearlCampBlockedUntilMs = now + cooldownMs;
                 _opportunisticPearlTask = null;
-                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
-                        + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
-                // (2026-09-19) 冷却一生效就必须退出。原来这里没有 return, 会继续往下
-                // 用旧锚点重建蹲守任务 → "放弃→同 tick 立刻重开"横跳, 冷却形同虚设。
-                return null;
+                // (2026-09-21 用户拍板"冷却=原地不动没意义, 继续 patrolling 找末影人,
+                // 走的距离远一点") 现场 230958: 蹲守 60s 没见末影人 giveup
+                // (no-enderman-seen) → 120s 冷却 → 冷却期站桩 (19:05 引入的 hold-still)。
+                // 枯竭 ≠ 该停: 巡逻本身有走廊推进/锚点漂移 (30~60 格跨步), 且
+                // PatrolSession 跨重建保留方位角与已访问集合, 重建实例零成本 ——
+                // 直接丢弃实例【不设冷却】, 继续往下走扫描/重建, 同拍换新蹲守实例 =
+                // 巡逻无缝续走。camp-timeout (总时长上限, 让位主线) 仍走原冷却。
+                if ("no-enderman-seen".equals(camp.getGiveUpReason())) {
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCAMP-RECYCLE reason=no-enderman-seen"
+                            + " (dry, no cooldown — fresh instance, patrol continues)");
+                    // 故意不 return: 落到下方扫描/重建流程。
+                } else {
+                    long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
+                    _pearlCampBlockedUntilMs = now + cooldownMs;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
+                            + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
+                    // (2026-09-19) 冷却一生效就必须退出。原来这里没有 return, 会继续往下
+                    // 用旧锚点重建蹲守任务 → "放弃→同 tick 立刻重开"横跳, 冷却形同虚设。
+                    return null;
+                }
             } else if (shouldForce(mod, _opportunisticPearlTask)) {
                 return _opportunisticPearlTask;
             }
