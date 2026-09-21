@@ -845,7 +845,8 @@ public class BeatMinecraft2Task extends Task {
 
     // End specific dragon breath avoidance
     private final DragonBreathTracker _dragonBreathTracker = new DragonBreathTracker();
-    private boolean _escapingDragonsBreath;
+    // (2026-09-21) 触碰逃逸的边沿检测, 仅用于诊断日志 (进入/离开"踩进云"各记一条)。
+    private boolean _wasTouchingBreath;
 
     public BeatMinecraft2Task() {
         _locateStrongholdTask = new GoToStrongholdPortalTask(_config.targetEyes);
@@ -886,8 +887,15 @@ public class BeatMinecraft2Task extends Task {
         mod.getBehaviour().allowWalkingOn(blockPos -> _enterindEndPortal && mod.getChunkTracker().isChunkLoaded(blockPos) && mod.getWorld().getBlockState(blockPos).getBlock() == Blocks.END_PORTAL);
 
         // Avoid dragon breath
+        // (2026-09-21 1955 会话) 云格寻路避让 (baritone canWalkThrough 硬墙)
+        // 在逃跑期间【保持生效】—— 旧版 _escapingDragonsBreath=true 整体关闭 +
+        // setBlockPlacePenalty(0), 洞底逃跑的最廉价路径变成"竖直垫柱穿云"
+        // (195335 实锤 -11 血)。现在硬墙常开, 逃跑自动绕云/贴地横挖;
+        // 只有绕云无解 (逃跑 stall 3s) 才由 RunAwayFromDragonsBreathTask 放行。
         mod.getBehaviour().avoidWalkingThrough(blockPos -> {
-            return WorldHelper.getCurrentDimension() == Dimension.END && !_escapingDragonsBreath && _dragonBreathTracker.isTouchingDragonBreath(blockPos);
+            return WorldHelper.getCurrentDimension() == Dimension.END
+                    && !_dragonBreathTracker.isEscapeAllowThroughBreath()
+                    && _dragonBreathTracker.isTouchingDragonBreath(blockPos);
         });
 
         // Don't break the bed we placed near the end portal
@@ -1203,13 +1211,22 @@ public class BeatMinecraft2Task extends Task {
         if (WorldHelper.getCurrentDimension() == Dimension.END) {
 
             // Dragons breath avoidance
+            // (2026-09-21 1955 会话) 触碰判定改实体级 (isTouchingDragonBreathEntity,
+            // 对齐原版 AreaEffectCloudEntity.tick 伤害语义: 包围盒相交 + XZ 圆柱
+            // 距离 <= 云半径)。旧格级判定 (getBlocksTouchingPlayer ∩ 云盒覆盖格)
+            // 在"云悬洞口、bot 在洞底安全"时因同占方块格而误报, 触发逃跑把 bot
+            // 送进云里 (195335 实锤 -11 血, 用户确认洞里没掉血)。
             _dragonBreathTracker.updateBreath(mod);
-            for (BlockPos playerIn : WorldHelper.getBlocksTouchingPlayer(mod)) {
-                if (_dragonBreathTracker.isTouchingDragonBreath(playerIn)) {
-                    setDebugState("ESCAPE dragons breath");
-                    _escapingDragonsBreath = true;
-                    return _dragonBreathTracker.getRunAwayTask(6);
-                }
+            boolean breathTouch = _dragonBreathTracker.isTouchingDragonBreathEntity(mod);
+            if (breathTouch != _wasTouchingBreath) {
+                Debug.logToFile("altoclef_diag.log", "[BreathEscape] "
+                        + (breathTouch ? "touch (entity-level, vanilla semantics)" : "clear")
+                        + " pos=" + mod.getPlayer().getBlockPos());
+            }
+            _wasTouchingBreath = breathTouch;
+            if (breathTouch) {
+                setDebugState("ESCAPE dragons breath");
+                return _dragonBreathTracker.getRunAwayTask(6);
             }
             // (2026-09-21 1849 用户"dragon's breath 差点被魔法打死") 主动规避:
             // 紫云贴脸 (未踩进, 10 格内) 也逃 —— 旧链路只在踩进云格才触发,
@@ -1217,10 +1234,8 @@ public class BeatMinecraft2Task extends Task {
             // 同样被这段顶层守卫抢占。
             if (_dragonBreathTracker.isNearDragonBreath(mod, 10)) {
                 setDebugState("ESCAPE dragons breath (cloud nearby)");
-                _escapingDragonsBreath = true;
                 return _dragonBreathTracker.getRunAwayTask(12);
             }
-            _escapingDragonsBreath = false;
 
             // If we find an ender portal, just GO to it!!!
             if (mod.getBlockTracker().anyFound(Blocks.END_PORTAL)) {
