@@ -4,12 +4,14 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.movement.CustomBaritoneGoalTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.baritone.CachedProjectile;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalRunAway;
 import net.minecraft.entity.AreaEffectCloudEntity;
+import net.minecraft.entity.projectile.DragonFireballEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
@@ -103,6 +105,118 @@ public class DragonBreathTracker {
         return new RunAwayFromDragonsBreathTask(distance);
     }
 
+    /**
+     * (2026-09-21 211823 会话) 龙火球来袭检测: 返回预测撞击点方块; 无威胁返回 null。
+     *
+     * <p>背景: 全系统的弹射物防御【明确跳过龙火球】(MobDefenseChain
+     * getNearestProjectile / isProjectileClose 双处 "Ignore dragon fireballs"),
+     * 云侧链路全部是【落地后】的被动反应 —— 211823 实锤: 龙 strafe 火球,
+     * 7 秒 4 发直接命中 (20→14→9.7→4→0, 全 indirectMagic), bot 活靶子。
+     * 火球直线飞行无重力无追踪 (spawn 包携带速度, 客户端 getVelocity 可信),
+     * 可以提前预测撞击点先手躲。
+     *
+     * <p>判据 (全部满足才算来袭): 距离 ≤24 格; 速度方向与"火球→bot"夹角
+     * <45°(归一 dot>0.7); 预测撞击点 (当前 pos + vel*(dist/|vel|)) 距 bot
+     * ≤4.5 格 (直击包线内, 云半径不算 —— 落地云由云侧链路管)。贴脸 (<6 格)
+     * 不再细算朝向, 直接按当前飞行方向前推 2 格当撞击点。
+     */
+    public BlockPos findIncomingFireballImpact(AltoClef mod) {
+        Vec3d me = mod.getPlayer().getPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        try {
+            for (CachedProjectile p : mod.getEntityTracker().getProjectiles()) {
+                if (p == null || p.position == null || p.velocity == null) continue;
+                if (p.projectileType != DragonFireballEntity.class) continue;
+                double vlen = p.velocity.length();
+                if (vlen < 0.05) continue;
+                double dist = p.position.distanceTo(me);
+                if (dist > 24) continue;
+                BlockPos impact;
+                if (dist < 6) {
+                    // 已贴脸: 不算包线了, 朝它前进方向前推 2 格就是危险区
+                    impact = new BlockPos(
+                            (int) Math.floor(p.position.x + p.velocity.x / vlen * 2),
+                            (int) Math.floor(p.position.y + p.velocity.y / vlen * 2),
+                            (int) Math.floor(p.position.z + p.velocity.z / vlen * 2));
+                } else {
+                    double heading = (p.velocity.x / vlen) * ((me.x - p.position.x) / dist)
+                            + (p.velocity.y / vlen) * ((me.y - p.position.y) / dist)
+                            + (p.velocity.z / vlen) * ((me.z - p.position.z) / dist);
+                    if (heading < 0.7) continue;
+                    Vec3d hit = p.position.add(p.velocity.multiply(dist / vlen));
+                    if (hit.distanceTo(me) > 4.5) continue;
+                    impact = new BlockPos(
+                            (int) Math.floor(hit.x), (int) Math.floor(hit.y), (int) Math.floor(hit.z));
+                }
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = impact;
+                }
+            }
+        } catch (ConcurrentModificationException | NullPointerException ignored) {
+            // 实体列表并发修改: 本 tick 视为无威胁, 下 tick 重扫 (同 MobDefenseChain 先例)
+        }
+        return best;
+    }
+
+    /** 有龙火球朝 bot 直飞时返回躲避任务, 否则 null (供顶层守卫每 tick 询问)。 */
+    public Task getFireballEvadeTaskIfIncoming(AltoClef mod) {
+        return findIncomingFireballImpact(mod) == null ? null : new FireballEvadeTask();
+    }
+
+    /**
+     * (2026-09-21 211823 会话) 火球躲避: 对预测撞击点 GoalRunAway(9) 侧闪/后撤。
+     * 撞击点随火球前移每 tick 可能变化 → 变化时 forceRepath 重快照 (见
+     * CustomBaritoneGoalTask.forceRepath); 威胁解除 (无来袭火球) 即完成,
+     * 上层守卫自然接管 (云侧/任务链)。
+     */
+    private class FireballEvadeTask extends CustomBaritoneGoalTask {
+
+        private BlockPos _impactBlock;
+        private boolean _loggedStart = false;
+
+        @Override
+        protected Goal newGoal(AltoClef mod) {
+            BlockPos impact = findIncomingFireballImpact(mod);
+            _impactBlock = impact != null ? impact : mod.getPlayer().getBlockPos();
+            return new GoalRunAway(9, _impactBlock);
+        }
+
+        @Override
+        protected Task onTick(AltoClef mod) {
+            BlockPos impact = findIncomingFireballImpact(mod);
+            if (impact != null) {
+                if (!_loggedStart) {
+                    _loggedStart = true;
+                    Debug.logToFile("altoclef_diag.log", "[FireballEvade] incoming dragon fireball, impact~"
+                            + impact.toShortString() + " bot=" + mod.getPlayer().getBlockPos().toShortString());
+                }
+                if (!impact.equals(_impactBlock)) {
+                    _impactBlock = impact;
+                    forceRepath(mod);
+                }
+            }
+            return super.onTick(mod);
+        }
+
+        @Override
+        public boolean isFinished(AltoClef mod) {
+            if (findIncomingFireballImpact(mod) == null) return true; // 威胁解除
+            return super.isFinished(mod);
+        }
+
+        @Override
+        protected boolean isEqual(Task other) {
+            return other instanceof FireballEvadeTask;
+        }
+
+        @Override
+        protected String toDebugString() {
+            return "EVADE Dragon Fireball";
+        }
+    }
+
     private class RunAwayFromDragonsBreathTask extends CustomBaritoneGoalTask {
 
         private final double _distance;
@@ -113,6 +227,9 @@ public class DragonBreathTracker {
         // 持续刷新参考点, 不会误触发。
         private final TimerGame _stallTimer = new TimerGame(3);
         private Vec3d _stallRefPos = null;
+
+        // (2026-09-21 211823) 近距云实体集合 (目标新鲜度检测用)。
+        private HashSet<BlockPos> _nearCloudBlocks = null;
 
         private RunAwayFromDragonsBreathTask(double distance) {
             _distance = distance;
@@ -141,6 +258,25 @@ public class DragonBreathTracker {
 
         @Override
         protected Task onTick(AltoClef mod) {
+            // (2026-09-21 211823) 目标新鲜度: 逃跑期间新火球落地 → 新云出现 →
+            // 危险集变化。老机制 newGoal 只在任务启动时快照一次, isEqual 保活的
+            // 实例永远对【旧云集】寻路 —— 211823 实锤: touch 反复触发但 bot 仍
+            // 站在/走向新云 (旧目标里根本没有新云)。近距 (16 格) 云实体集合
+            // 一变就 forceRepath, newGoal 重快照当 tick 的 _breathBlocks。
+            Vec3d meNow = mod.getPlayer().getPos();
+            HashSet<BlockPos> near = new HashSet<>();
+            for (AreaEffectCloudEntity cloud : mod.getEntityTracker().getTrackedEntities(AreaEffectCloudEntity.class)) {
+                if (cloud.squaredDistanceTo(meNow) < 16 * 16) near.add(cloud.getBlockPos());
+            }
+            if (_nearCloudBlocks == null) {
+                _nearCloudBlocks = near; // 首 tick: 目标快照本来就是新的, 只记录
+            } else if (!near.equals(_nearCloudBlocks)) {
+                _nearCloudBlocks = near;
+                forceRepath(mod);
+                Debug.logToFile("altoclef_diag.log", "[BreathEscape] goal-refresh (nearby cloud set changed, n="
+                        + near.size() + ") pos=" + mod.getPlayer().getBlockPos());
+            }
+
             // stall 保底: 净位移持续停滞 → 绕云无解 → 放行穿云重算。
             Vec3d pos = mod.getPlayer().getPos();
             if (_stallRefPos == null || pos.squaredDistanceTo(_stallRefPos) >= 0.25) {

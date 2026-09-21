@@ -377,6 +377,20 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         return null;
     }
 
+    /**
+     * (2026-09-21 211823 会话) 子任务在"危险集/目标点实时变化"时调用:
+     * 目标快照作废 + 停掉当前寻路, 下一 tick 用最新快照 setGoalAndPath。
+     *
+     * <p>动机: _cachedGoal 在首次 isFinished 时定格一次, 而 isEqual 保活的
+     * 实例不会重建 —— 龙息逃跑/火球躲避这类"移动靶"任务里, 新落地的云/
+     * 新飞来的火球不在旧快照里, 任务会一直对着【旧危险集】寻路 (211823
+     * 实锤: touch 反复触发但逃跑目标一直是旧云集)。
+     */
+    protected void forceRepath(AltoClef mod) {
+        _cachedGoal = null;
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+    }
+
     @Override
     public boolean isFinished(AltoClef mod) {
         if (_cachedGoal == null) {

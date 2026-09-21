@@ -1216,6 +1216,17 @@ public class BeatMinecraft2Task extends Task {
             // 距离 <= 云半径)。旧格级判定 (getBlocksTouchingPlayer ∩ 云盒覆盖格)
             // 在"云悬洞口、bot 在洞底安全"时因同占方块格而误报, 触发逃跑把 bot
             // 送进云里 (195335 实锤 -11 血, 用户确认洞里没掉血)。
+            // (2026-09-21 211823 会话) 火球来袭先手躲避 —— 放在一切云检查之前:
+            // 火球落地才变成云, 云侧链路全是【事后】反应; 全系统弹射物防御明确
+            // 跳过龙火球 (MobDefenseChain 双处 "Ignore dragon fireballs")。
+            // 211823 实锤: 龙 strafe 火球 7 秒 4 发直接命中 (20→14→9.7→4→0,
+            // 全 indirectMagic), bot 全程无任何躲避动作。
+            Task _fireballEvade = _dragonBreathTracker.getFireballEvadeTaskIfIncoming(mod);
+            if (_fireballEvade != null) {
+                setDebugState("EVADE dragon fireball");
+                return _fireballEvade;
+            }
+
             _dragonBreathTracker.updateBreath(mod);
             boolean breathTouch = _dragonBreathTracker.isTouchingDragonBreathEntity(mod);
             if (breathTouch != _wasTouchingBreath) {
