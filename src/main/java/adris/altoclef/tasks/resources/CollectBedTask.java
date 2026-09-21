@@ -241,8 +241,16 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
     }
 
     /**
-     * (2026-08-31) 把"自己放的重生点床 + 玩家身旁 8 格内床"标为不可达,
-     * 防止做床/杀羊过程中把身边刚睡的/出生点床撸掉。
+     * (2026-08-31) 把"自己放的重生点床"标为不可达, 防止做床/收床过程中把
+     * 刚放的出生点床撸掉。
+     * (2026-09-21 移除"玩家身旁 8 格内床"保护, 用户"还没拆掉一个就切下一张床")
+     * 20260921-110154 实锤: 村庄收床时 bot 每走近一张床(&lt;8 格), 该床即被
+     * 本保护标记 unreachable → 闸门以 canBreak:canReach:false(tracker-unreachable)
+     * 淘汰 → 切下一张 → 走近再被标 → 连环换目标 (tasks.log 11:07:21 起 6 次
+     * Destroy block 目标切换全数未破块, knownBeds 14→4)。挖掘距离 4.5 格 &lt;
+     * 8 格保护半径, 该保护与"拆床进背包"在本任务里天然互斥; 出生点床的语义
+     * 由 selfBed 记录全覆盖 (PlaceBedAndSetSpawnTask 只认自放床), 8 格规则无
+     * 独立价值。
      */
     private void markProtectedBedsUnreachable(AltoClef mod) {
         BlockPos selfBed = mod.getLastSelfPlacedBed();
@@ -254,14 +262,6 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
                         mod.getBlockTracker().requestBlockUnreachable(c);
                     }
                 }
-            }
-        }
-        BlockPos playerPos = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
-        if (playerPos == null) return;
-        for (BlockPos bed : mod.getBlockTracker().getKnownLocations(ItemHelper.itemsToBlocks(ItemHelper.BED))) {
-            if (bed.isWithinDistance(playerPos, 8.0)
-                    && mod.getWorld().getBlockState(bed).getBlock() instanceof BedBlock) {
-                mod.getBlockTracker().requestBlockUnreachable(bed);
             }
         }
     }
