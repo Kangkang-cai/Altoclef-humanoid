@@ -165,7 +165,12 @@ public class DragonBreathTracker {
 
         @Override
         protected Goal newGoal(AltoClef mod) {
-            return new GoalRunAway(_distance, _breathBlocks.toArray(BlockPos[]::new));
+            // (2026-09-21 210114) 半径 +1 防"边界带站桩死锁": baritone isInGoal 用
+            // BlockPos 整数口径 (>=range² 达标站桩), 上层派发判据 (isNearDragonBreath/
+            // touch 的 Vec3d 中心口径 <range) 会差最多 ~0.7 格 → bot 站进边界带时
+            // 上层每 tick 重派、baritone 每次都认为达标不动 → 站桩被火球白打
+            // (210114 实锤: ESCAPE(12) 站桩 5s, -6 血后死)。+1 推出边界带。
+            return new GoalRunAway(_distance + 1, _breathBlocks.toArray(BlockPos[]::new));
         }
 
         @Override
