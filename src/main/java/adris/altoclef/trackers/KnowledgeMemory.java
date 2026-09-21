@@ -3,9 +3,11 @@ package adris.altoclef.trackers;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.helpers.VisibilityHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -395,6 +397,16 @@ public final class KnowledgeMemory {
     }
 
     private void remember(StructureType type, BlockPos pos) {
+        // (2026-09-21 刷怪笼验明守卫) BLAZE_SPAWNER 的地标是通用刷怪笼方块,
+        // 记录端原样裸奔: 主世界要塞的蠹虫笼/废弃矿井的蜘蛛笼方块完全相同,
+        // 看到 ANY 刷怪笼就记成烈焰笼 (20260921-120334 实锤: 12:28:30 要塞
+        // 蠹虫笼 9835,20,-10695 被记成 BLAZE_SPAWNER)。记录端必须先验明渲染
+        // 实体是 BlazeEntity 才入账 —— 与消费端 WorldHelper.getSpawnerEntity
+        // 同一款口径, 双保险。森林侧群系守卫同款先例。
+        if (type == StructureType.BLAZE_SPAWNER
+                && !(WorldHelper.getSpawnerEntity(_mod, pos) instanceof BlazeEntity)) {
+            return;
+        }
         // (2026-09-20 森林记忆) 散落信号方块守卫: 真林子里的菌岩/菌菇所在群系
         // 必然是 WARPED_FOREST; 废墟/洞穴里的零星菌菇不是林子, 不入账
         // (20260920-155006 实锤 2 个坑底菌菇曾被当成"最近的林子"蹲守)。

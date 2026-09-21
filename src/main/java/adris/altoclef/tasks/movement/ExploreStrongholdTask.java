@@ -47,9 +47,8 @@ public class ExploreStrongholdTask extends Task {
     private static final double EXPLORE_RADIUS_MAX = 96;
     // 传送门"看到"距离 (视野内 + LOS)。
     private static final int PORTAL_SEE_RANGE = 12;
-    // (2026-09-21 近距豁免) 该距离内见到门框只要区块已加载就算看到 (不要
-    // FOV/LOS) —— 站在门口 6 格内还"看不见"不是人类行为。
-    private static final int PORTAL_NEAR_RANGE = 6;
+    // (2026-09-21 零行为诊断) 已打过 near-miss 点的门框位置, 每个只报一次。
+    private final Set<BlockPos> _nearMissLogged = new HashSet<>();
     // 扫描节流: 避免每 tick 扫 12³/20³ 个方块 (卡顿)。
     private static final int SCAN_INTERVAL_TICKS = 10;
     // (2026-08-26 只认砖块空间) 视野内多久没看到地牢砖块就认为不在地牢 (ms)。
@@ -203,30 +202,30 @@ public class ExploreStrongholdTask extends Task {
     /**
      * 扫描附近传送门框架: 视野内 + LOS 可见才算"看到", 登记到 BlockTracker。
      *
-     * <p>(2026-09-21 近距豁免) 6 格内有门框也直接算看到 —— 只要求区块已加载,
-     * 不要 FOV 锥 + LOS。现场实锤 (20260921-120334, 用户口述 + 日志): bot 在
-     * 传送门房间门口走过 (还看见了蠹虫刷怪笼), 但相机没朝房间里扫, FOV+LOS
-     * 永不触发, 探索任务继续格栅乱走。走到 6 格内 = 站在门口, 人类必然注意到;
-     * 已加载区块的方块状态客户端本来就有, 不构成透视。原 12 格 FOV+LOS 判据
-     * 保留 (远距离仍须真看见)。
+     * <p>(2026-09-21 1245 后记) 近距豁免被用户否决 ("不能近距离豁免, 刚刚明显
+     * 看到了, 扫到了") —— 已撤回, 恢复纯 FOV+LOS 判据。用户观察 ("扫到了却没停")
+     * 与判据的矛盾尚未定位, 加零行为诊断: 门框在 12 格内但 FOV/LOS 判负时打点
+     * ([PortalSee] near-miss), 下次实跑定量验证差在哪一环, 再决定改判据还是改
+     * 其他环节。
      */
     private boolean trySeePortal(AltoClef mod) {
         BlockPos player = mod.getPlayer().getBlockPos();
         for (BlockPos pos : WorldHelper.scanRegion(mod,
-                player.add(-PORTAL_NEAR_RANGE, -PORTAL_NEAR_RANGE, -PORTAL_NEAR_RANGE),
-                player.add(PORTAL_NEAR_RANGE, PORTAL_NEAR_RANGE, PORTAL_NEAR_RANGE))) {
-            if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.END_PORTAL_FRAME
-                    && mod.getChunkTracker().isChunkLoaded(pos)) {
-                return portalSeen(mod, pos, "near-touch");
-            }
-        }
-        for (BlockPos pos : WorldHelper.scanRegion(mod,
                 player.add(-PORTAL_SEE_RANGE, -PORTAL_SEE_RANGE, -PORTAL_SEE_RANGE),
                 player.add(PORTAL_SEE_RANGE, PORTAL_SEE_RANGE, PORTAL_SEE_RANGE))) {
-            if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.END_PORTAL_FRAME
-                    && VisibilityHelper.isBlockInView(mod, pos)
-                    && VisibilityHelper.isBlockVisible(mod, pos)) {
+            if (mod.getWorld().getBlockState(pos).getBlock() != Blocks.END_PORTAL_FRAME) {
+                continue;
+            }
+            boolean inView = VisibilityHelper.isBlockInView(mod, pos);
+            boolean visible = VisibilityHelper.isBlockVisible(mod, pos);
+            if (inView && visible) {
                 return portalSeen(mod, pos, "los");
+            }
+            // 零行为诊断: 每个门框位置只报一次, 不改任何行为。
+            if (_nearMissLogged.add(pos.toImmutable())) {
+                Debug.logMessage("[PortalSee] near-miss: frame in " + PORTAL_SEE_RANGE
+                        + "r at " + pos.toShortString()
+                        + " but FOV=" + inView + " LOS=" + visible);
             }
         }
         return false;
