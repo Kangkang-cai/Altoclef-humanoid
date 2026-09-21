@@ -169,6 +169,29 @@ public final class JumpStuckResolver {
     private static final int LAVA_GUARD_LOG_TICKS = 100;
     private static final TimerGame _lavaGuardLogTimer = new TimerGame(5);
 
+    // ===== (2026-09-21) 垂直垫柱豁免: 垫柱跳跃是又一个"合法零水平速度"状态 =====
+    //
+    // 现场实锤 (会话 20260921-185215, 末地 Pillaring up, goal=GoalYLevel{y=107},
+    // diag.log [JumpStuck] 行): MovementPillar 全程水平速度≈0 (vel=(0.01,0.00,0.00),
+    // onGround=false), baritone 强制 JUMP → 1s 检测 + "强制跳跃"证据恒成立 →
+    // 每 1s 判一次卡死 → forceCancel 作废路径 + 全量 A* 重算 (~103 万 movements,
+    // open set 1.6 万, 每次约 1s) = 用户看到的"搭一格停一下"; 同格计数到 4 还会
+    // 强制 wander 把 bot 拽离垫柱 (18:53:27-30, 约 2.3s)。18:35 会话 GoalXZ 垫柱
+    // 过 end stone 地形时同样在误判挖方块, 同族问题一并覆盖。
+    //
+    // 与挖掘豁免 (:isBreakingBlock)/岩浆豁免 (:isInLava) 同一性质: 垂直推进中
+    // 水平速度天然为 0, 不是卡死。判据 (两层, 缺一不可):
+    //   ① 最近 CLIMB_GAIN_WINDOW_TICKS 内脚下 Y 创过新高 = 垫柱在真推进
+    //     (真撞头顶棚无 Y 增益, 窗口过后检测自然恢复);
+    //   ② 当前处于垂直姿态: 离地 (空中) 或 baritone 正强制跳跃 —— 排除
+    //     "刚爬上坡就撞墙" 的水平卡死 (那种姿态在地面且强制的是前进不是跳)。
+    // 长程爬升真卡死另有 CustomBaritoneGoalTask 的 20s 看门狗 (2026-09-15)
+    // 兜底, 不在本件职责内。static 口径同上: 任务实例频繁重建。
+    private static int _climbBestY = Integer.MIN_VALUE;
+    private static int _climbBestYTick = 0;
+    /** Y 增益新鲜窗口: 垫柱一个跳跃周期约 1.2s (+1 格), 2s 容忍一个空拍周期。 */
+    private static final int CLIMB_GAIN_WINDOW_TICKS = 40;
+
     /** 共享 wander 任务 (强制脱离用)。 */
     private static final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
 
@@ -183,6 +206,15 @@ public final class JumpStuckResolver {
      *         TimeoutWanderTask); null = 无事发生 / 只做了 forceCancel 换路 / 冷却中。
      */
     public static Task tick(AltoClef mod) {
+        // (2026-09-21) Y 增益追踪必须放在所有提前 return 之前 —— 挖掘/岩浆豁免
+        // 分支会先 return null, 若追踪放在它们之后, 豁免期间 (正是跳跃/上浮推进中)
+        // 的 Y 增益会丢失, 回到主流程时 bestY 已过期。
+        int nowTick0 = WorldHelper.getTicks();
+        int playerY0 = mod.getPlayer().getBlockPos().getY();
+        if (_climbBestY == Integer.MIN_VALUE || playerY0 > _climbBestY) {
+            _climbBestY = playerY0;
+            _climbBestYTick = nowTick0;
+        }
         // 0) (2026-09-12) 进行中的处置任务优先续租。处置任务必须"独占"到它自己
         //    报告结束为止 —— 否则父任务下一 tick 的 SwimUp/本体 return null 会
         //    立刻把它换掉 (实锤: 每次只活 1 tick)。期间不重估、不 forceCancel,
@@ -265,6 +297,17 @@ public final class JumpStuckResolver {
             return null;
         }
         _lavaGuardSinceTick = 0;
+
+        // (2026-09-21) 垂直垫柱豁免 —— 见字段区注释。必须与挖掘/岩浆豁免同层:
+        // 在累积 streak 之前放行, 否则垫柱跳跃的水平零速会一路攒满 20 tick,
+        // 等落到柱顶那一刻立刻触发 forceCancel (185215 会话每秒一次的实锤节奏)。
+        // 两层判据缺一不可: 只看 Y 增益会放过"爬上坡后撞墙"的水平卡死
+        // (那种情况离地=false 且强制的是前进), 只看姿态会放过"原地悬停算路"。
+        if (nowTick0 - _climbBestYTick < CLIMB_GAIN_WINDOW_TICKS
+                && (!mod.getPlayer().isOnGround() || isInputForced(mod, Input.JUMP))) {
+            resetStreak();
+            return null;
+        }
 
         Vec3d v = mod.getPlayer().getVelocity();
         boolean hSlow = Math.hypot(v.x, v.z) < HSPEED_STUCK;
