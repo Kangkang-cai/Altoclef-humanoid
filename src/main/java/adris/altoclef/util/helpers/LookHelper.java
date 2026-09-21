@@ -164,6 +164,27 @@ public interface LookHelper {
                 return true;
             }
         }
+
+        // ③ 8 角点判定 (2026-09-21): END_PORTAL_FRAME 嵌在传送门房间内部,
+        // 从门口看到的是门框方块的边角, 中心+6 面射线全被房间结构挡住
+        // (20260921-134247 场实锤: 12 个门框点全在 12r 内, 其中 3 个
+        // FOV=true 但 LOS=false, bot 贴着门格栅探索就是不停)。对 8 个角点
+        // 各补一条射线。角点仍在方块自身体积内, 必须命中目标方块本身才算
+        // 可见, 与 ② 同口径, 不引入透视。
+        if (entity.world.getBlockState(block).getBlock() == Blocks.END_PORTAL_FRAME) {
+            for (double sx : new double[]{-0.5, 0.5}) {
+                for (double sy : new double[]{-0.5, 0.5}) {
+                    for (double sz : new double[]{-0.5, 0.5}) {
+                        Vec3d corner = center.add(sx, sy, sz);
+                        BlockHitResult cornerHit = raycastSkippingWebs(entity, start, corner, maxRange, handling);
+                        if (cornerHit != null && cornerHit.getType() == HitResult.Type.BLOCK
+                                && cornerHit.getBlockPos().equals(block)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
         return false;
     }
 

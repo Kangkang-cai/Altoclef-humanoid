@@ -56,8 +56,19 @@ public class Debug {
             File[] dirs = base.listFiles(File::isDirectory);
             if (dirs == null || dirs.length <= KEEP_SESSIONS) return;
             java.util.Arrays.sort(dirs, java.util.Comparator.comparingLong(File::lastModified).reversed());
-            for (int i = KEEP_SESSIONS; i < dirs.length; i++) {
-                File cur = dirs[i];
+            // (2026-09-21 记忆目录被清空事故) 只把名字符合会话时间戳格式
+            // (yyyyMMdd-HHmmss) 的目录当会话目录清理。memory/ 等常驻目录的
+            // 目录 mtime 只在条目增删时变化 (平时只往里写文件, mtime 长期
+            // 停在创建日), 按时间排序永远排最老 —— 之前整目录 listFiles
+            // 把它当旧会话 deleteRecursively, 会话数一超 10 跨会话记忆
+            // (knowledge.log 等) 就陪葬 (134247 场 13:43 实锤)。
+            java.util.regex.Pattern sessionName = java.util.regex.Pattern.compile("\\d{8}-\\d{6}");
+            int kept = 0;
+            for (File dir : dirs) {
+                if (!sessionName.matcher(dir.getName()).matches()) continue;
+                kept++;
+                if (kept <= KEEP_SESSIONS) continue;
+                File cur = dir;
                 if (cur.getName().equals(SESSION_STAMP)) continue;
                 deleteRecursively(cur);
             }
