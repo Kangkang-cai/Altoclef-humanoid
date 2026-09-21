@@ -1208,8 +1208,17 @@ public class BeatMinecraft2Task extends Task {
                 if (_dragonBreathTracker.isTouchingDragonBreath(playerIn)) {
                     setDebugState("ESCAPE dragons breath");
                     _escapingDragonsBreath = true;
-                    return _dragonBreathTracker.getRunAwayTask();
+                    return _dragonBreathTracker.getRunAwayTask(6);
                 }
+            }
+            // (2026-09-21 1849 用户"dragon's breath 差点被魔法打死") 主动规避:
+            // 紫云贴脸 (未踩进, 10 格内) 也逃 —— 旧链路只在踩进云格才触发,
+            // 走位擦着云边持续吃伤害 (183333 实锤)。末地收集材料/走位阶段
+            // 同样被这段顶层守卫抢占。
+            if (_dragonBreathTracker.isNearDragonBreath(mod, 10)) {
+                setDebugState("ESCAPE dragons breath (cloud nearby)");
+                _escapingDragonsBreath = true;
+                return _dragonBreathTracker.getRunAwayTask(12);
             }
             _escapingDragonsBreath = false;
 

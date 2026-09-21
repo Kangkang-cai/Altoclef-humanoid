@@ -1159,11 +1159,16 @@ public class MineAndCollectTask extends ResourceTask {
         /** 悬空垫脚目标的选块罚距: 贴地块正常排序, 悬空块排到最后 (兜底才选)。 */
         private double scaffoldSelectionPenalty(AltoClef mod, BlockPos p) {
             if (!isScaffoldGroundTarget()) return 0.0;
-            // (2026-09-19 16:05 问题一, 用户"拿方块容易持续向下挖") 脚下以下的
-            // 下界岩重罚 —— 向下挖出坑, 爬回来又要费方块。平层/以上正常排序,
+            // (2026-09-19 16:05 问题一, 用户"拿方块容易持续向下挖") 站立层以下
+            // 的下界岩重罚 —— 向下挖出坑, 爬回来又要费方块。平层/以上正常排序,
             // 以下按深度递增罚 (全场上都 Below 时近的下面仍优先兜底)。
+            // (2026-09-21 1849, 用户"末地收集材料往下挖的很深") 旧阈值
+            // p.getY() < feetY 把【站立层本身】也罚了 —— 平地上整个可挖面
+            // (脚下那层) 全是同罚, 罚距等于没罚, bot 照样挖空脚底一层层往下
+            // (183333 实锤 y=42→41→40→39 阶梯坑)。阈值下移一格: 站立层
+            // (feetY-1, 真正的地表) 不罚, 再往下才罚 —— 贴着地表收料, 不掘地。
             int feetY = (mod.getPlayer() != null) ? mod.getPlayer().getBlockPos().getY() : Integer.MIN_VALUE;
-            double penalty = (p.getY() < feetY) ? 1.0e6 * (double)(feetY - p.getY()) : 0.0;
+            double penalty = (p.getY() < feetY - 1) ? 1.0e6 * (double)(feetY - 1 - p.getY()) : 0.0;
             if (!scaffoldDropLandsNearby(mod, p)) penalty += 1.0e9; // 悬空照旧最重罚
             return penalty;
         }
@@ -1793,11 +1798,13 @@ public class MineAndCollectTask extends ResourceTask {
                         // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
                         if (piglinDensityGated(mod, p)) continue;
                         double dSq = mod.getPlayer().getBlockPos().getSquaredDistance(p);
-                        // (2026-09-19 16:05 问题一) 垫脚目标: 脚下以下的块重罚
+                        // (2026-09-19 16:05 问题一) 垫脚目标: 站立层以下的块重罚
                         // (与 scaffoldSelectionPenalty 同口径), 防近场链挖一路
-                        // 向下挖出坑。
-                        if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY()) {
-                            dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - p.getY());
+                        // 向下挖出坑。(2026-09-21 1849) 阈值下移一格: 站立层
+                        // (feetY-1) 不罚 —— 平地整层地表被旧阈值同罚=无差别,
+                        // bot 照样掘地三层 (183333 实锤)。
+                        if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY() - 1) {
+                            dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - 1 - p.getY());
                         }
                         if (dSq < bestSq) {
                             bestSq = dSq;

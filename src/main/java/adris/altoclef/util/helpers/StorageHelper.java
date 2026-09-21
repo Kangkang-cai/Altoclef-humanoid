@@ -1009,8 +1009,18 @@ public class StorageHelper {
     }
 
 
+    /**
+     * (2026-09-21 1849 用户"他有可使用的方块: 深板岩, 统一清单没接上") 建筑材料
+     * 计数统一走 {@link ScaffoldBlocks#countInInventory} —— 旧口径数
+     * getThrowawayItems 里的 BlockItem, 而 throwaway 清单缺深板岩本体/圆石
+     * (0825 用户指定圆石不可丢, 从 throwaway 里剔了) /石头系, bot 背包里明明
+     * 有能垫的深板岩却判"缺材料"再去收集。所有 4 个使用点 (BeatMinecraft2Task
+     * 进末地前置闸 / WaitForDragonAndPearlTask 龙战补料闸 / GetToOuterEndIslandsTask
+     * 搭桥闸 / GetBuildingMaterialsTask 完成判定) 全是垫脚语义, 统一无副作用;
+     * 砾石(重力)/树叶从计数里剔除 —— 它们不能可靠垫脚。
+     */
     public static int getBuildingMaterialCount(AltoClef mod) {
-        return mod.getItemStorage().getItemCount(Arrays.stream(mod.getModSettings().getThrowawayItems(mod, true)).filter(item -> item instanceof BlockItem).toArray(Item[]::new));
+        return ScaffoldBlocks.countInInventory(mod);
     }
 
     private static boolean isScreenOpenInner(Predicate<ScreenHandler> pNotNull) {

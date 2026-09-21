@@ -29,7 +29,11 @@ public final class ScaffoldBlocks {
     /**
      * 全部可作为搭路/垫脚/造墙消耗的非重力方块物品。
      * 下界: 地狱岩/黑石/玄武岩/灵魂沙/灵魂土; 主世界: 圆石/深板岩圆石/深板岩/
-     * 凝灰岩/石头系/泥土; 两界通用: 哭泣黑曜石 (用户点名, 废弃传送门拆的)。
+     * 凝灰岩/石头系/泥土; 两界通用: 哭泣黑曜石 (用户点名, 废弃传送门拆的);
+     * 末地: 末地石 (2026-09-21 1849, 用户"他有可使用的方块: 深板岩, 统一清单
+     * 没接上"后一并收编 —— 末地打龙垫柱/搭桥唯一可挖的大量方块就是末地石,
+     * 旧注释"末地石不在清单里"是已知缺口, 末地场景 (GetToOuterEndIslandsTask /
+     * WaitForDragonAndPearlTask) 现已存在)。
      */
     public static final Item[] SAFE_MATERIALS = new Item[]{
             Items.NETHERRACK, Items.BLACKSTONE, Items.BASALT,
@@ -37,7 +41,8 @@ public final class ScaffoldBlocks {
             Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.DEEPSLATE, Items.TUFF,
             Items.STONE, Items.GRANITE, Items.DIORITE, Items.ANDESITE,
             Items.DIRT,
-            Items.CRYING_OBSIDIAN
+            Items.CRYING_OBSIDIAN,
+            Items.END_STONE
     };
 
     private static final Set<Item> _set = new HashSet<>(Arrays.asList(SAFE_MATERIALS));
@@ -68,8 +73,9 @@ public final class ScaffoldBlocks {
         boolean nether = mod.getPlayer().world.getRegistryKey() == World.NETHER;
         boolean theEnd = mod.getPlayer().world.getRegistryKey() == World.END;
         if (theEnd) {
-            // 末地: 末地石不在清单里(搭路场景覆盖不到), 圆石兜底。
-            return Items.COBBLESTONE;
+            // 末地: 末地石遍地, 木镐可挖直掉本体 —— 唯一的合理补货目标
+            // (2026-09-21 1849 收编, 旧"圆石兜底"在末地无来源, 纯死分支)。
+            return Items.END_STONE;
         }
         if (nether) {
             // 下界最常见优先: 地狱岩(堡垒区遍地) → 黑石(堡垒内部大量) → 玄武岩(三角洲)。
