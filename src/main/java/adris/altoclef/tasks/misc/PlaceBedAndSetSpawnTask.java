@@ -87,6 +87,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private BlockPos _currentBedRegion;
     private BlockPos _currentStructure, _currentBreak;
     private boolean _spawnSet;
+    // (2026-09-21) 睡觉超时放弃后的一次性完成 latch, 防放弃分支每 tick 重入刷屏。
+    private boolean _gaveUpSetSpawn;
     private Subscription<ChatMessageEvent> _respawnPointSetMessageCheck;
     private Subscription<GameOverlayEvent> _respawnFailureMessageCheck;
     private boolean _sleepAttemptMade;
@@ -283,6 +285,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
         mod.getBlockTracker().trackBlock(BEDS);
 
         _spawnSet = false;
+        _gaveUpSetSpawn = false;
         _sleepAttemptMade = false;
         _wasSleeping = false;
         _sleepTimeoutStarted = false;
@@ -295,6 +298,17 @@ public class PlaceBedAndSetSpawnTask extends Task {
             }
         });
         _respawnFailureMessageCheck = EventBus.subscribe(GameOverlayEvent.class, evt -> {
+            // (2026-09-21 白天右键即设点, 用户指定 + 反编译实锤) 1.18.2
+            // ServerPlayerEntity.trySleep: setSpawnPoint(sendMessage=true) 在
+            // isDay 检查【之前】—— 白天右键床重生点已设置, 随后才提示"只能在
+            // 晚上睡觉"。该消息走动作栏 = GameOverlayEvent (ChatMessageEvent
+            // 只挂 ChatHudListener, 对动作栏永不触发 —— 旧实现收不到, 只能靠
+            // 12s 超时放弃)。收到即视为设点完成, 不需要睡进去。
+            if (evt.message.contains("Respawn point set")) {
+                _spawnSet = true;
+                _inBedTimer.reset();
+                return;
+            }
             final String[] NEUTRAL_MESSAGES = new String[]{"You can sleep only at night", "You can only sleep at night", "You may not rest now; there are monsters nearby"};
             for (String checkMessage : NEUTRAL_MESSAGES) {
                 if (evt.message.contains(checkMessage)) {
@@ -309,6 +323,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
     public void resetSleep() {
         _spawnSet = false;
+        _gaveUpSetSpawn = false;
         _sleepAttemptMade = false;
         _wasSleeping = false;
         _sleepTimeoutStarted = false;
@@ -391,6 +406,11 @@ public class PlaceBedAndSetSpawnTask extends Task {
             if (_bedInteractTimeout.elapsed()) {
                 Debug.logMessage("Failed to set spawn via sleeping within timeout, moving on.");
                 _spawnSet = true;
+                // (2026-09-21 防刷屏 latch) 放弃后 isFinished 仍被 _inBedTimer 门住
+                // (145404 实锤: 12s 大超时到期后每 tick 重打 "Failed to set spawn"
+                // 24 条才等来 isFinished) —— 置一次性 latch 让 isFinished 立即 true,
+                // STOP 一次干净收尾。
+                _gaveUpSetSpawn = true;
                 return null;
             }
         }
@@ -1146,7 +1166,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 return false;
             }
         }
-        return _spawnSet && !mod.getPlayer().isSleeping() && _inBedTimer.elapsed();
+        return (_spawnSet && !mod.getPlayer().isSleeping() && _inBedTimer.elapsed()) || _gaveUpSetSpawn;
     }
 
     public BlockPos getBedSleptPos() {
@@ -1245,6 +1265,11 @@ public class PlaceBedAndSetSpawnTask extends Task {
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     BlockPos p = center.add(dx, dy, dz);
+                    // (2026-09-21 床豁免, 145404 实锤) 床碰撞箱半格不算完整固体,
+                    // 绕过 isSolid 过滤 + canBreak(床)=true → 刚放的床的另一半
+                    // 被当"植被"清掉 (9831,18,-10697 foot 半块被拆 → nearest bed
+                    // far(3766) → 重放 → 放/拆循环)。任何一半是床都不碰。
+                    if (mod.getWorld().getBlockState(p).getBlock() instanceof BedBlock) continue;
                     BlockState bs = mod.getWorld().getBlockState(p);
                     if (WorldHelper.isAir(mod, p)) continue;
                     if (WorldHelper.isSolid(mod, p)) continue;
