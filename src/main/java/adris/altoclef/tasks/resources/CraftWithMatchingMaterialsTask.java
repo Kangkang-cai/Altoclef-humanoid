@@ -123,9 +123,19 @@ public abstract class CraftWithMatchingMaterialsTask extends ResourceTask {
             }
 
             CraftingRecipe samedRecipe = generateSamedRecipe(_recipe, majorityCraftItem, _sameMask);
-            int toCraftTotal = majorityCraftCount + currentTargetCount;
-            toCraftTotal = Math.min(toCraftTotal, _target.getTargetCount());
             Item output = getSpecificItemCorrespondingToMajorityResource(majorityCraftItem);
+            // (2026-09-21 只合成缺口, 162614 实锤) 旧: toCraftTotal = majorityCraftCount
+            // + currentTargetCount —— currentTargetCount 是【全色系】目标成品持有量,
+            // 而 RecipeTarget 的成品是 majority 单色 → 混色持有场景把别色成品也记进
+            // "要合成数" → 目标 11 张、已有 10 张(只差 1)仍按 11 张收料 (缺口 12 羊毛
+            // → "Collect 12 wool" 回地表找羊, 用户"修复生效了吗"现场)。
+            // 新: 合成数 = 缺口张数(currentTargetsRequired)与 majority 材料可造数的
+            // 较小值, 加上【单色】已有持有量 (CraftInTableTask 完成判定按单色持有,
+            // 不补会被已持有同色成品误判提前翻 true 空转)。材料不足时按可造数渐进
+            // 合成, 余下缺口下一轮由收料分支补。
+            int outputHeld = mod.getItemStorage().getItemCount(output);
+            int toCraftTotal = outputHeld + Math.min(Math.max(0, currentTargetsRequired), majorityCraftCount);
+            toCraftTotal = Math.min(toCraftTotal, _target.getTargetCount());
             RecipeTarget recipeTarget = new RecipeTarget(output, toCraftTotal, samedRecipe);
             return _recipe.isBig() ? new CraftInTableTask(recipeTarget) : new CraftInInventoryTask(recipeTarget);
         }
