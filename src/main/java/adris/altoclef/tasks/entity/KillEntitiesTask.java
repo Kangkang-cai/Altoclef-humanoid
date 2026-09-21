@@ -55,6 +55,13 @@ public class KillEntitiesTask extends DoToClosestEntityTask {
     //   - 例外 = 已经愤怒的末影人 (已在攻击我们, 打它是自保不是招新);
     //   - 锁定的不可达 (CombatMemory 冷却) 且无愤怒替代 → 返回 empty 走
     //     wander 等 (锁保留), 不把新目标交出去。
+    //   - (2026-09-21 2207 二修: 锁只认【纯末影人批次】) 首版 anyMatch(含末影人)
+    //     误把 MobDefenseChain 的混合战斗任务 (_fightTask = HOSTILE_ANNOYING_CLASSES,
+    //     含末影人也含骷髅/僵尸等) 判成末影人狩猎: 任务名恒显 "enderman single-lock"
+    //     误导现场, 且 getClosestTo 在感知无末影人时返回 empty → 主世界重生后
+    //     must-kill 骷髅在射程内 (215937 实锤 "MUST-KILL active skeleton shooter
+    //     at 9857,40,-10646") 却 wander 空转 58s 无人打, 违反 must-kill 语义。
+    //     混合批次回退基类"最近优先+粘滞", 末影人仍在候选集内就近被打。
     private final boolean _endermanHunt;
     private final Predicate<Entity> _shouldKillStore;
     private UUID _engagedId = null;
@@ -71,8 +78,12 @@ public class KillEntitiesTask extends DoToClosestEntityTask {
         super(KillEntityTask::new, shouldKill, entities);
         _candidatesOverride = candidatesOverride;
         _shouldKillStore = shouldKill;
-        _endermanHunt = Arrays.stream(entities)
-                .anyMatch(c -> c != null && EndermanEntity.class.isAssignableFrom(c));
+        // (2026-09-21 2207 二修) 纯末影人批次 = 候选类别非空且【全部】是末影人
+        // (珍珠收集链 KillAndLootTask(EndermanEntity) / 林子蹲守单类别)。
+        // 混合批次 (MobDefenseChain _fightTask 等) 一律 false → 走基类目标选择。
+        Class[] nonNull = Arrays.stream(entities).filter(java.util.Objects::nonNull).toArray(Class[]::new);
+        _endermanHunt = nonNull.length > 0 && Arrays.stream(nonNull)
+                .allMatch(c -> EndermanEntity.class.isAssignableFrom(c));
     }
 
     public KillEntitiesTask(Class... entities) {
