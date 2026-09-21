@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -436,6 +437,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // dry-point 高级寻路。
         boolean swimming = isPlayerInWater(mod);
 
+        // (2026-09-21 末地虚空护栏) 末地不做"方向持久"的直线探索: 主岛半径有限,
+        // 岛缘外是虚空, "持续一个方向走"迟早跨出岛缘。其它维度保持原方向纪律。
+        boolean inEnd = WorldHelper.getCurrentDimension() == Dimension.END;
+
         // (2026-09-17 多步逼近/锁定) 若手上还有一个"正在逼近"的目标 (仍有效、未被拉黑、
         // 跳数未超上限、仍在 BIAS_MAX_DISTANCE 内), 就继续朝【同一个】目标走, 不再每步
         // 重选一次最近目标。原实现每步都 pickBiasedTarget(最近未访问) —— 刚朝 A 走了
@@ -467,7 +472,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                     angle = Math.atan2(land.getZ() - pos.z, land.getX() - pos.x)
                             + (Math.random() * 2 - 1) * Math.toRadians(BIAS_ANGLE_DEG);
                 } else {
-                    angle = nextRandomHeading();
+                    angle = inEnd ? freshRandomHeading() : nextRandomHeading();
                 }
                 _heading = angle;
                 // 游泳是另一套模式 (朝最近陆地), 与记忆目标无关: 清掉逼近线程。
@@ -485,7 +490,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 _lastWasBiased = true;
             } else {
                 // Keep heading roughly the same direction instead of spinning around.
-                angle = nextRandomHeading();
+                // (2026-09-21 末地例外) 末地每步全新随机方向, 净位移≈0, 防直线接力
+                // 跨出岛缘进虚空; 其它维度维持持久航向 (0920 方向纪律)。
+                angle = inEnd ? freshRandomHeading() : nextRandomHeading();
                 // (2026-09-17) 这里原先把 _currentBiasTarget 清空 —— 一次 15% 概率的随机
                 // 抖动就把"我正在逼近 A"这条线断掉, 下一步重选最近目标 → 又可能掉头。
                 // 改成保留: 随机抖动只影响【这一步的方向】, 不影响"在追谁"
@@ -523,6 +530,16 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                                     + " (feet=" + feet.getBlock() + " head=" + head.getBlock() + ")");
                     continue;
                 }
+            }
+            // (2026-09-21 末地虚空护栏) 落点列必须真实存在地面。上面的 AIR-TARGET 校验
+            // 只查"脚+头是空气/流体" —— 末地虚空列全是空气, 照样放行, 48 格一步就把
+            // bot 领向岛缘虚空。用与 surfaceYAt 同口径的高度图哨兵判虚空列, 命中即拒绝。
+            if (inEnd && isVoidColumn(mod, candidate)) {
+                _failedTargets.add(candidate);
+                Debug.logToFile("altoclef_diag.log",
+                        "[VOID-GUARD] reject void-column landing " + candidate.toShortString()
+                                + " player=" + mod.getPlayer().getBlockPos().toShortString());
+                continue;
             }
             // Avoid retrying the exact directions we already failed on.
             // (2026-09-17) 跨实例拉黑目标同样跳过: 它可能恰好落在这个候选点上。
@@ -703,6 +720,27 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             _heading += (Math.random() * 2 - 1) * jitter;
         }
         return _heading;
+    }
+
+    /**
+     * (2026-09-21 末地专用) 每步全新随机方向, 不读不写持久航向 {@link #_heading}。
+     * 末地主岛半径有限, 岛缘外是虚空 —— "持续一个方向走"的方向纪律在这里是自杀
+     * 策略, 每步重掷让净位移≈0, bot 留在岛内。
+     */
+    private double freshRandomHeading() {
+        return Math.random() * 2 * Math.PI;
+    }
+
+    /**
+     * (2026-09-21 末地虚空护栏) 该 xz 列是否是虚空列: 区块已加载但 WORLD_SURFACE
+     * 高度图无任何方块。与 {@link #surfaceYAt} 的哨兵同口径 (wsTop <= bottomY+1 =
+     * 整列无方块)。区块未加载返回 false (未知不拦, 与 isTargetInWater 等既有判据
+     * 口径一致 —— 步长 48 格在渲染距离内, 正常都已是加载块)。
+     */
+    private boolean isVoidColumn(AltoClef mod, BlockPos pos) {
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+        int wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, pos.getX(), pos.getZ());
+        return wsTop <= mod.getWorld().getBottomY() + 1;
     }
 
     /**

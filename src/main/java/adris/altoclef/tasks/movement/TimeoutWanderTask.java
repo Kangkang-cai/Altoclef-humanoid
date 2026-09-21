@@ -6,7 +6,9 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import adris.altoclef.util.Dimension;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalXZ;
 import net.minecraft.block.Block;
@@ -209,6 +211,11 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
                 : (_distanceToWander + _wanderDistanceExtension);
         if (_bearingDeg == null) {
             // 防御: 调用方跳过 onStart 直接 onTick 的路径 (理论上没有, #18 同族守卫)。
+            _bearingDeg = Math.random() * 360.0;
+        }
+        // (2026-09-21 末地例外) 末地不做方位角锁定: 每段重新随机方向, 净位移≈0,
+        // 防直线接力走出主岛边缘进虚空。其它维度维持 0920 方向纪律 (持续一个方向)。
+        if (WorldHelper.getCurrentDimension() == Dimension.END) {
             _bearingDeg = Math.random() * 360.0;
         }
         Vec3d p = mod.getPlayer().getPos();
