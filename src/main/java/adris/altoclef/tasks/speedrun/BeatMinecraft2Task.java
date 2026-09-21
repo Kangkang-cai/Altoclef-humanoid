@@ -295,6 +295,13 @@ public class BeatMinecraft2Task extends Task {
     private boolean _endPortalOpened;
     private BlockPos _bedSpawnLocation;
 
+    /**
+     * (2026-09-21) 收床"已在地表发起"闩。见 {@link #bedShortageTask}。
+     * 未发起 (false) 且判在地下 → 先回地表再谈收床; 已在地表发起过 (true) →
+     * 不再按深度翻面 (防"收床途中短暂下潜 → 被拉回地表"的横跳)。
+     */
+    private boolean _bedCollectCommitted = false;
+
     private List<BlockPos> _notRuinedPortalChests = new ArrayList<>();
 
     // ==== 就近快速搜刮 (2026-08-21 用户原则: 路过的结构物资先拿上) ====
@@ -1352,6 +1359,21 @@ public class BeatMinecraft2Task extends Task {
         // endPortalFound (结构感知, 地牢区块一加载就 true) 会让 bot 在海上/未下挖
         // 时就被引去收集床/重置出生点, 打断"定位→下挖→探索→找到传送门"主流程
         // (用户 10:22 实测: 船上被打断去重置出生点 → 水上放床失败)。
+        // (2026-09-21 用户现场报 → 方案①) 锁定分支内的收床补口。
+        // 收床检查原先只在"门未找到"(:1463, case OVERWORLD) 与"门已找到"(:1381) 两处;
+        // 而下界凑齐最后一颗眼睛走的是 case NETHER —— 该分支没有收床检查, 却照样把
+        // _ranStrongholdLocator 置位。置位后本方法首部直接返回定位任务, 收床检查被
+        // 永久旁路 (20260921-091405 实锤: 背包仅 1-9 张床, 全程无
+        // "Getting beds before stronghold search.", 09:18:31 从 "Crafting Ender Eyes"
+        // 直接跳 "Locating End Portal...")。
+        // 只在已锁定 (locator 已启动) 时接管: 未锁定时下面的 switch 会走原路径, 保持
+        // "门已找到 → 先拆刷怪笼"的既有次序不变。
+        if (_ranStrongholdLocator) {
+            Task bedShortage = bedShortageTask(mod, "Collecting beds before stronghold search.");
+            if (bedShortage != null) {
+                return bedShortage;
+            }
+        }
         if (_ranStrongholdLocator && !_locateStrongholdTask.isFinished(mod)) {
             setDebugState("Locating End Portal...");
             return _locateStrongholdTask;
@@ -1378,9 +1400,11 @@ public class BeatMinecraft2Task extends Task {
                     }
 
                     // Get remaining beds.
-                    if (needsBeds(mod)) {
-                        setDebugState("Collecting beds.");
-                        return getBedTask(mod);
+                    // (2026-09-21) 收口到 bedShortageTask: 地牢里缺床 → 先回地表
+                    // (地下没有村庄床/羊, 硬在牢里挖着找羊毛等于挖穿整座山)。
+                    Task bedShortage = bedShortageTask(mod, "Collecting beds.");
+                    if (bedShortage != null) {
+                        return bedShortage;
                     }
                     if (_config.placeSpawnNearEndPortal) {
                         if (!spawnSetNearPortal(mod, _endPortalCenterLocation)) {
@@ -1460,9 +1484,11 @@ public class BeatMinecraft2Task extends Task {
                     }
                 } else {
                     // Get beds before starting our portal location.
-                    if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && needsBeds(mod)) {
-                        setDebugState("Getting beds before stronghold search.");
-                        return getBedTask(mod);
+                    // (2026-09-21) 收口到 bedShortageTask (缺床 + 地表闸)。本分支已在
+                    // case OVERWORLD 内, 维度判据由 helper 自带 (幂等)。
+                    Task bedShortage = bedShortageTask(mod, "Getting beds before stronghold search.");
+                    if (bedShortage != null) {
+                        return bedShortage;
                     }
                     // Portal Location
                     setDebugState("Locating End Portal...");
@@ -3303,6 +3329,40 @@ public class BeatMinecraft2Task extends Task {
     }
     private Task getBedTask(AltoClef mod) {
         return getBedTask(mod, getTargetBeds(mod));
+    }
+
+    /**
+     * (2026-09-21) 缺床 → 收床的统一出口 (含地表前置闸)。
+     *
+     * <p><b>用户原则: 地下不收床。</b> 床与羊毛的来源 (村庄床/羊) 都在地表, 在地下
+     * 派发收床会让 bot 挖穿地层满地图找羊 (20260921-093422 实锤: 09:34:56 于 y=15
+     * 地下打 `Collecting 11 beds`)。{@link GoToSurfaceTask} 的既定用途正是
+     * "地表资源 (原木/食物/羊毛) 收集前先显式回地表", 羊毛即在其列 —— 故缺床且
+     * 在地下时先回地表, 回到地表后本方法自然放行收床。
+     *
+     * <p>"已在地表发起"闩 {@code _bedCollectCommitted}: 收床任务自身可能短暂下潜
+     * (追羊/落坑), 若每 tick 都按深度翻面就会变成 收床 ↔ Digging up 横跳。
+     * 闩在【地表】发起收床后置位, 仅在 {@code needsBeds()} 转 false 时清零 ——
+     * 语义是"地下不许<b>发起</b>收床", 而不是"地下不许继续收床"。
+     *
+     * <p>深度判据用全项目唯一口径 {@link WorldHelper#isDeepUnderground} (= SurfaceHelper
+     * 迟滞版), 与 {@code GoToSurfaceTask.isFinished} 同源, 两者不会互相打架。
+     *
+     * @param collectReason 在地表发起收床时的 debug 状态文案 (各调用点保留自己的措辞)
+     * @return 要执行的任务 (回地表 / 收床); null = 不在主世界或床已够, 调用方继续原流程
+     */
+    private Task bedShortageTask(AltoClef mod, String collectReason) {
+        if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD || !needsBeds(mod)) {
+            _bedCollectCommitted = false;
+            return null;
+        }
+        if (!_bedCollectCommitted && isUndergroundDebounced(mod)) {
+            setDebugState("Digging up to collect beds.");
+            return new GoToSurfaceTask();
+        }
+        _bedCollectCommitted = true;
+        setDebugState(collectReason);
+        return getBedTask(mod);
     }
 
     /**
