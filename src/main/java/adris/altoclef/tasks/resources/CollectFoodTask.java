@@ -12,6 +12,7 @@ import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.OverworldExpeditionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
+import adris.altoclef.tasks.movement.GoToSurfaceTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.CraftingRecipe;
 import adris.altoclef.util.ItemTarget;
@@ -605,6 +606,30 @@ public class CollectFoodTask extends Task {
 
         // 已达标: 不再游荡找食, isFinished 下一 tick 自然完成。
         if (foodMet) return null;
+
+        // (2026-09-22 深地下无食物 → 先回地表, 用户"食物收集没有顺带触发回地表,
+        // 在下面没有食物的") 现场 20260922-202943/tasks.log 20:52:01: 进下界前 150
+        // 硬闸 (BeatMinecraft2Task.getPreNetherFoodTask, 09-15 9a7767aa) 在 bot
+        // y=-23 烧金锭时触发 CollectFoodTask(150), 硬闸从引入起就没有地下分支 ——
+        // 动物/作物/干草/浆果全在地表, 上方每 tick 发现扫描全部落空 → 回落
+        // BiasedExploreTask 在 y=-15/-16 挖石头"随机探索", 300s 后的远征兜底
+        // (OverworldExpeditionTask 锁方位角平向走) 在地下同样不会抬头, 永久空转。
+        // 日常 FOOD FIRST 门 (BeatMinecraft2Task:2443) 与 CollectWoolTask:137
+        // 早有同款分支, 唯独硬闸路径漏了。放在【所有发现通道落空之后、兜底探索
+        // 之前】: 熔炼/合成 (_smeltTask/tryCookRawFood) 与活跃终端任务 (正在
+        // 捡/猎/收) 都在更前面先行返回, 不受影响。GoToSurfaceTask.isEqual 是
+        // instanceof, 每 tick new 不会重启 (与羊毛任务同款用法)。
+        // 口径与羊毛任务一致: 仅 WorldHelper.isDeepUnderground (转发
+        // SurfaceHelper.isBelowSurfaceDebounced), 不引浅坑口径。
+        if (WorldHelper.isDeepUnderground(mod)) {
+            setDebugState("No food underground: returning to surface");
+            Debug.logToFile("altoclef_diag.log",
+                    "[FOOD-SURFACE]\tdeep underground (y="
+                            + (mod.getPlayer() != null ? mod.getPlayer().getBlockPos().getY() : "?")
+                            + ", potential " + (int) potentialFood + "/" + (int) effectiveTarget(mod)
+                            + ") -> GoToSurfaceTask before food search");
+            return new GoToSurfaceTask();
+        }
 
         // Look for food.
         setDebugState("Searching...");
