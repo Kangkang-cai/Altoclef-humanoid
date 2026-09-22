@@ -78,6 +78,17 @@ public class MineAndCollectTask extends ResourceTask {
     // 岩石包住的远矿 (用户实测: 密不透风 7 格外的铁矿也能被锁定去挖)。
     private final boolean _greedy;
 
+    // (2026-09-22 批次开局判死保护, 183317 场实锤) 贪婪批次在【第一 tick 之前】
+    // 被父层/自身 isFinished 询问时: _miningPos=null(未选目标)、破坏记账未跑
+    // (brokenMs=0, 记账在 getClosestTo :1285)、掉落未回册 → 保活/宽限/链挖
+    // 三条挂住路径全部失效 → super(POSSESS 已达标)恒真 → isFinished 误判完成
+    // → 每 50ms 拆批重建 (diag: [GreedyBatch] release 20 连发, have 却在涨 —
+    // 碎片式捡漏)。修: 创建后 GREEDY_BATCH_GRACE_MS 内贪婪批次一律不算完成,
+    // 保证至少活到第一 tick (getClosestTo 必然选目标/记账/捡掉落三选一),
+    // 之后 isFinished 恢复正常语义 (在场即活/宽限/链挖接管)。
+    private static final long GREEDY_BATCH_GRACE_MS = 100;
+    private final long _createdMs = System.currentTimeMillis();
+
     // (2026-09-16 工具打架修复, 082639 场次) 本类 [ToolEquip] 分支与
     // PlayerInteractionFixChain 的 better-tool 分支是两个独立的 0.5s 装备源:
     // 本分支按任务 miningPos(石头)换镐, chain 按"实际在撸的方块"(如卡住时
@@ -470,6 +481,11 @@ public class MineAndCollectTask extends ResourceTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-22 批次开局判死保护) 见 GREEDY_BATCH_GRACE_MS 注释: 第一 tick
+        // 前三条挂住路径全失效, 100ms 内一律不算完成。
+        if (_greedy && System.currentTimeMillis() - _createdMs < GREEDY_BATCH_GRACE_MS) {
+            return false;
+        }
         if (!super.isFinished(mod)) {
             // (2026-08-31 防挖床卡死, 用户"又卡住不动") 仅【床】目标: 当 MineAndCollect(bed)
             // 在 96 格内找不到可感知可挖的床时, 不能一直"无目标 null 停"卡死 (getWanderTask
@@ -570,6 +586,19 @@ public class MineAndCollectTask extends ResourceTask {
         } else if (_greedyDropSeen && _greedyDropLostSinceMs == 0) {
             _greedyDropLostSinceMs = System.currentTimeMillis();
         }
+    }
+
+    /**
+     * (2026-09-22 掉落宽限对外查询, 183317 场实锤) 本批次是否处于"挖掉目标块后
+     * 等掉落物落地回册"的宽限挂住期。供 CollectVisibleOresTask 的批次释放检查
+     * 使用: isFinished 可能因掉落物 tracker 1~2 tick 回册抖动瞬时翻真, 父层若
+     * 直接拆批会把宽限语义整个绕掉 (每 50ms 拆批重建循环的成因之一)。
+     * 调用前先刷 latch, 与 isFinished 内部顺序一致。
+     */
+    public boolean holdingForGreedyDrop(AltoClef mod) {
+        if (!_greedy) return false;
+        updateGreedyDropLatch(mod);
+        return holdGreedyForDrop(mod);
     }
 
     // (2026-09-11 背包满顺延) scoop/腾格子进行中的宽限顺延上限(总窗口 = GRACE + 此值)。
@@ -912,6 +941,9 @@ public class MineAndCollectTask extends ResourceTask {
         private static final int GREEDY_TARGET_RANGE = 8;
         private final adris.altoclef.util.time.TimerGame _greedyTargetScanTimer = new adris.altoclef.util.time.TimerGame(0.5);
         private BlockPos _greedyTargetCache = null;
+        // (2026-09-22 透视取证) [GreedyTarget] 日志节流: 同目标不重打, 换目标立打。
+        private BlockPos _lastGreedyTargetLogged = null;
+        private long _lastGreedyTargetLogMs = 0;
         // Throttle for [Diag-blind] logging (counts wander ticks).
         private int _blindDiagTick = 0;
         // 上次创建 wander 探索任务的游戏 tick（重建冷却用）。
@@ -2119,6 +2151,22 @@ public class MineAndCollectTask extends ResourceTask {
                 }
             }
             _greedyTargetCache = best;
+            // (2026-09-22 透视取证, 用户"挖隔墙完全看不到的铁") 选中目标时打出感知来源
+            // 标签 (perceiveSource: los=真视线 / stone_medium / canopy_inference /
+            // experience / fluid_*) + 距离。下次"看到挖了看不见的矿"时, 该行直接定位
+            // 是哪条感知分支放行的 —— 与 09-01 [GreedyDiag] 钻石排查同一套路。
+            // 2s 节流: 同一目标反复选中不刷屏。
+            if (best != null) {
+                long nowMs = System.currentTimeMillis();
+                if (!best.equals(_lastGreedyTargetLogged) || nowMs - _lastGreedyTargetLogMs >= 2000) {
+                    _lastGreedyTargetLogged = best;
+                    _lastGreedyTargetLogMs = nowMs;
+                    double dist = Math.sqrt(player.getSquaredDistance(best));
+                    Debug.logToFile("altoclef_diag.log",
+                            String.format("[GreedyTarget] selected %s dist=%.1f perceive=%s",
+                                    best.toShortString(), dist, VisibilityHelper.perceiveSource(mod, best)));
+                }
+            }
             return Optional.ofNullable(best);
         }
 

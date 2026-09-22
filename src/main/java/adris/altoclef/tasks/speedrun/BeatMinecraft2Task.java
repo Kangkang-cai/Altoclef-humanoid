@@ -2265,7 +2265,10 @@ public class BeatMinecraft2Task extends Task {
                             ? mod.getModSettings().getPreNetherGreedyCooldownSeconds()
                             : GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
                     if (_greedyOreTask != null) {
-                        if (_greedyOreTask.isFinished(mod)) {
+                        // (2026-09-22 宽限保护, 183317 场实锤) isFinished 会因掉落物
+                        // tracker 1~2 tick 回册抖动瞬时翻真; 宽限挂住期不拆, 否则批次
+                        // 状态丢失+3s 冷却重建, 挖矿退化成碎片式捡漏 (50ms 循环顶层成因)。
+                        if (_greedyOreTask.isFinished(mod) && !_greedyOreTask.holdingForGreedyDrop(mod)) {
                             _greedyOreTask = null;
                         } else {
                             setDebugState("Greedy mining visible ores");

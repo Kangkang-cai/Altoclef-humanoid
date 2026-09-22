@@ -107,15 +107,24 @@ public class CollectVisibleOresTask extends Task {
             // (2026-08-23) 达标判定按"生矿+锭"动态计数 (含光标) — 原只数
             // 生矿: 烧好后生铁跌破 32 会重新触发挖矿 (用户: 烧制产物也
             // 算进 32)。中途被 gear 任务拿去烧一部分同样成立。
-            if (countedItems(mod, _activePlan) >= _activePlan.cap() || _active.isFinished(mod)) {
+            // (2026-09-22 宽限保护, 183317 场实锤 50ms 拆批重建循环) isFinished
+            // 会因掉落物 tracker 1~2 tick 回册抖动瞬时翻真; 挖掉块后的掉落宽限
+            // 挂住期 (holdingForGreedyDrop) 不得释放批次, 否则宽限语义被父层
+            // 整个绕掉 → 每 tick 拆批重建, 挖矿退化成碎片式捡漏。
+            boolean capHit = countedItems(mod, _activePlan) >= _activePlan.cap();
+            boolean fin = _active.isFinished(mod);
+            boolean holding = fin && _active.holdingForGreedyDrop(mod);
+            if (capHit || (fin && !holding)) {
                 // (2026-09-13 批次收尾诊断) 用户"矿脉没挖完就回主线"现场取证:
                 // 分清是①达上限正常收工, 还是②近场判无活提前释放 (后者看 vis8 与
                 // 近场豁免口径能否覆盖矿脉延伸)。每批只打一条, 天然节流。
                 // (2026-09-22) 近场豁免收编为面相邻6块 (原 GREEDY_NEAR_FIELD_RADIUS
                 // 删除), 诊断字段改为固定口径标签。
                 int have = countedItems(mod, _activePlan);
-                boolean capHit = have >= _activePlan.cap();
                 OreStat endSt = countAllVisible(mod).get(_activePlan);
+                // (2026-09-22) release 原因分解: capHit=达上限收工; holding=true 不可能
+                // 出现在此(宽限期已保护); 其余为 isFinished 瞬时真 — 看 have/vis8 区分
+                // 正常收尾与抖动拆批。
                 Debug.logToFile("altoclef_diag.log", "[GreedyBatch] release item="
                         + _activePlan.item() + " capHit=" + capHit
                         + " have=" + have + "/" + _activePlan.cap()
@@ -224,6 +233,16 @@ public class CollectVisibleOresTask extends Task {
             return !hasAnyVisibleOreWork(mod);
         }
         return _active.isFinished(mod);
+    }
+
+    /**
+     * (2026-09-22 宽限对外查询, 183317 场实锤) 当前批次是否处于"挖掉目标块后
+     * 等掉落物落地回册"的宽限挂住期。供 BeatMinecraft2Task 的顶层释放检查使用:
+     * isFinished 因掉落物 tracker 1~2 tick 回册抖动瞬时翻真时, 顶层不应拆掉
+     * 整个贪婪任务 (拆掉=批次状态丢失+3s 冷却重建, 50ms 拆批重建循环的顶层成因)。
+     */
+    public boolean holdingForGreedyDrop(AltoClef mod) {
+        return _active != null && _active.holdingForGreedyDrop(mod);
     }
 
     /**
