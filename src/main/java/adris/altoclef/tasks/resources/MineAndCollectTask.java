@@ -1639,7 +1639,50 @@ public class MineAndCollectTask extends ResourceTask {
                 // (2026-09-05) 过期项已在上面 iterator 遍历时清掉; 这里仅保底防膨胀。
                 _seenOreTick.entrySet().removeIf(x -> nowTick - x.getValue() >= MEMORY_NAV_LIFETIME_TICKS);
             }
-            return Optional.ofNullable(best);
+            if (best != null) return Optional.of(best);
+
+            // (2026-09-22 跨实例记忆兜底, 20260922-114142 实锤"钻石贪婪挖被抢占后矿脉丢失",
+            // 用户"我不会放过的") 根因: _seenOreTick 是【实例字段】, 钻石收集链上同时存在
+            // 多个 MineAndCollectTask 实例 (CollectVisibleOresTask 持有的贪婪 x1 /
+            // Collect Recipe Resources 持有的 x10)。11:44:16 贪婪 x1 实例真感知(FOV+LOS)
+            // 锁定 47,-41,-34 矿脉正垫柱扑矿; 11:44:19 Get catalogued 抢占杀掉 x1, 接手
+            // 的 x10 实例自己从未感知过那颗矿 (边界 LOS 站位), _seenOreTick 为空 → 实例
+            // 记忆兜底无记忆可回 → 落到挖隧道分支弃矿脉而去, 到用户手动停止再没回头。
+            // 2026-09-02 那次修复解决的是"同实例内战斗打断" (注释原文"杀完怪该回去挖
+            // 记忆中的钻石"), 没覆盖跨实例交接 — 本兜底补上这一层。
+            // 修法: 实例记忆落空时退接 WorldMemory._oreMemory — 全局按维度记忆的
+            // "真看见过(isBlockVisible)的矿", 天然跨实例存活。不违反两条既有原则:
+            //   不透视 —— WorldMemory 只记 isBlockVisible 通过的矿, 没看过的不会出现;
+            //   舍近求远不可取 (2026-08-21 用户原则) —— 这里仅在实例记忆为空、挖隧道
+            //   之前的最后兜底 (原记忆兜底语义不变), 不参与主目标竞争。
+            // 护栏与实例记忆路径同口径: 距离 ≤MEMORY_NAV_RANGE / 黑名单 / canBreak /
+            // chunk 已加载时必须仍是目标块 (已挖掉的空位直接跳过, 不扑空位)。
+            // 只读不改 WorldMemory (结构不归本任务管, 过期位由其自身机制维护)。
+            {
+                BlockPos gBest = null;
+                double gBestSq = Double.POSITIVE_INFINITY;
+                for (BlockPos p : mod.getWorldMemory().getOreLocations(_blocks)) {
+                    if (_blacklist.contains(p)) continue;
+                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    if (mod.getChunkTracker().isChunkLoaded(p)) {
+                        Block actual = mod.getWorld().getBlockState(p).getBlock();
+                        boolean matches = false;
+                        for (Block target : _blocks) {
+                            if (actual == target) { matches = true; break; }
+                        }
+                        if (!matches) continue;
+                    }
+                    double sq = p.getSquaredDistance(fromPos);
+                    if (sq >= maxSq) continue;
+                    if (sq < gBestSq) { gBestSq = sq; gBest = p; }
+                }
+                if (gBest != null) {
+                    Debug.logMessage("[MineMem-Global] instance memory empty -> navigating to globally-seen ore "
+                            + gBest.toShortString() + " (dist=" + (int) Math.sqrt(gBestSq) + ")");
+                    return Optional.of(gBest);
+                }
+            }
+            return Optional.empty();
         }
 
         /**
