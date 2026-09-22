@@ -680,24 +680,14 @@ public class MineAndCollectTask extends ResourceTask {
 
     private static final double MINE_EVERYTHING_RANGE = 16;
 
-    /**
-     * (2026-09-13 贪婪矿脉收尾, 用户"矿脉没挖完就回主线") 贪婪批次的近场扫描半径。
-     *
-     * 旧口径 getNearFieldOreAt 硬编码 dx,dy,dz ∈ [-1,1] (3x3x3 = 27 块)。铁矿脉/钻石脉
-     * 常斜向延伸, 挖穿一块后下一块若落在 2 格外 (含对角), 3x3x3 扫不到 → 同 tick
-     * isFinished 判"近场无活" → 整批退出回主线 (用户现场: 挖了 17 颗铁, rem=11 未达
-     * 上限就交还 Portal 主线, logs 13:13:26 STOP by Going to dimension: NETHER)。
-     *
-     * 2 = 5x5x5 (125 块): 语义是"人挖开一簇矿后环顾四周顺手清掉的暴露面", 不是隔墙
-     * 透视 — 扫描直接读世界方块 (与旧 3x3x3 同一机制), 不含 LOS 放宽, 远处/被岩石
-     * 深埋的矿依旧不计入。非贪婪路径 (木头/工作台/床/羊毛) 保持 radius=1 行为不变。
-     * 回退: 改回 1 即恢复旧行为。
-     *
-     * 【必须同步三处调用点】getClosestTo (L848/L854, 决定"挖哪块") 与
-     * hasNearFieldTarget (L1339, 决定"还有没有活") 必须用同一半径 —— 否则出现
-     * "判还有活但找不到目标"的空转挂住 (L474-475 注释警告过的老问题)。
-     */
-    public static final int GREEDY_NEAR_FIELD_RADIUS = 2;
+    // (2026-09-22 邻接口径收编, 用户定案"豁免=面相邻6块, 都改, 口径一致") 原此处
+    // GREEDY_NEAR_FIELD_RADIUS=2 (贪婪近场 5x5x5=125 块, 09-13 为"矿脉收尾"引入;
+    // 更早 3x3x3)。立方体豁免里棱邻/角邻的矿可以整块埋在石头里也被当候选, 与
+    // "不透视"冲突。现近场豁免统一收编为【面相邻 6 块】(getNearFieldOreAt):
+    // 挖掉/正在挖锚块时, 贴面 6 块必然暴露或即将暴露, 豁免感知不引入透视;
+    // 棱/角邻与更远的矿交给 BlockTracker 真感知 (LOS/角点射线) 接力。
+    // 木头批采的 ±3 格扫描 (用户 09-15 定案"3 格内还有原木就继续砍") 属批采
+    // 行为非感知豁免, 保留立方体口径 → getNearFieldOreInCube。
 
     private boolean hasNearbyMineableTarget(AltoClef mod) {
         // (2026-08-28 贪心=纯贴身) 贪心只看紧贴矿, 不把缓存里远处/被包住的矿
@@ -1320,8 +1310,10 @@ public class MineAndCollectTask extends ResourceTask {
             // 批采续砍目标: 围绕批锚点(刚砍的原木)扫 ±3 格 (用户:"扫一下这个原木的
             // 位置的 3 格范围内还有别的原木吗")。首根未砍(_woodBatchBroken==0)时
             // 不用这口径, 走正常最近目标选择。
+            // (2026-09-22) 立方体扫描收编为 getNearFieldOreInCube: 批采是行为约定
+            // 非感知豁免, 矿石链挖已换面相邻口径, 木头批采口径不变。
             Optional<BlockPos> woodBatchNext = (woodBatchActive && _woodBatchBroken > 0)
-                    ? getNearFieldOreAt(mod, getChainAnchor(), WOOD_BATCH_RADIUS)
+                    ? getNearFieldOreInCube(mod, getChainAnchor(), WOOD_BATCH_RADIUS)
                     : Optional.empty();
             // (2026-08-30 木头立即拾取强制, 用户) 木头/床挖完必须立刻捡掉落, 不能
             // 等整片挖完再统一捡。原逻辑掉落优先级排在 _miningPos 粘性之后 → 挖完
@@ -1395,31 +1387,26 @@ public class MineAndCollectTask extends ResourceTask {
                     }
                 }
             }
-            // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它周围的 3x3x3:
+            // (2026-08-28 近场即时, 用户) 刚挖完这块, 立刻扫它紧贴的邻位:
             // 紧贴刚挖穿的连位矿下一 tick 就被看到并续挖 — 完全不需要缓存/节流,
             // 也不受挖矿位置远近影响 (锚定的是矿, 不是玩家)。
-            // (2026-09-13) 半径统一由 nearR 决定 (贪婪 5x5x5 / 非贪婪 3x3x3),
-            // 与 hasNearFieldTarget 必须同口径, 见 GREEDY_NEAR_FIELD_RADIUS。
-            int nearR = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
-            // (2026-09-19 15:05 用户"获取方块不就近, 跳来跳去") 下界岩等垫脚料
-            // 满地都是, 3x3x3 挖净即断链 → 全局最近把 bot 拽去别的方向 (现场
-            // 20260919-150152: 目标 771,75,121 → 770,75,121 → 775,76,122 来回
-            // 横跳)。垫脚目标近场扩到 7x7x7 —— 一片挖干净再挪窝, 挪窝也只挪
-            // 到真正的最近片。
-            if (nearR == 1 && isScaffoldGroundTarget()) nearR = 3;
-            // (2026-09-15 链挖锚点修复) 原: getNearFieldOreAt(mod, _miningPos, nearR)
+            // (2026-09-22 邻接口径收编, 用户定案"豁免=面相邻6块, 都改, 口径一致")
+            // 原 (2026-09-13) 半径立方体 (贪婪 5x5x5 / 非贪婪 3x3x3) 撤销 —— 立方体里
+            // 棱/角邻的矿可整块埋在石头里也被当候选 (透视嫌疑)。现统一为面相邻 6 块
+            // (getNearFieldOreAt), 与 hasNearFieldTarget 同口径。
+            // (2026-09-15 链挖锚点修复) 原: getNearFieldOreAt(mod, _miningPos)
             // —— _miningPos 刚被清空恒为 null, 链挖断链。改用 getChainAnchor()。
             // (2026-09-15 批采) 木头批采转入拾取阶段 (砍满/背包达标) 时跳过链挖,
             // 防止掉落物登记 1-2 tick 空窗内链挖续砍第 4 根 (违背"每挖3个拾取一次")。
             Optional<BlockPos> nearField = (isBatchTarget() && _woodBatchBroken > 0 && !woodBatchActive)
                     ? Optional.empty()
-                    : getNearFieldOreAt(mod, getChainAnchor(), nearR);
+                    : getNearFieldOreAt(mod, getChainAnchor());
             if (nearField.isPresent()) {
                 return nearField.map(Object.class::cast);
             }
             if (_greedy) {
                 // (2026-08-28 贪心=纯贴身) 先认玩家近身紧贴的矿 (起始/链尾)。
-                Optional<BlockPos> nearMine = getNearFieldOreAt(mod, mod.getPlayer().getBlockPos(), nearR);
+                Optional<BlockPos> nearMine = getNearFieldOreAt(mod, mod.getPlayer().getBlockPos());
                 if (nearMine.isPresent()) {
                     return nearMine.map(Object.class::cast);
                 }
@@ -1510,12 +1497,12 @@ public class MineAndCollectTask extends ResourceTask {
             // (2026-09-15 判据统一, 104100 实锤) 16 格 gate 走 BlockTracker 感知缓存:
             // 下界隧道壁里的连位矿从未 LOS 入册 → 缓存恒空 → "还有矿"误判 false →
             // 矿脉挖到一半被 Pickup 抢占弃坑 (矿脉 35,80/-79/-78,-36/-37 挖到第二格
-            // 被抢)。与链挖同口径兜底: 围绕链挖锚点 5x5x5 世界直扫 (125 块, 便宜)。
+            // 被抢)。与链挖同口径兜底: 围绕链挖锚点面相邻 6 块直扫 (便宜)。
             // 扫完真没矿才算"本处挖完", 才轮到掉落物。
             if (nearbyMine.isEmpty()) {
                 // (2026-09-15 批采) 拾取阶段同样跳过锚点兜底扫, 理由同上。
                 if (!(isBatchTarget() && _woodBatchBroken > 0 && !woodBatchActive)) {
-                    nearbyMine = getNearFieldOreAt(mod, getChainAnchor(), 2);
+                    nearbyMine = getNearFieldOreAt(mod, getChainAnchor());
                 }
             }
             if (isCollectDropsImmediately()) {
@@ -1931,22 +1918,66 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         /**
-         * (2026-08-28 近场即时, 用户) 围绕【正在挖/刚挖完的那块】(center) 扫 3x3x3,
-         * 找紧贴它的可挖目标矿。范围极小 (27 块), 每 tick 直接采样世界, 不缓存
-         * 不限流 —— 挖穿一块, 邻位暴露的连位矿下一 tick 就被看见并续挖, 彻底摆脱
-         * 对异步 BlockTracker 缓存和节流扫描的依赖 (人挖一个马上挖下一个)。
-         * center 为空 (还没开始挖) 时返回空, 由冷启动的缓存/世界扫描负责首个目标。
+         * (2026-08-28 近场即时, 用户) 围绕【正在挖/刚挖完的那块】(center) 找紧贴它的
+         * 可挖目标矿。center 为空 (还没开始挖) 时返回空, 由冷启动的缓存/世界扫描
+         * 负责首个目标。
+         *
+         * (2026-09-22 邻接口径收编, 用户定案"豁免=面相邻6块, 都改, 口径一致") 原实现
+         * 扫立方体 (贪婪 5x5x5 / 非贪婪 3x3x3, 更早历史见 GREEDY_NEAR_FIELD_RADIUS
+         * 删除处注释), 棱邻/角邻的矿可以整块埋在石头里也被当候选 —— 与"不透视"冲突。
+         * 现只认【面相邻】的 6 块: 锚=正在挖的块时, 挖掉它贴面 6 块必然暴露 (即将
+         * 暴露); 锚=刚挖掉的空位时, 贴面 6 块已经暴露。豁免感知不引入任何透视。
+         * 代价: 纯斜向 (棱/角) 连接的矿脉段链挖会断, 交给 BlockTracker 真感知
+         * (暴露后 LOS/角点射线入册) 接力 —— 宁可慢一步, 不透视。
          */
         private Optional<BlockPos> getNearFieldOreAt(AltoClef mod, BlockPos center) {
-            return getNearFieldOreAt(mod, center, 1);
+            if (center == null) return Optional.empty();
+            BlockPos best = null;
+            double bestSq = Double.POSITIVE_INFINITY;
+            for (Direction dir : Direction.values()) {
+                BlockPos p = center.offset(dir);
+                if (_blacklist.contains(p)) continue;
+                Block actual = mod.getWorld().getBlockState(p).getBlock();
+                boolean matches = false;
+                for (Block target : _blocks) {
+                    if (actual == target) { matches = true; break; }
+                }
+                if (!matches) continue;
+                if (!WorldHelper.canBreak(mod, p)) continue;
+                if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
+                if (piglinDensityGated(mod, p)) continue;
+                double dSq = mod.getPlayer().getBlockPos().getSquaredDistance(p);
+                // (2026-09-19 16:05 问题一) 垫脚目标: 站立层以下的块重罚
+                // (与 scaffoldSelectionPenalty 同口径), 防近场链挖一路
+                // 向下挖出坑。(2026-09-21 1849) 阈值下移一格: 站立层
+                // (feetY-1) 不罚 —— 平地整层地表被旧阈值同罚=无差别,
+                // bot 照样掘地三层 (183333 实锤)。
+                if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY() - 1) {
+                    dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - 1 - p.getY());
+                } else if (_horizontalMode && isMaterialCollectionTarget()
+                        && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource()
+                        && p.getY() < mod.getPlayer().getBlockPos().getY()) {
+                    // (2026-09-21 2156 竖井策略) 水平阶段: 脚下层候选最后兜底,
+                    // 与 scaffoldSelectionPenalty 的 horizontalCollect 分支同口径。
+                    dSq += 1.0e9;
+                }
+                if (dSq < bestSq) {
+                    bestSq = dSq;
+                    best = p;
+                }
+            }
+            return Optional.ofNullable(best);
         }
 
         /**
-         * (2026-09-13 贪婪矿脉收尾) radius 版: 半边长 radius, 覆盖 (2r+1)^3。
-         * 非贪婪保持 radius=1 (3x3x3, 原行为); 贪婪批次用
-         * {@link #GREEDY_NEAR_FIELD_RADIUS} —— 见外层常量注释。
+         * (2026-09-22 从原 getNearFieldOreAt 立方体实现收编改名, 仅木头批采保留)
+         * 围绕批锚点扫半径 radius 的立方体, 找可挖目标。木头批采是用户 09-15 定案的
+         * 【批采行为】("扫一下这个原木的位置的 3 格范围内还有别的原木吗"), 不是感知
+         * 豁免 —— 树冠遮挡的木头另有 canopy_inference 感知口径, 且树叶透明本就不构成
+         * 矿石那种"隔岩透视"。矿石/材料链挖一律走 {@link #getNearFieldOreAt} 面相邻口径。
          */
-        private Optional<BlockPos> getNearFieldOreAt(AltoClef mod, BlockPos center, int radius) {
+        private Optional<BlockPos> getNearFieldOreInCube(AltoClef mod, BlockPos center, int radius) {
             if (center == null) return Optional.empty();
             BlockPos best = null;
             double bestSq = Double.POSITIVE_INFINITY;
@@ -1964,23 +1995,8 @@ public class MineAndCollectTask extends ResourceTask {
                         if (!matches) continue;
                         if (!WorldHelper.canBreak(mod, p)) continue;
                         if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
-                        // (20260915 挖金猪灵闸) 猪灵密集的金块本轮不可选。
                         if (piglinDensityGated(mod, p)) continue;
                         double dSq = mod.getPlayer().getBlockPos().getSquaredDistance(p);
-                        // (2026-09-19 16:05 问题一) 垫脚目标: 站立层以下的块重罚
-                        // (与 scaffoldSelectionPenalty 同口径), 防近场链挖一路
-                        // 向下挖出坑。(2026-09-21 1849) 阈值下移一格: 站立层
-                        // (feetY-1) 不罚 —— 平地整层地表被旧阈值同罚=无差别,
-                        // bot 照样掘地三层 (183333 实锤)。
-                        if (isScaffoldGroundTarget() && p.getY() < mod.getPlayer().getBlockPos().getY() - 1) {
-                            dSq += 1.0e6 * (double)(mod.getPlayer().getBlockPos().getY() - 1 - p.getY());
-                        } else if (_horizontalMode && isMaterialCollectionTarget()
-                                && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource()
-                                && p.getY() < mod.getPlayer().getBlockPos().getY()) {
-                            // (2026-09-21 2156 竖井策略) 水平阶段: 脚下层候选最后兜底,
-                            // 与 scaffoldSelectionPenalty 的 horizontalCollect 分支同口径。
-                            dSq += 1.0e9;
-                        }
                         if (dSq < bestSq) {
                             bestSq = dSq;
                             best = p;
@@ -2146,20 +2162,18 @@ public class MineAndCollectTask extends ResourceTask {
         }
 
         /**
-         * (2026-08-28) 近场是否有紧贴正在挖那块的可挖连位矿 (供 isFinished 判断)。 */
+         * (2026-08-28) 近场是否有紧贴正在挖那块的可挖连位矿 (供 isFinished 判断)。
+         * (2026-09-22) 与 getClosestTo 同口径收编为面相邻 6 块 (原贪婪 5x5x5 /
+         * 非贪婪 3x3x3 / 垫脚 7x7x7 立方体撤销), 半径不一致会"判还有活但找不到
+         * 目标"空转的老问题由"两边都调 getNearFieldOreAt"根治。
+         */
         boolean hasNearFieldTarget(AltoClef mod) {
-            // (2026-09-13) 与非贪婪/贪婪各自的 getClosestTo 同口径, 见
-            // GREEDY_NEAR_FIELD_RADIUS: 半径不一致会"判还有活但找不到目标"空转。
-            // (2026-09-15) 锚点同样与 getClosestTo 同口径 (getChainAnchor 含刚挖
+            // (2026-09-15) 锚点与 getClosestTo 同口径 (getChainAnchor 含刚挖
             // 完 4s 内的破坏位置兜底), 否则"判没活但链挖有目标"反向不一致。
-            int r = _greedy ? GREEDY_NEAR_FIELD_RADIUS : 1;
-            // (2026-09-19 15:05) 与 getClosestTo 同口径: 垫脚目标近场 7x7x7,
-            // 否则"判没活"提前结束/反向不一致 (见 getClosestTo 处注释)。
-            if (r == 1 && isScaffoldGroundTarget()) r = 3;
-            Optional<BlockPos> m = getNearFieldOreAt(mod, getChainAnchor(), r);
+            Optional<BlockPos> m = getNearFieldOreAt(mod, getChainAnchor());
             if (m.isPresent()) return true;
             // 贪心: 玩家近身也有紧贴矿也算"还有活", 任务不结束 (等 getClosestTo 派发)。
-            return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos(), r).isPresent();
+            return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos()).isPresent();
         }
 
         // (2026-09-08 无目标空转兜底) surface 目标(熔炉/工作台等)在全无目标时
