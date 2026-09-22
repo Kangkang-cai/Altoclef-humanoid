@@ -534,7 +534,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int LAVA_MEMORY_SEED_LIMIT = 8;
 
     // Cave exploration watchdog.
-    private final TimerGame _caveExploreTimer = new TimerGame(CAVE_EXPLORE_TIMEOUT);
+    // (2026-09-22 甲案: 看门狗改"在场 tick 计数", 挂起/停机不计时) 原 TimerGame 走
+    // ClientConnection.ticks, 只要游戏在跑就照走 —— 而被战斗抢占/手动停机/链抖动期间
+    // 本任务 onTick 根本没被调, 计时却在走。09-22 实锤: 13:30:20 FIRE → 13:30:27 被
+    // 僵尸战斗抢占 → 13:31:09 手动停 → 13:33:09 重启瞬间, 冻结的看门狗立即报
+    // "exploration timed out"(2m49s 里实际一秒都没探), 还把"已探索区域"错标在重启
+    // 站位。改为只在探索支线在场跑的 tick 计数(onTick 经 AltoClef.onClientTick 每
+    // game tick 恰好一次), 挂起/停机期间预算冻结, 假超时从根上消失。
+    private int _caveExploreActiveTicks = 0;
+    private static final int CAVE_EXPLORE_TIMEOUT_TICKS = (int) (CAVE_EXPLORE_TIMEOUT * 20);
     // (2026-09-02 防"同一洞反复探索", 用户"永远不会离开这个矿洞") 探索结束(超时/
     // 完成)后的冷却步数: 冷却内不再探测矿洞, 让 bot 挖离洞区/换向, 避免
     // 探索→挖几步→又探测到同一洞→又探索 的死循环 (日志 17:01 at 63,33,428 /
@@ -580,7 +588,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * "长时间没挖到矿的干逛"才被限时。
      */
     public void markOreMined() {
-        _caveExploreTimer.reset();
+        _caveExploreActiveTicks = 0;
     }
 
     // (2026-09-07 断点续探) 是否已完成过一次 onStart; 区分"首次启动"与"被打断后恢复"。
@@ -1138,11 +1146,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // We found a cave while digging: prefer exploring inside it.
             // A watchdog bounds the detour so a huge cave network can't trap
             // us forever — after CAVE_EXPLORE_TIMEOUT seconds we resume digging.
-            if (_subTask != null && !_subTask.isFinished(mod) && !_caveExploreTimer.elapsed()) {
+            // (2026-09-22 甲案) 预算只按"探索支线在场跑"的 tick 计数, 挂起期间冻结。
+            boolean exploringNow = _subTask != null && !_subTask.isFinished(mod);
+            if (exploringNow && _caveExploreActiveTicks < CAVE_EXPLORE_TIMEOUT_TICKS) {
+                _caveExploreActiveTicks++;
                 setDebugState("Exploring cave found while digging");
                 return _subTask;
             }
-            if (_caveExploreTimer.elapsed()) {
+            boolean caveTimedOut = exploringNow; // 还在场但预算耗尽 = 真超时; 否则 = 自然完成
+            if (caveTimedOut) {
                 Debug.logMessage("Cave exploration timed out after " + CAVE_EXPLORE_TIMEOUT + "s, resuming digging.");
                 Debug.logToFile("altoclef_diag.log", "[MineDown-Cave] exploration timed out, resuming digging.");
             } else {
@@ -1151,10 +1163,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             }
             _inCave = false;
             _subTask = null;
-            // (2026-09-03 区域记忆) 探索结束(超时/完成): 以当前玩家位置标记这个洞穴
-            // 区域为"已探索", 扁圆柱(水平16/±8, 2026-09-11 收窄)内不再触发探索 →
+            // (2026-09-03 区域记忆) 探索结束(超时/完成): 标记这个洞穴区域为"已探索",
+            // 扁圆柱(水平16/±8, 2026-09-11 收窄)内不再触发探索 →
             // 同一大洞网络不会被打转第二次(用户"同一个矿洞打转")。
-            markExploredCaveRegion(mod, mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null);
+            // (2026-09-22 甲案: 超时收尾改标真洞口) 超时的语义对象是"这个洞", 中心改用
+            // _lastFireAnchor(FIRE 洞锚点), 不再标 bot 当前站位 —— 09-22 实锤: 挂起 2m49s
+            // 的假超时把标记落在重启站位(54,-38,-46), 距真洞口 anchor(13,-45,-34) 差 40+
+            // 格, 错位封禁一块无关区域(没盖住真洞纯属侥幸)。真超时时 bot 也可能在洞深处
+            // /已被逐出洞口, 站位同样不代表洞区; 洞内真走过的路径另有 markExploredCavePoints
+            // 点集覆盖(ExploreCaveTask.onStop), 深处不漏标。完成收尾玩家位置是真走过的,
+            // 照旧标玩家位置。锚点缺失(跨世界 onWorldBoundary 已清)退回玩家位置。
+            markExploredCaveRegion(mod, caveTimedOut && _lastFireAnchor != null ? _lastFireAnchor
+                    : (mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null));
             // (2026-09-02) 探索结束(超时/完成): 启动冷却防立刻重新探测同一洞;
             // 隧道模式下换一个水平方向继续挖, 避免原方向挖回刚探索过的洞区再次触发。
             _caveExploreCooldownSteps = CAVE_EXPLORE_COOLDOWN_STEPS;
@@ -1251,7 +1271,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     markRecentCaveAnchor(mod, anchor);
                     _lastFireAnchor = anchor.toImmutable();
                     Debug.logMessage("Found cave at shaft bottom at " + anchor.toShortString() + ", exploring it.");
-                    _caveExploreTimer.reset();
+                    _caveExploreActiveTicks = 0;
                     // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
                     // (其落点被强制抬到 48 格外地表, 从未真正走进洞里)。
                     _subTask = new ExploreCaveTask(_targetY, caveWindowMinY(), caveWindowMaxY());
@@ -1292,7 +1312,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 Debug.logMessage("Found cave while digging at " + anchor.toShortString() + ", exploring it.");
                 Debug.logToFile("altoclef_diag.log",
                         "[MineDown-Cave] found cave while digging at " + anchor.toShortString() + ", exploring it first.");
-                _caveExploreTimer.reset();
+                _caveExploreActiveTicks = 0;
                 // (2026-09-01 真正进洞) 专用洞内导航任务: 直奔最远天然洞空气,
                 // 到达后重扫跟深(见 ExploreCaveTask), 25s 看门狗兜底不影响挖矿主线。
                 // (2026-09-02 传 targetY) 导航目标限目标深度附近, 不导航到上方浅层。
