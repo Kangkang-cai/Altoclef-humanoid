@@ -2398,6 +2398,16 @@ public class MineAndCollectTask extends ResourceTask {
 
         /**
          * 找近处仅因 FOV 被拒的已知矿（遮挡/太远的转头也没用）。
+         * (2026-09-22 修复死过滤, 20260922-121524 实锤) 原判据是
+         * `perceivableFailReason(...).startsWith("outside FOV")` — 但
+         * perceivableFailReason 自 2026-08-21 改版后【只可能】返回
+         * "occluded (ray to center blocked...)"（FOV 拒绝已从感知判定里拆出,
+         * 原因串不复存在), 全工程无任何产出点 → 本方法每个候选都被 continue,
+         * LookAroundTask(环顾) 自那时起从未触发过 = 死代码。12:21:40 现场:
+         * [Diag-blind] perceivable=1(唯一可感知钻在视锥外被 requireFov 丢弃)
+         * 却无人救回, 直接挖隧道。改用 isBlockInView 直接判视锥内外, 语义
+         * 与方法名一致: 已在视锥内的转头没用, 视锥外的转头看一眼即可被
+         * 正常选中。
          */
         private Optional<BlockPos> findFovRejectedOre(AltoClef mod, double maxRange) {
             if (mod.getPlayer() == null) return Optional.empty();
@@ -2411,8 +2421,7 @@ public class MineAndCollectTask extends ResourceTask {
                 if (WorldHelper.isAdjacentToLiquid(mod, pos)) continue;
                 double dSq = pos.getSquaredDistance(mod.getPlayer().getBlockPos());
                 if (dSq >= maxSq) continue;
-                if (VisibilityHelper.isBlockPerceivable(mod, pos)) continue; // 已可见，无需转头
-                if (!VisibilityHelper.perceivableFailReason(mod, pos).startsWith("outside FOV")) continue;
+                if (VisibilityHelper.isBlockInView(mod, pos)) continue; // 已在视锥内，无需转头
                 if (dSq < bestSq) {
                     bestSq = dSq;
                     best = pos;

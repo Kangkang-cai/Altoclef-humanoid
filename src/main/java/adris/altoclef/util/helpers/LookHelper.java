@@ -165,22 +165,25 @@ public interface LookHelper {
             }
         }
 
-        // ③ 8 角点判定 (2026-09-21): END_PORTAL_FRAME 嵌在传送门房间内部,
-        // 从门口看到的是门框方块的边角, 中心+6 面射线全被房间结构挡住
-        // (20260921-134247 场实锤: 12 个门框点全在 12r 内, 其中 3 个
-        // FOV=true 但 LOS=false, bot 贴着门格栅探索就是不停)。对 8 个角点
-        // 各补一条射线。角点仍在方块自身体积内, 必须命中目标方块本身才算
-        // 可见, 与 ② 同口径, 不引入透视。
-        if (entity.world.getBlockState(block).getBlock() == Blocks.END_PORTAL_FRAME) {
-            for (double sx : new double[]{-0.5, 0.5}) {
-                for (double sy : new double[]{-0.5, 0.5}) {
-                    for (double sz : new double[]{-0.5, 0.5}) {
-                        Vec3d corner = center.add(sx, sy, sz);
-                        BlockHitResult cornerHit = raycastSkippingWebs(entity, start, corner, maxRange, handling);
-                        if (cornerHit != null && cornerHit.getType() == HitResult.Type.BLOCK
-                                && cornerHit.getBlockPos().equals(block)) {
-                            return true;
-                        }
+        // ③ 8 角点判定 (2026-09-21): 中心+6 面射线全被挡、但方块以边角露出时,
+        // 人眼在屏幕上仍能看到它的一角 — 几何事实是角点仍在方块自身体积内,
+        // 对 8 个角点各补一条射线, 任一命中目标方块本身即可见, 不引入透视。
+        // (20260921-134247 场实锤引入: END_PORTAL_FRAME 嵌在传送门房间内部,
+        // 从门口看到的是门框方块的边角, 12 个门框点全在 12r 内, 其中 3 个
+        // FOV=true 但 LOS=false, bot 贴着门格栅探索就是不停。)
+        // (2026-09-22 放开到全部方块, 20260922-121524 实锤同类事故: 钻石矿
+        // 48,-41,-35 在 7m 外以边角露出, 用户屏幕上"钻石就在眼前", 中心+6 面
+        // 射线全被挡 → perceivable=0 → bot 弃矿挖隧道。判据一致性原则: 同一
+        // 几何事实(角点在方块体积内、命中须为目标方块本身)不应按方块种类
+        // 分裂成两套口径 — 09-21 那次只放开门框是打补丁, 这次收编为统一判定。)
+        for (double sx : new double[]{-0.5, 0.5}) {
+            for (double sy : new double[]{-0.5, 0.5}) {
+                for (double sz : new double[]{-0.5, 0.5}) {
+                    Vec3d corner = center.add(sx, sy, sz);
+                    BlockHitResult cornerHit = raycastSkippingWebs(entity, start, corner, maxRange, handling);
+                    if (cornerHit != null && cornerHit.getType() == HitResult.Type.BLOCK
+                            && cornerHit.getBlockPos().equals(block)) {
+                        return true;
                     }
                 }
             }
