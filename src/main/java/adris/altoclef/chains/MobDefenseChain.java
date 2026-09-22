@@ -646,6 +646,18 @@ public class MobDefenseChain extends SingleTaskChain {
     private static final double SILVERFISH_PORTAL_IGNORE_RADIUS = 6.0;
 
     /**
+     * (2026-09-22 用户"未点火直接就不管了才对, 瞎wander干什么") 未点火苦力怕
+     * 一律不进战斗批次: 它不在 KillEntitiesTask 候选类别里 (近战打苦力怕=错误),
+     * 进了批次只会让"批次清空"判据永远不满足 → KillEntitiesTask 空转 wander
+     * 对峙 (112130 实锤: 僵尸 2.3s 击杀后, 未点火苦力怕滞留批次 wander 14s)。
+     * 点火后由 stateEvaluate/stateFight 前置 fusing 分支接手 (盾核/撤退, 保批次),
+     * 与本豁免不冲突。口径与 {@link #getClosestFusingCreeper} 一致 (fuse<0.001=未点火)。
+     */
+    private static boolean isUnfusingCreeper(Entity e) {
+        return e instanceof CreeperEntity && ((CreeperEntity) e).getClientFuseTime(1) < 0.001;
+    }
+
+    /**
      * 传送门锚点 = BlockTracker 已登记的 END_PORTAL_FRAME (本会话亲眼见过)
      * ∪ KnowledgeMemory 的 END_PORTAL 中心 (跨会话记忆)。都没有 → false。
      */
@@ -705,7 +717,16 @@ public class MobDefenseChain extends SingleTaskChain {
         _combatStartTick = nowTick;
         _runAwayTask = null;
         for (Entity hostile : near) {
+            // (2026-09-22 用户"未点火直接不管") 未点火苦力怕不进批次, 见 isUnfusingCreeper。
+            if (isUnfusingCreeper(hostile)) continue;
             if (!_fightTargets.contains(hostile)) _fightTargets.add(hostile);
+        }
+        if (_fightTargets.isEmpty()) {
+            // 批次全是未点火苦力怕 → 不开战, 交回 EVALUATE (用户任务继续)。
+            _confidentFight = false;
+            _inCombat = false;
+            _combatStartTick = 0;
+            return false;
         }
         _defenseState = DefenseState.FIGHT;
         return true;
@@ -877,6 +898,10 @@ public class MobDefenseChain extends SingleTaskChain {
                 boolean yieldBlazes = shouldYieldBlazesToEnclosureBuild(mod);
                 for (Entity hostile : hostiles) {
                     if (yieldBlazes && hostile instanceof BlazeEntity) continue;
+                    // (2026-09-22 用户"未点火直接不管") 苦力怕不进击杀清单: 未点火
+                    // 无视 (点火 → stateEvaluate 前置 fusing 分支已接手), 否则 12s
+                    // 计时进批次后 KillEntitiesTask 无候选 → wander 对峙 (112130 实锤)。
+                    if (hostile instanceof CreeperEntity) continue;
                     // (2026-09-21 用户"距离传送门6格远的虫子就不下杀死死命令") 威胁
                     // 公式路径不走 getNearbyHostiles 漏斗, 必须在这里同款剔除 ——
                     // 否则蠹虫照样进 _closeAnnoyingEntities 计时 → FIGHT (131443
@@ -1074,6 +1099,9 @@ public class MobDefenseChain extends SingleTaskChain {
                 for (Entity hostile : mod.getEntityTracker().getHostiles()) {
                     if (_fightTargets.contains(hostile)) continue;
                     if (yieldBlazes && hostile instanceof BlazeEntity) continue;
+                    // (2026-09-22 用户"未点火直接不管") 苦力怕不吸收进批次, 见 isUnfusingCreeper;
+                    // 若已点火, 本步之前的 stateFight 前置 fusing 分支已接手 (不会走到这)。
+                    if (hostile instanceof CreeperEntity) continue;
                     // (2026-09-21) 已开打的批次也不吸收传送门 6 格内的蠹虫。
                     if (hostile instanceof SilverfishEntity
                             && isNearEndPortalAnchor(mod, hostile.getBlockPos())) {
