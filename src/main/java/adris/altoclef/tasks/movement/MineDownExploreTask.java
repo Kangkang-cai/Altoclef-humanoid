@@ -1078,9 +1078,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 不重复触发; 又放在水改道与所有挖掘推进【之前】: 危险源优先, 绝不让 bot 先往
         // 前迈一步才发现脚下已经变岩浆。判据 / 合规边界 / 三档 cause 见字段区注释。
         if (!_inLavaDetour && !_lavaGiveUp && !_ascendMode && !_baritoneAscent) {
-            // 主判据: 仓内人类式视觉 (表面暴露 + LOS 无遮挡), 危险能在 3~12 格外被抓出来。
-            BlockPos seenLava = findSeenLava(mod);
-            // 兜底: 贴身 11 格 (LOS 射线在脚下/紧贴方块处几何不稳; 且贴身 = 危险已上身)。
+            // (2026-09-22 探洞豁免远距离视觉岩浆, 新增豁免; 用户"矿洞没探索完就切回通道")
+            // 114142 实锤: 探索中(_inCave=true, subTask=ExploreCaveTask) findSeenLava
+            // 在 LAVA_SIGHT_RADIUS_XZ=12 边界看见【洞内天然岩浆】(36,-50,-44, xz 距 12)
+            // → abandonTunnelForLava 把探索子任务顶成 RunAway; 撤完 _inCave 分支(:1111)
+            // 见 subTask==null 判 "exploration done" → markExploredCaveRegion 把仅探了
+            // ~10% 的洞 (reachable=4356 CAP HIT vs visited=343) 永久封禁 (随后 CaveScan
+            // REJECT naturalAir=0 explored=498)。洞里有岩浆是常态, 不是挖道事故。
+            // 探索态只认贴身实触 (findAdjacentLava, NEAR_LAVA_OFFSETS 口径) —— 真走到
+            // 岩浆边仍会撤; 远处的交给洞内导航自行绕行 (baritone 岩浆不可通行)。
+            // 非探索态 (挖道/楼梯/隧道) 口径不变, seen 照旧。
+            BlockPos seenLava = _inCave ? null : findSeenLava(mod);
+            // 兜底: 贴身 (LOS 射线在脚下/紧贴方块处几何不稳; 且贴身 = 危险已上身)。
             BlockPos hazard = seenLava != null ? seenLava : findAdjacentLava(mod);
             if (hazard != null) {
                 abandonTunnelForLava(mod, hazard, seenLava != null ? "seen" : "adjacent");
