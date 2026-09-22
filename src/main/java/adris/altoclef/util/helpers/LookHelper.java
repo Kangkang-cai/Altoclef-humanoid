@@ -304,13 +304,19 @@ public interface LookHelper {
         return cleanLineOfSight(entity, start, end, maxRange);
     }
 
-    private static boolean isCollidingInteractable(AltoClef mod) {
-
+    /**
+     * (2026-09-22 熔炉合成卡死修复) 只读判定: 玩家是否"开着容器界面 / 十字准星
+     * 对着可交互方块"。不 closeScreen、不转视角 —— 供 FoodChain.getPriority 这类
+     * 只评估优先级的路径使用。旧 tryAvoidingInteractable 在评估路径上带
+     * closeScreen() 副作用, needEat=true 期间把用户任务刚打开的合成界面每 tick
+     * 强关 (20260922-121524 实锤: 12:16:56~12:17:03 工作台界面永远开不住,
+     * 熔炉合成空转报 clean, CraftFill have=0 持续 51s, 直到吃饱才合成成功)。
+     */
+    static boolean isFacingInteractable(AltoClef mod) {
+        // 容器界面开着 = 正在交互 (只读判定, 不关闭)
         if (!(mod.getPlayer().currentScreenHandler instanceof PlayerScreenHandler)) {
-            StorageHelper.closeScreen();
             return true;
         }
-
         HitResult result = MinecraftClient.getInstance().crosshairTarget;
         if (result == null) return false;
         if (result.getType() == HitResult.Type.BLOCK) {
@@ -320,6 +326,16 @@ public interface LookHelper {
                 Entity entity = ((EntityHitResult) result).getEntity();
                 return entity instanceof MerchantEntity;
             }
+        }
+        return false;
+    }
+
+    private static boolean isCollidingInteractable(AltoClef mod) {
+        if (isFacingInteractable(mod)) {
+            // 动作路径 (投掷珍珠等) 保留旧副作用: 关掉碍事的界面。
+            // 玩家自身界面 (PlayerScreenHandler) 时本就没有 Screen 可关, closeScreen 为 no-op。
+            StorageHelper.closeScreen();
+            return true;
         }
         return false;
     }

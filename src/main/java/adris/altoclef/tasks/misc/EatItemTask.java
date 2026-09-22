@@ -79,6 +79,20 @@ public class EatItemTask extends Task {
             return null;
         }
 
+        // (2026-09-22 熔炉合成卡死修复) 面向容器 / 容器界面开着时右键 = 打开界面
+        // 而不是吃。旧设计靠 FoodChain 每 tick 重评闸门让位, 造成 Food↔User Tasks
+        // ownership 乒乓 (121524 会话 6.2s 内 50 次, 一口都吃不成, 用户工作台的
+        // 合成也被 closeScreen 副作用掐断)。现在接管后视角自己负责: 面向容器先
+        // 低头 (低头永不指向容器), 视角稳定后再开吃。
+        if (adris.altoclef.util.helpers.LookHelper.isFacingInteractable(mod)) {
+            releaseEat(mod);
+            // 俯仰角 90 = 垂直向下; 保持当前 yaw, 避免无谓的水平甩头
+            adris.altoclef.util.helpers.LookHelper.lookAt(mod,
+                    new baritone.api.utils.Rotation(mod.getPlayer().getYaw(), 90f));
+            setDebugState("Facing interactable, looking down before eating");
+            return null;
+        }
+
         Optional<Item> bestFood = mod.getFoodChain().getBestFoodToEat(mod);
         if (bestFood.isEmpty()) {
             // 没有可选食物 (全被保护/没有食物): 释放右键干等, 超时兜底结束,

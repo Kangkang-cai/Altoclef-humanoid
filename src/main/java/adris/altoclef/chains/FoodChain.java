@@ -19,6 +19,7 @@ import net.minecraft.item.FoodComponent;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.util.Pair;
 
 import java.util.Objects;
@@ -201,11 +202,6 @@ public class FoodChain extends SingleTaskChain {
         }
 
         if (hasFood && (needEat || _requestFillup) && _cachedPerfectFood.isPresent() && !mod.getMLGBucketChain().isChorusFruiting()) {
-            // Make sure we're not facing a container
-            if (!LookHelper.tryAvoidingInteractable(mod)) {
-                logFoodDiag(mod, "wait", "facing-interactable");
-                return Float.NEGATIVE_INFINITY;
-            }
             if (needEat) {
                 // (2026-09-06 战后前台进食修复, 用户"打完架血量低不恢复, 继续挖铁")
                 // 真饿/低血时不再走异步后台进食 —— 异步右键会被获胜任务链 tick 里的
@@ -216,13 +212,34 @@ public class FoodChain extends SingleTaskChain {
                 // eatForegroundPriority(默认 62) 高于用户任务(50), 低于逃跑/冷却(70)、
                 // 自信战斗(65 之下不冲突——有怪时战斗优先), MLG(100)/加急战斗(95) 可随时
                 // 抢占保命, 抢占时 EatItemTask.onStop 释放右键。
+                //
+                // (2026-09-22 熔炉合成卡死修复) 旧的 facing-interactable 闸门
+                // (tryAvoidingInteractable) 挡在本分支之前, 且带两个破坏性副作用:
+                // closeScreen() + randomOrientation()。needEat=true 期间它每 tick
+                // 重评 —— 用户任务刚把工作台界面打开就被关掉、准星对准工作台就被
+                // 转走, 而让位后用户任务又转回来 → Food↔User Tasks ownership
+                // 每 1~2 tick 互换 (121524 会话 6.2s 内 50 次), 合成空转报 clean,
+                // 熔炉 51s 没合成出来。现在: 评估路径完全只读 (LookHelper.
+                // isFacingInteractable), 视角由 EatItemTask 自己负责 (面对容器先
+                // 低头再吃); 唯一保留的让位条件是容器界面正开着 —— 那是用户任务
+                // 正在操作界面, 抢了只会两边都卡。
+                if (!(mod.getPlayer().currentScreenHandler instanceof PlayerScreenHandler)) {
+                    logFoodDiag(mod, "wait", "container-screen-open");
+                    return Float.NEGATIVE_INFINITY;
+                }
                 stopEat(mod);
                 setTask(new EatItemTask(_config.eatTaskTimeoutSeconds));
                 logFoodDiag(mod, "foreground-eat", "");
                 return _config.eatForegroundPriority;
             }
-            startEat(mod, _cachedPerfectFood.get());
-            logFoodDiag(mod, "async-topup", "");
+            // 异步补食 (不饿只补满): 保留只读闸门 —— 面向容器时右键会开界面
+            // 而不是吃, 让位即可; 但不 closeScreen/不转视角 (副作用已移出评估路径)。
+            if (!LookHelper.isFacingInteractable(mod)) {
+                startEat(mod, _cachedPerfectFood.get());
+                logFoodDiag(mod, "async-topup", "");
+            } else {
+                logFoodDiag(mod, "wait", "facing-interactable");
+            }
         } else {
             stopEat(mod);
             logFoodDiag(mod, "idle", hasFood ? (needEat ? "no-fit-food" : "not-needed") : "no-food");
