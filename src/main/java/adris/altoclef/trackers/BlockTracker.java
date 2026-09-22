@@ -868,7 +868,9 @@ public class BlockTracker extends Tracker {
         }
 
         public void blacklistBlockUnreachable(AltoClef mod, BlockPos pos, int allowedFailures) {
-            _blacklist.blackListItem(mod, pos, allowedFailures);
+            // (2026-09-22) unreachable = 寻路/够不着语义: 靠近不改变可达性,
+            // 禁用距离 RESET, 保证失败计数能走到上限真正拉黑。
+            _blacklist.blackListItem(mod, pos, allowedFailures, false);
         }
 
         public boolean blockUnreachable(BlockPos pos) {

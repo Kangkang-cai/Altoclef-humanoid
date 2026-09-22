@@ -33,7 +33,20 @@ public abstract class AbstractObjectBlacklist<T> {
     // 工具升级路径不受限(那是真实挖掘能力提升)。
     private static final int RESET_COOLDOWN_TICKS = 100; // 5s
 
+    // (2026-09-22 unreachable 类失败禁用距离 RESET) "距离改善 RESET" 的语义前提是
+    // "走近一点就可能够得着"。对【寻路/够不着】类失败 (requestBlockUnreachable /
+    // requestEntityUnreachable) 该前提不成立: 目标在覆盖水体/对岸/封闭腔体内,
+    // 走近 1 格不改变可达性, RESET 只是清零计数 → 4 次上限永远打不满 → 同一目标
+    // 无限重选 (20260922 另机日志实锤: latest.log 00:11:24-00:12:06 同一目标
+    // 24,10,27 连续 5 次 giving up, 每次都因 wander 靠近被 RESET; raw_iron 掉落物
+    // 在覆盖水体内 00:02:55-00:08:00 停滞 5 分钟同理)。改: 此类失败走
+    // allowDistanceReset=false 重载, 逐 entry 粘滞 (最严赢, 与 09-15 allowed 取 min
+    // 同款口径); 工具升级 RESET 不受影响 (那是真实挖掘能力提升)。
     public void blackListItem(AltoClef mod, T item, int numberOfFailuresAllowed) {
+        blackListItem(mod, item, numberOfFailuresAllowed, true);
+    }
+
+    public void blackListItem(AltoClef mod, T item, int numberOfFailuresAllowed, boolean allowDistanceReset) {
         if (!_entries.containsKey(item)) {
             BlacklistEntry entry = new BlacklistEntry();
             entry.numberOfFailuresAllowed = numberOfFailuresAllowed;
@@ -43,6 +56,9 @@ public abstract class AbstractObjectBlacklist<T> {
             _entries.put(item, entry);
         }
         BlacklistEntry entry = _entries.get(item);
+        // (2026-09-22) 距离 RESET 许可逐 entry 粘滞: 一旦按 unreachable 语义登记
+        // (false), 后续任何调用都不再放宽 —— 最严赢, 防止"最后写入者赢"回退。
+        if (!allowDistanceReset) entry.distanceResetAllowed = false;
         entry.totalFailures++;
         int totalFailuresBefore = entry.totalFailures - 1; // (2026-09-17 录制) 0 = 首次登记
         boolean resetHappened = false;                     // (2026-09-17 录制) 本次是否走了"距离改善/工具升级 RESET"
@@ -69,7 +85,8 @@ public abstract class AbstractObjectBlacklist<T> {
             // (2026-09-13) 距离改善路径加 5s 冷却: 失败比靠近更快时 RESET 会变成死循环。
             int nowTick = WorldHelper.getTicks();
             boolean toolUpgraded = newTool.ordinal() > entry.bestTool.ordinal();
-            boolean closer = newDistance < entry.bestDistanceSq - 1
+            boolean closer = entry.distanceResetAllowed
+                    && newDistance < entry.bestDistanceSq - 1
                     && nowTick - entry.lastResetTick >= RESET_COOLDOWN_TICKS;
             if (allowReset && (toolUpgraded || closer)) {
                 if (toolUpgraded) entry.bestTool = newTool;
@@ -143,6 +160,9 @@ public abstract class AbstractObjectBlacklist<T> {
         public int totalFailures;
         public double bestDistanceSq;
         public MiningRequirement bestTool;
+        // (2026-09-22) 是否允许"距离改善 RESET"。unreachable 类失败 (寻路够不着)
+        // 登记 false 后粘滞; 默认 true 保持旧行为。
+        public boolean distanceResetAllowed = true;
         // (2026-09-13) 上次"距离改善 RESET"的时刻(游戏 tick), 用于 RESET 冷却。
         public int lastResetTick = -RESET_COOLDOWN_TICKS;
     }

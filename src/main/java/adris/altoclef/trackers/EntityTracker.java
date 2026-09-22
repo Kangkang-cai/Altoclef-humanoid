@@ -388,7 +388,10 @@ public class EntityTracker extends Tracker {
      * Tells the entity tracker that we were unable to reach this entity.
      */
     public void requestEntityUnreachable(Entity entity) {
-        _entityBlacklist.blackListItem(_mod, entity, 3);
+        // (2026-09-22) unreachable 语义: 禁用距离 RESET (走近不改变可达性),
+        // 否则水中/封闭腔体内的掉落物永远拉不黑, pickup 无限重选同一目标
+        // (20260922 另机日志实锤: raw_iron 覆盖水体内停滞 5 分钟)。
+        _entityBlacklist.blackListItem(_mod, entity, 3, false);
     }
 
     /**
