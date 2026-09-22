@@ -2169,12 +2169,39 @@ public class MineAndCollectTask extends ResourceTask {
          * 目标"空转的老问题由"两边都调 getNearFieldOreAt"根治。
          */
         boolean hasNearFieldTarget(AltoClef mod) {
+            // (2026-09-22 批次在场即活, 用户"路过很多铁不挖" 165449 场实锤)
+            // 批次已从真感知锁定目标块 (_miningPos 由 getClosestTo 从 BlockTracker/
+            // 可见扫描选出) 且该块世界校验仍有效 → 本身就是活。原保活口径只有
+            // "锚块面相邻6"+"玩家面相邻6": 批次开局 bot 距目标 2~8 格、洞壁散铁
+            // 彼此不贴面 → 两个口径全 false → isFinished 在批次创建后 1~2 tick 即
+            // 真, 上层(BeatMinecraft2Task)立即拆批, 表现为 TRIGGER 每 3s 闪一次、
+            // 生铁一颗没挖 (16:58:07~27 五连闪实锤; 对照 16:58:30 金批次恰贴脸
+            // 才活)。这不是感知豁免: 目标块本就是真感知选的, 保活不引入透视;
+            // 面相邻口径只用于链挖延续 (锚=刚挖掉的空位)。防陈旧: 黑名单/块已
+            // 非目标/不可挖/邻液/chunk 卸载 → 不认活, 防"判还有活但找不到目标"空转。
+            if (_greedy && _miningPos != null && isMiningPosStillWorkable(mod)) {
+                return true;
+            }
             // (2026-09-15) 锚点与 getClosestTo 同口径 (getChainAnchor 含刚挖
             // 完 4s 内的破坏位置兜底), 否则"判没活但链挖有目标"反向不一致。
             Optional<BlockPos> m = getNearFieldOreAt(mod, getChainAnchor());
             if (m.isPresent()) return true;
             // 贪心: 玩家近身也有紧贴矿也算"还有活", 任务不结束 (等 getClosestTo 派发)。
             return _greedy && getNearFieldOreAt(mod, mod.getPlayer().getBlockPos()).isPresent();
+        }
+
+        /** (2026-09-22 在场即活) 目标块世界校验: 仍是目标方块且可挖不邻液未拉黑。 */
+        private boolean isMiningPosStillWorkable(AltoClef mod) {
+            if (_blacklist.contains(_miningPos)) return false;
+            if (!mod.getChunkTracker().isChunkLoaded(_miningPos)) return false;
+            Block actual = mod.getWorld().getBlockState(_miningPos).getBlock();
+            boolean matches = false;
+            for (Block target : _blocks) {
+                if (actual == target) { matches = true; break; }
+            }
+            if (!matches) return false;
+            if (!WorldHelper.canBreak(mod, _miningPos)) return false;
+            return !WorldHelper.isAdjacentToLiquid(mod, _miningPos);
         }
 
         // (2026-09-08 无目标空转兜底) surface 目标(熔炉/工作台等)在全无目标时
