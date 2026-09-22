@@ -112,8 +112,15 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
 
         // (2026-09-09 [GridWar] 根修) 本任务的收成品/正式合成阶段都在操作 2x2
         // 格, 与清格链互斥: 清格(CLEAR)持有时整体等待, 防止收成品时输入格被
-        // 抽走。材料收集阶段被顺带等待无碍(有界 ≤3s)。子任务 CraftGeneric*
-        // 每 tick 重跑各自续租。
+        // 抽走。子任务 CraftGeneric* 每 tick 重跑各自续租。
+        // (2026-09-22 死锁根修) CRAFT 租约只在【本任务亲自操作 2x2 格】的阶段持有。
+        // 旧实现 begin 之后无差别持有到方法尾, 包括返回收集子任务 _collectTask 的
+        // 阶段 —— 收集链会下沉到 SmeltInFurnaceTask(熔炼要走几分钟), 其 ResourceTask
+        // 网格清理器看到 2x2 格里有上一配方残留(现场 20260922-094351: 格内 4 木板 +
+        // 输出槽 crafting_table 滞留)派 EnsureFreePlayerCraftingGridTask 要 CLEAR,
+        // 而 CLEAR 被【自己的祖先】每 tick 续租的 CRAFT 挡死 → 祖先等子任务完成、
+        // 子任务等租约过期、租约被祖先永久续 = 30 分钟原地死锁 (anomaly stall 1785s)。
+        // 修法: 走到"返回收集子任务"这个 return 前先释放租约, 收集全程 2x2 格自由。
         if (!CraftingGridArbiter.begin(CraftingGridArbiter.INTENT_CRAFT)) {
             setDebugState("2x2 busy: clearing holds the grid, waiting");
             return null;
@@ -185,6 +192,12 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
             }
             if (!_collectTask.isFinished(mod)) {
                 setDebugState("Collecting materials");
+                // (2026-09-22 死锁根修) 收集阶段不持 CRAFT 租约 —— 见上方 begin
+                // 注释。持有收集链(可能含熔炼/清格子链)期间续租 CRAFT 会让
+                // EnsureFreePlayerCraftingGridTask 的 CLEAR 永远拿不到锁(祖先自己
+                // 续租, 租约永不过期), 形成自死锁。释放后 CLEAR 可立即接手清格;
+                // 收集完成回到本 tick 时 begin(CRAFT) 重新拿锁进正式合成。
+                CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CRAFT);
                 return _collectTask;
             }
             _collectTask = null;
