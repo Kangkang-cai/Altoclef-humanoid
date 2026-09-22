@@ -222,6 +222,19 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 }
             }
             if (result == null || result.getType() != HitResult.Type.ENTITY || blockObstruction != null) {
+                // (2026-09-22 贴脸让位, 用户"小白就在脸上, 已经不用再靠近了, 得让出来")
+                // 目标已在交战射程内 (贴脸) 时, "被挡→绕位" 判据近距下大量误报
+                // (相机射线贴着方块沿/怪身擦过), 绕位与交战每 tick 互抢控制 —
+                // 现场 20260922-132249: Approach entity <-> Getting to block 39,-42,6
+                // ForceProtect 打架 (13:30:47~49), 判定逐 tick 翻面, bot 站桩挨射
+                // 11s 掉到 0.45 血。近战子类声明贴脸时绕位让位, 交战分支接管。
+                if (isPointBlankCombat(mod, entity)) {
+                    _visibleAimPoint = computeVisibleAimPoint(mod, entity);
+                    _progress.reset();
+                    _losBlockedSinceTick = Long.MIN_VALUE;
+                    setDebugState("Target in face, fighting instead of repositioning");
+                    return onEntityInteract(mod, entity);
+                }
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
                 _losClearSinceTick = Long.MIN_VALUE;
@@ -315,6 +328,16 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
      */
     protected Task onObstructionPersistent(AltoClef mod, Entity entity, BlockPos obstruction) {
         return null;
+    }
+
+    /**
+     * (2026-09-22 贴脸让位) 目标已在交战射程内 (贴脸) 时是否放弃绕位、直接
+     * 走交战分支。默认 false —— 交易/剪羊毛等非战斗交互维持原绕位行为;
+     * 近战击杀子类覆写为 true: 贴脸时"被挡"多为相机射线擦沿误报, 绕位只会
+     * 与交战互抢控制 (0922 站桩挨射事故)。
+     */
+    protected boolean isPointBlankCombat(AltoClef mod, Entity entity) {
+        return false;
     }
 
     /**

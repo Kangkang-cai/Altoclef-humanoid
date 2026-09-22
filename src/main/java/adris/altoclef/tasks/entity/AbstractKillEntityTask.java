@@ -349,6 +349,17 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         return null;
     }
 
+    /**
+     * (2026-09-22 贴脸让位, 用户"小白就在脸上, 已经不用再靠近了, 得让出来")
+     * 目标已在攻击射程内 → 绕位不再抢控制, 交战分支 (盾战/出刀) 接管。
+     * 射程口径与攻击判定一致 (entityReachRange, 默认 3.2)。
+     */
+    @Override
+    protected boolean isPointBlankCombat(AltoClef mod, Entity entity) {
+        double reach = mod.getModSettings().getEntityReachRange();
+        return entity.squaredDistanceTo(mod.getPlayer()) <= reach * reach;
+    }
+
     // (2026-08-23) 瞄准点: 末影人瞄准眼睛 (脚底 +1.5), 其余生物默认脚底。
     // (2026-08-31 用户: 瞄脚部不对) 其余生物改为瞄身体中心 (bounding box 中心),
     // 准心落在身体中段而非脚底。
