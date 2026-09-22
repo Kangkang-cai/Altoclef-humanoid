@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.compound.ConstructNetherPortalBucketTask;
 import adris.altoclef.tasks.construction.compound.ConstructNetherPortalObsidianTask;
+import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -39,6 +40,19 @@ public class DefaultGoToDimensionTask extends Task {
     private boolean _buildingPortalHome = false;
     private long _portalHomeBuildStartMs = 0L;
     private static final long PORTAL_HOME_BUILD_TIMEOUT_MS = 180_000;
+
+    // (2026-09-22 进下界门前就地设重生点, 用户"进入下界传送门前也要设置一下,
+    // 参考末地的") 对齐末地门 BeatMinecraft2Task#setSpawnNearPortalTask:
+    // 走到已点亮的下界门 XZ 8 格内 → 先执行 PlaceBedAndSetSpawnTask (身边有床
+    // 直接右键设点; 有床物品就地放床; 没床就 CollectBedTask 收一张), 完成
+    // (设点成功或任务自身超时放弃) 后再进传送门。对所有主世界→下界的调用方
+    // 全局生效 (用户拍板"所有进下界都生效, 没床就收集一张")。
+    // 任务系统按 isEqual(_target) 保活首个实例 (Task.tickInternal), 闩与床
+    // 任务实例跨 tick 不丢, 与 _buildingPortalHome 同理。
+    private final PlaceBedAndSetSpawnTask _bedSpawnBeforeNetherTask = new PlaceBedAndSetSpawnTask();
+    private boolean _netherBedSpawnStarted = false;
+    private boolean _netherBedSpawnDone = false;
+    private static final double NETHER_PORTAL_BED_SPAWN_RANGE = 8.0;
 
     public DefaultGoToDimensionTask(Dimension target) {
         _target = target;
@@ -174,6 +188,11 @@ public class DefaultGoToDimensionTask extends Task {
 
     private Task goToNetherFromOverworldTask(AltoClef mod) {
         if (netherPortalIsClose(mod)) {
+            // (2026-09-22) 进门前先就地放床/右键设重生点, 完成后才真正进门。
+            Task bedSpawn = netherPortalBedSpawnTask(mod);
+            if (bedSpawn != null) {
+                return bedSpawn;
+            }
             setDebugState("Going to nether portal");
             return new EnterNetherPortalTask(Dimension.NETHER);
         }
@@ -208,6 +227,55 @@ public class DefaultGoToDimensionTask extends Task {
             return closest.isPresent() && closest.get().isWithinDistance(mod.getPlayer().getPos(), 2000);
         }
         return false;
+    }
+
+    /**
+     * (2026-09-22) 进下界门前的就地重生点闸门 (对齐末地门
+     * BeatMinecraft2Task#setSpawnNearPortalTask + END_PORTAL_BED_SPAWN_RANGE)。
+     * <ul>
+     *   <li>未开始: 必须已走到最近的已点亮下界门 XZ {@value #NETHER_PORTAL_BED_SPAWN_RANGE}
+     *       格内才启动 — 远的时候让 EnterNetherPortalTask/导航先走, 绝不会在离门
+     *       很远的地方提前放床;</li>
+     *   <li>已开始: 保活床任务到 isFinished (设点成功 / 睡眠放弃 / 收床失败),
+     *       期间 CollectBedTask 可能为收床走到 96 格外, 不中途撤回 (同末地
+     *       shouldForce 语义);</li>
+     *   <li>完成: 闩 {@code _netherBedSpawnDone} 永久放行进门; 床任务自身有
+     *       超时/放弃出口, 不会卡死进门流程。</li>
+     * </ul>
+     * @return 要执行的床任务; null = 放行进入传送门
+     */
+    private Task netherPortalBedSpawnTask(AltoClef mod) {
+        if (_netherBedSpawnDone) {
+            return null;
+        }
+        if (_netherBedSpawnStarted) {
+            if (_bedSpawnBeforeNetherTask.isFinished(mod)) {
+                _netherBedSpawnStarted = false;
+                _netherBedSpawnDone = true;
+                Debug.logMessage("(NetherBedSpawn) Spawn step finished (spawnSet="
+                        + _bedSpawnBeforeNetherTask.isSpawnSet() + "), entering nether portal.");
+                Debug.logToFile("altoclef_diag.log", "[NetherBedSpawn]\tdone spawnSet="
+                        + _bedSpawnBeforeNetherTask.isSpawnSet() + " -> enter portal");
+                return null;
+            }
+            setDebugState("Setting spawn near nether portal");
+            return _bedSpawnBeforeNetherTask;
+        }
+        Optional<BlockPos> nearest = mod.getBlockTracker().getNearestTracking(
+                mod.getPlayer().getPos(), Blocks.NETHER_PORTAL);
+        if (nearest.isPresent()
+                && WorldHelper.inRangeXZ(mod.getPlayer(), WorldHelper.toVec3d(nearest.get()),
+                        NETHER_PORTAL_BED_SPAWN_RANGE)) {
+            _netherBedSpawnStarted = true;
+            Debug.logMessage("(NetherBedSpawn) At nether portal " + nearest.get().toShortString()
+                    + ", setting spawn point in place before entering.");
+            Debug.logToFile("altoclef_diag.log", "[NetherBedSpawn]\tstart at portal "
+                    + nearest.get().toShortString() + " player="
+                    + mod.getPlayer().getBlockPos().toShortString());
+            setDebugState("Setting spawn near nether portal");
+            return _bedSpawnBeforeNetherTask;
+        }
+        return null;
     }
 
     /**
