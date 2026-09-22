@@ -238,12 +238,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static long _caveScanDiagMs = 0;
     // Check for caves every N steps.
     private static final int CAVE_SCAN_EVERY_STEPS = 3;
-    // (2026-09-22 用户定案"下沉过程中 y<-10 时遇到矿洞就直接探索") 下沉模式探洞
-    // 解禁线: y<-10 的深层下挖途中也扫描遇洞即探; y≥-10 的浅层仍不扫 —— 保留
-    // 09-02 "浅层大洞抢占下挖"防护(当年实锤 17:01 at y=33/51 反复触发)。
     // 动机: 121524 实锤读档点在洞内(y=-42)却一路穿洞下挖到 -57, 洞留在头顶
-    // 不连通, 到 -57 后探洞判据永久够不着(only 9 natural air)。
-    private static final int DESCENT_CAVE_SCAN_MIN_Y = -10;
+    // 不连通, 到 -57 后探洞判据永久够不着(only 9 natural air)。下沉扫洞闸门已改
+    // 为目标带自适应 caveWindowMaxY (见 descentDeepScan), 不再用固定深度常量。
     // Horizontal direction of the staircase (dig east as we descend).
     private static final int STAIR_DIR_X = 1;
     private static final int STAIR_DIR_Z = 0;
@@ -1300,11 +1297,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (已到目标深度, 水平隧道挖矿) 才中途探测洞; 楼梯下沉模式(起始高于目标
         // 深度)先沉到目标深度再探测, 否则浅层大洞网络会一直抢占探索, 永不沉到
         // 钻石层 y=-24 (日志 17:01 at 63,33,428 / 51,33,406 浅层反复触发实锤)。
-        // (2026-09-22 用户定案"下沉过程中 y<-10 遇到矿洞就直接探索") 下沉解禁:
-        // 深层(y<DESCENT_CAVE_SCAN_MIN_Y)下沉途中同款扫描, y≥-10 浅层仍不扫。
-        // 冷却内不探测(防同一洞反复), 步进门控与隧道模式共用。
+        // (2026-09-22 用户定案"下沉过程中遇洞直接探索" + v2 目标带自适应, 用户
+        // "挖铁时的深度y要求应该不同") 原深度闸门硬编码 y<DESCENT_CAVE_SCAN_MIN_Y
+        // (-10) 对主世界挖铁是错的: 铁带[5,30], 挖进 y~33 的大洞穴时 -10 永不满足
+        // → 全程不扫洞、洞不探索, 只会继续竖井下挖 (20260922-183317 实锤: y33 遇洞
+        // 不切 ExploreCave, dug 到 75/80)。改随【本带洞穴窗口上限】自适应:
+        // caveWindowMaxY = 带上限 + CAVE_ABOVE_TARGET_BUFFER(8) → 铁带 y≤38 起扫、
+        // 遇洞即探; 钻/下界深带仍深才扫 → 浅层大洞不抢占, 保留 09-02 防护。冷却内
+        // 不探测(防同一洞反复), 步进门控与隧道模式共用。
         boolean descentDeepScan = !_tunnelMode && !_ascendMode && !_baritoneAscent
-                && mod.getPlayer().getBlockPos().getY() < DESCENT_CAVE_SCAN_MIN_Y;
+                && mod.getPlayer().getBlockPos().getY() <= caveWindowMaxY();
         if ((_tunnelMode || descentDeepScan)
                 && _caveExploreCooldownSteps <= 0 && _step % CAVE_SCAN_EVERY_STEPS == 0) {
             Optional<BlockPos> cave = findNearbyCave(mod);
