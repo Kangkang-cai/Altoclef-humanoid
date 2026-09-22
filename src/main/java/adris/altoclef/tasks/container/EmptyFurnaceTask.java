@@ -64,7 +64,7 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     // 直到手动推进 4 格才"再找到")。加"无进展超时": 连续 N 秒 super.onTick 都返回 null
     // (未开炉/未取空/未拆炉) → 判放弃, isFinished=true 放行父任务 (冶炼/食物) 继续,
     // 而不是冻死。_stuckOpenTimer 只管"贴炉打不开", 本计时器补"连炉都建立不了"。
-    private final TimerGame _noProgressTimer = new TimerGame(8.0);
+    private final TimerGame _noProgressTimer = new TimerGame(4.0);
     private boolean _gaveUp = false;
 
     // (2026-09-09 Fix-A) 直走已知熔炉坐标的移动子任务 (同目标复用, 不每 tick new)。
@@ -154,7 +154,7 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
         if (_noProgressTimer.elapsed()) {
             setDebugState("Giving up emptying furnace (no findable/openable furnace)");
             Debug.logToFile("altoclef_diag.log",
-                    "[MAIN-FIX]\t[EmptyFurnace]\tno-progress 8s (no findable/openable furnace) -> giving up, letting parent proceed");
+                    "[MAIN-FIX]\t[EmptyFurnace]\tno-progress 4s (no findable/openable furnace) -> giving up, letting parent proceed");
             _gaveUp = true;
         }
         return null;
