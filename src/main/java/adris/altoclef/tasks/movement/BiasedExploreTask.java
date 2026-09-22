@@ -118,7 +118,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-22 淌水惩罚) 一步的直线路径上允许【连续涉水】的最大格数。"过河可以"
     // (2026-08-21 定案) 只对窄河成立: 直线连续水面超过上限 = 宽河/湖/湾, 游过去又慢
     // 又有溺水风险, 拒绝这一步换方向重采。窄河 (<=上限) 照旧放行。
-    private static final int RIVER_CROSS_MAX_BLOCKS = 12;
+    // (2026-09-22 用户"12格水限制太严") 放宽到 24: 中等宽度的河也能直接游过,
+    // 不必绕路。海洋仍由 isTargetOcean 单独拦截, 不会因放宽而"下海"。
+    private static final int RIVER_CROSS_MAX_BLOCKS = 24;
     // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取食物")
     // 找食物探索 (foodExplore) 的落点必须是【干燥陆地】。落点在水面时沿同一方向按
     // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。

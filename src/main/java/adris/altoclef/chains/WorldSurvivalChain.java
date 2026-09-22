@@ -96,6 +96,13 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private final TimerGame _drownReissueTimer = new TimerGame(1); // 溺水时限紧, 1s 重发冷却
     private final TimerGame _drownPathlessTimer = new TimerGame(1.5); // baritone 无路径观察期
     private boolean _loggedNoBreathable = false;
+    // (2026-09-22 水下近距离直接游动兜底) baritone 水下寻路在"头顶有方块、需先侧
+    // 向游再上浮"场景下长期无路径 (现场 20260922-172819: 空气在 (100,63,-231),
+    // bot 在 (101,61,-231), 每 1.5s 重发 GetToBlockTask 却导航不到, 30s 淹死)。
+    // 目标欧氏距离小于此阈值且 GetToBlockTask 无路径超时 → 直接面向目标 hold
+    // 前进+跳跃游过去, 绕过 baritone 寻路。
+    private static final double DROWN_DIRECT_SWIM_DIST_SQ = 5.0 * 5.0;
+    private BlockPos _drownSwimTarget = null;
 
     // ==== 盾牌看门狗 (2026-09-11, 用户复盘 21:10 死于骷髅射杀) ====
     // 每 60s 检查一次: 副手+背包都没盾时, 材料够(1 铁锭+6 木板)就马上合成,
@@ -328,7 +335,36 @@ public class WorldSurvivalChain extends SingleTaskChain {
         double airFrac = (double) p.getAir() / p.getMaxAir();
         if (airFrac > DROWN_ESCAPE_AIR_FRACTION) {
             _loggedNoBreathable = false;
+            _drownSwimTarget = null;
             return Float.NEGATIVE_INFINITY;
+        }
+
+        // (2026-09-22) 直接游动模式: 绕过 baritone 寻路, 面向目标前进+上浮。
+        // 进入条件见下方 GetToBlockTask 无路径重评分支。
+        if (_drownSwimTarget != null) {
+            if (!p.isTouchingWater()) {
+                _drownSwimTarget = null;
+                return Float.NEGATIVE_INFINITY;
+            }
+            // 到达目标附近 (欧氏 < 1.5 格) → 退出直接游动, 让常规逻辑接管。
+            if (p.getBlockPos().getSquaredDistance(_drownSwimTarget) < 1.5 * 1.5) {
+                _drownSwimTarget = null;
+                return Float.NEGATIVE_INFINITY;
+            }
+            Vec3d eye = p.getEyePos();
+            Vec3d target = Vec3d.ofCenter(_drownSwimTarget);
+            double dx = target.x - eye.x;
+            double dz = target.z - eye.z;
+            float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            // 面向目标 (保持当前 pitch, 水中水平移动方向由 yaw 决定, JUMP 负责上浮)。
+            mod.getClientBaritone().getLookBehavior().updateTarget(new Rotation(yaw, p.getPitch()), true);
+            var h = mod.getClientBaritone().getInputOverrideHandler();
+            h.setInputForceState(Input.MOVE_FORWARD, true);
+            h.setInputForceState(Input.JUMP, true);
+            h.setInputForceState(Input.MOVE_BACK, false);
+            h.setInputForceState(Input.MOVE_LEFT, false);
+            h.setInputForceState(Input.MOVE_RIGHT, false);
+            return DROWN_ESCAPE_PRIORITY;
         }
 
         // 已有逃生任务在跑:
@@ -378,15 +414,34 @@ public class WorldSurvivalChain extends SingleTaskChain {
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         } else {
-            setTask(new GetToBlockTask(air));
-            _drownReissueTimer.reset();
-            _drownPathlessTimer.reset();
-            String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
-                    + " -> navigate to breathable " + air.toShortString()
-                    + " (targetY=" + air.getY() + " vs playerY=" + p.getBlockPos().getY() + ")"
-                    + " player=" + p.getBlockPos();
-            Debug.logMessage(m);
-            Debug.logToFile("altoclef_diag.log", m);
+            // (2026-09-22) 目标很近但 baritone 水下寻路失败 (头顶有方块等) →
+            // 直接面向目标游动, 绕过 baritone A*。现场: 空气距 bot 2.2 格,
+            // GetToBlockTask 每 1.5s 重发却导航不到, 30s 淹死。
+            double distSq = p.getBlockPos().getSquaredDistance(air);
+            if (distSq < DROWN_DIRECT_SWIM_DIST_SQ) {
+                _drownSwimTarget = air;
+                // 作废 baritone 当前路径, 避免它的输入控制与直接游动冲突。
+                try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
+                _drownReissueTimer.reset();
+                _drownPathlessTimer.reset();
+                String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                        + " -> DIRECT SWIM to " + air.toShortString()
+                        + " (baritone pathing failed, dist="
+                        + String.format("%.1f", Math.sqrt(distSq))
+                        + ") player=" + p.getBlockPos();
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            } else {
+                setTask(new GetToBlockTask(air));
+                _drownReissueTimer.reset();
+                _drownPathlessTimer.reset();
+                String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                        + " -> navigate to breathable " + air.toShortString()
+                        + " (targetY=" + air.getY() + " vs playerY=" + p.getBlockPos().getY() + ")"
+                        + " player=" + p.getBlockPos();
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
         }
         return DROWN_ESCAPE_PRIORITY;
     }
