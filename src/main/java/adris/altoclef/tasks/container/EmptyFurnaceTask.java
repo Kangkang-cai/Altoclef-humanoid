@@ -56,12 +56,24 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     // 拆走 — 否则本任务会站着空转, 又被上层反复重建。
     private final TimerGame _stuckOpenTimer = new TimerGame(8.0);
 
+    // (2026-09-22 空值路径兜底, 用户"没找到容器停了 24s 冻死") 父类 DoStuffInContainerTask
+    // 在 nearestMissing 且禁止新造时返回 null (不派移动/不开炉/不产子任务), 而本类
+    // isFinished 又是 false → 整条链原地空转 (20260922-183317 实锤 18:43:20~44 冻 24s,
+    // 直到手动推进 4 格才"再找到")。加"无进展超时": 连续 N 秒 super.onTick 都返回 null
+    // (未开炉/未取空/未拆炉) → 判放弃, isFinished=true 放行父任务 (冶炼/食物) 继续,
+    // 而不是冻死。_stuckOpenTimer 只管"贴炉打不开", 本计时器补"连炉都建立不了"。
+    private final TimerGame _noProgressTimer = new TimerGame(8.0);
+    private boolean _gaveUp = false;
+
     // (2026-09-09 Fix-A) 直走已知熔炉坐标的移动子任务 (同目标复用, 不每 tick new)。
     private GetToBlockTask _walkTask = null;
     private BlockPos _walkTaskTarget = null;
 
     public EmptyFurnaceTask() {
         super(Blocks.FURNACE, new ItemTarget(Items.FURNACE));
+        // TimerGame 基类 _prevTime 默认 0, 长会话 ticks 大时初始即 elapsed → seed 一次,
+        // 让 _noProgressTimer 从本任务开始计时, 避免单次瞬时 null 就误判放弃。
+        _noProgressTimer.reset();
     }
 
     @Override
@@ -125,7 +137,25 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
                 return _walkTask;
             }
         }
-        return super.onTick(mod);
+        Task sub = super.onTick(mod);
+        if (sub != null) {
+            _noProgressTimer.reset(); // 有真实子任务 → 有进展, 无进展计时清零
+            return sub;
+        }
+        // 父类返回 null (典型: nearestMissing + 禁止新造 → "No container to take from,
+        // placing is not allowed here")。此刻没有移动/开炉/取物子任务, 若不设截止时限就
+        // 原地冻结 (18:43:20~44 冻 24s 实锤)。连续 N 秒无进展 → 判放弃, 让父任务继续,
+        // 而不是冻死。
+        if (_gaveUp) {
+            return null; // 已放弃: 保持 null, 下一 tick 由 isFinished=true 释放本任务
+        }
+        if (_noProgressTimer.elapsed()) {
+            setDebugState("Giving up emptying furnace (no findable/openable furnace)");
+            Debug.logToFile("altoclef_diag.log",
+                    "[MAIN-FIX]\t[EmptyFurnace]\tno-progress 8s (no findable/openable furnace) -> giving up, letting parent proceed");
+            _gaveUp = true;
+        }
+        return null;
     }
 
     @Override
@@ -272,6 +302,11 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-22 放弃逃生) 找不到/建不成要取空的熔炉时, 空转超时判放弃 → isFinished
+        // 放行父任务 (冶炼/食物) 继续, 而不是永久冻死 (20260922-183317 实锤 24s 冻结)。
+        if (_gaveUp) {
+            return true;
+        }
         // (2026-09-07 死循环根因修复) 取尽内容后绝不能立刻算完成。
         // 旧实现 `return _emptied`: 取尽的那一 tick 就返回 true, 上层
         // BeatMinecraft2Task 见 isFinished 立刻丢弃本实例另建一个新的,
