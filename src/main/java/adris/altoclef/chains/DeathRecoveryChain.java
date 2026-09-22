@@ -149,8 +149,14 @@ public class DeathRecoveryChain extends SingleTaskChain {
         // 本 Guard 紧跟 streak(Guard 0) 之后、其余 Guard 之前: streak 计数逻辑
         // 完全不变; 只要 streak 未触发且死因为 drown/lava, 就不再走 too_old/too_far/
         // pickaxe 那套"是否值得去捡"的判定, 直接弃墓切主任务(食物/原木)。
+        //
+        // (2026-09-22 地表溺水例外, 用户"死于地表的水的掉落物可以拾取")
+        // drown 默认弃墓, 但若墓地在地表 (heightmap 地表 y - 墓 y <= BURIED_DEPTH_THRESHOLD),
+        // 说明淹死在河流/海洋/湖面等开阔水域, 掉落物漂在水面仍可拾取。复用
+        // DeathRecoveryTask.isGraveBuried 的地表口径, 避免重写一套 heightmap 判断。
+        // lava 不享受此例外(岩浆会销毁掉落物)。
         // ------------------------------------------------------------
-        if (isAbandonCause(grave.deathCause)) {
+        if (isAbandonCause(grave.deathCause) && !isSurfaceDrownException(mod, grave, currentDim)) {
             if (!grave.altTaskDispatched) {
                 // 玩家还躺在死亡界面(health<=0)时不派发, 等复活(health>0)后再切主任务,
                 // 避免在一个"死人"身上跑需要移动采集的觅食/囤木任务(且此时坐标仍是死亡点)。
@@ -391,6 +397,24 @@ public class DeathRecoveryChain extends SingleTaskChain {
      */
     private static boolean isAbandonCause(String cause) {
         return cause != null && (cause.equals("drown") || cause.equals("lava"));
+    }
+
+    /**
+     * (2026-09-22 地表溺水例外) 死因为 drown 且墓地在地表时, 掉落物仍可拾取。
+     * 复用 {@link DeathRecoveryTask#isGraveBuried} 的 heightmap 口径: 墓 y 距
+     * 地表 <= BURIED_DEPTH_THRESHOLD(8 格) 即视为地表/浅层, 对应河流/海洋/湖面
+     * 等开阔水域溺亡。lava 不在此例外范围(岩浆销毁掉落物)。
+     * 区块未加载时 isGraveBuried 返回 false(当作地表), 保守走拾取。
+     */
+    private static boolean isSurfaceDrownException(AltoClef mod, WorldMemory.DeathGraveRecord grave, Dimension dim) {
+        if (!"drown".equals(grave.deathCause)) return false;
+        boolean buried = DeathRecoveryTask.isGraveBuried(mod, grave.position);
+        if (!buried) {
+            Debug.logToFile("death_recovery.log", String.format(
+                    "[SURFACE DROWN] cause=drown grave=%s dim=%s — surface water death, proceeding with normal pickup",
+                    grave.position, dim));
+        }
+        return !buried;
     }
 
     /**
