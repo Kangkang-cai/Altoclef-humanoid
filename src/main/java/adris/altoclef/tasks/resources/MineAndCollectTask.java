@@ -992,35 +992,31 @@ public class MineAndCollectTask extends ResourceTask {
             return true;
         }
 
-        /** 目标块集合是否包含该方块 (竖井每步/选块校验用)。 */
-        private boolean blockInTargets(Block block) {
-            for (Block t : _blocks) {
-                if (t == block) return true;
-            }
-            return false;
-        }
-
         // 竖井状态: _shaftBaseY = 触发时的脚Y (MIN_VALUE=未触发); 到底后进 _horizontalMode。
         private int _shaftBaseY = Integer.MIN_VALUE;
         private boolean _horizontalMode = false;
         private static final int SHAFT_DEPTH = 4;
 
         /**
-         * 竖井安全闸: 脚下 1..{@link #SHAFT_DEPTH} 格连续、可挖、属目标块、不邻液体,
-         * 且第 SHAFT_DEPTH+1 格是实体底 —— 防打穿悬空柱(自己垫的塔)/岩浆上空/浮空团块
-         * (0919 悬空下界岩教训)。任一不过 → 不打井, 直接水平取料。
+         * 竖井安全闸: 脚下 1..{@link #SHAFT_DEPTH} 格连续、可挖、不邻液体,
+         * 且第 SHAFT_DEPTH+1 格是实体底 —— 防打穿悬空柱(自己垫的塔)/岩浆上空/浮空
+         * 团块 (0919 悬空下界岩教训)。
+         * (2026-09-22 0925 用户"和地狱岩策略一样处理") 不再要求柱内方块 ∈ 目标块:
+         * 竖井是【下降手段】不是材料来源 —— 0922-091750 实锤: 泥土任务站在草地上,
+         * 柱内草方块/石头直接判 unsafe → skip 闩死水平模式 → 阶梯坑复发。
+         * 返回 null = 安全; 否则返回原因串 (调用方记日志)。
          */
-        private boolean isSafeShaftColumn(AltoClef mod, BlockPos feet) {
+        private String isSafeShaftColumn(AltoClef mod, BlockPos feet) {
             for (int dy = 1; dy <= SHAFT_DEPTH; dy++) {
                 BlockPos p = feet.down(dy);
-                if (!mod.getChunkTracker().isChunkLoaded(p)) return false;
-                if (!WorldHelper.canBreak(mod, p)) return false;
-                if (!blockInTargets(mod.getWorld().getBlockState(p).getBlock())) return false;
-                if (WorldHelper.isAdjacentToLiquid(mod, p)) return false;
+                if (!mod.getChunkTracker().isChunkLoaded(p)) return "chunk unloaded @" + p.toShortString();
+                if (!WorldHelper.canBreak(mod, p)) return "unbreakable @" + p.toShortString();
+                if (WorldHelper.isAdjacentToLiquid(mod, p)) return "liquid adjacent @" + p.toShortString();
             }
             BlockPos floor = feet.down(SHAFT_DEPTH + 1);
-            if (!mod.getChunkTracker().isChunkLoaded(floor)) return false;
-            return WorldHelper.isSolid(mod, floor);
+            if (!mod.getChunkTracker().isChunkLoaded(floor)) return "chunk unloaded @" + floor.toShortString();
+            if (!WorldHelper.isSolid(mod, floor)) return "no solid floor @" + floor.toShortString();
+            return null;
         }
 
         // Log/stem/wood blocks only generate on the surface (or nether ceiling).
@@ -1360,17 +1356,25 @@ public class MineAndCollectTask extends ResourceTask {
             if (!_greedy && !_horizontalMode && isMaterialCollectionTarget()
                     && !isTargetingWood() && !isTargetingBed() && !isTargetingSurfaceResource()) {
                 int feetY = mod.getPlayer().getBlockPos().getY();
-                if (_shaftBaseY == Integer.MIN_VALUE && closestDrop.isEmpty()) {
+                if (_shaftBaseY == Integer.MIN_VALUE) {
+                    // (2026-09-22 修复激活被掉落物饿死) 旧条件 closestDrop.isEmpty():
+                    // 泥土任务是"挖一块→捡一块"交替, 掉落物几乎恒在场 → 整个收集期
+                    // 没有干净 tick, 竖井从未评估 (0922-091750 实锤阶梯坑复发)。
+                    // 掉落物优先级由更早的 early-return 保证, 这里不再看掉落物。
                     if (!mod.getPlayer().isOnGround()) {
                         // 落地前不决策不打井, 让既有流程接住这几 tick, 落地后再评估。
-                    } else if (isSafeShaftColumn(mod, mod.getPlayer().getBlockPos())) {
-                        _shaftBaseY = feetY;
-                        Debug.logMessage("[MINE-SHAFT] activate at " + mod.getPlayer().getBlockPos().toShortString()
-                                + ": dig down " + SHAFT_DEPTH + ", then horizontal nearest");
                     } else {
-                        _horizontalMode = true;
-                        Debug.logMessage("[MINE-SHAFT] skip (unsafe column at "
-                                + mod.getPlayer().getBlockPos().toShortString() + "), horizontal nearest only");
+                        String shaftReason = isSafeShaftColumn(mod, mod.getPlayer().getBlockPos());
+                        if (shaftReason == null) {
+                            _shaftBaseY = feetY;
+                            Debug.logMessage("[MINE-SHAFT] activate at " + mod.getPlayer().getBlockPos().toShortString()
+                                    + ": dig down " + SHAFT_DEPTH + ", then horizontal nearest");
+                        } else {
+                            _horizontalMode = true;
+                            Debug.logMessage("[MINE-SHAFT] skip (unsafe column at "
+                                    + mod.getPlayer().getBlockPos().toShortString() + ": " + shaftReason
+                                    + "), horizontal nearest only");
+                        }
                     }
                 }
                 if (_shaftBaseY != Integer.MIN_VALUE) {
@@ -1379,9 +1383,10 @@ public class MineAndCollectTask extends ResourceTask {
                         Debug.logMessage("[MINE-SHAFT] bottom reached (y=" + feetY + "), switch to horizontal nearest");
                     } else {
                         BlockPos below = mod.getPlayer().getBlockPos().down(1);
-                        // 每步再验: 漂位/邻液体/非目标块当场放弃竖井转水平, 不硬挖。
+                        // 每步再验: 漂位/邻液体/不可挖当场放弃竖井转水平, 不硬挖。
+                        // (2026-09-22) 不再要求 ∈ 目标块 —— 竖井是下降手段, 草/石照挖
+                        // (isValid 已为竖井步放行, 见 isValid 注释)。
                         if (mod.getChunkTracker().isChunkLoaded(below) && WorldHelper.canBreak(mod, below)
-                                && blockInTargets(mod.getWorld().getBlockState(below).getBlock())
                                 && !WorldHelper.isAdjacentToLiquid(mod, below)) {
                             return Optional.of((Object) below);
                         }
@@ -2810,6 +2815,15 @@ public class MineAndCollectTask extends ResourceTask {
         @Override
         protected boolean isValid(AltoClef mod, Object obj) {
             if (obj instanceof BlockPos b) {
+                // (2026-09-22 竖井步放行) 竖井进行中, 脚下方块是当前竖井步 —— 竖井是
+                // 【下降手段】不是材料来源, 可以不是目标块(草/石照挖), 只要可挖不邻液体。
+                // 不放行的话框架 isValid 否决 → 重选 → 竖井目标永远立不住 (0922-091750
+                // 泥土任务站在草地上, 脚下第一格就是草方块)。
+                if (_shaftBaseY != Integer.MIN_VALUE && !_horizontalMode
+                        && mod.getPlayer() != null
+                        && b.equals(mod.getPlayer().getBlockPos().down(1))) {
+                    return WorldHelper.canBreak(mod, b) && !WorldHelper.isAdjacentToLiquid(mod, b);
+                }
                 // Don't use BlockTracker.blockIsValid here — it checks the unreachable cache
                 // which doesn't know about WorldMemory positions we remember from afar.
                 if (!WorldHelper.canBreak(mod, b)) return false;
