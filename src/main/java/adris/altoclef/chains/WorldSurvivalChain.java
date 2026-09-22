@@ -103,6 +103,12 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 前进+跳跃游过去, 绕过 baritone 寻路。
     private static final double DROWN_DIRECT_SWIM_DIST_SQ = 5.0 * 5.0;
     private BlockPos _drownSwimTarget = null;
+    // (2026-09-22) 直接游动超时: 超过此时长水平位移不足 → 直游被挡 (前方/头顶
+    // 有方块), 回退到挖穿兜底。溺水时限紧, 给 3s 足够试出"游不动"。
+    private static final int DROWN_DIRECT_SWIM_TIMEOUT_TICKS = 60;
+    private static final double DROWN_DIRECT_SWIM_MIN_MOVE_SQ = 0.5 * 0.5;
+    private long _drownSwimStartTick = Long.MIN_VALUE;
+    private Vec3d _drownSwimStartPos = null;
 
     // ==== 盾牌看门狗 (2026-09-11, 用户复盘 21:10 死于骷髅射杀) ====
     // 每 60s 检查一次: 副手+背包都没盾时, 材料够(1 铁锭+6 木板)就马上合成,
@@ -351,6 +357,23 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 _drownSwimTarget = null;
                 return Float.NEGATIVE_INFINITY;
             }
+            // 超时无进展 → 直游被挡 (前方/头顶有方块), 回退挖穿兜底。
+            long nowTick = WorldHelper.getTicks();
+            if (_drownSwimStartTick != Long.MIN_VALUE && _drownSwimStartPos != null
+                    && nowTick - _drownSwimStartTick >= DROWN_DIRECT_SWIM_TIMEOUT_TICKS) {
+                double dx = p.getX() - _drownSwimStartPos.x;
+                double dz = p.getZ() - _drownSwimStartPos.z;
+                if (dx * dx + dz * dz < DROWN_DIRECT_SWIM_MIN_MOVE_SQ) {
+                    String m = "[DROWN-ESCAPE] DIRECT SWIM stalled -> dig fallback player="
+                            + p.getBlockPos() + " target=" + _drownSwimTarget.toShortString();
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    return startDigFallback(mod, p);
+                }
+                // 有进展: 重置计时继续直游。
+                _drownSwimStartTick = nowTick;
+                _drownSwimStartPos = p.getPos();
+            }
             Vec3d eye = p.getEyePos();
             Vec3d target = Vec3d.ofCenter(_drownSwimTarget);
             double dx = target.x - eye.x;
@@ -420,6 +443,8 @@ public class WorldSurvivalChain extends SingleTaskChain {
             double distSq = p.getBlockPos().getSquaredDistance(air);
             if (distSq < DROWN_DIRECT_SWIM_DIST_SQ) {
                 _drownSwimTarget = air;
+                _drownSwimStartTick = WorldHelper.getTicks();
+                _drownSwimStartPos = p.getPos();
                 // 作废 baritone 当前路径, 避免它的输入控制与直接游动冲突。
                 try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
                 _drownReissueTimer.reset();
@@ -466,6 +491,50 @@ public class WorldSurvivalChain extends SingleTaskChain {
             }
         }
         return null;
+    }
+
+    /**
+     * (2026-09-22) 直接游动超时无进展后的挖穿兜底。
+     * 直游被挡说明前方或头顶有方块。优先挖头顶 (feet.up(2), 现场"头上有方块
+     * 挡着"), 其次挖面向方向前方 1 格。找到可挖方块就 setTask(DestroyBlockTask)
+     * 并返回逃生优先级; 都不可挖则清除直游状态回到常规重评。
+     */
+    private float startDigFallback(AltoClef mod, net.minecraft.entity.player.PlayerEntity p) {
+        BlockPos feet = p.getBlockPos();
+        // 头顶两格 (bot 在水中 bobbing, 头可能在 feet.up(1), 真正挡的是 feet.up(2))。
+        BlockPos headBlocker = feet.up(2);
+        if (mod.getChunkTracker().isChunkLoaded(headBlocker)
+                && WorldHelper.canBreak(mod, headBlocker)
+                && !mod.getWorld().getBlockState(headBlocker).isAir()) {
+            _drownSwimTarget = null;
+            setTask(new DestroyBlockTask(headBlocker));
+            _drownReissueTimer.reset();
+            _drownPathlessTimer.reset();
+            String m = "[DROWN-ESCAPE] dig HEAD blocker " + headBlocker.toShortString()
+                    + " (direct swim stalled) player=" + feet;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return DROWN_ESCAPE_PRIORITY;
+        }
+        // 前方 1 格 (面向方向, 脚部高度)。
+        Direction fwd = p.getHorizontalFacing();
+        BlockPos frontBlocker = feet.offset(fwd);
+        if (mod.getChunkTracker().isChunkLoaded(frontBlocker)
+                && WorldHelper.canBreak(mod, frontBlocker)
+                && !mod.getWorld().getBlockState(frontBlocker).isAir()) {
+            _drownSwimTarget = null;
+            setTask(new DestroyBlockTask(frontBlocker));
+            _drownReissueTimer.reset();
+            _drownPathlessTimer.reset();
+            String m = "[DROWN-ESCAPE] dig FRONT blocker " + frontBlocker.toShortString()
+                    + " (direct swim stalled) player=" + feet;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return DROWN_ESCAPE_PRIORITY;
+        }
+        // 都不可挖: 清除直游状态, 下一 tick 走常规重评 (findBlockerOnLine / GetToBlockTask)。
+        _drownSwimTarget = null;
+        return DROWN_ESCAPE_PRIORITY;
     }
 
     /**
