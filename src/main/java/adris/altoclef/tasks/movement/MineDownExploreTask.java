@@ -1042,10 +1042,22 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // 多 tick 几次时, 这里会继续"撤完→计数+1→再 GiveUp", 计数一路涨到 23/4
             // (20260917-191217 实锤), 任务链每 100ms 抖一次 —— 用户观感"快速跳跃"。
             if (_lavaGiveUp) return null;
-            if (_subTask != null && !_subTask.isFinished(mod) && !_lavaDetourTimer.elapsed()) {
+            // (2026-09-22 三修: 同 tick 竞态) 132249 实锤: staircase 弃道(cause=seen,
+            // 岩浆贴身 1 格)与 CaveScan FIRE 同拍 —— abandonTunnelForLava 先设
+            // _inLavaDetour=true + _subTask=RunAway, 同一 tick 洞穴扫描随后把 _subTask
+            // 换成 ExploreCaveTask(探洞接管移动), 但 _inLavaDetour 残留; 30s 后本分支
+            // 走"后撤超时"把 _subTask 置 null 杀掉正在跑的探索(visited=2793/4356+ 未完),
+            // _inCave 分支见 null 判 "exploration done" → point-set marked (interrupted)
+            // 封洞。探索接管移动后撤退已无意义(探索态岩浆守卫整条豁免, baritone 绕行
+            // 岩浆), 直接清掉残留状态, 落回下方 _inCave 正常分支续跑探索。
+            // 注: 撤退期间 onTick 在此提前 return, 洞穴扫描不会跑 —— _inCave 只可能
+            // 在弃道同拍被置位, 本分支清残留即可, 无需处理"撤到一半被接管"的跨 tick 版本。
+            if (_inCave) {
+                _inLavaDetour = false;
+            } else if (_subTask != null && !_subTask.isFinished(mod) && !_lavaDetourTimer.elapsed()) {
                 setDebugState("Lava retreat: backing away from lava in dig path");
                 return _subTask;
-            }
+            } else {
             // 撤完(或超时): 换向重挖。注意与上面的 ascend 分支的交互 —— 玩家若已掉到
             // 行事线以下, ascend 分支会先把 _subTask 置空并换向, 这里紧接着再按"背离
             // 岩浆"重选一次方向, 两者不冲突 (都以玩家当前位置为新锚点)。
@@ -1077,6 +1089,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 return null;
             }
             retreatAndRedig(mod, lava);
+            }
         }
 
         // (2026-09-17 视觉岩浆感知) 看得见的岩浆 (含侧壁/脚下渗进已挖空间的那种) → 立刻
