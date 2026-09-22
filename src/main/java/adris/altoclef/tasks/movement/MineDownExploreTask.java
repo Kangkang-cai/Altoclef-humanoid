@@ -143,11 +143,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 改为围绕【目标矿带】(不是单点 _targetY) 的双边窗口:
     //   上限 = 带上限 + CAVE_ABOVE_TARGET_BUFFER
     //   下限 = 带下限 - CAVE_BELOW_TARGET_BUFFER
-    // 各带实际窗口 (ABOVE/BELOW 均取 8):
+    // 各带默认窗口 (ABOVE/BELOW 均取 8):
     //   钻石 [-57,-53] → [-65, -45] → 受世界底/基岩约束为 [-59,-45]  (含 -53 以上的探洞层)
     //   金   [-24, 0]  → [-32,   8]   (金峰值 -16, 窗口内)
     //   铁   [  5,30]  → [ -3,  38]   (铁带隧道 5~30, 窗口内)
     //   兜底 [ 50,50]  → [ 42,  45]   (注: CAVE_EXPLORE_MIN_DEPTH_Y=45 已先拦下)
+    // (2026-09-22 调用方专属覆盖, 见 withCaveMaxY): 铁窗口上限 38→40、
+    // 钻石窗口上限 -45→-1 —— 实际窗口以覆盖值为准, 此表仅列默认推导。
     // 语义: 隧道挖到目标层后, 只有【与本层高度相当】的洞才值得进去; 向上蔓延到
     // 浅层、或落在更深处的洞都不再吸引 bot。
     static final int CAVE_ABOVE_TARGET_BUFFER = 8;

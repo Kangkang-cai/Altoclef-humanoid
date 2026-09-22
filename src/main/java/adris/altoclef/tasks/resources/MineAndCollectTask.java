@@ -2744,6 +2744,11 @@ public class MineAndCollectTask extends ResourceTask {
             if (isIronOverworldTask()) {
                 exploration.withCaveMaxY(IRON_CAVE_MAX_Y);
             }
+            // (2026-09-22 钻石任务矿洞窗口, 用户"钻石矿洞范围 y=-1以下就好")
+            // 默认窗口 -53+8=-45; 覆盖为 -1 (y≤-1), 下沉到 -1 起即可扫洞进洞。
+            else if (isDiamondOverworldTask()) {
+                exploration.withCaveMaxY(DIAMOND_CAVE_MAX_Y);
+            }
             _lastCaveExploration = exploration;
             return exploration;
         }
@@ -2782,6 +2787,22 @@ public class MineAndCollectTask extends ResourceTask {
             if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) return false;
             for (Block block : _blocks) {
                 if (block == Blocks.IRON_ORE || block == Blocks.DEEPSLATE_IRON_ORE) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // (2026-09-22 钻石任务矿洞窗口专属上限, 用户"钻石矿洞范围 y=-1以下就好",
+        // y≤-1 含-1, 与铁任务"含40"口径一致)。只放宽钻石任务的窗口上限,
+        // 采矿目标带 [-57,-53] 不变; 窗口下限仍是 -57-8=-65。
+        private static final int DIAMOND_CAVE_MAX_Y = -1;
+
+        /** 主世界挖钻石任务 (含钻石矿石目标): 矿洞认定/导航窗口上限放宽到 -1。 */
+        private boolean isDiamondOverworldTask() {
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) return false;
+            for (Block block : _blocks) {
+                if (block == Blocks.DIAMOND_ORE || block == Blocks.DEEPSLATE_DIAMOND_ORE) {
                     return true;
                 }
             }
