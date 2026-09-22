@@ -80,7 +80,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 折中: 候选集仍按 EXPLORE_SCAN_RADIUS 收集(洞的延伸范围可见), 选目标只在
     // NAV_STEP_MAX_DIST 格以内挑"离起点最远"的点 —— 保持"一致向外"语义, 同时保证
     // 单次导航能在抢占窗口内完成。想调推进速度只需改这一个常量。
-    static final int NAV_STEP_MAX_DIST = 10;
+    // (2026-09-22 乙案: 主世界步长 10→16) 09-22 实锤: 一次探索 done 时 exclude=834 /
+    // reachable=4051, 只探了 ~20% 就 best=null —— bot 两秒才挪 1~3 格, 近场 10 格内
+    // 未访问点被剔空就提前收工, 远处够不着。对齐下界 0916 同款处理(下界 10→24),
+    // 主世界取满视野 EXPLORE_SCAN_RADIUS(16) = "看得见就走得到"; 被抢占不怕走不完:
+    // baritone 目标在恢复时会重下(ExploreCaveTask onStart 保留 _currentTarget),
+    // 打断点也不再误标(同日 B 案)。垂直闸门 NAV_STEP_MAX_DY_UP/DOWN 不变。
+    static final int NAV_STEP_MAX_DIST = 16;
     // (2026-09-13 垂直可达性, 修 NAV_STEP_MAX_DIST 的副作用) NAV_STEP_MAX_DIST 用的是
     // 3D 距离(isWithinDistance), 垂直分量能吃满全部预算 —— 实锤 09-13 13:08:15
     // best=247,-39,28 c=246,-48,27 navDist=9.1 = (dx1,dy9,dz1), 目标在【正上方 9 格】。
@@ -2418,7 +2424,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // (2026-09-13 导航步长上限) 视野里看得见、但不作为本次导航目标 ——
             // 超出抢占窗口能走完的距离(见 NAV_STEP_MAX_DIST 注释)。
             // (2026-09-16 下界差异化) 下界巨腔无障碍、baritone 直线可达, 步长放大
-            // 到 24(主世界仍 10, 见 NETHER_NAV_STEP_MAX_DIST 注释)。
+            // 到 24(主世界 09-22 乙案同款放大到 16=视野半径, 见 NAV_STEP_MAX_DIST 注释)。
             if (!p.isWithinDistance(center, navMaxDist)) continue;
             // (2026-09-13 垂直可达性) 3D 距离不约束垂直分量 → 目标可能落在正上方
             // 9 格(纯空腔里无落脚点, 上不去 → JumpStuck 反复 forceCancel)。见常量注释。
