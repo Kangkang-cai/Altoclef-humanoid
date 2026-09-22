@@ -584,6 +584,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _targetY = _targetYMin;
     }
 
+    // (2026-09-22 铁任务专属矿洞窗口) 默认窗口上限 = 带上限 + 8; 铁任务由
+    // MineAndCollectTask 覆盖为 40 (用户"把铁任务的矿洞范围设为40以下")。
+    // null = 默认推导。仅主世界调用方设置。
+    private Integer _caveMaxYOverride = null;
+
+    /** 覆盖洞穴认定/导航窗口的高度上限 (仍受 CAVE_NATURAL_AIR_MAX_Y 硬顶)。 */
+    public MineDownExploreTask withCaveMaxY(int maxY) {
+        _caveMaxYOverride = maxY;
+        return this;
+    }
+
     /**
      * (2026-09-01 用户"一旦挖到矿就应该重置矿洞探索超时") 矿洞探索期间挖到矿
      * = 有产出, 看门狗不应把活跃的探索掐断。由 MineOrCollectTask 每次开始追
@@ -1273,6 +1284,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     // 结束路径的持久化标记保留(那里记的玩家位置是真走过的)。
                     markRecentCaveAnchor(mod, anchor);
                     _lastFireAnchor = anchor.toImmutable();
+                    // (2026-09-22) 进洞前马上踢一次盾牌看门狗检查 (用户: 触发矿洞
+                    // 探索时马上检查是否能做盾, 进洞=遇骷髅风险)。
+                    adris.altoclef.chains.WorldSurvivalChain.requestShieldCheckNow();
                     Debug.logMessage("Found cave at shaft bottom at " + anchor.toShortString() + ", exploring it.");
                     _caveExploreActiveTicks = 0;
                     // (2026-09-01 真正进洞) 专用洞内导航任务, 不再用 BiasedExploreTask
@@ -1317,6 +1331,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 // (2026-09-17 降级为临时租约, 同上)。
                 markRecentCaveAnchor(mod, anchor);
                 _lastFireAnchor = anchor.toImmutable();
+                // (2026-09-22) 同上: 进洞瞬间踢盾牌看门狗马上检查做盾。
+                adris.altoclef.chains.WorldSurvivalChain.requestShieldCheckNow();
                 Debug.logMessage("Found cave while digging at " + anchor.toShortString() + ", exploring it.");
                 Debug.logToFile("altoclef_diag.log",
                         "[MineDown-Cave] found cave while digging at " + anchor.toShortString() + ", exploring it first.");
@@ -2162,6 +2178,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-16 下界差异化) 主世界硬顶 45 在下界会把矿带 [32,96] 的上半截
         // 全部拒掉(0916 实锤 aboveMaxY=280) — 下界用自己的硬顶, 矿带上沿 + 8 照常生效。
         if (_nether) return Math.min(NETHER_NATURAL_AIR_MAX_Y, _targetYMax + CAVE_ABOVE_TARGET_BUFFER);
+        // (2026-09-22 铁任务专属窗口, 用户"把铁任务的矿洞范围设为40以下, y≤40")
+        // 调用方覆盖默认公式 (铁带 30+8=38): 窗口 38 会把 y39+ 的洞空气全部当
+        // aboveMaxY 剔除, y36~43 的正常矿洞只剩单层在窗口内 → Y 跨度=1 被跨度
+        // 闸门误拒 (20260922-214354 实锤: natural=92/96 spans Y=1)。仍受全局硬顶 45 约束。
+        if (_caveMaxYOverride != null) return Math.min(CAVE_NATURAL_AIR_MAX_Y, _caveMaxYOverride);
         return Math.min(CAVE_NATURAL_AIR_MAX_Y, _targetYMax + CAVE_ABOVE_TARGET_BUFFER);
     }
 

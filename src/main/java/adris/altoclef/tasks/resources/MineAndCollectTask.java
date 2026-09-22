@@ -2738,6 +2738,12 @@ public class MineAndCollectTask extends ResourceTask {
                             + (_lastCaveExploration == null ? "null" : Integer.toHexString(System.identityHashCode(_lastCaveExploration)))
                             + ")");
             MineDownExploreTask exploration = new MineDownExploreTask(band[0], band[1]);
+            // (2026-09-22 铁任务矿洞窗口, 用户"把铁任务的矿洞范围设为40以下, y≤40")
+            // 默认窗口 带上限30+8=38, 会把正常矿洞 y39+ 的上层空气全剔成 aboveMaxY,
+            // 剩单层过不了 Y 跨度闸门 (20260922-214354: natural=92/96 spans Y=1)。
+            if (isIronOverworldTask()) {
+                exploration.withCaveMaxY(IRON_CAVE_MAX_Y);
+            }
             _lastCaveExploration = exploration;
             return exploration;
         }
@@ -2764,6 +2770,22 @@ public class MineAndCollectTask extends ResourceTask {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        // (2026-09-22 铁任务矿洞窗口专属上限, 用户"把铁任务的矿洞范围设为40以下",
+        // y≤40 含40)。只放宽铁任务: 默认公式 30+8=38 导致 y39+ 洞空气全被
+        // aboveMaxY 剔除。不动 CAVE_ABOVE_TARGET_BUFFER 共享常量 (钻石/金窗口不受影响)。
+        private static final int IRON_CAVE_MAX_Y = 40;
+
+        /** 主世界挖铁任务 (含铁矿石目标): 矿洞认定/导航窗口上限放宽到 40。 */
+        private boolean isIronOverworldTask() {
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER) return false;
+            for (Block block : _blocks) {
+                if (block == Blocks.IRON_ORE || block == Blocks.DEEPSLATE_IRON_ORE) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /**

@@ -113,15 +113,28 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private boolean _loggedSwimUpOnce = false;
 
     // ==== 盾牌看门狗 (2026-09-11, 用户复盘 21:10 死于骷髅射杀) ====
-    // 每 60s 检查一次: 副手+背包都没盾时, 材料够(1 铁锭+6 木板)就马上合成,
-    // 材料不够跳过不管(不主动去挖铁, 用户原话"没有就跳过不管了")。
+    // 每 30s 检查一次 (2026-09-22 用户 60→30): 副手+背包都没盾时, 材料够
+    // (1 铁锭+6 木板)就马上合成, 材料不够跳过不管(不主动去挖铁, 用户原话"没有就跳过不管了")。
+    // (2026-09-22 进洞即查) MineDownExploreTask FIRE 时调 requestShieldCheckNow,
+    // 不等 30s 周期马上检查 —— 进洞=遇骷髅风险, 盾要在进洞前备好。
     // 背景: 死亡清空背包后旧逻辑没人补盾, 下次遇骷髅必吃箭。副手装备由
     // MobDefenseChain/AbstractKillEntityTask 现有反应式装备负责, 这里只管"造出来"。
     // prio 55: 抢占常规任务(50), 让位战斗(65+)/死亡恢复(70)/岩浆火溺水(90+)。
-    private static final double SHIELD_WATCHDOG_INTERVAL = 60;
+    private static final double SHIELD_WATCHDOG_INTERVAL = 30;
     private static final float SHIELD_WATCHDOG_PRIORITY = 55;
     private static final int SHIELD_PLANKS_REQUIRED = 6;
     private final TimerGame _shieldWatchdogTimer = new TimerGame(SHIELD_WATCHDOG_INTERVAL);
+    // (2026-09-22 进洞即查) 外部 kick 标记: true = 下一次 getPriority 不等计时
+    // 马上跑盾牌检查, 消耗后复位并重置 30s 周期。
+    private static boolean _shieldCheckKick = false;
+
+    /**
+     * 触发矿洞探索时由 MineDownExploreTask 调用: 马上检查一次"没盾+材料够→合成",
+     * 不等下一个 30s 周期 (用户"触发矿洞探索时马上检查一下是否能做盾")。
+     */
+    public static void requestShieldCheckNow() {
+        _shieldCheckKick = true;
+    }
     // (2026-09-14 续租, 232015 场次) 已派发的盾牌合成任务引用。原实现只在计时
     // 到点那一 tick 返回 55, 下一 tick 落到方法末尾 NEGATIVE_INFINITY → 所有权
     // 54ms 内弹回 User Tasks (日志 23:21:35.983→36.037), 合成任务挂链上一 tick
@@ -270,9 +283,12 @@ public class WorldSurvivalChain extends SingleTaskChain {
             stopFireWaterTracking(mod);
         }
 
-        // 盾牌看门狗 (2026-09-11): 每 60s 检查, 没盾+材料够 → 合成 (prio 55)。
-        // 计时器无条件重置, 材料不够也只是跳过本轮, 下轮再查。
-        if (_shieldWatchdogTimer.elapsed()) {
+        // 盾牌看门狗 (2026-09-11): 每 30s 检查, 没盾+材料够 → 合成 (prio 55)。
+        // (2026-09-22) 触发矿洞探索的 kick 也在此立即兑付。计时器无条件重置,
+        // 材料不够也只是跳过本轮, 下轮再查。
+        boolean shieldKick = _shieldCheckKick;
+        if (shieldKick || _shieldWatchdogTimer.elapsed()) {
+            _shieldCheckKick = false;
             _shieldWatchdogTimer.reset();
             boolean offHandShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
             if (!offHandShield && !mod.getItemStorage().hasItem(Items.SHIELD)
@@ -317,7 +333,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 return SHIELD_WATCHDOG_PRIORITY;
             }
             // 被更高优先级紧急任务顶掉或已完成 → 放开; 材料条件仍真时下一轮
-            // 看门狗 (60s 内) 会重新派发。
+            // 看门狗 (30s 内) 会重新派发。
             _shieldCraftTask = null;
         }
 
