@@ -202,7 +202,8 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-12 实际探索点回传) 把本次【增量】实际到达的目标点 + 当前所在位置
+     * (2026-09-12 实际探索点回传) 把本次【增量】实际到达的目标点(done 时另加结束
+     * 位置; interrupted/stop 只记真实到达点, 见方法内 B 案注释)
      * 交给 MineDownExploreTask 登记为已探索洞穴区域。去重(间距 8)与覆盖半径(16)
      * 由下游负责, 本方法只负责"把走过的位置交出去"。
      *
@@ -219,7 +220,13 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
             _exportedCount = _reachedTargets.size();
         }
         // 结束位置本身也要覆盖: 最后一次到达点到结束点之间往往还有一段洞体。
-        if (mod != null && mod.getPlayer() != null) {
+        // (2026-09-22 B案: interrupted/stop 只记真实到达点) 被打断时玩家【当前位置】
+        // 只是"恰好站的地方", 不是"探过的洞体" —— 09-22 实锤: FIRE 后 2 秒即被父层
+        // 抖动打断, interrupted 导出把起点站位写进持久记忆, r16/±8 柱形正好压在
+        // 探索起点上, 压缩后续选点候选。只保留 done 的结束位置(那一段是真走完的);
+        // interrupted 的段间缝隙宁可将来重探, 不误封 —— 与 2026-09-17 FIRE 标记
+        // 降级同一价值取向(租约管"正在探", 持久记忆只收"事实")。
+        if ("done".equals(why) && mod != null && mod.getPlayer() != null) {
             fresh.add(mod.getPlayer().getBlockPos());
         }
         if (fresh.isEmpty()) return;
