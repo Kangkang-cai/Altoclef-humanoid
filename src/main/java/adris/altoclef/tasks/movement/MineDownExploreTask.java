@@ -344,6 +344,22 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // ("Shaft done") 时清空重掷, 下一口井换高度。不同矿种带不重叠, 越界自动重掷。
     private static int _lastRolledTargetY = Integer.MIN_VALUE;
 
+    // (2026-09-22 防回头·跨实例方向粘滞) 用户"水平方向容易回头, 导致 bot 长期
+    // 在一片高危区探索": 隧道方向原来是每次 onStart 纯随机 —— 父层重建实例后
+    // 25% 概率正好掉头、50% 概率折回刚挖过的象限, 净位移不增长。方向记忆放
+    // static (跨实例存续, 同 _lastRolledTargetY 口径):
+    // - 正常开新隧道 (onStart 隧道分支): 有记忆就延续上一方向 (粘滞), 无记忆随机;
+    // - 上行楼梯/爬升续挖/弃道换向: 随机但【排除逆方向】(回头 = 挖回自己刚走过
+    //   的区域), 20260922 另机日志实锤 z=26 一面墙 9 分钟逐格烧 10s。
+    private static int _lastTunnelDirX = 0;
+    private static int _lastTunnelDirZ = 0;
+
+    // (2026-09-22 挖不动名单) 10s 超时被放弃的队首格 (FIFO 有界)。几何路径重新
+    // 铺到它时直接跳过, 不再派发 DestroyBlockTask 重试 —— 重试只会重演 10s 停滞
+    // (20260922 实锤: 24,10,27 连续 5 次 giving up, 纯烧 50s)。
+    private static final java.util.ArrayDeque<BlockPos> _recentGiveUps = new java.util.ArrayDeque<>();
+    private static final int RECENT_GIVEUP_MAX = 64;
+
     private final Deque<BlockPos> _digQueue = new ArrayDeque<>();
 
     private BlockPos _digStart;
@@ -413,6 +429,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private boolean _inWaterDetour = false;
     private final TimerGame _waterDetourTimer = new TimerGame(WATER_DETOUR_TIMEOUT);
     private int _lastDetourWaterMark = 0;
+    // (2026-09-22 沾水粘滞) 水面浮沉让 isTouchingWater 逐 tick 翻面; 沾水后 3s 内
+    // 一律按"水中"处置 (见 isWatery), 防止水中场景在 baritone 爬升/楼梯之间抖动。
+    private final TimerGame _waterRecent = new TimerGame(3);
 
     // ==== (2026-09-14 遇岩浆弃道) 岩浆不能按水处置, 见一次立刻换通道 ====
     // 背景 (代码考古): 本类此前完全没有 lava 概念, skipAirAndWater 里的 isWater()
@@ -627,7 +646,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + " -> no ascent, dig tunnel instead.");
             ascendTriggered = false;
         }
-        if (ascendTriggered && !mod.getPlayer().isTouchingWater()) {
+        if (ascendTriggered && !isWatery(mod)) {
             enterBaritoneAscent(mod, "start below ascend line (y=" + _digStart.getY() + ")");
         } else {
             _ascendMode = ascendTriggered;
@@ -646,7 +665,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _digStart = mod.getPlayer().getBlockPos();
         }
         if (_ascendMode) {
+            // (2026-09-22 防回头) 随机选向但排除上一隧道方向的逆方向 (回头挖回
+            // 刚走过的区域); 选出后更新方向记忆。
             int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+            for (int i = 0; i < 8 && isReverseOfLastTunnelDir(dir); i++) {
+                dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+            }
+            rememberTunnelDir(dir[0], dir[1]);
             _dirX = dir[0];
             _dirZ = dir[1];
             Debug.logMessage("[MineDown] below target depth (y=" + _digStart.getY()
@@ -656,7 +681,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         } else if (_tunnelMode) {
             // Pick a random cardinal direction so consecutive tunnels don't
             // forever dig the same way through the same rock.
-            int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+            // (2026-09-22 防回头) 改为跨实例粘滞: 有方向记忆就延续上一方向 ——
+            // 父层重建实例后继续往前推 (净位移增长), 不再 25% 概率正好掉头挖回
+            // 刚走过的区域; 完全没有记忆才随机。弃道换向仍会更新记忆 (见
+            // retreatAndRedig), 粘滞不等于死锁在坏方向上。
+            int[] dir;
+            if (hasLastTunnelDir()) {
+                dir = new int[]{_lastTunnelDirX, _lastTunnelDirZ};
+            } else {
+                dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+                rememberTunnelDir(dir[0], dir[1]);
+            }
             _dirX = dir[0];
             _dirZ = dir[1];
             Debug.logMessage("Already at depth " + _digStart.getY() + " (target " + _targetY
@@ -678,6 +713,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             p = p.up();
         }
         return true;
+    }
+
+    /**
+     * (2026-09-22 沾水粘滞) 当前在水中, 或 3s 内曾沾水。水体表面浮沉会让
+     * isTouchingWater 逐 tick 翻面 —— 上行模式选择的两个入口 (开/baritone vs 楼梯)
+     * 都用本判定, 防止"出水一瞬选 baritone → 落水重挂 thrash"。计时器未 reset 过时
+     * elapsed()=true → 非水中, 与旧语义兼容。
+     */
+    private boolean isWatery(AltoClef mod) {
+        return mod.getPlayer().isTouchingWater() || !_waterRecent.elapsed();
     }
 
     /**
@@ -749,7 +794,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _subTask = null;
         _miningTarget = null;
         _caveExploreCooldownSteps = 0;
+        // 方向重掷: 爬升可能位移了十几格, 原方向继续大概率一头撞回刚爬出来的那片洞;
+        // (2026-09-22 防回头) 重掷时排除上一方向的逆方向, 选出后更新记忆。
         int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        for (int i = 0; i < 8 && isReverseOfLastTunnelDir(dir); i++) {
+            dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        }
+        rememberTunnelDir(dir[0], dir[1]);
         _dirX = dir[0];
         _dirZ = dir[1];
         _digStart = mod.getPlayer().getBlockPos();
@@ -782,8 +833,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _inCave = false;
             _subTask = null;
             _caveExploreCooldownSteps = 0;
-            if (mod.getPlayer().isTouchingWater()) {
+            if (isWatery(mod)) {
                 // (2026-09-15 baritone-first) 水中 baritone 垂直爬升无解 → 直接楼梯。
+                // (2026-09-22) 判定换 isWatery (3s 粘滞): 水面浮沉出水一瞬不再误选 baritone。
                 _ascendMode = true;
                 retreatAndRedig(mod);
                 Debug.logMessage("[MineDown] nether: hit bedrock floor zone (y="
@@ -900,6 +952,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                         // 旧实现每轮重建都 reset, 看门狗永远攒不满, 兜底楼梯永不触发
                         // (死循环链第 3 环)。
                         if (_baritoneAscentTask == null || _baritoneAscentTask.isFinished(mod)) {
+                            // (2026-09-22 水中立即降级楼梯) baritone 自认"完成"但落地后
+                            // 仍湿着且低于目标 = "游上去→瞬时到线→落回水里"的重挂循环:
+                            // 每次 recreate 都是一次全量重算 (20260922 另机日志
+                            // 23:59:50-57 七秒内重发 16 次, 每次一条 baritone 路径)。
+                            // 水中不再重挂 baritone, 立即走与看门狗超时同款的楼梯回退。
+                            if (isWatery(mod)) {
+                                String m = "[MineDown-AscentFallback] baritone 爬升自认完成但落回水中 (y="
+                                        + y + ", target " + _targetY + ") at "
+                                        + mod.getPlayer().getBlockPos().toShortString()
+                                        + " -> 回退自写 45° 楼梯 (水中 baritone 重挂即 thrash)";
+                                Debug.logMessage(m);
+                                Debug.logToFile("altoclef_diag.log", m);
+                                _baritoneAscent = false;
+                                _baritoneAscentTask = null;
+                                _ascendMode = true;
+                                retreatAndRedig(mod);
+                                return null;
+                            }
                             _baritoneAscentTask = new GetToYTask(_targetY);
                         }
                         setDebugState("Climbing back to y=" + _targetY + " via baritone (stall watchdog "
@@ -1245,6 +1315,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 long elapsed = now - _stallTargetSinceMs;
                 if (elapsed > DIG_TARGET_STALL_TIMEOUT_MS) {
                     _digQueue.poll();
+                    // (2026-09-22 挖不动名单) 该格 10s 超时已证明"挖不动/够不着",
+                    // 记入名单后 reanchor/实例重建重新铺几何路径时直接跳过, 不再
+                    // 重演"同一格反复 giving up" (20260922 日志实锤: 24,10,27
+                    // 连续 5 次, 每次烧 10s)。
+                    rememberGiveUp(head);
                     Debug.logMessage("[MineDown] giving up on stuck target " + head.toShortString()
                             + " after " + elapsed + "ms, advancing past it.");
                     Debug.logToFile("altoclef_diag.log", "[MineDown-DigStuck] 队首长时间挖不动 -> 放弃 "
@@ -1288,17 +1363,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _skipStreak = 0;
         _miningTarget = null;
         BlockPos feet = mod.getPlayer().getBlockPos();
-        _digStart = feet.down();
+        // (2026-09-22 行事线对齐) 锚点规则与 reanchorToPlayer 同源: 上行/隧道锚
+        // 脚所在格 (走行线 = 脚 y), 下行楼梯锚脚下地板。旧实现无条件 feet.down(),
+        // 水改道后隧道走行线比脚低 1 格 → 立刻再撞 floor 门控触发爬升 (高度调整
+        // 不灵活的结构性来源之一, 20260917-183338 同款)。
+        _digStart = (_ascendMode || _tunnelMode) ? feet : feet.down();
         int[] newDir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
         for (int i = 0; i < 12; i++) {
             int[] cand = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
             if (cand[0] == _dirX && cand[1] == _dirZ) continue;
+            // (2026-09-22 防回头) 逆方向 = 挖回刚撤出来的那条隧道, 一并排除。
+            if (cand[0] == -_dirX && cand[1] == -_dirZ) continue;
             if (pointsToward(feet, cand, awayFrom)) continue;
             newDir = cand;
             break;
         }
         _dirX = newDir[0];
         _dirZ = newDir[1];
+        rememberTunnelDir(_dirX, _dirZ);
     }
 
     /** 方向 dir 是否朝向 hazard (只看水平分量; 同格/无法判定时不算朝向)。 */
@@ -1307,6 +1389,33 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         int dx = hazard.getX() - from.getX();
         int dz = hazard.getZ() - from.getZ();
         return dx * dir[0] + dz * dir[1] > 0;
+    }
+
+    // ==== (2026-09-22 防回头 / 挖不动名单) 辅助 ====
+
+    /** 上一条隧道方向是否有记忆 (static, 跨实例存续)。 */
+    private static boolean hasLastTunnelDir() {
+        return _lastTunnelDirX != 0 || _lastTunnelDirZ != 0;
+    }
+
+    /** cand 是否是上一条隧道方向的逆方向 (回头)。 */
+    private static boolean isReverseOfLastTunnelDir(int[] cand) {
+        return hasLastTunnelDir() && cand[0] == -_lastTunnelDirX && cand[1] == -_lastTunnelDirZ;
+    }
+
+    private static void rememberTunnelDir(int x, int z) {
+        _lastTunnelDirX = x;
+        _lastTunnelDirZ = z;
+    }
+
+    /** 记录一个"挖不动被放弃"的队首格 (FIFO 有界, 跨实例存续)。 */
+    private static void rememberGiveUp(BlockPos pos) {
+        BlockPos p = pos.toImmutable();
+        _recentGiveUps.remove(p);
+        _recentGiveUps.addLast(p);
+        while (_recentGiveUps.size() > RECENT_GIVEUP_MAX) {
+            _recentGiveUps.pollFirst();
+        }
     }
 
     /**
@@ -1365,6 +1474,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 // 岩浆意味着它前方那格已经挖开、岩浆就在眼前, 属于合规的"亲眼看到"。
                 abandonTunnelForLava(mod, head);
                 return;
+            }
+            // (2026-09-22 挖不动名单) 曾经 10s 超时被放弃的格子: 几何路径重新铺到
+            // 它时直接弹掉继续推进, 不再派发 DestroyBlockTask 重试。排在岩浆之后
+            // (安全优先)、水之前 (名单内格子是实体方块, 两者不会重叠, 顺序无实义)。
+            if (_recentGiveUps.contains(head)) {
+                _digQueue.poll();
+                continue;
             }
             if (isWater(mod, head)) {
                 logWaterEncounter(mod, head);
