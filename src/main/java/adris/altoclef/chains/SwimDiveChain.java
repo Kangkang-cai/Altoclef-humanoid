@@ -384,8 +384,15 @@ public class SwimDiveChain extends TaskChain {
             return;
         }
         if (spot.status == WaterStandHelper.Status.NONE) {
-            // 深水够不着 / 水草挡路 / 放置禁区 → 本轮放弃, 回退下潜兜底
-            writeDiag(mod, "PLACE_NO_SPOT placed=" + _placedCount);
+            // 深水够不着 / 水草挡路 / 放置禁区 → 本轮放弃, 回退下潜兜底。
+            // (2026-09-22 修下潜档饿死) 现场 20260922-224740: probe 在深水柱对
+            // 同一位置无论 bob 相位恒 NONE (apex 与水中两 tick 实锤), 旧代码只
+            // endPlace 不写 _skipPlaceUntilTick → 每 3s 新窗口 hasMaterials=true
+            // 仍选垫档, 同一 tick 立刻 NONE, dive+sprint 档 45s 零触发。必须像
+            // SUPPORTED 让位一样置冷却, 下一窗口才会走 triggerDive (向前下游离
+            // 开深水柱); 游到新位置后冷却到期自然会再试垫档。
+            _skipPlaceUntilTick = nowTick + RE_DIVE_COOLDOWN_TICKS;
+            writeDiag(mod, "PLACE_NO_SPOT placed=" + _placedCount + " -> dive next window");
             endPlace(mod);
             return;
         }
