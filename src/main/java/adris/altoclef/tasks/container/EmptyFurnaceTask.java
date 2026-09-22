@@ -48,7 +48,9 @@ public class EmptyFurnaceTask extends DoStuffInContainerTask {
     // 留下的熔炉不在本次 BlockTracker 里 (本次从未追踪过它), 父类 getNearestTracking
     // 必然漏判 → nearest 空 → 走进"新造容器"分支 (本类已禁止, 会返回 null 空转)。
     // 范围与 BeatMinecraft2Task.findNearbyFurnace 的 FURNACE_GRAB_RANGE 保持一致。
-    private static final int SCAN_RANGE = 16;
+    // (2026-09-22 用户定案 16→25) 加大熔炉近场扫描半径, 降低"离开几步杀羊回来扫不到
+    // 刚烧过肉的炉"的概率 (配合 8s 无进展超时兜底, 不再狱死)。
+    private static final int SCAN_RANGE = 25;
     private final TimerGame _rescanTimer = new TimerGame(1.0);
     private BlockPos _cachedFurnace = null;
 
