@@ -474,9 +474,22 @@ public class WorldSurvivalChain extends SingleTaskChain {
     /**
      * 直线视线 eye→target 上、reach 内的第一块实体方块 (需挖穿的障碍)。
      * 中途全为空气/水 → null (baritone 可直接寻路)。
+     * (2026-09-22 用户建议) 优先挖头顶: 沿直线挖若有多块障碍需两轮, 而挖头顶
+     * feet.up(2) 一块通常就能腾出上浮通道, 溺水时限紧, 选更快的。
      */
     private BlockPos findBlockerOnLine(AltoClef mod, BlockPos target) {
-        Vec3d eye = mod.getPlayer().getEyePos();
+        var p = mod.getPlayer();
+        BlockPos feet = p.getBlockPos();
+        // 优先头顶: 有可挖方块就先挖它 (上浮比沿直线凿穿更快)。
+        BlockPos headBlocker = feet.up(2);
+        if (mod.getChunkTracker().isChunkLoaded(headBlocker)) {
+            BlockState hs = mod.getWorld().getBlockState(headBlocker);
+            if (!hs.isAir() && !(hs.getBlock() instanceof FluidBlock)
+                    && WorldHelper.canBreak(mod, headBlocker)) {
+                return headBlocker.toImmutable();
+            }
+        }
+        Vec3d eye = p.getEyePos();
         Vec3d to = Vec3d.ofCenter(target).subtract(eye);
         double len = to.length();
         if (len < 0.5) return null;
