@@ -282,6 +282,9 @@ public class AltoClef implements ModInitializer {
             // (2026-09-19 修 17:58 围场施工站桩) baritone 的"岩浆可游"开关与现场
             // 状态解耦同步, 详见 tickLavaSwimSync 注释。
             tickLavaSwimSync();
+            // (2026-09-22 木板搭路闸门) 木板按背包存量动态进/出 baritone 可放置
+            // 清单, 详见 tickPlankScaffoldSync 注释。
+            tickPlankScaffoldSync();
             // (2026-09-17 跨世界残留状态) 换存档(不重启游戏)时 static 字段全部存活
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
@@ -740,6 +743,52 @@ public class AltoClef implements ModInitializer {
         Debug.logToFile("altoclef_diag.log", m);
     }
 
+    /**
+     * (2026-09-22 木板搭路闸门) 木板按背包存量动态进/出 baritone 的
+     * {@code acceptableThrowawayItems}。见字段区注释与 ScaffoldBlocks.PLANK_ITEMS。
+     *
+     * <p>设计要点:
+     * <ul>
+     * <li>1s 节流 (baritone 每次放置选材才读清单, 不需要逐 tick 改);</li>
+     * <li>双阈值迟滞: ≥8 开、≤4 关, 4..7 保持现状 —— 背包临界值不横跳;</li>
+     * <li>进清单时挂在【末尾】: 泥土/圆石/深板岩圆石等杂石先消耗, 木板是最后
+     *     手段 (Settings 加载处的 SAFE_MATERIALS 重排不感知木板, 这里 add 在尾部
+     *     恰好就是最低优先);</li>
+     * <li>状态变化只在实际翻转时打日志, [ScaffoldPlanks] 可现场核查。</li>
+     * </ul>
+     */
+    private void tickPlankScaffoldSync() {
+        if (!_plankScaffoldTimer.elapsed()) {
+            return;
+        }
+        _plankScaffoldTimer.reset();
+        int planks = adris.altoclef.util.helpers.ScaffoldBlocks.countPlanksInInventory(this);
+        boolean want = _plankScaffoldEnabled
+                ? planks > PLANK_SCAFFOLD_DISABLE_MAX
+                : planks >= PLANK_SCAFFOLD_ENABLE_MIN;
+        if (want == _plankScaffoldEnabled) {
+            return;
+        }
+        _plankScaffoldEnabled = want;
+        List<Item> placeable = getClientBaritoneSettings().acceptableThrowawayItems.value;
+        if (want) {
+            for (Item plank : adris.altoclef.util.helpers.ScaffoldBlocks.PLANK_ITEMS) {
+                if (!placeable.contains(plank)) {
+                    placeable.add(plank);
+                }
+            }
+        } else {
+            // 木板族 8 项一次摘净。
+            placeable.removeIf(adris.altoclef.util.helpers.ScaffoldBlocks::isPlankItem);
+        }
+        String m = "[ScaffoldPlanks] " + (want ? "允许" : "停用") + "木板垫路/搭桥 planks=" + planks
+                + " (启用阈值 ≥" + PLANK_SCAFFOLD_ENABLE_MIN
+                + ", 停用阈值 ≤" + PLANK_SCAFFOLD_DISABLE_MAX
+                + ", 木板排在可放置清单末尾=最低优先)";
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
     // ==== (2026-09-18 岩浆邻域导航保险) ====
     // 背景: baritone 的斜向升格 (allowDiagonalAscend, 俗称"旋转跳") 执行失败率
     // 实测 >50% —— 从 (1,0,0) 斜跳 (0,1,1) 且头顶 (1,2,1) 有顶棚时需要空中转向,
@@ -811,6 +860,23 @@ public class AltoClef implements ModInitializer {
     private final adris.altoclef.util.time.TimerGame _lavaNavClearTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_RELEASE_CONFIRM_SEC);
     /** 命中危险后请求重算路径的节流 (防 forceCancel 反复重算同一条路)。 */
     private final adris.altoclef.util.time.TimerGame _lavaNavReplanTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_REPLAN_THROTTLE_SEC);
+
+    // ==== (2026-09-22 木板搭路闸门, 用户"木板也作为搭路方块之一, 木板过少时不用,
+    // 注意原木和木板的转化") ====
+    // 背景 (20260922 0921 本机现场实锤): 砍树捡掉落时目标悬空 (掉在树冠上),
+    // bot 背包 25 根原木全是保护物资不可放置 → baritone 无任何可搭方块 →
+    // MovementPillar 无解 → A* 对 4 格外的目标洪泛全场 (单次 ~90 万 movements,
+    // ~81k nodes/s ≈ 11s 满核 CPU), 反复重算 = "卡顿十几秒"。有可垫方块时
+    // A* 会把垫柱当可行动作直接算出路, 洪泛不会发生。
+    // 实现: 木板动态进/出 baritone acceptableThrowawayItems (真放置清单),
+    // 阈值 + 迟滞防横跳; 不动 ScaffoldBlocks.SAFE_MATERIALS (那是补货目标语义,
+    // 见 ScaffoldBlocks.PLANK_ITEMS 注释)。
+    /** 木板 ≥ 该值 → 允许木板垫路/搭桥。8 = 合成台4 + 木棍2 + 富余2。 */
+    private static final int PLANK_SCAFFOLD_ENABLE_MIN = 8;
+    /** 已启用后木板 ≤ 该值 → 收回 (迟滞带 4..7 保持现状, 防临界横跳)。 */
+    private static final int PLANK_SCAFFOLD_DISABLE_MAX = 4;
+    private boolean _plankScaffoldEnabled = false;
+    private final adris.altoclef.util.time.TimerGame _plankScaffoldTimer = new adris.altoclef.util.time.TimerGame(1.0);
     /** 触发后的最小保持计时: 解除需同时满足"外围无岩浆 + 路径无危险斜跳 + 已保持 ≥8s"。 */
     private final adris.altoclef.util.time.TimerGame _lavaNavHoldTimer = new adris.altoclef.util.time.TimerGame(LAVA_NAV_MIN_HOLD_SEC);
     /** 连续"重算后仍命中"计数; 路径一旦干净立即清零。 */

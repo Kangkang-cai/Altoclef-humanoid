@@ -47,6 +47,41 @@ public final class ScaffoldBlocks {
 
     private static final Set<Item> _set = new HashSet<>(Arrays.asList(SAFE_MATERIALS));
 
+    // ==== (2026-09-22 木板搭路, 用户"木板也作为搭路方块之一, 木板过少时不用,
+    // 注意原木和木板的转化") ====
+    // 木板【只进 baritone 的 acceptableThrowawayItems (阈值闸门动态开关, 见
+    // AltoClef.tickPlankScaffoldSync), 不进 SAFE_MATERIALS】:
+    //  - SAFE_MATERIALS 会被 ShelterAndRecoverTask/TowerEscapeTask/PlaceBlockTask
+    //    当成"需要去获取的补货目标" (PlaceBlockTask 按 SAFE_MATERIALS 逐项造
+    //    ItemTarget 去收集) —— 木板一旦进清单, 避难/造塔会反过来逼 bot 砍木头
+    //    合成木板当建材, 语义反了。
+    //  - baritone 放置清单是纯"有就可用"语义, 由阈值闸门控制进/出: 木板 ≥8 块
+    //    才允许垫/搭, ≤4 块收回 (双阈值迟滞防背包临界值反复横跳)。8 = 合成台 4 +
+    //    木棍 2 + 2 富余, 保证木链关键合成 (台/棍/木镐) 永不被垫路吃穿。
+    //  - 原木→木板是 1:4 合成, 垫掉的木板可随时从库存原木补回, 闭环成立;
+    //    原木本体 (25 根补给目标) 仍保持保护不放置。
+    //  - 优先级: 挂在清单【末尾】(见 AltoClef 设置加载), 泥土/圆石/深板岩圆石
+    //    等杂石先用完才轮到木板。
+    public static final Item[] PLANK_ITEMS = new Item[]{
+            Items.OAK_PLANKS, Items.SPRUCE_PLANKS, Items.BIRCH_PLANKS, Items.JUNGLE_PLANKS,
+            Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS, Items.CRIMSON_PLANKS, Items.WARPED_PLANKS
+    };
+
+    private static final Set<Item> _plankSet = new HashSet<>(Arrays.asList(PLANK_ITEMS));
+
+    public static boolean isPlankItem(Item item) {
+        return item != null && _plankSet.contains(item);
+    }
+
+    /** 背包(真实口径: 含副手/光标/护甲)里的全部木板数量 (8 种合计)。 */
+    public static int countPlanksInInventory(AltoClef mod) {
+        int n = 0;
+        for (Item item : PLANK_ITEMS) {
+            n += StorageHelper.countItemInInventoryReal(mod, item);
+        }
+        return n;
+    }
+
     private ScaffoldBlocks() {
     }
 
