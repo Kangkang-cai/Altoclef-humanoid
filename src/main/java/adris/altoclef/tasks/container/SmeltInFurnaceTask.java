@@ -800,8 +800,10 @@ public class SmeltInFurnaceTask extends ResourceTask {
         @Override
         protected double getMaxWalkDistance(AltoClef mod) {
             // (2026-09-03 远熔炉该现做而非远走, 用户"定位特别远的熔炉不如现做一个")
-            // 已有熔炉超过 40 格就不去, 走现做(先挖/找圆石做熔炉)就近烧, 不上百格远赴。
-            return 40;
+            // 已有熔炉超过 40 格就不去, 走现做就近烧, 不百格远赴。
+            // (2026-09-22 用户"1.5min内64格内非空炉直接回去拿, 别白烧"): 上限放宽到 64,
+            // 让被追逐/打断后仍非空的熔炉在 64 格内可被正常走回 (配合非空豁免优先取回)。
+            return 64;
         }
 
         @Override
@@ -826,6 +828,13 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
             }
             // If we have a valid container position, KEEP it.
+            // (2026-09-22 非空熔炉豁免时间, 用户"1.5min内64格内非空炉直接回去拿, 别白烧")
+            // 被怪物追/被打断任务重建后, 实例级缓存已丢 → 从静态在途账里找最近仍非空的
+            // 熔炉走回取/续烧, 而不是就地现做新炉白丢正在烧的部分。超 64 格/超 1.5min 不豁免。
+            BlockPos recentNonEmpty = nearestRecentInflightFurnace(mod, _target);
+            if (recentNonEmpty != null) {
+                return recentNonEmpty;
+            }
             return getTargetContainerPosition();
         }
 
@@ -956,15 +965,25 @@ public class SmeltInFurnaceTask extends ResourceTask {
         final Item cooked;
         int matCount;
         int outCount;
+        // (2026-09-22 非空熔炉豁免) 最近一次确认该炉非空的时刻 (wall clock), 供
+        // nearestRecentInflightFurnace 判断"1.5min 内仍值得走回取"。
+        long lastSeenMs;
         InflightSmelt(BlockPos pos, Item raw, Item cooked) {
             this.pos = pos;
             this.raw = raw;
             this.cooked = cooked;
+            this.lastSeenMs = System.currentTimeMillis();
         }
     }
 
     private static final List<InflightSmelt> INFLIGHT_SMELTS = new ArrayList<>();
     private static final int INFLIGHT_LEDGER_CAP = 8;
+
+    // (2026-09-22 非空熔炉豁免时间, 用户"1.5min 内 64 格内非空炉直接回去拿, 别白烧")
+    // 被怪物追/被打断重建后, 从静态在途账里找最近仍非空的熔炉走回取/续烧, 而不是就地
+    // 现做新炉白丢正在烧的部分。超过 64 格或超过 1.5min 才放弃回程。
+    private static final long SMELT_RETURN_WINDOW_MS = 90_000; // 1.5 min (wall clock)
+    private static final int  SMELT_RETURN_MAX_DIST = 64;      // 64 格内才值得回
 
     /**
      * (2026-09-17 世界边界) 换存档时清空熔炉侧 static 状态:
@@ -1011,6 +1030,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
         }
         entry.matCount = matCount;
         entry.outCount = outCount;
+        entry.lastSeenMs = System.currentTimeMillis(); // 每次确认非空都刷新豁免窗口
         if (matCount == 0 && outCount == 0) {
             INFLIGHT_SMELTS.remove(entry);
         }
@@ -1034,6 +1054,34 @@ public class SmeltInFurnaceTask extends ResourceTask {
             return e;
         }
         return null;
+    }
+
+    /**
+     * (2026-09-22 非空熔炉豁免) 从在途静态账里找: 目标匹配、最近确认非空距今 ≤ 1.5min、
+     * 距玩家 ≤ 64 格、世界仍是熔炉 的【最近】一座, 返回其坐标, 无则 null。
+     *
+     * 供 overrideContainerPosition: 被怪物追/被打断(任务重建, 实例级 _cachePos 已丢)
+     * 后, 直接走回正在烧的炉取/续烧 —— 而不是就地现做新炉白丢已烧部分"1.5min 内 64 格
+     * 内非空炉直接回去拿"(用户 2026-09-22 定案)。
+     */
+    private static BlockPos nearestRecentInflightFurnace(AltoClef mod, SmeltTarget target) {
+        if (mod.getPlayer() == null) return null;
+        BlockPos player = mod.getPlayer().getBlockPos();
+        long now = System.currentTimeMillis();
+        Item raw = target.getMaterial().getMatches()[0];
+        Item cooked = target.getItem().getMatches()[0];
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (InflightSmelt e : INFLIGHT_SMELTS) {
+            if (e.raw != raw && e.cooked != cooked) continue;         // 只回取本目标对应的炉
+            if (now - e.lastSeenMs > SMELT_RETURN_WINDOW_MS) continue; // 超 1.5min 不再豁免
+            if (e.matCount <= 0 && e.outCount <= 0) continue;          // 已空不值得回
+            if (player.getSquaredDistance(e.pos) > (double) SMELT_RETURN_MAX_DIST * SMELT_RETURN_MAX_DIST) continue; // 超 64 格不回
+            if (mod.getWorld().getBlockState(e.pos).getBlock() != Blocks.FURNACE) continue; // 炉已不在
+            double dSq = player.getSquaredDistance(e.pos);
+            if (dSq < bestSq) { bestSq = dSq; best = e.pos; }
+        }
+        return best;
     }
 
     private static class OrphanFurnace {
