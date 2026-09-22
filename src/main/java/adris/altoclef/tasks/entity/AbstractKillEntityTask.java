@@ -25,7 +25,9 @@ import net.minecraft.entity.mob.AbstractSkeletonEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.EndermanEntity;
+import net.minecraft.entity.mob.SkeletonEntity;
 import net.minecraft.entity.mob.WitherSkeletonEntity;
+import net.minecraft.entity.passive.PassiveEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
@@ -151,14 +153,24 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
 
     /**
      * (2026-09-09 凋零骷髅特殊对待, 用户"打凋零靠的太近了, 必须控制靠近距离")
-     * 凋零骷髅近战带凋零效果, 贴身白挨凋零太亏。它不参与小白那套"贴身 3.0":
-     * 接近距离 = 攻击射程 (entityReachRange, 默认 3.2), 一进射程就停, 绝不往它
-     * 身上凑; 它自己冲脸时原地举盾硬打, 不后退 (用户确认不后退)。其余生物维持
-     * MELEE_HUG_DISTANCE 不变。
+     * 凋零骷髅近战带凋零效果, 贴身白挨凋零太亏。它不参与小白那套"贴身 3.0", 一进
+     * 射程就停, 绝不往它身上凑; 它自己冲脸时原地举盾硬打, 不后退 (用户确认不后退)。
+     * (2026-09-22 用户"bot停止的射程太近了, 很容易让怪物摸到第一下" + "除小白和
+     * 烈焰人外的敌人都会主动靠近, 那就增加一格远离") 对会主动靠近的近战敌怪把接近
+     * 距离 +1 格 —— bot 停在更远处等怪自己把距离拉进攻击射程 (entityReachRange,
+     * 3.2) 再出手, 让怪物先够不着 bot、bot 抢占先手。注意接近距离(停靠)可以 > 攻击
+     * 射程, 因为此类敌怪会主动贴上来补满最后一段距离。
+     *   小白 SkeletonEntity: 维持 MELEE_HUG_DISTANCE (3.0) 不变
+     *       (09-01 特意放远, 用户没有要求再动远程怪)
+     *   烈焰人 BlazeEntity: 维持收紧值 2.5 不变 (命中优先, 见下)
+     *   友好动物 PassiveEntity: 维持 3.0 —— 它们不主动靠近, 拉远会导致停靠距离
+     *       超出攻击射程, 永远打不死
+     *   凋零骷髅: 原 3.2 → **4.2** (+1)
+     *   其余近战敌怪: 原 3.0 → **4.0** (+1)
      */
     private static double approachDistance(AltoClef mod, Entity entity) {
         if (entity instanceof WitherSkeletonEntity) {
-            return Math.max(2.6, mod.getModSettings().getEntityReachRange());
+            return Math.max(2.6, mod.getModSettings().getEntityReachRange()) + 1.0;
         }
         // (2026-09-19 23:26 用户"3 格好像 bot 打不到, 得靠近一点才打得到吧; 我观察到
         // bot 瞄着烈焰人, 但是不出手") 烈焰人单独收紧接近距离。
@@ -177,7 +189,12 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         if (entity instanceof BlazeEntity) {
             return BLAZE_APPROACH_DISTANCE;
         }
-        return MELEE_HUG_DISTANCE;
+        // 小白 (普通骷髅, 非凋零) / 友好动物: 维持 MELEE_HUG_DISTANCE 不变。
+        if (entity instanceof SkeletonEntity || entity instanceof PassiveEntity) {
+            return MELEE_HUG_DISTANCE;
+        }
+        // 其余会主动靠近的近战敌怪 (僵尸/蜘蛛/苦力怕/末影人/等): +1 格远离。
+        return MELEE_HUG_DISTANCE + 1.0;
     }
 
     /** (2026-09-19 23:29 用户) 烈焰人接近距离: 命中优先 (reach 3.2 留 0.7 余量) 但不贴脸。 */
