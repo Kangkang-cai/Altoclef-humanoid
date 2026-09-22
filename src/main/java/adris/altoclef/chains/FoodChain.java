@@ -54,6 +54,10 @@ public class FoodChain extends SingleTaskChain {
     public static boolean s_foodExpeditionActive = false;
     public static long s_foodSearchStartMs = -1;
     public static double s_foodSearchBestPotential = -1;
+    // (2026-09-22 防尖峰重置) 潜力新高的"持续确认"起点: 新高必须持续
+    // FOOD_GAIN_CONFIRM_MS (CollectFoodTask) 才重置无增长时钟。static 跨实例
+    // 存续, 与上方三个字段同理。
+    public static long s_foodGainPendingSinceMs = -1;
 
     /**
      * (2026-09-17 世界边界) 换存档时清空食物哨兵。
@@ -66,6 +70,7 @@ public class FoodChain extends SingleTaskChain {
         s_foodExpeditionActive = false;
         s_foodSearchStartMs = -1;
         s_foodSearchBestPotential = -1;
+        s_foodGainPendingSinceMs = -1;
     }
 
     private int _cachedFoodScore;

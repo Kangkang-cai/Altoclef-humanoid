@@ -115,6 +115,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
     // Attempts to pick a non-water, non-failed target before counting the step as failed.
     private static final int MAX_PICK_ATTEMPTS = 12;
+    // (2026-09-22 淌水惩罚) 一步的直线路径上允许【连续涉水】的最大格数。"过河可以"
+    // (2026-08-21 定案) 只对窄河成立: 直线连续水面超过上限 = 宽河/湖/湾, 游过去又慢
+    // 又有溺水风险, 拒绝这一步换方向重采。窄河 (<=上限) 照旧放行。
+    private static final int RIVER_CROSS_MAX_BLOCKS = 12;
     // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取食物")
     // 找食物探索 (foodExplore) 的落点必须是【干燥陆地】。落点在水面时沿同一方向按
     // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。
@@ -598,6 +602,23 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (swimming && isTargetOcean(mod, candidate)) {
                 Debug.logMessage("[Swim-out] already in water, heading towards " + candidate.toShortString());
             }
+            // (2026-09-22 淌水惩罚) 过河放行只对窄水成立: 沿本步直线采样连续水面
+            // 格数, 超过 RIVER_CROSS_MAX_BLOCKS = 宽河/湖/湾, 拒绝换向。对 biased
+            // 与 random、food 与非 food 统一生效 (窄河照旧放行, 不推翻"过河可以"
+            // 的定论; 拒宽水只在岸上生效, 已在水里时交由 Swim-out 分支)。
+            if (!swimming) {
+                int waterSpan = maxWaterSpanAlongLine(mod, pos, angle, stepLen);
+                if (waterSpan > RIVER_CROSS_MAX_BLOCKS) {
+                    _failedTargets.add(candidate);
+                    Debug.logToFile("altoclef_diag.log",
+                            "[RIVER-CAP] reject wide water on bearing "
+                                    + (int) Math.toDegrees(angle) + " deg: span=" + waterSpan
+                                    + " > " + RIVER_CROSS_MAX_BLOCKS
+                                    + " candidate=" + candidate.toShortString()
+                                    + " player=" + mod.getPlayer().getBlockPos().toShortString());
+                    continue;
+                }
+            }
             // (2026-09-17) 只有真的朝 bias 目标走的步才算一跳 (随机抖动步不计),
             // 跳数到 BIAS_MAX_HOPS_PER_TARGET 就作废当前目标 (见 onTick 到达分支)。
             if (_lastWasBiased) ++_biasHops;
@@ -612,12 +633,46 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (2026-09-22 淌水惩罚) 从 pos 沿 angle 逐格采样 (步长 1, 最远 maxDist),
+     * 返回途中【最长连续水面】的格数; 0 = 全程干燥。
+     * 判水窗口取玩家 y+2..y-5 —— 过河发生在步行高度, 全列扫描 (isTargetInWater
+     * 口径, 每列最多 320 次) 沿 48 格采样线太贵; 选步每 48 格才执行一次,
+     * 窗口 8 格 × 48 采样 = 最多 ~400 次方块读取, 可接受。
+     * 区块未加载按干处理 (无法预知, 与 isTargetInWater 同口径)。
+     */
+    private int maxWaterSpanAlongLine(AltoClef mod, Vec3d pos, double angle, double maxDist) {
+        int best = 0;
+        int cur = 0;
+        int yRef = (int) Math.floor(pos.y);
+        for (double d = 1; d <= maxDist; d += 1.0) {
+            int x = (int) Math.floor(pos.x + Math.cos(angle) * d);
+            int z = (int) Math.floor(pos.z + Math.sin(angle) * d);
+            if (columnWetNearY(mod, x, z, yRef)) {
+                cur++;
+                if (cur > best) best = cur;
+            } else {
+                cur = 0;
+            }
+        }
+        return best;
+    }
+
+    /** (2026-09-22 淌水惩罚) (x,z) 列在 yRef+2..yRef-5 窗口内是否有水。 */
+    private boolean columnWetNearY(AltoClef mod, int x, int z, int yRef) {
+        for (int y = yRef + 2; y >= yRef - 5; --y) {
+            BlockPos p = new BlockPos(x, y, z);
+            if (!mod.getChunkTracker().isChunkLoaded(p)) return false;
+            if (mod.getWorld().getBlockState(p).getBlock() == Blocks.WATER) return true;
+        }
+        return false;
+    }
+
+    /**
      * True if walking to {@code target} would put us in water: the topmost
      * non-air block of the target's column is water (lake/ocean surface).
      * Columns in unloaded chunks are treated as dry (we can't know yet).
      */
-    private boolean isTargetInWater(AltoClef mod, BlockPos target) {
-        if (mod.getWorld() == null) return false;
+    private boolean isTargetInWater(AltoClef mod, BlockPos target) {        if (mod.getWorld() == null) return false;
         for (int y = mod.getWorld().getHeight() - 1; y >= 0; --y) {
             BlockPos check = new BlockPos(target.getX(), y, target.getZ());
             if (!mod.getChunkTracker().isChunkLoaded(check)) return false;

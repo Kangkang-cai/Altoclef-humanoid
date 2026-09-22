@@ -124,6 +124,11 @@ public class CollectFoodTask extends Task {
     // 一旦决定捡就持续返回直到地面无目标掉落, 不再被 Biased exploration(找下一只)抢占。
     private Task _foodDropPickupTask = null;
     private static final double FOOD_DROP_PICKUP_RANGE = 24;
+    /**
+     * (2026-09-22 防尖峰重置) 潜力新高必须持续这么久才算"真进展"重置远征无增长
+     * 时钟。杀怪→捡肉→马上吃掉的瞬时尖峰 (持仓 <10s) 不再清零计时。
+     */
+    private static final long FOOD_GAIN_CONFIRM_MS = 10_000;
 
     // (2026-09-13 不再每 10s 拆任务, 用户"三层都修") _checkNewOptionsTimer 到期原
     // 无条件 _currentResourceTask = null → 正在推进(甚至正在长途接近)的采集/探索子任务
@@ -284,6 +289,7 @@ public class CollectFoodTask extends Task {
         if (FoodChain.s_foodSearchStartMs < 0 || FoodChain.s_foodSearchBestPotential < 0) {
             FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
             FoodChain.s_foodSearchBestPotential = calculateFoodPotential(mod);
+            FoodChain.s_foodGainPendingSinceMs = -1;
         } else {
             double cur = calculateFoodPotential(mod);
             if (cur + 15 < FoodChain.s_foodSearchBestPotential) {
@@ -322,11 +328,28 @@ public class CollectFoodTask extends Task {
         // (2026-09-15 觅食远征) 超时判定: 食物潜力高水位无增长 (或大幅损失后
         // 重计) 持续超过 timeout → 触发远征并降低本轮达标线。有进展 (潜力新高)
         // 即重置计时 —— "连续长时间没找到食物"才远走, 边走边捡不算。
+        // (2026-09-22 防尖峰重置) "有进展即重置"被瞬时尖峰钻空子 (20260922 另机
+        // 日志: 岛上 3 分钟 Killing hostiles×22 / Pickup mutton×8, 每次捡到肉
+        // 潜力瞬时冲高 → 计时清零 → 吃掉回落 → 再杀, "无增长 300s"永远攒不满,
+        // 远征迟迟不触发)。改为: 新高必须【持续】FOOD_GAIN_CONFIRM_MS 才算真进展
+        // 重置计时; 捡了马上吃掉/丢掉的尖峰不清零时钟。大幅损失 (-15) 仍立即重计。
         if (!FoodChain.s_foodExpeditionActive) {
-            if (potentialFood > FoodChain.s_foodSearchBestPotential + 0.5
-                    || potentialFood + 15 < FoodChain.s_foodSearchBestPotential) {
+            long nowMs = System.currentTimeMillis();
+            if (potentialFood + 15 < FoodChain.s_foodSearchBestPotential) {
                 FoodChain.s_foodSearchBestPotential = potentialFood;
-                FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+                FoodChain.s_foodSearchStartMs = nowMs;
+                FoodChain.s_foodGainPendingSinceMs = -1;
+            } else if (potentialFood > FoodChain.s_foodSearchBestPotential + 0.5) {
+                if (FoodChain.s_foodGainPendingSinceMs < 0) {
+                    FoodChain.s_foodGainPendingSinceMs = nowMs;
+                } else if (nowMs - FoodChain.s_foodGainPendingSinceMs >= FOOD_GAIN_CONFIRM_MS) {
+                    FoodChain.s_foodSearchBestPotential = potentialFood;
+                    FoodChain.s_foodSearchStartMs = nowMs;
+                    FoodChain.s_foodGainPendingSinceMs = -1;
+                }
+                // 确认期间不动 s_foodSearchStartMs: 瞬时尖峰 ≠ 进展。
+            } else {
+                FoodChain.s_foodGainPendingSinceMs = -1;
             }
             double timeoutSeconds = mod.getModSettings().getFoodSearchExpeditionTimeoutSeconds();
             if (timeoutSeconds > 0
