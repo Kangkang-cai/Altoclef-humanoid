@@ -91,6 +91,16 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // (STOP took=198ms) 再重建, 16 格外的岸永远走不到。
     // 修: 触发即闩住 (_waterExitLatched), 中途不再重评瞬时判据, 直到子任务真正
     // 结束 (上岸站住 0.5s / 放弃进 60s static 冷却) 才松闩。
+    //
+    // (2026-09-22 v3 同构 PlaceBlockNearbyTask) 现场 20260922-224740: v2 闩锁的
+    // 【保活返回】仍埋在 `if (reach.isPresent())` 挖掘分支里。水面 bob 顶端眼睛抬高
+    // ~1 格 → LookHelper.getReach 随 bob 相位闪断 → 父任务那些 tick 旁路闩锁返回
+    // null / 重启 builder, GetToLand 每 200~400ms 被拆一次 (tasks.log 实锤 45s 内
+    // 60+ 轮 SUB/STOP)。重挂重跑 onStart 使子任务的 4s 卡住重规划与放弃冷却永远攒
+    // 不满, baritone customGoal(上岸点) 与 builder(挖浆果丛) 每 0.3s 互相抢权,
+    // bot 在 (639,62,-774) 纯原地浮动 45s 到 miningTotal 超时。修: 闩锁【保活+松闩】
+    // 上提到 onTick 顶部 (保护性早退之后), 与 PlaceBlockNearbyTask 同款无条件持续
+    // 返回; 触发条件仍留在 reach 分支 (远处导航不该触发离水)。
     private boolean _waterExitLatched = false;
     // 收敛出口: 上岸成功后 30s 内同目标再次触发 = 这块只能泡水挖 (上岸也得再下水)
     // → 拉黑换目标, 封顶"上岸-下水"的大周期震荡。
@@ -310,6 +320,32 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             return null;
         }
 
+        // (2026-09-22 v3) 离水闩锁保活 —— 无条件持续返回同一个 GetToLandTask,
+        // 不再看 reach/bob 相位 (字段注释有现场链)。与 PlaceBlockNearbyTask 的
+        // _landActive 闩锁同构: "一旦判定要上岸就一路游到岸, 中途不打断", 卡住
+        // 由 GetToLandTask 自己的 4s 重规划/放弃冷却解决。
+        if (_waterExitLatched) {
+            if (_toLand != null && _toLand.isFinished(mod)) {
+                if (!_toLand.hasGivenUp()) {
+                    // 真上岸了 (脚下实体连续 0.5s), 记锚点供下面重复触发拉黑。
+                    _waterExitGroundedTick = WorldHelper.getTicks();
+                    _waterExitGroundedPos = _pos;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[WATER-EXIT] grounded next to target " + _pos.toShortString());
+                }
+                // 放弃时任务内部已写 60s static 冷却 (isOnCooldown 兜底)。
+                _toLand.reset();
+                _toLand = null;
+                _waterExitLatched = false;
+            } else if (_toLand != null) {
+                setDebugState("Floating in water (mining 25x slow) -> heading to land first (latched)");
+                return _toLand;
+            } else {
+                // 防御: 闩在但任务缺失 (理论上不发生) → 松闩走正常流程。
+                _waterExitLatched = false;
+            }
+        }
+
         // Wander and check
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
             _moveChecker.reset();
@@ -379,27 +415,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // 的两格空气, WaterExitHelper.hasReachableAirExit=false) 时继续挖。
             // 站浅水底 (脚下有实体) 不算泡水漂浮, 涉水过河不受影响。
             //
-            // (2026-09-16 v2 防横跳) 触发后【闩住】, 不再逐 tick 重评瞬时判据 ——
-            // bob 腾空相 isTouchingWater 翻 false 曾把子任务 0.2s 一拆 (现场实锤)。
-            // 松闩只看 _toLand 真正结束; 结束后按情况记"上岸成功"锚点供重复触发拉黑。
+            // (2026-09-16 v2 防横跳 / 2026-09-22 v3 上提) 触发即闩住; 闩住后的
+            // 【保活返回 + 松闩】已上提到 onTick 顶部 —— bob 顶端 reach 闪断时本块
+            // 整段会被旁路, v2 因此仍每 0.2~0.4s 拆一次子任务。本块只负责【触发】
+            // 与上岸后的重复触发拉黑; 触发当 tick 的就地返回保留 (立即交权, 不等下一 tick)。
             if (reach.isPresent()) {
-                if (_waterExitLatched) {
-                    if (_toLand == null) {
-                        _waterExitLatched = false;
-                    } else if (_toLand.isFinished(mod)) {
-                        if (!_toLand.hasGivenUp()) {
-                            // 真上岸了 (脚下实体连续 0.5s), 记锚点。
-                            _waterExitGroundedTick = WorldHelper.getTicks();
-                            _waterExitGroundedPos = _pos;
-                            Debug.logToFile("altoclef_diag.log",
-                                    "[WATER-EXIT] grounded next to target " + _pos.toShortString());
-                        }
-                        // 放弃时任务内部已写 60s static 冷却 (isOnCooldown 兜底)。
-                        _toLand.reset();
-                        _toLand = null;
-                        _waterExitLatched = false;
-                    }
-                }
                 // 上岸后短时间内同目标又漂回来 = 只能泡水挖 → 拉黑换目标。
                 if (!_waterExitLatched
                         && _waterExitGroundedTick >= 0
