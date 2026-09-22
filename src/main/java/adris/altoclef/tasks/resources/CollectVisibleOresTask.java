@@ -110,7 +110,9 @@ public class CollectVisibleOresTask extends Task {
             if (countedItems(mod, _activePlan) >= _activePlan.cap() || _active.isFinished(mod)) {
                 // (2026-09-13 批次收尾诊断) 用户"矿脉没挖完就回主线"现场取证:
                 // 分清是①达上限正常收工, 还是②近场判无活提前释放 (后者看 vis8 与
-                // GREEDY_NEAR_FIELD_RADIUS 能否覆盖矿脉延伸)。每批只打一条, 天然节流。
+                // 近场豁免口径能否覆盖矿脉延伸)。每批只打一条, 天然节流。
+                // (2026-09-22) 近场豁免收编为面相邻6块 (原 GREEDY_NEAR_FIELD_RADIUS
+                // 删除), 诊断字段改为固定口径标签。
                 int have = countedItems(mod, _activePlan);
                 boolean capHit = have >= _activePlan.cap();
                 OreStat endSt = countAllVisible(mod).get(_activePlan);
@@ -118,7 +120,7 @@ public class CollectVisibleOresTask extends Task {
                         + _activePlan.item() + " capHit=" + capHit
                         + " have=" + have + "/" + _activePlan.cap()
                         + " vis8=" + (endSt == null ? 0 : endSt.count)
-                        + " nearR=" + MineAndCollectTask.GREEDY_NEAR_FIELD_RADIUS
+                        + " nearField=face-adjacent-6"
                         + " player=" + mod.getPlayer().getBlockPos());
                 _active = null;
                 _activePlan = null;
