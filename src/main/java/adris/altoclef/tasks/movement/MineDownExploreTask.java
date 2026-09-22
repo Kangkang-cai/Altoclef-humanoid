@@ -429,6 +429,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private boolean _inWaterDetour = false;
     private final TimerGame _waterDetourTimer = new TimerGame(WATER_DETOUR_TIMEOUT);
     private int _lastDetourWaterMark = 0;
+    // (2026-09-22 方向选水) 最近一次在挖掘路径上撞到的水 (改道/换向时背离它用)。
+    private BlockPos _lastWaterPos = null;
+    /** 选向时沿走行线向前看这么多格统计水块 (方向选水评分)。 */
+    private static final int DIR_WATER_LOOKAHEAD = 8;
+    /** 记忆方向走行线水块数超过该值 → "方向被水封死", 放弃粘滞改选最干方向。 */
+    private static final int DIR_WATER_STICKY_MAX = 2;
     // (2026-09-22 沾水粘滞) 水面浮沉让 isTouchingWater 逐 tick 翻面; 沾水后 3s 内
     // 一律按"水中"处置 (见 isWatery), 防止水中场景在 baritone 爬升/楼梯之间抖动。
     private final TimerGame _waterRecent = new TimerGame(3);
@@ -665,10 +671,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _digStart = mod.getPlayer().getBlockPos();
         }
         if (_ascendMode) {
-            // (2026-09-22 防回头) 随机选向但排除上一隧道方向的逆方向 (回头挖回
-            // 刚走过的区域); 选出后更新方向记忆。
-            int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-            for (int i = 0; i < 8 && isReverseOfLastTunnelDir(dir); i++) {
+            // (2026-09-22 防回头 + 方向选水) 随机选向但排除上一隧道方向的逆方向
+            // (回头挖回刚走过的区域); 2026-09-22 二改: 改为按走行线水块数选最干
+            // 方向 (平手随机), 水下/湖底起楼梯不再一头扎进水柱。选出后更新方向记忆。
+            int[] dir = pickDriestDir(mod, mod.getPlayer().getBlockPos(), null,
+                    hasLastTunnelDir() ? new int[]{-_lastTunnelDirX, -_lastTunnelDirZ} : null,
+                    null);
+            if (dir == null) {
                 dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
             }
             rememberTunnelDir(dir[0], dir[1]);
@@ -688,6 +697,21 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             int[] dir;
             if (hasLastTunnelDir()) {
                 dir = new int[]{_lastTunnelDirX, _lastTunnelDirZ};
+                // (2026-09-22 方向选水) 记忆方向走行线被水封死 (前看 8 格水块 > 2)
+                // → 放弃粘滞, 在其余方向 (排除回头) 里选最干的。三面环水时新实例
+                // 不再一头续挖进水里, 挖 2 格又触发改道。
+                int w = countWaterAhead(mod, mod.getPlayer().getBlockPos(), dir);
+                if (w > DIR_WATER_STICKY_MAX) {
+                    int[] drier = pickDriestDir(mod, mod.getPlayer().getBlockPos(), null,
+                            new int[]{-dir[0], -dir[1]}, null);
+                    String m = "[MineDown-DirWater] 记忆方向 (" + dir[0] + "," + dir[1]
+                            + ") 走行线水块 " + w + "/" + DIR_WATER_LOOKAHEAD
+                            + " > " + DIR_WATER_STICKY_MAX + " -> 弃粘滞换最干方向 ("
+                            + (drier == null ? "无合法方向, 保底随机" : drier[0] + "," + drier[1]) + ")";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    if (drier != null) dir = drier;
+                }
             } else {
                 dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
                 rememberTunnelDir(dir[0], dir[1]);
@@ -795,9 +819,12 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _miningTarget = null;
         _caveExploreCooldownSteps = 0;
         // 方向重掷: 爬升可能位移了十几格, 原方向继续大概率一头撞回刚爬出来的那片洞;
-        // (2026-09-22 防回头) 重掷时排除上一方向的逆方向, 选出后更新记忆。
-        int[] dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-        for (int i = 0; i < 8 && isReverseOfLastTunnelDir(dir); i++) {
+        // (2026-09-22 防回头 + 方向选水) 重掷排除上一方向的逆方向, 按走行线水块数
+        // 选最干方向 (与 onStart/retreatAndRedig 同口径), 选出后更新记忆。
+        int[] dir = pickDriestDir(mod, mod.getPlayer().getBlockPos(), null,
+                hasLastTunnelDir() ? new int[]{-_lastTunnelDirX, -_lastTunnelDirZ} : null,
+                null);
+        if (dir == null) {
             dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
         }
         rememberTunnelDir(dir[0], dir[1]);
@@ -1074,7 +1101,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + mod.getPlayer().getBlockPos().toShortString() + ", retreatAndRedig.");
             _inWaterDetour = false;
             _subTask = null;
-            retreatAndRedig(mod);
+            // (2026-09-22 方向选水) 带上水源位置: 换向不仅排除原方向/逆方向,
+            // 还排除朝向水源的方向 + 按"走行线水块数"选最干方向。旧行为只保证
+            // "换个随机方向" —— 三面环水时新方向大概率还是扎进水里, 挖 2 格
+            // 又触发改道, 循环烧时间。
+            retreatAndRedig(mod, _lastWaterPos);
         }
 
         if (_inCave) {
@@ -1350,12 +1381,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * @param awayFrom 需要背离的危险点 (岩浆), 传 null 时只保证换一个方向。
+     * @param awayFrom 需要背离的危险点 (岩浆/水), 传 null 时只保证换一个方向。
      *
      * (2026-09-14 岩浆弃道) 原实现只排除"与旧方向相同", 换出来的新方向有 1/3 概率
      * 正好朝着刚撤出来的那处岩浆 —— 撤了等于白撤, 挖两格又撞回去, 直接把
      * LAVA_ABANDON_LIMIT 烧穿。这里加一条: 新方向与 (危险点 - 玩家) 的水平分量同向
      * 则重选。试 12 次仍选不出 (四面都是岩浆的极端情况) 就接受最后一个, 由上限兜底。
+     *
+     * (2026-09-22 方向选水) 随机重试改为【评分选最干】: 对每个合法方向沿走行线
+     * 前看 DIR_WATER_LOOKAHEAD 格统计水块数, 取最少者 (平手随机)。三面环水时
+     * 至少选中水最少的那一面, 不再 50% 概率继续扎进水里。
      */
     private void retreatAndRedig(AltoClef mod, BlockPos awayFrom) {
         _digQueue.clear();
@@ -1368,19 +1403,56 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 水改道后隧道走行线比脚低 1 格 → 立刻再撞 floor 门控触发爬升 (高度调整
         // 不灵活的结构性来源之一, 20260917-183338 同款)。
         _digStart = (_ascendMode || _tunnelMode) ? feet : feet.down();
-        int[] newDir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-        for (int i = 0; i < 12; i++) {
-            int[] cand = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-            if (cand[0] == _dirX && cand[1] == _dirZ) continue;
-            // (2026-09-22 防回头) 逆方向 = 挖回刚撤出来的那条隧道, 一并排除。
-            if (cand[0] == -_dirX && cand[1] == -_dirZ) continue;
-            if (pointsToward(feet, cand, awayFrom)) continue;
-            newDir = cand;
-            break;
+        int[] newDir = pickDriestDir(mod, feet,
+                new int[]{_dirX, _dirZ}, new int[]{-_dirX, -_dirZ}, awayFrom);
+        if (newDir == null) {
+            // 合法方向全被排除 (四面都是危险源的极端情况): 兜底随机, 由弃道上限兜底。
+            newDir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
         }
         _dirX = newDir[0];
         _dirZ = newDir[1];
         rememberTunnelDir(_dirX, _dirZ);
+    }
+
+    /**
+     * (2026-09-22 方向选水) 在 4 个 cardinal 方向里选"走行线最干"的方向。
+     * 排除: sameDir (原方向)、reverseDir (回头)、朝向 awayFrom 的方向。
+     * 每方向沿走行线前看 DIR_WATER_LOOKAHEAD 格数水块 (区块未加载按干处理)。
+     *
+     * @return 最干方向; 全部被排除时返回 null (调用方兜底)。
+     */
+    private int[] pickDriestDir(AltoClef mod, BlockPos from,
+                                int[] sameDir, int[] reverseDir, BlockPos awayFrom) {
+        int[] best = null;
+        int bestWater = Integer.MAX_VALUE;
+        for (int[] cand : TUNNEL_DIRS) {
+            if (sameDir != null && cand[0] == sameDir[0] && cand[1] == sameDir[1]) continue;
+            if (reverseDir != null && cand[0] == reverseDir[0] && cand[1] == reverseDir[1]) continue;
+            if (pointsToward(from, cand, awayFrom)) continue;
+            int w = countWaterAhead(mod, from, cand);
+            if (w < bestWater || (w == bestWater && Math.random() < 0.5)) {
+                bestWater = w;
+                best = cand;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * (2026-09-22 方向选水) 统计 dir 方向前 DIR_WATER_LOOKAHEAD 格走行线上的水块数。
+     * 走行线取 from 沿 dir 的水平推进 (与隧道 ground 同源: ground.y = from.y;
+     * 上行楼梯用脚 y 评也够 —— 满区水时低层水就是洪泛区的一致代理)。
+     * 区块未加载视为干 (无法预知, 与 isUnbreakable 同口径)。
+     */
+    private int countWaterAhead(AltoClef mod, BlockPos from, int[] dir) {
+        int water = 0;
+        BlockPos p = from;
+        for (int i = 0; i < DIR_WATER_LOOKAHEAD; i++) {
+            p = p.add(dir[0], 0, dir[1]);
+            if (!mod.getChunkTracker().isChunkLoaded(p)) break;
+            if (isWater(mod, p)) water++;
+        }
+        return water;
     }
 
     /** 方向 dir 是否朝向 hazard (只看水平分量; 同格/无法判定时不算朝向)。 */
@@ -1396,11 +1468,6 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     /** 上一条隧道方向是否有记忆 (static, 跨实例存续)。 */
     private static boolean hasLastTunnelDir() {
         return _lastTunnelDirX != 0 || _lastTunnelDirZ != 0;
-    }
-
-    /** cand 是否是上一条隧道方向的逆方向 (回头)。 */
-    private static boolean isReverseOfLastTunnelDir(int[] cand) {
-        return hasLastTunnelDir() && cand[0] == -_lastTunnelDirX && cand[1] == -_lastTunnelDirZ;
     }
 
     private static void rememberTunnelDir(int x, int z) {
@@ -1795,6 +1862,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      */
     private void logWaterEncounter(AltoClef mod, BlockPos pos) {
         _waterSkipped++;
+        // (2026-09-22 方向选水) 记下水源, 水改道结束时 retreatAndRedig 背离它。
+        _lastWaterPos = pos.toImmutable();
         if (_waterSkipped <= 3 || _waterSkipped % 10 == 0) {
             String m = "[Diag-water] shaft/tunnel hit water at " + pos.toShortString()
                     + " (y=" + pos.getY() + ", skipped so far: " + _waterSkipped + ")"
