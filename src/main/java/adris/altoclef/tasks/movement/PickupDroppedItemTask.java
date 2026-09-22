@@ -62,6 +62,13 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     private Vec3d _pickupNavTarget = null;
     private final TimerGame _pickupNavTimer = new TimerGame(3);
     private int _pickupNavWaitTicks = 0;
+    // (2026-09-22 水面粘滞) 掉落物一旦沾水就按水中物品处置 (永不进"等落地"分支):
+    // 水面漂浮物 isTouchingWater 随浮沉逐 tick 翻面 —— 出水的瞬间 falling 判据
+    // 翻真 → 等落地 → 入水翻假 → 发导航 → 永不落地的循环 (20260922 另机日志
+    // 00:02-00:08 停滞 5 分钟窗口内 "Waiting for dropped item to land" 与
+    // isTouchingWater=true 诊断并存)。isOnGround 对水中物品恒 false, 只有
+    // isTouchingWater 是单 tick 瞬时值, 必须粘滞。
+    private boolean _pickupItemSeenInWater = false;
     // 等待落定的上限 (tick): 超过就放弃等待改慢追 (防死等/被进度检查判困)。
     private static final int PICKUP_NAV_WAIT_MAX_TICKS = 200;
     // 导航目标更新阈值 (平方距离): 物品移动超过该距离才重建导航任务。
@@ -496,13 +503,21 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             _pickupNavWaitTicks = 0;
             _pickupNavItem = itemEntity;
             _pickupNavTarget = null;
+            _pickupItemSeenInWater = false;
+        }
+        if (itemEntity.isTouchingWater()) {
+            _pickupItemSeenInWater = true;
         }
         // (2026-09-02 修: 已消失掉落物不再等落地) 旧 `!isOnGround() && !isTouchingWater()`
         // 对【已被捡走/despawn 的陈旧实体】(tracker 感知记忆 20s 未过期) 恒 true →
         // falling 分支无限循环 "Waiting for dropped item to land" 卡死 (日志实锤
         // 19:07 Greedy mining diamond 挖完钻石后卡 18 秒)。实体已不在世界 → 不走
         // "等落地", 交给 isValid(isAlive)/进度检查释放。
+        // (2026-09-22) 水面粘滞: 见 _pickupItemSeenInWater 注释 —— 漂浮物出水
+        // 瞬间两条件同时翻真, 等落地分支被瞬时误触发, 加 _pickupItemSeenInWater
+        // 后沾过水的物品永不进等待分支。
         boolean falling = itemEntity.isAlive()
+                && !_pickupItemSeenInWater
                 && !itemEntity.isOnGround() && !itemEntity.isTouchingWater();
         if (falling) {
             // 还在下落 (未落地未入水): 等落定, 不追实时 pos (防 TaskPingPong)。
