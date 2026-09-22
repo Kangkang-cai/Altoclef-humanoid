@@ -176,7 +176,17 @@ public class GoToStrongholdPortalTask extends Task {
                 // 丢眼"的分支 —— 记忆直达/见砖直进探索的路径不补粮 (用户口径:
                 // 闸在"丢眼睛任务前")。ignoreExpeditionReduction=true: 与进下界
                 // 前食物硬闸同口径, 远征长, 不许"超时降低"砍目标。
-                if (!_expeditionFoodDone) {
+                // (2026-09-22 维度短路, 修 0238d7c 死锁) gate 必须只在主世界生效:
+                // 下界凑齐最后一颗眼时 (BeatMinecraft2Task case NETHER → 本任务),
+                // 下界没有任何 CollectFoodTask 食物来源 (猎杀清单全是主世界
+                // 牛/猪/羊/鸡/兔/鱼, 作物/干草/浆果也只在主世界; 疣猪兽的生猪排
+                // 不在猎杀清单), ignoreReduction=true 又堵死远征降标出口 →
+                // 永久卡死。放行后 _locateCoordsTask.onTick 第一件事
+                // (L150) 就是 DefaultGoToDimensionTask(OVERWORLD) 回主世界;
+                // 本实例 sticky 存活, 回主世界后同一 gate 下一拍自然再拦补粮。
+                // 不置 _expeditionFoodDone —— 没补过粮就不许标记完成。
+                if (!_expeditionFoodDone
+                        && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD) {
                     double foodScore = StorageHelper.calculateInventoryFoodScore(mod);
                     if (foodScore >= EXPEDITION_FOOD_UNITS) {
                         _expeditionFoodDone = true; // 够了直接放行, 不建任务
