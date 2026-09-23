@@ -128,6 +128,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // prio 55: 抢占常规任务(50), 让位战斗(65+)/死亡恢复(70)/岩浆火溺水(90+)。
     private static final double SHIELD_WATCHDOG_INTERVAL = 30;
     private static final float SHIELD_WATCHDOG_PRIORITY = 55;
+    private static final int SHIELD_IRON_REQUIRED = 1;
     private static final int SHIELD_PLANKS_REQUIRED = 6;
     // (2026-09-23) 每个原木/木头/菌柄可合成的木板数 (含去皮变种, 见 ItemHelper.LOG)。
     private static final int PLANKS_PER_LOG = 4;
@@ -347,16 +348,23 @@ public class WorldSurvivalChain extends SingleTaskChain {
             int plankCount = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
             int logCount = mod.getItemStorage().getItemCount(ItemHelper.LOG);
             int plankPotential = plankCount + PLANKS_PER_LOG * logCount;
+            // (2026-09-23 用户"生铁肯定也要算") 铁材料按潜力计: 铁锭+生铁,
+            // 1生铁→1铁锭 —— 造盾资源链注册了 smelt(iron_ingot <- raw_iron)
+            // (TaskCatalogue:207), 派发后内部自动熔炉烧铁, 无需先烧成锭。
+            int ingotCount = mod.getItemStorage().getItemCount(Items.IRON_INGOT);
+            int rawIronCount = mod.getItemStorage().getItemCount(Items.RAW_IRON);
+            int ironPotential = ingotCount + rawIronCount;
             if (!offHandShield && !mod.getItemStorage().hasItem(Items.SHIELD)
-                    && mod.getItemStorage().hasItem(Items.IRON_INGOT)
+                    && ironPotential >= SHIELD_IRON_REQUIRED
                     && plankPotential >= SHIELD_PLANKS_REQUIRED) {
                 // (2026-09-14 交易让位, 232015 场次) 交易进行中插队会开背包屏打断
                 // 丢金锭节奏 → 跳过本轮, 交易结束 (金锭耗尽/任务停 3s) 后下轮再合成。
                 if (TradeWithPiglinsTask.isTradeInProgress()) {
                     Debug.logMessage("[Shield-Watchdog] no shield + materials present, but piglin trading in progress — deferring to next check.");
                 } else {
-                    Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present (iron ingot + "
-                            + plankCount + " planks/" + logCount + " logs = " + plankPotential
+                    Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present ("
+                            + ingotCount + " ingots/" + rawIronCount + " raw iron = " + ironPotential
+                            + " iron; " + plankCount + " planks/" + logCount + " logs = " + plankPotential
                             + " planks potential), crafting one.");
                     _shieldCraftTask = TaskCatalogue.getItemTask(Items.SHIELD, 1);
                     setTask(_shieldCraftTask);
