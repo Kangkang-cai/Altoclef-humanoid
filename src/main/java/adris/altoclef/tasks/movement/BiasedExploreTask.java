@@ -1049,10 +1049,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (!signature.equals(_lastBiomeSignature)) {
                 Debug.logToFile("altoclef_diag.log",
                         "[FOOD-BIOME] food explore: player=" + player
-                                + " plains=" + plains.size() + "@" + nearestOf(plains, mod)
-                                + " richForest=" + richForests.size() + "@" + nearestOf(richForests, mod)
-                                + " birch=" + birch.size() + "@" + nearestOf(birch, mod)
-                                + " darkForest=" + darkForests.size() + "@" + nearestOf(darkForests, mod)
+                                + " plains=" + plains.size() + "@" + fmtNearest(plains, mod)
+                                + " richForest=" + richForests.size() + "@" + fmtNearest(richForests, mod)
+                                + " birch=" + birch.size() + "@" + fmtNearest(birch, mod)
+                                + " darkForest=" + darkForests.size() + "@" + fmtNearest(darkForests, mod)
                                 + " (tier: plains > animal memory > richForest > birch > darkForest)");
             }
         } else {
@@ -1078,6 +1078,12 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (d < bestSq) { bestSq = d; nearest = p; }
         }
         return nearest;
+    }
+
+    /** [FOOD-BIOME] 日志格式化最近点: 空池显示 "-" 而非字符串 "null" (审查 Low-3)。 */
+    private static String fmtNearest(List<BlockPos> pool, AltoClef mod) {
+        BlockPos p = nearestOf(pool, mod);
+        return p == null ? "-" : p.toShortString();
     }
 
     @Override

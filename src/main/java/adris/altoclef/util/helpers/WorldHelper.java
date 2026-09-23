@@ -617,18 +617,20 @@ public interface WorldHelper {
      * 平原 → 动物记忆点 → 橡木/花森林 → 白桦系 → 深色橡木林。
      *
      * <h3>三档的原版机制依据 (1.18.2 生成规则)</h3>
-     * 被动动物自然生成需要草方块+光照&gt;8:
+     * 被动动物自然生成需要草方块+光照&gt;8。完整导航顺序五级:
+     * ①平原 ②动物记忆点(在 BiasedExploreTask.pickBiasedTarget)
+     * ③橡木/花森林 ④白桦系 ⑤深色橡木林:
      * <ul>
-     *   <li>第二档 {@link #isRichFoodForest} —— {@link BiomeKeys#FOREST}
+     *   <li>第③级 {@link #isRichFoodForest} —— {@link BiomeKeys#FOREST}
      *       (橡树+桦树混交, 动物刷怪表齐全且橡树落叶掉苹果) 与
      *       {@link BiomeKeys#FLOWER_FOREST} (冠层开阔光照足, 动物正常刷)。</li>
-     *   <li>第三档 {@link #isBirchForest} —— {@link BiomeKeys#BIRCH_FOREST} /
+     *   <li>第④级 {@link #isBirchForest} —— {@link BiomeKeys#BIRCH_FOREST} /
      *       {@link BiomeKeys#OLD_GROWTH_BIRCH_FOREST}: 刷怪表有动物但有效密度
      *       偏低, 白桦不掉苹果也无浆果。</li>
-     *   <li>第四档 {@link #isDarkForest} —— {@link BiomeKeys#DARK_FOREST}:
+     *   <li>第⑤级 {@link #isDarkForest} —— {@link BiomeKeys#DARK_FOREST}:
      *       致密深色橡树冠近乎全遮光 (地面光照 4~5), 动物光照条件基本不满足,
      *       白天也刷怪; 仅有红/棕蘑菇 (不做蘑菇煲不是即食食物)。用户拍板
-     *       保留在【最低档】: 只在前三档全扫不到时才去, 而非完全排除。</li>
+     *       保留在【最低档】: 只在前四级全扫不到时才去, 而非完全排除。</li>
      * </ul>
      * 注意: biome 是随区块下发的【地形数据】(与 baritone 读已加载方块同一可知性
      * 口径), 不是实体感知 —— 动物实体仍全程走 EntityTracker 的 FOV/LOS/记忆
@@ -639,13 +641,13 @@ public interface WorldHelper {
         || b.matchesKey(BiomeKeys.FLOWER_FOREST));
     }
 
-    /** [FOOD-BIOME] 第三档森林: 白桦林 / 原始白桦林 (见 {@link #isRichFoodForest})。 */
+    /** [FOOD-BIOME] 第④级森林: 白桦林 / 原始白桦林 (见 {@link #isRichFoodForest})。 */
     static boolean isBirchForest(RegistryEntry<Biome> b){
         return (b.matchesKey(BiomeKeys.BIRCH_FOREST)
         || b.matchesKey(BiomeKeys.OLD_GROWTH_BIRCH_FOREST));
     }
 
-    /** [FOOD-BIOME] 第四档(最低)森林: 深色橡木林 (见 {@link #isRichFoodForest})。 */
+    /** [FOOD-BIOME] 第⑤级(最低)森林: 深色橡木林 (见 {@link #isRichFoodForest})。 */
     static boolean isDarkForest(RegistryEntry<Biome> b){
         return b.matchesKey(BiomeKeys.DARK_FOREST);
     }
