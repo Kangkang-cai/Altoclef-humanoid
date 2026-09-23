@@ -133,10 +133,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
 
     // [FOOD-BIOME] 找食物/找动物专用的食物富集群系偏置 (foodExplore=true 时才启用)。
-    // 两档 (2026-09-23 用户拍板"平原优先, 森林兜底"):
+    // 五级 (2026-09-23 用户两次拍板"平原优先, 森林兜底"+"森林也是有差别的"):
     //   ① 平原系 PLAINS/SUNFLOWER_PLAINS —— 动物/作物密度最高, 最优先;
-    //   ② 森林系 FOREST/FLOWER_FOREST/BIRCH_FOREST/OLD_GROWTH_BIRCH_FOREST/
-    //     DARK_FOREST —— 附近扫不到平原时兜底 (花森林用户确认纳入)。
+    //   ② biasSources 动物记忆点 (KillAndLoot 传入, 直接证据, 在 pickBiasedTarget);
+    //   ③ 富森林系 FOREST/FLOWER_FOREST —— 动物齐全+橡苹果/冠层开阔;
+    //   ④ 白桦系 BIRCH_FOREST/OLD_GROWTH_BIRCH_FOREST —— 动物密度偏低, 无苹果;
+    //   ⑤ 深色橡木林 DARK_FOREST —— 冠层遮光动物刷不出/白天刷怪/只有蘑菇,
+    //      用户拍板保留在最低档而非排除。
     // 挖矿/砍木等 non-food 探索一律不启用 (foodExplore=false), 绝不改跑去别的 biome。
     private static final int FOODBIOME_SCAN_INTERVAL_TICKS = 50; // 每 50 tick(~2.5s) 周期扫描, 足够节流
     // 已加载区块内扫描半径 (格)。略小于步长 48*? 保持远, 但小于 BIAS_MAX_DISTANCE(256) 才会被选中。
@@ -150,15 +153,17 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
     // [FOOD-BIOME] 是否"找食物/找动物"的探索 (CollectFoodTask / KillAndLootTask
     // 创建时为 true)。true 时在已加载区块内周期性扫描平原/森林食物富集群系,
-    // 平原点作为最高优先级 bias 目标、森林点兜底, 100% 导航过去。挖矿/砍木等
-    // non-food 探索保持 false, 完全不受影响。
+    // 按平原→富森林→白桦→深色橡林的档级导航过去。挖矿/砍木等 non-food 探索
+    // 保持 false, 完全不受影响。
     private final boolean _foodExplore;
-    // 最近一次扫描到玩家周围已加载区块里的平原系/森林系地表点 (找食物探索专用)。
+    // 最近一次扫描到玩家周围已加载区块里的各档食物富集群系【干燥地表点】。
     private List<BlockPos> _plainsTargets = new ArrayList<>();
-    private List<BlockPos> _forestTargets = new ArrayList<>();
+    private List<BlockPos> _richForestTargets = new ArrayList<>();
+    private List<BlockPos> _birchTargets = new ArrayList<>();
+    private List<BlockPos> _darkForestTargets = new ArrayList<>();
     private int _scanTicker = 0;
     private int _foodBiomeEmptyLogCounter = 0;
-    // 两池数量签名 "plains/forest", 变化时才打日志。
+    // 各池数量签名 "plains/rich/birch/dark", 变化时才打日志。
     private String _lastBiomeSignature = null;
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
@@ -289,9 +294,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _heading = Double.NaN;
         _repathCount = 0;
         _plainsTargets = new ArrayList<>();
-        _forestTargets = new ArrayList<>();
+        _richForestTargets = new ArrayList<>();
+        _birchTargets = new ArrayList<>();
+        _darkForestTargets = new ArrayList<>();
         // (2026-09-23 [FOOD-BIOME] 首扫立即生效) 旧码 _scanTicker=0 → 实例新建
-        // (isFinished 失败 10 步后父任务会重建) 后头 50 tick(~2.5s) 两池全空,
+        // (isFinished 失败 10 步后父任务会重建) 后头 50 tick(~2.5s) 各池全空,
         // pickBiasedTarget 只能返回空 → 起步必走随机步, 偏置"看起来从没生效"
         // (20260923-201942 日志: 20:26:29 扫到 409 个平原点的同一秒 BiasStep 却
         // 是 random target=none, 即重建空窗)。初始置满, 首个 onTick 立即扫一轮。
@@ -324,7 +331,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         if (_biasExhausted) return null;
 
         // [FOOD-BIOME] 仅在找食物/找动物的探索 (foodExplore=true) 上周期性扫描
-        // 玩家附近已加载区块里的平原/森林食物富集群系: 平原最高优先, 森林兜底。
+        // 玩家附近已加载区块里的食物富集群系: 平原最优先, 森林按
+        // 橡木/花森林→白桦→深色橡林逐级兜底 (见 pickBiasedTarget)。
         // 其它探索走原逻辑, 不影响。纯增量, 不加递归、不碰 setTask/subTask/getPriority()。
         if (_foodExplore) {
             updateFoodBiomeBias(mod);
@@ -907,12 +915,14 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
-        // [FOOD-BIOME] 找食物/找动物探索三级优先 (2026-09-23 用户拍板):
+        // [FOOD-BIOME] 找食物/找动物探索五级优先 (2026-09-23 用户两次拍板):
         //   ① 平原点 —— 食物密度最高, 有就直奔最近的;
         //   ② biasSources 记忆点 (KillAndLootTask 传入"以前在这见过该动物")
-        //      —— 直接证据, 排在统计性的森林提示之前; CollectFoodTask 无
+        //      —— 直接证据, 排在统计性的群系提示之前; CollectFoodTask 无
         //      sources, 这一级天然跳过;
-        //   ③ 森林点 —— 附近没有平原、也没有动物记忆时才兜底。
+        //   ③ 橡木/花森林点 —— 动物齐全+橡苹果, 森林里最富;
+        //   ④ 白桦系点 —— 动物密度偏低且无苹果, ③ 扫不到才去;
+        //   ⑤ 深色橡木林点 —— 遮光无动物/白天刷怪/只有蘑菇, 最低档兜底。
         if (_foodExplore) {
             Optional<BlockPos> plains = nearestEligible(_plainsTargets, pos);
             if (plains.isPresent()) return plains;
@@ -929,7 +939,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (_foodExplore) {
-            return nearestEligible(_forestTargets, pos);
+            Optional<BlockPos> rich = nearestEligible(_richForestTargets, pos);
+            if (rich.isPresent()) return rich;
+            Optional<BlockPos> birch = nearestEligible(_birchTargets, pos);
+            if (birch.isPresent()) return birch;
+            return nearestEligible(_darkForestTargets, pos);
         }
         return Optional.empty();
     }
@@ -959,19 +973,20 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * [FOOD-BIOME] (2026-08-31 平原偏置, 2026-09-23 扩森林兜底, 用户需求)
-     * 周期扫描玩家周围已加载区块里的食物富集 biome, 收集其【干燥地表点】分两池
-     * 存入 {@code _plainsTargets} / {@code _forestTargets}, 供 pickBiasedTarget
-     * 按"平原→动物记忆→森林"三级导航。为什么只在 foodExplore 上启用 (见 onTick):
-     * 只有找食物/找动物的探索才需要直奔富食群系提高收获; 挖矿/砍木走洞穴/森林,
-     * 不应被群系偏置带偏。
+     * [FOOD-BIOME] (2026-08-31 平原偏置, 2026-09-23 森林分档, 用户需求)
+     * 周期扫描玩家周围已加载区块里的食物富集 biome, 收集其【干燥地表点】按档分
+     * 四池存入 {@code _plainsTargets} / {@code _richForestTargets} /
+     * {@code _birchTargets} / {@code _darkForestTargets}, 供 pickBiasedTarget
+     * 按"平原→动物记忆→橡木/花森林→白桦→深色橡林"五级导航。为什么只在
+     * foodExplore 上启用 (见 onTick): 只有找食物/找动物的探索才需要直奔富食
+     * 群系提高收获; 挖矿/砍木走洞穴/森林, 不应被群系偏置带偏。
      *
      * 视力口径: 只读【已加载区块】的 biome —— biome 是服务端随区块下发的地形
      * 数据, 与 baritone 读已加载方块同一可知性, 不涉及实体透视; 动物实体的发现
      * 仍全程走 EntityTracker 统一视力 (FOV/LOS/记忆窗口)。
      *
      * 节流: 每 FOODBIOME_SCAN_INTERVAL_TICKS tick 扫一次 (onStart 后立即首扫);
-     * 两池都空时按 FOODBIOME_EMPTY_LOG_INTERVAL 低节流记日志, 不刷屏。
+     * 四池都空时按 FOODBIOME_EMPTY_LOG_INTERVAL 低节流记日志, 不刷屏。
      */
     private void updateFoodBiomeBias(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return;
@@ -980,16 +995,29 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
         BlockPos player = mod.getPlayer().getBlockPos();
         List<BlockPos> plains = new ArrayList<>();
-        List<BlockPos> forests = new ArrayList<>();
+        List<BlockPos> richForests = new ArrayList<>();
+        List<BlockPos> birch = new ArrayList<>();
+        List<BlockPos> darkForests = new ArrayList<>();
         for (int dx = -FOODBIOME_SCAN_RADIUS; dx <= FOODBIOME_SCAN_RADIUS; dx += FOODBIOME_SCAN_STEP) {
             for (int dz = -FOODBIOME_SCAN_RADIUS; dz <= FOODBIOME_SCAN_RADIUS; dz += FOODBIOME_SCAN_STEP) {
                 BlockPos check = new BlockPos(player.getX() + dx, player.getY(), player.getZ() + dz);
                 // 只扫已加载区块, 未加载的不算数。
                 if (!mod.getChunkTracker().isChunkLoaded(check)) continue;
-                // getBiome 按 xz 列返回 biome, 用 matchesKey 判群系档位。
+                // getBiome 按 xz 列返回 biome, 用 matchesKey 判群系档位 (互斥,
+                // 先平原再三档森林, 都不命中跳过)。
                 RegistryEntry<Biome> biome = mod.getWorld().getBiome(check);
-                boolean isPlains = WorldHelper.isPlains(biome);
-                if (!isPlains && !WorldHelper.isFoodForest(biome)) continue;
+                List<BlockPos> tierPool;
+                if (WorldHelper.isPlains(biome)) {
+                    tierPool = plains;
+                } else if (WorldHelper.isRichFoodForest(biome)) {
+                    tierPool = richForests;
+                } else if (WorldHelper.isBirchForest(biome)) {
+                    tierPool = birch;
+                } else if (WorldHelper.isDarkForest(biome)) {
+                    tierPool = darkForests;
+                } else {
+                    continue;
+                }
                 // 目标定位到该列【忽略树冠的地表】(M2, 高度图 O(1) 同取代逐格下扫
                 // 的 getGroundHeight=M3): 与步点 candY 完全同一口径, 否则森林里
                 // 目标在地面、步点在树冠顶 → 爬冠超时误拉黑。getTopY 返回最高匹配
@@ -1000,32 +1028,39 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 // (河/湖上的列, MOTION_BLOCKING 含流体) → 落点在水里。这类点不作
                 // 为导航目标: 直奔它会把 bot 带到水面。
                 if (!isDryLanding(mod, landing)) continue;
-                (isPlains ? plains : forests).add(landing);
+                tierPool.add(landing);
             }
         }
 
         _plainsTargets = plains;
-        _forestTargets = forests;
+        _richForestTargets = richForests;
+        _birchTargets = birch;
+        _darkForestTargets = darkForests;
 
         // (2026-09-23 L1 修复, 独立审查) 旧码空池计数被关在"签名变化"分支里:
         // 持续荒芜时签名恒为 0/0, 计数永远停在 1, 空扫描日志再也打不出来。
         // 改为每轮独立计数; 非空日志仍只在数量签名变化时打印, 不刷屏。
-        String signature = plains.size() + "/" + forests.size();
-        if (!plains.isEmpty() || !forests.isEmpty()) {
+        String signature = plains.size() + "/" + richForests.size() + "/"
+                + birch.size() + "/" + darkForests.size();
+        boolean any = !plains.isEmpty() || !richForests.isEmpty()
+                || !birch.isEmpty() || !darkForests.isEmpty();
+        if (any) {
             _foodBiomeEmptyLogCounter = 0;
             if (!signature.equals(_lastBiomeSignature)) {
                 Debug.logToFile("altoclef_diag.log",
                         "[FOOD-BIOME] food explore: player=" + player
-                                + " plains=" + plains.size() + " nearest=" + nearestOf(plains, mod)
-                                + " | forest=" + forests.size() + " nearest=" + nearestOf(forests, mod)
-                                + " (tier: plains > animal memory > forest)");
+                                + " plains=" + plains.size() + "@" + nearestOf(plains, mod)
+                                + " richForest=" + richForests.size() + "@" + nearestOf(richForests, mod)
+                                + " birch=" + birch.size() + "@" + nearestOf(birch, mod)
+                                + " darkForest=" + darkForests.size() + "@" + nearestOf(darkForests, mod)
+                                + " (tier: plains > animal memory > richForest > birch > darkForest)");
             }
         } else {
             _foodBiomeEmptyLogCounter++;
-            // 两池都空: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
+            // 四池都空: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
             if (_foodBiomeEmptyLogCounter >= FOODBIOME_EMPTY_LOG_INTERVAL) {
                 Debug.logToFile("altoclef_diag.log",
-                        "[FOOD-BIOME] food explore: no plains/food-forest nearby, player=" + player
+                        "[FOOD-BIOME] food explore: no food-rich biome nearby, player=" + player
                                 + " (keeping default behavior)");
                 _foodBiomeEmptyLogCounter = 0;
             }

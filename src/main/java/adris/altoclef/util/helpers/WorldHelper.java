@@ -612,26 +612,42 @@ public interface WorldHelper {
     }
 
     /**
-     * (2026-09-23 [FOOD-BIOME], 用户拍板"草原或白桦林/深色橡木林/橡木林食物
-     * 最丰富, 平原优先森林兜底") 食物富集【森林】系 biome —— 第二档: 附近已加载
-     * 区块扫不到平原时才作为兜底导航目标。
+     * (2026-09-23 [FOOD-BIOME], 用户拍板"森林也是有差别的, 不是所有森林都食物
+     * 丰富") 森林按食物产出再分三档, 导航选择顺序:
+     * 平原 → 动物记忆点 → 橡木/花森林 → 白桦系 → 深色橡木林。
+     *
+     * <h3>三档的原版机制依据 (1.18.2 生成规则)</h3>
+     * 被动动物自然生成需要草方块+光照&gt;8:
      * <ul>
-     *   <li>{@link BiomeKeys#FOREST} 橡木林本体 (普通森林是橡树+桦树混交)</li>
-     *   <li>{@link BiomeKeys#FLOWER_FOREST} 花森林 (用户确认纳入: 橡树+开阔地表)</li>
-     *   <li>{@link BiomeKeys#BIRCH_FOREST} / {@link BiomeKeys#OLD_GROWTH_BIRCH_FOREST}
-     *       白桦林 / 原始白桦林</li>
-     *   <li>{@link BiomeKeys#DARK_FOREST} 深色橡木林</li>
+     *   <li>第二档 {@link #isRichFoodForest} —— {@link BiomeKeys#FOREST}
+     *       (橡树+桦树混交, 动物刷怪表齐全且橡树落叶掉苹果) 与
+     *       {@link BiomeKeys#FLOWER_FOREST} (冠层开阔光照足, 动物正常刷)。</li>
+     *   <li>第三档 {@link #isBirchForest} —— {@link BiomeKeys#BIRCH_FOREST} /
+     *       {@link BiomeKeys#OLD_GROWTH_BIRCH_FOREST}: 刷怪表有动物但有效密度
+     *       偏低, 白桦不掉苹果也无浆果。</li>
+     *   <li>第四档 {@link #isDarkForest} —— {@link BiomeKeys#DARK_FOREST}:
+     *       致密深色橡树冠近乎全遮光 (地面光照 4~5), 动物光照条件基本不满足,
+     *       白天也刷怪; 仅有红/棕蘑菇 (不做蘑菇煲不是即食食物)。用户拍板
+     *       保留在【最低档】: 只在前三档全扫不到时才去, 而非完全排除。</li>
      * </ul>
      * 注意: biome 是随区块下发的【地形数据】(与 baritone 读已加载方块同一可知性
      * 口径), 不是实体感知 —— 动物实体仍全程走 EntityTracker 的 FOV/LOS/记忆
      * 统一视力, 本判定不涉及任何透视。
      */
-    static boolean isFoodForest(RegistryEntry<Biome> b){
+    static boolean isRichFoodForest(RegistryEntry<Biome> b){
         return (b.matchesKey(BiomeKeys.FOREST)
-        || b.matchesKey(BiomeKeys.FLOWER_FOREST)
-        || b.matchesKey(BiomeKeys.BIRCH_FOREST)
-        || b.matchesKey(BiomeKeys.OLD_GROWTH_BIRCH_FOREST)
-        || b.matchesKey(BiomeKeys.DARK_FOREST));
+        || b.matchesKey(BiomeKeys.FLOWER_FOREST));
+    }
+
+    /** [FOOD-BIOME] 第三档森林: 白桦林 / 原始白桦林 (见 {@link #isRichFoodForest})。 */
+    static boolean isBirchForest(RegistryEntry<Biome> b){
+        return (b.matchesKey(BiomeKeys.BIRCH_FOREST)
+        || b.matchesKey(BiomeKeys.OLD_GROWTH_BIRCH_FOREST));
+    }
+
+    /** [FOOD-BIOME] 第四档(最低)森林: 深色橡木林 (见 {@link #isRichFoodForest})。 */
+    static boolean isDarkForest(RegistryEntry<Biome> b){
+        return b.matchesKey(BiomeKeys.DARK_FOREST);
     }
 
     static boolean isAir(AltoClef mod, BlockPos pos) {

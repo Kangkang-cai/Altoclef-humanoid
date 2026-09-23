@@ -670,8 +670,8 @@ public class CollectFoodTask extends Task {
         // TimeoutWanderTask(30) 走 Baritone 原生随机探索(ExploreProcess), 落点
         // 可能在海洋 → 直接一路游进大海(用户实测游荡下水)。改用
         // BiasedExploreTask(foodExplore=true): 它自带海洋落点拒绝(isTargetOcean,
-        // 过河放行) + 食物富集群系偏置(2026-09-23: 平原优先, 扫不到平原时白桦林/
-        // 深色橡木林/橡木林/花森林兜底, 动物/作物更集中, 找食物更快), 不再往
+        // 过河放行) + 食物富集群系偏置(2026-09-23: 平原优先, 森林按橡木/花森林
+        // →白桦→深色橡木林逐级兜底, 动物/作物更集中, 找食物更快), 不再往
         // 海洋方向探索。结合上方"跳过海洋 biome 的猎杀目标"双管齐下。
         // (2026-09-03 修复"走一格就换线找食物", 用户) 此处必须粘性复用探索实例:
         // BiasedExploreTask.isEqual 是 identity(other==this), 若直接 return new,

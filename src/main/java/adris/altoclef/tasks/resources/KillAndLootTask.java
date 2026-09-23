@@ -54,11 +54,12 @@ public class KillAndLootTask extends ResourceTask {
             // Steer toward places we remember seeing this mob before.
             // Reuse the cached instance; only swap once it finished.
             if (_exploreTask == null || _exploreTask.isFinished(mod)) {
-                // [FOOD-BIOME] (2026-08-31 用户需求, 2026-09-23 扩森林兜底)
+                // [FOOD-BIOME] (2026-08-31 用户需求, 2026-09-23 森林分档)
                 // CollectFoodTask → killTaskOrNull 触发的找动物/找食物探索:
-                // foodExplore=true 让探索机制 100% 偏置走向食物富集群系 —— 平原
-                // 最优先, 其次本动物的记忆点, 扫不到平原时森林群系兜底, 提高动物/
-                // 食物收获概率。挖矿/砍木等 non-food 探索不经过这里, 不受影响。
+                // foodExplore=true 让探索机制按档级偏置走向食物富集群系 —— 平原
+                // 最优先, 其次本动物的记忆点, 再按橡木/花森林→白桦→深色橡林逐级
+                // 兜底, 提高动物/食物收获概率。挖矿/砍木等 non-food 探索不经过
+                // 这里, 不受影响。
                 _exploreTask = new BiasedExploreTask(true, () -> mod.getWorldMemory().getAnimalLocations((Class<?>) _toKill));
             }
             return _exploreTask;
