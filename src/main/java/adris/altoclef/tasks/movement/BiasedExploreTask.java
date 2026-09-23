@@ -542,7 +542,16 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // 抵达位置的地表高度, 而非玩家当前 y。
             int candX = (int) Math.floor(pos.x + Math.cos(angle) * stepLen);
             int candZ = (int) Math.floor(pos.z + Math.sin(angle) * stepLen);
-            int candY = surfaceYAt(mod, candX, candZ, (int) Math.floor(pos.y));
+            // (2026-09-23 [FOOD-BIOME] M2 树冠 y 错配修复, 独立审查实证) 找食物探索
+            // 的落点 y 用 MOTION_BLOCKING_NO_LEAVES 高度图(忽略树叶/蘑菇冠): 森林里
+            // WORLD_SURFACE 给的是树冠顶空气格 → baritone goal 落在树冠上, 每步砍叶
+            // 爬冠 6s 超时, 还把完全可达的【地面】群系点 markUnreachable 跨实例误拉黑
+            // (树叶经字节码实证 blocksLight=false, 本就不是 solid)。非食物探索维持
+            // surfaceYAt 原口径, 零影响。
+            int fallbackY = (int) Math.floor(pos.y);
+            int candY = _foodExplore
+                    ? surfaceYNoLeavesAt(mod, candX, candZ, fallbackY)
+                    : surfaceYAt(mod, candX, candZ, fallbackY);
             BlockPos candidate = new BlockPos(candX, candY, candZ);
             // (20260918 用户"站在地表上后探索不许再导航到地下 —— 导航到空气位置, 非空气拒绝")
             // bot 自己在地表时, 落点脚+头必须是空气或流体; 实体方块(数据洞落进洞穴底/兜底
@@ -590,19 +599,43 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                         ? Math.max(0, biasDist - ARRIVED_DISTANCE) : Double.POSITIVE_INFINITY;
                 BlockPos dry = findDryLandingAlong(mod, pos, angle, maxResample);
                 if (dry == null || _failedTargets.contains(dry) || isUnreachable(dry)) {
-                    _failedTargets.add(candidate);
+                    // (2026-09-23 [FOOD-BIOME] M1 近距跨水 churn 修复, 独立审查实证)
+                    // 距离表最小项 16: bias 目标 <19 格且中间隔着池塘/河湾时, 沿锥内
+                    // 12 个角度重采样【必然全灭】→ 每 tick _failCounter++ → ~0.5s
+                    // isFinished → 父任务重建 → 扫描再生出同一个干目标(不拉黑) →
+                    // 原地无限重建, KillAndLoot 路径无远征兜底尤其致命。bias 目标
+                    // 本身是扫描时验证过的干落点: 直接以它为落点, 让 baritone 自己
+                    // 涉水/找路 (窄水它自己过得去); 后续宽水(RIVER_CAP)/海洋闸门照旧
+                    // 会拦, 这里不豁免任何水路限制。
+                    boolean directFallback = _lastWasBiased
+                            && _currentBiasTarget != null
+                            && isDryLanding(mod, _currentBiasTarget)
+                            && !_failedTargets.contains(_currentBiasTarget)
+                            && !isUnreachable(_currentBiasTarget);
+                    if (directFallback) {
+                        Debug.logToFile("altoclef_diag.log",
+                                "[DRY-LANDING] food explore: no dry resample within "
+                                        + (Double.isInfinite(maxResample) ? "inf" : (int) maxResample)
+                                        + " (wet " + candidate.toShortString()
+                                        + ") -> direct goal to dry bias target "
+                                        + _currentBiasTarget.toShortString());
+                        candidate = _currentBiasTarget;
+                    } else {
+                        _failedTargets.add(candidate);
+                        Debug.logToFile("altoclef_diag.log",
+                                "[DRY-LANDING] food explore: no dry landing along "
+                                        + (int) Math.toDegrees(angle) + " deg from " + pos
+                                        + " (wet " + candidate.toShortString()
+                                        + ", maxResample=" + (Double.isInfinite(maxResample) ? "inf" : (int) maxResample)
+                                        + "), picking another direction");
+                        continue;
+                    }
+                } else {
                     Debug.logToFile("altoclef_diag.log",
-                            "[DRY-LANDING] food explore: no dry landing along "
-                                    + (int) Math.toDegrees(angle) + " deg from " + pos
-                                    + " (wet " + candidate.toShortString()
-                                    + ", maxResample=" + (Double.isInfinite(maxResample) ? "inf" : (int) maxResample)
-                                    + "), picking another direction");
-                    continue;
+                            "[DRY-LANDING] food explore: wet landing " + candidate.toShortString()
+                                    + " -> dry landing " + dry.toShortString());
+                    candidate = dry;
                 }
-                Debug.logToFile("altoclef_diag.log",
-                        "[DRY-LANDING] food explore: wet landing " + candidate.toShortString()
-                                + " -> dry landing " + dry.toShortString());
-                candidate = dry;
             }
             // Don't explore into water: swimming is slow, drowning is a risk and
             // targets (mobs, ores, ...) are rarely found in the middle of a lake.
@@ -752,7 +785,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (dist > maxDistance) continue;
             int x = (int) Math.floor(pos.x + Math.cos(angle) * dist);
             int z = (int) Math.floor(pos.z + Math.sin(angle) * dist);
-            int y = surfaceYAt(mod, x, z, fallbackY);
+            // 仅 foodExplore 调用: 与步点/扫描同口径, 忽略树冠取地面 (M2)。
+            int y = surfaceYNoLeavesAt(mod, x, z, fallbackY);
             BlockPos cand = new BlockPos(x, y, z);
             if (isDryLanding(mod, cand)) return cand;
         }
@@ -852,6 +886,26 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         return wsTop;
     }
 
+    /**
+     * (2026-09-23 [FOOD-BIOME] M2/M3, 独立审查加固) 该 xz 坐标【忽略树叶/蘑菇冠】
+     * 的地表站立高度: MOTION_BLOCKING_NO_LEAVES 高度图顶 = 地面 (草/泥/沙/水/
+     * 树干柱顶), 不含橡木/白桦/深色橡树叶与巨型蘑菇冠。
+     * <ul>
+     *   <li>M2: 森林步点与扫描目标统一用本口径, 步点不再落在树冠顶 → baritone
+     *       不再砍叶爬冠、可达的地面群系点不再被 6s 超时误判 unreachable 拉黑。</li>
+     *   <li>M3: 高度图是服务端随区块下发的 O(1) 查询, 取代 WorldHelper
+     *       .getGroundHeight 从 y=319 逐格下扫 (~190 次 getBlockState/列)。</li>
+     * </ul>
+     * 哨兵口径与 {@link #surfaceYAt} 一致: 世界为空/未加载返回 fallbackY。
+     */
+    private int surfaceYNoLeavesAt(AltoClef mod, int x, int z, int fallbackY) {
+        if (mod.getWorld() == null) return fallbackY;
+        if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
+        int top = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+        if (top <= mod.getWorld().getBottomY() + 1) return fallbackY;
+        return top;
+    }
+
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
         // [FOOD-BIOME] 找食物/找动物探索三级优先 (2026-09-23 用户拍板):
         //   ① 平原点 —— 食物密度最高, 有就直奔最近的;
@@ -936,13 +990,14 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 RegistryEntry<Biome> biome = mod.getWorld().getBiome(check);
                 boolean isPlains = WorldHelper.isPlains(biome);
                 if (!isPlains && !WorldHelper.isFoodForest(biome)) continue;
-                // 目标定位到该列地表 (最高实心方块上方一格), 否则 bot 会往地下/天上走。
-                int sy = WorldHelper.getGroundHeight(mod, check.getX(), check.getZ());
-                // 只取一个代表点: 每列地表; 附近 160 格最多约 (160*2/8)^2 个点,
-                // 足够导航又不至于塞爆 visited 集合。
-                BlockPos landing = sy >= 0 ? new BlockPos(check.getX(), sy + 1, check.getZ()) : check;
+                // 目标定位到该列【忽略树冠的地表】(M2, 高度图 O(1) 同取代逐格下扫
+                // 的 getGroundHeight=M3): 与步点 candY 完全同一口径, 否则森林里
+                // 目标在地面、步点在树冠顶 → 爬冠超时误拉黑。getTopY 返回最高匹配
+                // 方块上方的空气格 y, 直接就是站立点, 不再 +1; 未加载列回退玩家 y。
+                int sy = surfaceYNoLeavesAt(mod, check.getX(), check.getZ(), check.getY());
+                BlockPos landing = new BlockPos(check.getX(), sy, check.getZ());
                 // (2026-09-16 用户"收集食物不要在水上") 富食 biome 也可能铺在水面
-                // (河/湖上的列, 最高实心方块是水下沙/泥) → 落点在水里。这类点不作
+                // (河/湖上的列, MOTION_BLOCKING 含流体) → 落点在水里。这类点不作
                 // 为导航目标: 直奔它会把 bot 带到水面。
                 if (!isDryLanding(mod, landing)) continue;
                 (isPlains ? plains : forests).add(landing);
@@ -952,27 +1007,30 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _plainsTargets = plains;
         _forestTargets = forests;
 
-        // 两池数量签名变化 (或首次扫描) 才记一行, 降低刷屏; 随移动群系点变化仍可观测。
+        // (2026-09-23 L1 修复, 独立审查) 旧码空池计数被关在"签名变化"分支里:
+        // 持续荒芜时签名恒为 0/0, 计数永远停在 1, 空扫描日志再也打不出来。
+        // 改为每轮独立计数; 非空日志仍只在数量签名变化时打印, 不刷屏。
         String signature = plains.size() + "/" + forests.size();
-        if (!signature.equals(_lastBiomeSignature)) {
-            if (!plains.isEmpty() || !forests.isEmpty()) {
+        if (!plains.isEmpty() || !forests.isEmpty()) {
+            _foodBiomeEmptyLogCounter = 0;
+            if (!signature.equals(_lastBiomeSignature)) {
                 Debug.logToFile("altoclef_diag.log",
                         "[FOOD-BIOME] food explore: player=" + player
                                 + " plains=" + plains.size() + " nearest=" + nearestOf(plains, mod)
                                 + " | forest=" + forests.size() + " nearest=" + nearestOf(forests, mod)
                                 + " (tier: plains > animal memory > forest)");
-            } else {
-                _foodBiomeEmptyLogCounter++;
-                // 两池都空: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
-                if (_foodBiomeEmptyLogCounter >= FOODBIOME_EMPTY_LOG_INTERVAL) {
-                    Debug.logToFile("altoclef_diag.log",
-                            "[FOOD-BIOME] food explore: no plains/food-forest nearby, player=" + player
-                                    + " (keeping default behavior)");
-                    _foodBiomeEmptyLogCounter = 0;
-                }
             }
-            _lastBiomeSignature = signature;
+        } else {
+            _foodBiomeEmptyLogCounter++;
+            // 两池都空: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
+            if (_foodBiomeEmptyLogCounter >= FOODBIOME_EMPTY_LOG_INTERVAL) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-BIOME] food explore: no plains/food-forest nearby, player=" + player
+                                + " (keeping default behavior)");
+                _foodBiomeEmptyLogCounter = 0;
+            }
         }
+        _lastBiomeSignature = signature;
     }
 
     /** 池内距玩家最近的点 (诊断日志用), 空池返回 null。 */
