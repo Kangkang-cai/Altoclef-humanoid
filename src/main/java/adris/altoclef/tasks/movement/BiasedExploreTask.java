@@ -13,7 +13,9 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.registry.RegistryEntry;
 import net.minecraft.world.Heightmap;
+import net.minecraft.world.biome.Biome;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -87,6 +89,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
 
     // Probability that a new exploration step is steered towards a known target.
     private static final double P_BIASED = 0.85;
+    // (2026-09-23 [FOOD-BIOME]) 找食物/找动物探索的偏置概率: 1.0 = 附近扫到
+    // 平原/森林富食点就每一步直奔, 不掷反向随机步 (稀释事故见 chooseNewTarget)。
+    private static final double P_BIASED_FOOD = 1.0;
     // How wide the steering cone around the exact target direction is (degrees).
     private static final double BIAS_ANGLE_DEG = 12;
     // How far each exploration step goes.
@@ -127,29 +132,34 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // 全部落水才判该方向不可用, 换角度重试。
     private static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
 
-    // [PLAINS-BIAS] 找食物/找动物专用的平原偏置 (foodExplore=true 时才启用)。
-    // 草原是动物/作物收获概率最高的地表 biome, 这是用户需求: 找食物/动物时
-    // 探索机制内部优先 100% 导航到平原, 提高收获。挖矿/砍木等 non-food 探索
-    // 一律不启用 (foodExplore=false), 绝不改跑去别的 biome。
-    private static final int PLAINS_SCAN_INTERVAL_TICKS = 50; // 每 50 tick(~2.5s) 周期扫描, 足够节流
+    // [FOOD-BIOME] 找食物/找动物专用的食物富集群系偏置 (foodExplore=true 时才启用)。
+    // 两档 (2026-09-23 用户拍板"平原优先, 森林兜底"):
+    //   ① 平原系 PLAINS/SUNFLOWER_PLAINS —— 动物/作物密度最高, 最优先;
+    //   ② 森林系 FOREST/FLOWER_FOREST/BIRCH_FOREST/OLD_GROWTH_BIRCH_FOREST/
+    //     DARK_FOREST —— 附近扫不到平原时兜底 (花森林用户确认纳入)。
+    // 挖矿/砍木等 non-food 探索一律不启用 (foodExplore=false), 绝不改跑去别的 biome。
+    private static final int FOODBIOME_SCAN_INTERVAL_TICKS = 50; // 每 50 tick(~2.5s) 周期扫描, 足够节流
     // 已加载区块内扫描半径 (格)。略小于步长 48*? 保持远, 但小于 BIAS_MAX_DISTANCE(256) 才会被选中。
-    private static final int PLAINS_SCAN_RADIUS = 160;
+    private static final int FOODBIOME_SCAN_RADIUS = 160;
     // 扫描采样步长 (格): 每 8 格取一列判 biome, 平衡开销与覆盖。
-    private static final int PLAINS_SCAN_STEP = 8;
-    // "没检测到平原" 日志的低节流: 每 N 次空扫描才写一行, 不刷屏。
-    private static final int PLAINS_EMPTY_LOG_INTERVAL = 10;
+    private static final int FOODBIOME_SCAN_STEP = 8;
+    // "没检测到食物富集群系" 日志的低节流: 每 N 次空扫描才写一行, 不刷屏。
+    private static final int FOODBIOME_EMPTY_LOG_INTERVAL = 10;
 
     private final List<Supplier<Collection<BlockPos>>> _biasSources;
 
-    // [PLAINS-BIAS] 是否"找食物/找动物"的探索 (仅 KillAndLootTask 创建时为 true)。
-    // true 时在已加载区块内周期性扫描平原 biome, 并作为最高优先级 bias 目标
-    // 优先 100% 导航过去。挖矿/砍木等 non-food 探索保持 false, 完全不受影响。
+    // [FOOD-BIOME] 是否"找食物/找动物"的探索 (CollectFoodTask / KillAndLootTask
+    // 创建时为 true)。true 时在已加载区块内周期性扫描平原/森林食物富集群系,
+    // 平原点作为最高优先级 bias 目标、森林点兜底, 100% 导航过去。挖矿/砍木等
+    // non-food 探索保持 false, 完全不受影响。
     private final boolean _foodExplore;
-    // 最近一次扫描到玩家周围已加载区块里的平原系地表点 (找食物探索专用)。
+    // 最近一次扫描到玩家周围已加载区块里的平原系/森林系地表点 (找食物探索专用)。
     private List<BlockPos> _plainsTargets = new ArrayList<>();
+    private List<BlockPos> _forestTargets = new ArrayList<>();
     private int _scanTicker = 0;
-    private int _plainsEmptyLogCounter = 0;
-    private int _lastFoundCount = -1;
+    private int _foodBiomeEmptyLogCounter = 0;
+    // 两池数量签名 "plains/forest", 变化时才打日志。
+    private String _lastBiomeSignature = null;
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final Set<BlockPos> _failedTargets = new HashSet<>();
@@ -279,9 +289,15 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _heading = Double.NaN;
         _repathCount = 0;
         _plainsTargets = new ArrayList<>();
-        _scanTicker = 0;
-        _plainsEmptyLogCounter = 0;
-        _lastFoundCount = -1;
+        _forestTargets = new ArrayList<>();
+        // (2026-09-23 [FOOD-BIOME] 首扫立即生效) 旧码 _scanTicker=0 → 实例新建
+        // (isFinished 失败 10 步后父任务会重建) 后头 50 tick(~2.5s) 两池全空,
+        // pickBiasedTarget 只能返回空 → 起步必走随机步, 偏置"看起来从没生效"
+        // (20260923-201942 日志: 20:26:29 扫到 409 个平原点的同一秒 BiasStep 却
+        // 是 random target=none, 即重建空窗)。初始置满, 首个 onTick 立即扫一轮。
+        _scanTicker = FOODBIOME_SCAN_INTERVAL_TICKS;
+        _foodBiomeEmptyLogCounter = 0;
+        _lastBiomeSignature = null;
     }
 
     @Override
@@ -307,11 +323,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // parent task can re-decide (e.g. go dig instead of circling the surface).
         if (_biasExhausted) return null;
 
-        // [PLAINS-BIAS] 仅在找食物/找动物的探索 (foodExplore=true) 上周期性扫描
-        // 玩家附近已加载区块里的平原 biome, 作为最高优先级导航目标。其它探索走
-        // 原逻辑, 不影响。纯增量, 不加递归、不碰 setTask/subTask/getPriority()。
+        // [FOOD-BIOME] 仅在找食物/找动物的探索 (foodExplore=true) 上周期性扫描
+        // 玩家附近已加载区块里的平原/森林食物富集群系: 平原最高优先, 森林兜底。
+        // 其它探索走原逻辑, 不影响。纯增量, 不加递归、不碰 setTask/subTask/getPriority()。
         if (_foodExplore) {
-            updatePlainsBias(mod);
+            updateFoodBiomeBias(mod);
         }
 
         if (_currentTarget == null || arrivedAtCurrentTarget(mod)) {
@@ -485,8 +501,15 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 _currentBiasTarget = null;
                 _biasHops = 0;
                 _lastWasBiased = false;
-            } else if (biased.isPresent() && Math.random() < P_BIASED) {
+            } else if (biased.isPresent() && Math.random() < (_foodExplore ? P_BIASED_FOOD : P_BIASED)) {
                 // Steer towards the target, with some randomness around its direction.
+                // (2026-09-23 [FOOD-BIOME] 偏置稀释修复) 食物探索用 P_BIASED_FOOD=1.0:
+                // 旧值 0.85 在日志里的实际贡献惨不忍睹 —— 20260923-201942 六分钟内
+                // BiasStep 仅 3 步 biased、其余全 random, bot 在最近平原 30~80 格处
+                // 乱走 (z 冲到 95 又折回), 用户肉眼"完全没看出平原偏置生效"。根因:
+                // 一个 48 格随机步被粘性坚持走 10~75s (还被猎杀/拾取打断延长),
+                // 15% 的反向概率被一步的长耗时放大成轨迹主导。食物探索的发现由父
+                // 任务每 tick 扫描负责, 这里不需要靠随机步探索, 有富食群系点就直奔。
                 double toTarget = Math.atan2(biased.get().getZ() - pos.z, biased.get().getX() - pos.x);
                 double spread = Math.toRadians(BIAS_ANGLE_DEG);
                 angle = toTarget + (Math.random() * 2 - 1) * spread;
@@ -558,13 +581,22 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // 非 foodExplore (村庄箱子等"过河取物") 保持原样放行, 不推翻既有
             // "过河可以、下海不行"的定论。
             if (_foodExplore && !isDryLanding(mod, candidate)) {
-                BlockPos dry = findDryLandingAlong(mod, pos, angle);
+                // (2026-09-23 [FOOD-BIOME] 重采样跨越修复) biased 步只允许采到
+                // 【不越过 bias 目标】的距离: 日志 20260923-201942 20:26:16 实证
+                // target 仅 10 格、step 截断成 8, 湿点重采样却选了 64 格外的干落点
+                // (DRY_LANDING_DISTANCES 首项 64), bot 直接跨过平原目标朝反方向走。
+                // 上限 = biasDist-3; 随机步 (biasDist=+inf) 维持全距离表不变。
+                double maxResample = (_lastWasBiased && Double.isFinite(biasDist))
+                        ? Math.max(0, biasDist - ARRIVED_DISTANCE) : Double.POSITIVE_INFINITY;
+                BlockPos dry = findDryLandingAlong(mod, pos, angle, maxResample);
                 if (dry == null || _failedTargets.contains(dry) || isUnreachable(dry)) {
                     _failedTargets.add(candidate);
                     Debug.logToFile("altoclef_diag.log",
                             "[DRY-LANDING] food explore: no dry landing along "
                                     + (int) Math.toDegrees(angle) + " deg from " + pos
-                                    + " (wet " + candidate.toShortString() + "), picking another direction");
+                                    + " (wet " + candidate.toShortString()
+                                    + ", maxResample=" + (Double.isInfinite(maxResample) ? "inf" : (int) maxResample)
+                                    + "), picking another direction");
                     continue;
                 }
                 Debug.logToFile("altoclef_diag.log",
@@ -711,10 +743,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      * (2026-09-16) 沿 {@code angle} 方向按 {@link #DRY_LANDING_DISTANCES} 重新采样,
      * 返回第一个干燥落点; 全是水返回 null。y 取该列地表 (surfaceYAt), 与正常 step
      * 落点同样的口径。
+     * (2026-09-23) maxDistance: biased 步不得重采样到越过 bias 目标的距离
+     * (传入 biasDist-ARRIVED_DISTANCE); 随机步传 +inf 保持原全距离表。
      */
-    private BlockPos findDryLandingAlong(AltoClef mod, Vec3d pos, double angle) {
+    private BlockPos findDryLandingAlong(AltoClef mod, Vec3d pos, double angle, double maxDistance) {
         int fallbackY = (int) Math.floor(pos.y);
         for (double dist : DRY_LANDING_DISTANCES) {
+            if (dist > maxDistance) continue;
             int x = (int) Math.floor(pos.x + Math.cos(angle) * dist);
             int z = (int) Math.floor(pos.z + Math.sin(angle) * dist);
             int y = surfaceYAt(mod, x, z, fallbackY);
@@ -818,117 +853,138 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
-        // [PLAINS-BIAS] 找食物/找动物探索: 只要附近已加载区块内扫到平原点,
-        // 就 100% 优先导航到最近的平原点 (直奔草原再找动物/作物)。这些平原点
-        // 是最高优先级, 其它 bias (动物记忆点等) 只有在没有平原点时才考虑。
-        if (_foodExplore && !_plainsTargets.isEmpty()) {
-            BlockPos best = null;
-            double bestDist = Double.POSITIVE_INFINITY;
-            for (BlockPos candidate : _plainsTargets) {
-                if (candidate == null) continue;
-                if (_visitedBiasTargets.contains(candidate)) continue;
-                if (isUnreachable(candidate)) continue;
-                if (!candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) continue;
-                double d = candidate.getSquaredDistance(pos);
-                if (d < bestDist) {
-                    bestDist = d;
-                    best = candidate;
-                }
-            }
-            if (best != null) return Optional.of(best);
+        // [FOOD-BIOME] 找食物/找动物探索三级优先 (2026-09-23 用户拍板):
+        //   ① 平原点 —— 食物密度最高, 有就直奔最近的;
+        //   ② biasSources 记忆点 (KillAndLootTask 传入"以前在这见过该动物")
+        //      —— 直接证据, 排在统计性的森林提示之前; CollectFoodTask 无
+        //      sources, 这一级天然跳过;
+        //   ③ 森林点 —— 附近没有平原、也没有动物记忆时才兜底。
+        if (_foodExplore) {
+            Optional<BlockPos> plains = nearestEligible(_plainsTargets, pos);
+            if (plains.isPresent()) return plains;
         }
 
-        if (_biasSources.isEmpty()) return Optional.empty();
+        if (!_biasSources.isEmpty()) {
+            List<BlockPos> sourcePoints = new ArrayList<>();
+            for (Supplier<Collection<BlockPos>> source : _biasSources) {
+                Collection<BlockPos> candidates = source == null ? null : source.get();
+                if (candidates != null) sourcePoints.addAll(candidates);
+            }
+            Optional<BlockPos> remembered = nearestEligible(sourcePoints, pos);
+            if (remembered.isPresent()) return remembered;
+        }
+
+        if (_foodExplore) {
+            return nearestEligible(_forestTargets, pos);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * [FOOD-BIOME] 从候选点池里挑"最近且当前可用"的一个: 排除已访问、跨实例
+     * 拉黑 TTL 内、超出 BIAS_MAX_DISTANCE 的点。池空/全不可用返回 empty。
+     */
+    private Optional<BlockPos> nearestEligible(List<BlockPos> pool, Vec3d pos) {
         BlockPos best = null;
         double bestDist = Double.POSITIVE_INFINITY;
-        for (Supplier<Collection<BlockPos>> source : _biasSources) {
-            Collection<BlockPos> candidates = source == null ? null : source.get();
-            if (candidates == null) continue;
-            for (BlockPos candidate : candidates) {
-                if (candidate == null) continue;
-                // Already walked to this one — don't steer back to it forever.
-                if (_visitedBiasTargets.contains(candidate)) continue;
-                // (2026-09-17 P0 拉黑) 跨实例: 上一个实例判过"够不着"的目标, 本实例
-                // (父任务重建出来的) 也不该再选它。TTL 到期自动放行。
-                if (isUnreachable(candidate)) continue;
-                if (candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) {
-                    double d = candidate.getSquaredDistance(pos);
-                    if (d < bestDist) {
-                        bestDist = d;
-                        best = candidate;
-                    }
-                }
+        for (BlockPos candidate : pool) {
+            if (candidate == null) continue;
+            // Already walked to this one — don't steer back to it forever.
+            if (_visitedBiasTargets.contains(candidate)) continue;
+            // (2026-09-17 P0 拉黑) 跨实例: 上一个实例判过"够不着"的目标, 本实例
+            // (父任务重建出来的) 也不该再选它。TTL 到期自动放行。
+            if (isUnreachable(candidate)) continue;
+            if (!candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) continue;
+            double d = candidate.getSquaredDistance(pos);
+            if (d < bestDist) {
+                bestDist = d;
+                best = candidate;
             }
         }
         return Optional.ofNullable(best);
     }
 
     /**
-     * [PLAINS-BIAS] (2026-08-31, 用户需求) 周期扫描玩家周围已加载区块里的
-     * 平原系 biome, 收集其地表点存入 {@code _plainsTargets} 供 pickBiasedTarget
-     * 100% 优先导航。为什么只在 foodExplore 上启用 (见 onTick): 只有找食物/找动物
-     * 的探索才需要直奔草原提高收获; 挖矿/砍木走洞穴/森林, 不应被带偏到平原。
+     * [FOOD-BIOME] (2026-08-31 平原偏置, 2026-09-23 扩森林兜底, 用户需求)
+     * 周期扫描玩家周围已加载区块里的食物富集 biome, 收集其【干燥地表点】分两池
+     * 存入 {@code _plainsTargets} / {@code _forestTargets}, 供 pickBiasedTarget
+     * 按"平原→动物记忆→森林"三级导航。为什么只在 foodExplore 上启用 (见 onTick):
+     * 只有找食物/找动物的探索才需要直奔富食群系提高收获; 挖矿/砍木走洞穴/森林,
+     * 不应被群系偏置带偏。
      *
-     * 节流: 每 PLAINS_SCAN_INTERVAL_TICKS tick 扫一次; 找不到平原时按
-     * PLAINS_EMPTY_LOG_INTERVAL 低节流记日志, 不刷屏。
+     * 视力口径: 只读【已加载区块】的 biome —— biome 是服务端随区块下发的地形
+     * 数据, 与 baritone 读已加载方块同一可知性, 不涉及实体透视; 动物实体的发现
+     * 仍全程走 EntityTracker 统一视力 (FOV/LOS/记忆窗口)。
+     *
+     * 节流: 每 FOODBIOME_SCAN_INTERVAL_TICKS tick 扫一次 (onStart 后立即首扫);
+     * 两池都空时按 FOODBIOME_EMPTY_LOG_INTERVAL 低节流记日志, 不刷屏。
      */
-    private void updatePlainsBias(AltoClef mod) {
+    private void updateFoodBiomeBias(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return;
-        if (++_scanTicker < PLAINS_SCAN_INTERVAL_TICKS) return;
+        if (++_scanTicker < FOODBIOME_SCAN_INTERVAL_TICKS) return;
         _scanTicker = 0;
 
         BlockPos player = mod.getPlayer().getBlockPos();
-        List<BlockPos> found = new ArrayList<>();
-        for (int dx = -PLAINS_SCAN_RADIUS; dx <= PLAINS_SCAN_RADIUS; dx += PLAINS_SCAN_STEP) {
-            for (int dz = -PLAINS_SCAN_RADIUS; dz <= PLAINS_SCAN_RADIUS; dz += PLAINS_SCAN_STEP) {
+        List<BlockPos> plains = new ArrayList<>();
+        List<BlockPos> forests = new ArrayList<>();
+        for (int dx = -FOODBIOME_SCAN_RADIUS; dx <= FOODBIOME_SCAN_RADIUS; dx += FOODBIOME_SCAN_STEP) {
+            for (int dz = -FOODBIOME_SCAN_RADIUS; dz <= FOODBIOME_SCAN_RADIUS; dz += FOODBIOME_SCAN_STEP) {
                 BlockPos check = new BlockPos(player.getX() + dx, player.getY(), player.getZ() + dz);
                 // 只扫已加载区块, 未加载的不算数。
                 if (!mod.getChunkTracker().isChunkLoaded(check)) continue;
-                // getBiome 按 xz 列返回 biome, 仿 WorldHelper.isOcean 用 matchesKey 判平原。
-                if (WorldHelper.isPlains(mod.getWorld().getBiome(check))) {
-                    // 目标定位到该列地表 (最高实心方块上方一格), 否则 bot 会往地下/天上走。
-                    int sy = WorldHelper.getGroundHeight(mod, check.getX(), check.getZ());
-                    // 只取一个代表点: 每列地表; 附近 160 格最多约 (160*2/8)^2 个点,
-                    // 足够导航又不至于塞爆 visited 集合。
-                    BlockPos landing = sy >= 0 ? new BlockPos(check.getX(), sy + 1, check.getZ()) : check;
-                    // (2026-09-16 用户"收集食物不要在水上") 平原 biome 也可能铺在水面
-                    // (河/湖上的 plains 列, 最高实心方块是水下沙/泥) → 落点在水里。
-                    // 这类点不作为导航目标: 直奔它会把 bot 带到水面。
-                    if (!isDryLanding(mod, landing)) continue;
-                    found.add(landing);
+                // getBiome 按 xz 列返回 biome, 用 matchesKey 判群系档位。
+                RegistryEntry<Biome> biome = mod.getWorld().getBiome(check);
+                boolean isPlains = WorldHelper.isPlains(biome);
+                if (!isPlains && !WorldHelper.isFoodForest(biome)) continue;
+                // 目标定位到该列地表 (最高实心方块上方一格), 否则 bot 会往地下/天上走。
+                int sy = WorldHelper.getGroundHeight(mod, check.getX(), check.getZ());
+                // 只取一个代表点: 每列地表; 附近 160 格最多约 (160*2/8)^2 个点,
+                // 足够导航又不至于塞爆 visited 集合。
+                BlockPos landing = sy >= 0 ? new BlockPos(check.getX(), sy + 1, check.getZ()) : check;
+                // (2026-09-16 用户"收集食物不要在水上") 富食 biome 也可能铺在水面
+                // (河/湖上的列, 最高实心方块是水下沙/泥) → 落点在水里。这类点不作
+                // 为导航目标: 直奔它会把 bot 带到水面。
+                if (!isDryLanding(mod, landing)) continue;
+                (isPlains ? plains : forests).add(landing);
+            }
+        }
+
+        _plainsTargets = plains;
+        _forestTargets = forests;
+
+        // 两池数量签名变化 (或首次扫描) 才记一行, 降低刷屏; 随移动群系点变化仍可观测。
+        String signature = plains.size() + "/" + forests.size();
+        if (!signature.equals(_lastBiomeSignature)) {
+            if (!plains.isEmpty() || !forests.isEmpty()) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-BIOME] food explore: player=" + player
+                                + " plains=" + plains.size() + " nearest=" + nearestOf(plains, mod)
+                                + " | forest=" + forests.size() + " nearest=" + nearestOf(forests, mod)
+                                + " (tier: plains > animal memory > forest)");
+            } else {
+                _foodBiomeEmptyLogCounter++;
+                // 两池都空: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
+                if (_foodBiomeEmptyLogCounter >= FOODBIOME_EMPTY_LOG_INTERVAL) {
+                    Debug.logToFile("altoclef_diag.log",
+                            "[FOOD-BIOME] food explore: no plains/food-forest nearby, player=" + player
+                                    + " (keeping default behavior)");
+                    _foodBiomeEmptyLogCounter = 0;
                 }
             }
+            _lastBiomeSignature = signature;
         }
+    }
 
-        _plainsTargets = found;
-
-        if (!found.isEmpty()) {
-            BlockPos nearest = null;
-            double bestSq = Double.POSITIVE_INFINITY;
-            for (BlockPos p : found) {
-                double d = p.getSquaredDistance(mod.getPlayer().getPos());
-                if (d < bestSq) { bestSq = d; nearest = p; }
-            }
-            _plainsEmptyLogCounter = 0;
-            // 数量变化或首次发现时才记, 降低刷屏 (不只记一次, 平原点随移动变化时仍可观测);
-            // 玩家pos + 最近平原点 + 数量。
-            int n = found.size();
-            if (_lastFoundCount != n || _lastFoundCount == -1) {
-                String m = "[PLAINS-BIAS] food explore: player=" + player
-                        + " nearest plains=" + nearest + " plainsPoints=" + n;
-                Debug.logToFile("altoclef_diag.log", m);
-            }
-            _lastFoundCount = n;
-        } else {
-            _plainsEmptyLogCounter++;
-            // 没检测到平原: 保持原探索行为 (不乱改去别的 biome), 低节流记一次。
-            if (_plainsEmptyLogCounter >= PLAINS_EMPTY_LOG_INTERVAL) {
-                Debug.logToFile("altoclef_diag.log",
-                        "[PLAINS-BIAS] food explore: no plains nearby, player=" + player + " (keeping default behavior)");
-                _plainsEmptyLogCounter = 0;
-            }
-            _lastFoundCount = 0;
+    /** 池内距玩家最近的点 (诊断日志用), 空池返回 null。 */
+    private static BlockPos nearestOf(List<BlockPos> pool, AltoClef mod) {
+        if (pool == null || pool.isEmpty() || mod.getPlayer() == null) return null;
+        BlockPos nearest = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (BlockPos p : pool) {
+            double d = p.getSquaredDistance(mod.getPlayer().getPos());
+            if (d < bestSq) { bestSq = d; nearest = p; }
         }
+        return nearest;
     }
 
     @Override

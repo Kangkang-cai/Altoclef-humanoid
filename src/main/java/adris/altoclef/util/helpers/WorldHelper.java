@@ -602,13 +602,36 @@ public interface WorldHelper {
     }
 
     /**
-     * (2026-08-31 [PLAINS-BIAS]) 平原系 biome 判定 (含向日葵平原)。
-     * 找食物/找动物时 bot 优先导航到草原, 动物/作物收获概率更高。
+     * (2026-08-31 [FOOD-BIOME]) 平原系 biome 判定 (含向日葵平原) —— 食物富集
+     * 群系【第一档】: 找食物/找动物时 bot 最优先导航到草原, 动物/作物收获概率最高。
      * 模仿 isOcean 用 matchesKey 判 biome, 无需实际地形检查。
      */
     static boolean isPlains(RegistryEntry<Biome> b){
         return (b.matchesKey(BiomeKeys.PLAINS)
         || b.matchesKey(BiomeKeys.SUNFLOWER_PLAINS));
+    }
+
+    /**
+     * (2026-09-23 [FOOD-BIOME], 用户拍板"草原或白桦林/深色橡木林/橡木林食物
+     * 最丰富, 平原优先森林兜底") 食物富集【森林】系 biome —— 第二档: 附近已加载
+     * 区块扫不到平原时才作为兜底导航目标。
+     * <ul>
+     *   <li>{@link BiomeKeys#FOREST} 橡木林本体 (普通森林是橡树+桦树混交)</li>
+     *   <li>{@link BiomeKeys#FLOWER_FOREST} 花森林 (用户确认纳入: 橡树+开阔地表)</li>
+     *   <li>{@link BiomeKeys#BIRCH_FOREST} / {@link BiomeKeys#OLD_GROWTH_BIRCH_FOREST}
+     *       白桦林 / 原始白桦林</li>
+     *   <li>{@link BiomeKeys#DARK_FOREST} 深色橡木林</li>
+     * </ul>
+     * 注意: biome 是随区块下发的【地形数据】(与 baritone 读已加载方块同一可知性
+     * 口径), 不是实体感知 —— 动物实体仍全程走 EntityTracker 的 FOV/LOS/记忆
+     * 统一视力, 本判定不涉及任何透视。
+     */
+    static boolean isFoodForest(RegistryEntry<Biome> b){
+        return (b.matchesKey(BiomeKeys.FOREST)
+        || b.matchesKey(BiomeKeys.FLOWER_FOREST)
+        || b.matchesKey(BiomeKeys.BIRCH_FOREST)
+        || b.matchesKey(BiomeKeys.OLD_GROWTH_BIRCH_FOREST)
+        || b.matchesKey(BiomeKeys.DARK_FOREST));
     }
 
     static boolean isAir(AltoClef mod, BlockPos pos) {
