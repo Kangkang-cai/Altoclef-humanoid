@@ -2569,7 +2569,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-01 三维开阔度) 连通空气集合的 X/Z/Y 跨度是否都达到阈值。
         // 自挖楼梯(1-2格宽、2格高)至少一个方向跨度不足 → false, 不会把自己
         // 挖的通道当成天然洞。天然洞/繁茂洞穴 X/Z/Y 都开阔 → true。
-        private boolean isOpenCaveSpace(Set<BlockPos> airs) {
+        private static boolean isOpenCaveSpace(Set<BlockPos> airs) {
             int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
             int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
             int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
@@ -2698,6 +2698,34 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
+     * (2026-09-23 通用进洞检测, 服务 WorldSurvivalChain 盾牌看门狗) 玩家当前开放
+     * 空间是否已经与一个【天然洞穴】连通。与 findNearbyCave 共用本体判据:
+     * 连通空气 BFS ±CAVE_SCAN_RADIUS + 排除自挖记忆 + ≥MIN_NATURAL_CAVE_AIR +
+     * 三轴开阔跨度, 避免"这是不是天然洞"出现两套口径。
+     *
+     * 与 findNearbyCave 的口径差异是故意的 (风险检测 vs 探索触发):
+     *  - 不看矿带专属 y 窗口: 固定 y≤CAVE_NATURAL_AIR_MAX_Y(45)、不设下限;
+     *  - 不排除已探索洞区 (旧洞会再刷怪, 重返仍有被射杀风险)。
+     * 仅主世界; 下界第一版不覆盖。只读零行为, 不触发探索、不写任何记忆。
+     */
+    public static boolean isInNaturalCave(AltoClef mod) {
+        if (mod.getWorld() == null || mod.getPlayer() == null) return false;
+        if (mod.getWorld().getRegistryKey() != net.minecraft.world.World.OVERWORLD) return false;
+        BlockPos center = mod.getPlayer().getBlockPos();
+        if (center.getY() > CAVE_EXPLORE_MIN_DEPTH_Y) return false;
+        // 同 findNearbyCave: y<0 物理上不可能露天, 跳过仰扫; 其余要求岩顶覆盖。
+        if (center.getY() >= 0 && !hasOverheadCover(mod, center)) return false;
+        Set<BlockPos> natural = new HashSet<>();
+        for (BlockPos p : collectConnectedAir(mod, center)) {
+            if (p.getY() > CAVE_NATURAL_AIR_MAX_Y) continue;
+            if (isSelfDugAir(mod, p)) continue; // 自挖隧道/楼梯不算
+            natural.add(p);
+        }
+        if (natural.size() < MIN_NATURAL_CAVE_AIR) return false;
+        return isOpenCaveSpace(natural);
+    }
+
+    /**
      * (2026-09-06 闸门级诊断) findNearbyCave 每次评估的结论行, 写 altoclef_diag.log。
      * 每个实例首次评估必打(防节流错过隧道模式 ~2 秒的扫描窗口), 拒绝类之后 2 秒
      * 节流, FIRE 必打。行为完全不变, 纯诊断。
@@ -2725,7 +2753,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 玩家上方几格到几十格内, 24 格上限足够覆盖, 也避免地表向上扫 60 格。
     private static final int CAVE_COVER_SCAN_UP = 24;
 
-    private boolean hasOverheadCover(AltoClef mod, BlockPos pos) {
+    private static boolean hasOverheadCover(AltoClef mod, BlockPos pos) {
         return hasOverheadCover(mod, pos, CAVE_COVER_SCAN_UP);
     }
 
@@ -2736,7 +2764,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 下界菌类(绯红/诡异森林): 菌柄(PillarBlock)本就不算顶; 菌伞(wart block)
      * 是普通实心方块, 必须显式排除, 否则森林地表头顶有菌伞会被误判"有岩顶"。
      */
-    private boolean hasOverheadCover(AltoClef mod, BlockPos pos, int scanUp) {
+    private static boolean hasOverheadCover(AltoClef mod, BlockPos pos, int scanUp) {
         BlockPos up = pos;
         for (int i = 0; i < scanUp; i++) {
             up = up.up();

@@ -142,6 +142,17 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 合成台留输出格, 整场未清。铁律: "返回任务"≠"任务会跑完", 侧线任务必须续租。
     private Task _shieldCraftTask = null;
 
+    // ==== 通用进洞边沿 (2026-09-23, 用户 09:54 死于矿洞骷髅射杀复盘) ====
+    // 贪心挖矿经 MineAndCollectTask→baritone 直接追矿石进天然洞, 不经过
+    // MineDownExploreTask 的 FIRE kick 点; 任何任务路径(贪心/主线/纯寻路/捡物)
+    // 进入天然洞都应在进洞瞬间踢一次盾牌检查。1s 节流扫描, 边沿 false→true
+    // 才踢, 同一次驻留 120s 冷却不重复踢。
+    private static final long CAVE_ENTRY_SCAN_INTERVAL_MS = 1000;
+    private static final long CAVE_ENTRY_KICK_COOLDOWN_MS = 120000;
+    private long _lastCaveEntryScanMs = Long.MIN_VALUE;
+    private long _lastCaveEntryKickMs = Long.MIN_VALUE;
+    private boolean _inNaturalCavePrev = false;
+
     public WorldSurvivalChain(TaskRunner runner) {
         super(runner);
     }
@@ -164,6 +175,32 @@ public class WorldSurvivalChain extends SingleTaskChain {
     @Override
     protected void onTaskFinish(AltoClef mod) {
 
+    }
+
+    /**
+     * (2026-09-23 通用进洞边沿) 1s 一查 MineDownExploreTask.isInNaturalCave;
+     * false→true 边沿且 120s 冷却已过 → requestShieldCheckNow (同 tick 看门狗
+     * 兑付: 没盾+铁锭+6木板就合成)。必打一条 diag: 材料状态一眼可验证机制
+     * 是否生效 (如本次场景会显示 hasIronIngot=false——生铁不算铁锭)。
+     */
+    private void detectCaveEntry(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (now - _lastCaveEntryScanMs < CAVE_ENTRY_SCAN_INTERVAL_MS) return;
+        _lastCaveEntryScanMs = now;
+        boolean inCave = MineDownExploreTask.isInNaturalCave(mod);
+        if (inCave && !_inNaturalCavePrev
+                && now - _lastCaveEntryKickMs >= CAVE_ENTRY_KICK_COOLDOWN_MS) {
+            _lastCaveEntryKickMs = now;
+            requestShieldCheckNow();
+            boolean offhandShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
+            Debug.logToFile("altoclef_diag.log", "[CaveEntry] entered natural cave at "
+                    + mod.getPlayer().getBlockPos().toShortString()
+                    + " — shield check kicked. offhandShield=" + offhandShield
+                    + " hasShield=" + mod.getItemStorage().hasItem(Items.SHIELD)
+                    + " hasIronIngot=" + mod.getItemStorage().hasItem(Items.IRON_INGOT)
+                    + " planks=" + mod.getItemStorage().getItemCount(ItemHelper.PLANKS));
+        }
+        _inNaturalCavePrev = inCave;
     }
 
     @Override
@@ -282,6 +319,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
         if (!mod.getPlayer().isOnFire() && _wasTrackingWaterForFire) {
             stopFireWaterTracking(mod);
         }
+
+        // (2026-09-23) 通用进洞边沿: 任何路径进天然洞立即踢盾牌检查。必须放在
+        // 看门狗兑付之前, 使 kick 同 tick 生效。
+        detectCaveEntry(mod);
 
         // 盾牌看门狗 (2026-09-11): 每 30s 检查, 没盾+材料够 → 合成 (prio 55)。
         // (2026-09-22) 触发矿洞探索的 kick 也在此立即兑付。计时器无条件重置,
