@@ -6,10 +6,14 @@ import baritone.api.pathing.path.IPathExecutor;
 import baritone.api.utils.BetterBlockPos;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.FallingBlock;
+import net.minecraft.block.LeavesBlock;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -224,5 +228,81 @@ public final class JumpObstructionHelper {
 
     private static int manhattan(BlockPos a, BlockPos b) {
         return Math.abs(a.getX() - b.getX()) + Math.abs(a.getY() - b.getY()) + Math.abs(a.getZ() - b.getZ());
+    }
+
+    // ===== (2026-09-23) 近场植物清场 =====
+    // 背景实锤 (会话 20260923-081029 08:18:36): bot 被双格高草丛卡住, 单点
+    // InstantBreakTask 在"眼睛位于目标方块内 + baritone 平滑转头未完成"时出手 →
+    // 准星实际没对准草丛 → 打空, 租约 50ms 即 done 释放不重试, 最终任务 28.9s
+    // 超时放弃。用户拍板: 不赌单点, 卡死时把 2 格内所有植物清干净。
+    /** 清场半径 (切比雪夫): x/z ±R, y 从 feet.y-1 到 feet.y+2。 */
+    public static final int VEGETATION_RADIUS = 2;
+
+    /**
+     * 可清植物白名单 (显式列举, 避免把玻璃/玻璃板/栅栏等"非实心但非植物"块误清)。
+     * 任意 {@link LeavesBlock} 另由 {@link #isClearableVegetation} 直接放行。
+     */
+    private static final HashSet<Block> VEGETATION_BLOCKS = new HashSet<>();
+    static {
+        VEGETATION_BLOCKS.addAll(Arrays.asList(
+                Blocks.GRASS, Blocks.FERN, Blocks.TALL_GRASS, Blocks.LARGE_FERN,
+                Blocks.AZALEA, Blocks.FLOWERING_AZALEA,
+                Blocks.AZALEA_LEAVES, Blocks.FLOWERING_AZALEA_LEAVES,
+                Blocks.VINE,
+                Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT,
+                Blocks.TWISTING_VINES, Blocks.TWISTING_VINES_PLANT,
+                Blocks.WEEPING_VINES, Blocks.WEEPING_VINES_PLANT,
+                Blocks.NETHER_SPROUTS,
+                Blocks.BIG_DRIPLEAF, Blocks.BIG_DRIPLEAF_STEM, Blocks.SMALL_DRIPLEAF,
+                Blocks.MOSS_CARPET, Blocks.HANGING_ROOTS, Blocks.SPORE_BLOSSOM
+        ));
+        // ItemHelper.FLOWER 含小花与 LILAC/PEONY/ROSE_BUSH/SUNFLOWER 双格花丛。
+        VEGETATION_BLOCKS.addAll(Arrays.stream(ItemHelper.FLOWER)
+                .map(Block::getBlockFromItem).toList());
+    }
+
+    /**
+     * 收集玩家近场 (x/z ±{@link #VEGETATION_RADIUS}, y=feet.y-1..feet.y+2) 全部可清植物。
+     * 每 tick 从【当前位置】重算 —— bot 挪位后集合跟着变, 清到集合为空即完成。
+     */
+    public static List<BlockPos> collectVegetation(AltoClef mod, BlockPos feet) {
+        List<BlockPos> result = new ArrayList<>();
+        if (!mod.getChunkTracker().isChunkLoaded(feet)) return result;
+        for (int dy = -1; dy <= 2; dy++) {
+            for (int dx = -VEGETATION_RADIUS; dx <= VEGETATION_RADIUS; dx++) {
+                for (int dz = -VEGETATION_RADIUS; dz <= VEGETATION_RADIUS; dz++) {
+                    BlockPos pos = feet.add(dx, dy, dz);
+                    if (isClearableVegetation(mod, pos)) result.add(pos);
+                }
+            }
+        }
+        return result;
+    }
+
+    /** 近场是否存在可清植物 (无单点障碍时的兜底判定, 避免直接走弱 forceCancel)。 */
+    public static boolean hasVegetationNearby(AltoClef mod, BlockPos feet) {
+        return !collectVegetation(mod, feet).isEmpty();
+    }
+
+    /**
+     * 植物清除闸门: 显式白名单 / 任意树叶, 且非空气非液体、硬度 ≥0 (挖得动)、
+     * 非重力方块 (挖了塌回来)、无 BlockEntity (不会撒内容物)、未被行为栈禁挖。
+     */
+    public static boolean isClearableVegetation(AltoClef mod, BlockPos pos) {
+        try {
+            if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+            BlockState state = mod.getWorld().getBlockState(pos);
+            if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+            Block block = state.getBlock();
+            boolean listed = VEGETATION_BLOCKS.contains(block) || block instanceof LeavesBlock;
+            if (!listed) return false;
+            if (block instanceof FallingBlock) return false;
+            if (mod.getWorld().getBlockEntity(pos) != null) return false;
+            if (state.getHardness(mod.getWorld(), pos) < 0) return false;
+            if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(pos)) return false;
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 }

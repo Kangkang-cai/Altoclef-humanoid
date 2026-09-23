@@ -365,17 +365,26 @@ public final class JumpStuckResolver {
         }
 
         if (obstacle != null) {
-            // 有明确挡路的方块 → 挖掉它。挖完路径自然重算 (改世界是最根本的杠杆,
-            // 也最拟人 — 等价于用户手动左键)。
-            // 同格挖了 2 次还在原地 (baritone builder 拒挖非实心植物等) → 强制 wander。
+            // 有明确挡路的方块。
+            boolean passable = isBaritonePassable(mod, obstacle);
+            // (2026-09-23) 植物类障碍不再单点 InstantBreak: 实锤 (会话 20260923-081029)
+            // 眼睛位于目标方块内 + 平滑转头未完成 → 出手打空、50ms 释放不重试。
+            // 改为清场 2 格内所有植物 (含脚下), 逐块验证消失。
+            if (passable) {
+                Debug.logToFile("altoclef_diag.log", "[JumpStuck] vegetation obstruction "
+                        + obstacle + " player=" + mod.getPlayer().getBlockPos()
+                        + " -> ClearNearbyVegetationTask");
+                mod.getClientBaritone().getPathingBehavior().forceCancel();
+                return issueVegetationSweep(mod);
+            }
+
+            // 实心方块 → DestroyBlockTask。同格挖了 2 次还在原地 → 强制 wander。
             if (obstacle.equals(_lastDigPos)) {
                 _digCount++;
             } else {
                 _lastDigPos = obstacle;
                 _digCount = 1;
             }
-            // 冷却 / streak 由 issue() 在真正派发处置那一刻设置 (见 _activeOrder 注释:
-            // 提前设冷却 = 派出的任务下一 tick 就被判 null 打断)。
             if (_digCount >= SAME_POS_DIG_LIMIT) {
                 _digCount = 0;
                 _lastDigPos = null;
@@ -385,19 +394,22 @@ public final class JumpStuckResolver {
                 _wanderTask.resetWander();
                 return issue(mod, _wanderTask);
             }
-            // (2026-09-12) 分流判据: baritone builder 只对自己视为实心的方块执行
-            // 破坏, "可穿过"的 (树叶/azalea/草) 一律拒挖 (111853 实锤连挖 8 次
-            // 方块纹丝不动) → 这些走 InstantBreakTask 直挖。
-            boolean passable = isBaritonePassable(mod, obstacle);
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] clearing obstruction " + obstacle
-                    + " passable=" + passable + " solid=" + WorldHelper.isSolid(mod, obstacle)
+                    + " passable=false solid=" + WorldHelper.isSolid(mod, obstacle)
                     + " player=" + mod.getPlayer().getBlockPos()
-                    + " -> " + (passable ? "InstantBreakTask" : "DestroyBlockTask"));
+                    + " -> DestroyBlockTask");
             mod.getClientBaritone().getPathingBehavior().forceCancel();
-            if (passable) {
-                return issue(mod, new InstantBreakTask(obstacle));
-            }
             return issue(mod, new DestroyBlockTask(obstacle));
+        }
+
+        // (2026-09-23) 无单点障碍, 但近场有植物 (脚下草丛/双格植物下半截等
+        // findObstruction 的盲区) → 清场兜底, 不走弱 forceCancel。
+        BlockPos feetNow = mod.getPlayer().getBlockPos();
+        if (JumpObstructionHelper.hasVegetationNearby(mod, feetNow)) {
+            Debug.logToFile("altoclef_diag.log", "[JumpStuck] vegetation near feet "
+                    + feetNow + " (no single obstruction) -> ClearNearbyVegetationTask");
+            mod.getClientBaritone().getPathingBehavior().forceCancel();
+            return issueVegetationSweep(mod);
         }
 
         // 没找到挡路方块 → 不是"挖一格就能过"的卡死 (baritone 规划了做不到的落点 /
@@ -416,6 +428,32 @@ public final class JumpStuckResolver {
                 + _sameSpotCount + ")");
         mod.getClientBaritone().getPathingBehavior().forceCancel();
         return null;
+    }
+
+    /**
+     * (2026-09-23) 派发植物清场任务, 以玩家当前位置计数: 同一位置连续清了
+     * {@link #SAME_POS_DIG_LIMIT} 轮仍卡死 (清完又有/清不到真正卡点) → 强制 wander,
+     * 不再原地纠缠。计数口径与旧单点挖障一致 (1 次 = 一个完整租约)。
+     */
+    private static Task issueVegetationSweep(AltoClef mod) {
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        if (feet.equals(_lastDigPos)) {
+            _digCount++;
+        } else {
+            _lastDigPos = feet;
+            _digCount = 1;
+        }
+        if (_digCount >= SAME_POS_DIG_LIMIT) {
+            _digCount = 0;
+            _lastDigPos = null;
+            Debug.logToFile("altoclef_diag.log", "[JumpStuck] veg sweep x" + SAME_POS_DIG_LIMIT
+                    + " no escape at " + feet + " -> forcing wander");
+            _wanderTask.resetWander();
+            return issue(mod, _wanderTask);
+        }
+        Debug.logToFile("altoclef_diag.log", "[JumpStuck] veg sweep round " + _digCount
+                + " at " + feet);
+        return issue(mod, new ClearNearbyVegetationTask());
     }
 
     /**
