@@ -450,6 +450,33 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 一律按"水中"处置 (见 isWatery), 防止水中场景在 baritone 爬升/楼梯之间抖动。
     private final TimerGame _waterRecent = new TimerGame(3);
 
+    // ==== (2026-09-23 通道灌水感知) 流动水灌入【已挖开的干通道】= 1 次即后撤换向 ====
+    // skipAirAndWater 的水判据只扫【挖掘队列队首】(几何路径上即将挖的格): 挖开方块
+    // 后, 从事后暴露的侧壁/头顶蔓延进来的流动水占据的是早已 poll 出队列的自挖格
+    // (脚格/前方已挖空间), 队列永远扫不到 → 几何继续前铺, bot 直接涉水走进灌水通道
+    // (2026-09-23 用户实锤: 进水位置多处, 表现为"直接走进水里继续挖")。岩浆在
+    // 09-17 已用 findAdjacentLava 贴身兜底补过同款盲区, 水此前没有等价检测。
+    // 口径合规性: 水出现在【我们挖开的格子】(isSelfDugAir) = 挖之前它是实心岩石,
+    // 不存在隔墙透视; 天然水体贴身 (挖穿水墙/水下挖矿) 所在格不是自挖格, 照旧走
+    // skipAirAndWater 的"累计 2 次"口径, 合法水下挖掘不受影响。
+    // 检测范围 (用户"多处都有"): 贴身 11 格 (NEAR_FLUID_OFFSETS, 同岩浆口径)
+    // + 头行四邻 (眼睛高度渗水, 脚格可能仍是干的) + 沿隧道走行线前探脚行/头行
+    // FLOOD_LOOKAHEAD 格 (平挖隧道精准; 下行楼梯前方脚格更低, 查不到=误报由贴身
+    // 的斜下 4 格兜底)。
+    private static final int FLOOD_LOOKAHEAD = 3;
+    private static final BlockPos[] FLOOD_HEAD_SIDE_OFFSETS = {
+            new BlockPos(1, 1, 0), new BlockPos(-1, 1, 0),
+            new BlockPos(0, 1, 1), new BlockPos(0, 1, -1),
+    };
+    private static final long NEAR_FLOOD_SCAN_INTERVAL_MS = 100;
+    private long _lastNearFloodScanMs = 0;
+    // 撤完换向的宽限 (同 LAVA_SIGHT_GRACE_MS 同构): RunAway 结束瞬间 bot 可能还站在
+    // 湿通道里 (10 格没跑够/超时), 或新方向第一格旁还有残水, 立刻重判会秒触发第二
+    // 轮 detour。宽限 2s 让 retreatAndRedig 换向/几何重置先跑; 2s 后仍被淹再触发是
+    // 正确的 (说明真没撤出去)。
+    private static final long WATER_FLOOD_GRACE_MS = 2000;
+    private long _waterFloodGraceUntilMs = 0;
+
     // ==== (2026-09-14 遇岩浆弃道) 岩浆不能按水处置, 见一次立刻换通道 ====
     // 背景 (代码考古): 本类此前完全没有 lava 概念, skipAirAndWater 里的 isWater()
     // 判据是 `getBlock() instanceof FluidBlock` —— LavaBlock 是 FluidBlock 子类,
@@ -503,7 +530,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 贴身兜底为什么留着: ①LOS 射线在脚下 / 紧贴方块处几何不稳 (同 VisibilityHelper
     // 里 CRAFTING_TABLE 16 格豁免的教训); ②紧邻格已是岩浆 = 危险已经贴上身体, 任何
     // 判据都得兜住, 不能因为"射线没打准"就放过。
-    private static final BlockPos[] NEAR_LAVA_OFFSETS = {
+    // 贴身偏移表 (2026-09-23 起岩浆 findAdjacentLava 与灌水检测 findFloodedTunnelWater
+    // 共用: 同一"贴身 11 格"几何概念只留一份)。
+    private static final BlockPos[] NEAR_FLUID_OFFSETS = {
             new BlockPos(0, 0, 0),
             new BlockPos(1, 0, 0), new BlockPos(-1, 0, 0),
             new BlockPos(0, 0, 1), new BlockPos(0, 0, -1),
@@ -1137,6 +1166,31 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             }
         }
 
+        // (2026-09-23 通道灌水感知) 水灌进【已挖开的干通道】(贴身/头行/走行线前探,
+        // 且该格在自挖记忆里) → 1 次即后撤换向, 不再等队首累计 2 次 —— 灌入的水占据
+        // 的是已出队格子, skipAirAndWater 永远扫不到 (见字段区注释)。
+        // 门控与岩浆守卫同口径, 外加 !_inWaterDetour: 探索态洞内涉水是常态(baritone
+        // 自行导航); 上行模式本就是"从水里爬回去"(isWatery engage ascend), 贴身水
+        // 预期内, 触发后撤会与爬升互打; 下行楼梯/平挖隧道为保护场景。岩浆命中当 tick
+        // 已置 _inLavaDetour, 本块自动让路 (isFloodWater 也另显式排除岩浆)。
+        if (!_inCave && !_inLavaDetour && !_inWaterDetour && !_lavaGiveUp
+                && !_ascendMode && !_baritoneAscent) {
+            BlockPos flooded = findFloodedTunnelWater(mod);
+            if (flooded != null) {
+                // (2026-09-22 方向选水) 记下水点, 撤完 retreatAndRedig 背离它 + 选干方向。
+                _lastWaterPos = flooded.toImmutable();
+                startWaterDetour(mod, flooded, "tunnel-flooded");
+                String m = "[MineDown-WaterFlood] 自挖通道被水灌入 at " + flooded.toShortString()
+                        + " -> 立即后撤换向 (player="
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + ", mode=" + (_tunnelMode ? "tunnel" : "staircase") + ")";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                // 同 tick 即接管移动: 不让后续几何推进/DestroyBlockTask 派发再往淹水区迈一步。
+                return _subTask;
+            }
+        }
+
         // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
         // 放在洞穴探索之前——水是当前挖掘路径的直接危险源, 优先于洞穴分心。
         if (_inWaterDetour) {
@@ -1151,7 +1205,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                     + mod.getPlayer().getBlockPos().toShortString() + ", retreatAndRedig.");
             _inWaterDetour = false;
             _subTask = null;
-            // (2026-09-22 方向选水) 带上水源位置: 换向不仅排除原方向/逆方向,
+            // (2026-09-23 通道灌水感知) 撤完换向后给灌水检测一个宽限: 收尾瞬间 bot
+            // 可能仍站在湿通道里 (RunAway 没跑够/超时), 立刻重判会秒触发第二轮改道。
+            _waterFloodGraceUntilMs = System.currentTimeMillis() + WATER_FLOOD_GRACE_MS;
             // 还排除朝向水源的方向 + 按"走行线水块数"选最干方向。旧行为只保证
             // "换个随机方向" —— 三面环水时新方向大概率还是扎进水里, 挖 2 格
             // 又触发改道, 循环烧时间。
@@ -1824,7 +1880,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-17 视觉岩浆感知, 贴身兜底) 扫【与玩家紧邻的 11 格】(见 NEAR_LAVA_OFFSETS),
+     * (2026-09-17 视觉岩浆感知, 贴身兜底) 扫【与玩家紧邻的 11 格】(见 NEAR_FLUID_OFFSETS),
      * 命中返回该岩浆格坐标, 否则 null。
      *
      * 为什么在视觉判据之外还要留这一层: ① cleanLineOfSight 对脚下/紧贴方块的几何本就
@@ -1840,7 +1896,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (now - _lastNearLavaScanMs < NEAR_LAVA_SCAN_INTERVAL_MS) return null;
         _lastNearLavaScanMs = now;
         BlockPos feet = mod.getPlayer().getBlockPos();
-        for (BlockPos off : NEAR_LAVA_OFFSETS) {
+        for (BlockPos off : NEAR_FLUID_OFFSETS) {
             BlockPos p = feet.add(off);
             if (isLava(mod, p)) return p;
         }
@@ -1951,18 +2007,78 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             Debug.logToFile("altoclef_diag.log", m);
         }
         // (2026-09-10 遇水改道) 路径真实水块累计达标 → 有界改道一轮。
-        if (!_inWaterDetour && _waterSkipped - _lastDetourWaterMark >= WATER_DETOUR_TRIGGER_SKIPS) {
-            _lastDetourWaterMark = _waterSkipped;
-            _inWaterDetour = true;
-            _waterDetourTimer.reset();
-            _subTask = new RunAwayFromPositionTask(WATER_DETOUR_RUN_DISTANCE, pos.toImmutable());
-            String m = "[MineDown-WaterDetour] dig path hit water (total " + _waterSkipped
-                    + ") -> detour away from " + pos.toShortString()
-                    + " (run " + (int) WATER_DETOUR_RUN_DISTANCE + " blocks, max "
-                    + (int) WATER_DETOUR_TIMEOUT + "s)";
-            Debug.logMessage(m);
-            Debug.logToFile("altoclef_diag.log", m);
+        if (_waterSkipped - _lastDetourWaterMark >= WATER_DETOUR_TRIGGER_SKIPS) {
+            startWaterDetour(mod, pos, "queue-head");
         }
+    }
+
+    /**
+     * (2026-09-23 通道灌水感知) 两条触发口径共用同一个改道动作:
+     *   queue-head     = 队首待挖格是水, 累计 2 次 (09-10 原有, logWaterEncounter);
+     *   tunnel-flooded = 水灌进【已挖开的自挖通道】, 1 次即触发 (09-23 新增,
+     *                    findFloodedTunnelWater)。
+     * 幂等: 已在改道中不重置计时器/撤离目标 (同 abandonTunnelForLava 口径)。
+     */
+    private void startWaterDetour(AltoClef mod, BlockPos pos, String cause) {
+        if (_inWaterDetour) return;
+        _lastDetourWaterMark = _waterSkipped;
+        _inWaterDetour = true;
+        _waterDetourTimer.reset();
+        _subTask = new RunAwayFromPositionTask(WATER_DETOUR_RUN_DISTANCE, pos.toImmutable());
+        String m = "[MineDown-WaterDetour] (" + cause + ") -> detour away from "
+                + pos.toShortString() + " (water skipped total " + _waterSkipped
+                + ", run " + (int) WATER_DETOUR_RUN_DISTANCE + " blocks, max "
+                + (int) WATER_DETOUR_TIMEOUT + "s)"
+                + " player=" + mod.getPlayer().getBlockPos().toShortString();
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * (2026-09-23 通道灌水感知) 找【灌进自挖通道的水】, 命中返回水格坐标, 否则 null。
+     *
+     * 为什么能与"水下挖矿"区分: 命中格必须同时满足 ①是水且【不是岩浆】(isWater 的
+     * FluidBlock 判据把 LavaBlock 也算子类, 见 isWater 注释, 这里显式排除; 岩浆由
+     * onTick 更靠前的岩浆守卫接管) ②在自挖记忆里 (isSelfDugAir) —— 这格是我们挖开
+     * 的干通道, 现在变水, 只可能是从事后暴露的侧壁/头顶蔓延灌入。天然水体里的格子
+     * 没有自挖记录 → 挖穿水墙/水下作业不触发本检测, 仍走队首累计 2 次的旧口径。
+     *
+     * 扫描顺序从"最贴身"到"走行线远端": 贴身 11 格 → 头行四邻 → 沿当前隧道方向
+     * 前探 {@value #FLOOD_LOOKAHEAD} 格的脚行与头行。节流 100ms (成本约 21 次
+     * getBlockState, 与 findAdjacentLava 同量级)。撤完宽限期内整体不判, 见
+     * WATER_FLOOD_GRACE_MS 注释。
+     */
+    private BlockPos findFloodedTunnelWater(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
+        long now = System.currentTimeMillis();
+        if (now < _waterFloodGraceUntilMs) return null;
+        if (now - _lastNearFloodScanMs < NEAR_FLOOD_SCAN_INTERVAL_MS) return null;
+        _lastNearFloodScanMs = now;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        for (BlockPos off : NEAR_FLUID_OFFSETS) {
+            BlockPos p = feet.add(off);
+            if (isFloodWater(mod, p) && isSelfDugAir(mod, p)) return p;
+        }
+        for (BlockPos off : FLOOD_HEAD_SIDE_OFFSETS) {
+            BlockPos p = feet.add(off);
+            if (isFloodWater(mod, p) && isSelfDugAir(mod, p)) return p;
+        }
+        for (int k = 1; k <= FLOOD_LOOKAHEAD; k++) {
+            BlockPos p = feet.add(_dirX * k, 0, _dirZ * k);
+            if (isFloodWater(mod, p) && isSelfDugAir(mod, p)) return p;
+            BlockPos head = p.up();
+            if (isFloodWater(mod, head) && isSelfDugAir(mod, head)) return head;
+        }
+        return null;
+    }
+
+    /**
+     * (2026-09-23 通道灌水感知) "水但不是岩浆"。isWater 的 instanceof FluidBlock
+     * 同时命中 LavaBlock (见该方法注释), 凡在 skipAirAndWater 排序之外复用都必须
+     * 显式排除岩浆。
+     */
+    private boolean isFloodWater(AltoClef mod, BlockPos pos) {
+        return isWater(mod, pos) && !isLava(mod, pos);
     }
 
     /**
