@@ -22,21 +22,30 @@ import baritone.api.pathing.goals.GoalTwoBlocks;
 import baritone.api.process.ICustomGoalProcess;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
@@ -124,6 +133,36 @@ public class InteractWithBlockTask extends Task {
     private DestroyBlockTask _clearAboveTask = null;
     private BlockPos _clearAbovePos = null;
     private long _clearAboveSinceMs = 0;
+
+    // ==================== (2026-09-23 水平绕行: 熔炉贴脸封门死锁) ====================
+    // 现场 20260923-085300: bot(220,65,80) → 熔炉(220,65,81) → 工作台(220,65,82),
+    // 目标站位环全实心。baritone A* 每 6s 超时重启(57万节点), 而 moveChecker 的
+    // "3.9s true + 1tick false" 闪断把 _giveUpTimer 每 tick reset → 全部兜底永不触发,
+    // 站桩 146s。修法同构 _clearAbove(垂直清方块): 同层近场 + 持续 CANT_REACH 3s
+    // (期间真实移动 >0.2 格即重新计时) + baritone 无路径 → BFS 找"挖块最少"的
+    // 侧面走廊, 逐块 DestroyBlockTask 挖通(抱持, 单块 10s 超时)。只挖近场、非容器/
+    // 功能方块、canBreak、不邻岩浆、头/脚空间合格的方块。同目标 2 轮封顶 →
+    // startEscape 拉黑脱险。绝不挖 _target 本体。
+    private static final double DETOUR_TRIGGER_SECONDS = 3;
+    private static final int DETOUR_MAX_BLOCKS = 4;
+    private static final int DETOUR_MAX_ROUNDS = 2;
+    private static final long DETOUR_BLOCK_TIMEOUT_MS = 10_000;
+    private static final Map<BlockPos, Integer> _detourRounds = new HashMap<>();
+    private final TimerGame _detourTimer = new TimerGame(DETOUR_TRIGGER_SECONDS);
+    private boolean _detourTiming = false;
+    private Vec3d _detourAnchor = null;
+    private List<BlockPos> _detourBlocks = null;
+    private int _detourIndex = 0;
+    private DestroyBlockTask _detourTask = null;
+    private long _detourBlockSinceMs = 0;
+    // 绕行绝不开挖的容器/功能方块(显式清单; Shulker/Bed 走 instanceof)。
+    private static final Set<net.minecraft.block.Block> NEVER_DETOUR_BREAK = Set.of(
+            Blocks.FURNACE, Blocks.BLAST_FURNACE, Blocks.SMOKER,
+            Blocks.CRAFTING_TABLE, Blocks.CHEST, Blocks.TRAPPED_CHEST,
+            Blocks.ENDER_CHEST, Blocks.BARREL, Blocks.HOPPER, Blocks.DROPPER,
+            Blocks.DISPENSER, Blocks.BREWING_STAND, Blocks.BEACON, Blocks.CONDUIT,
+            Blocks.BELL, Blocks.NOTE_BLOCK, Blocks.JUKEBOX, Blocks.ENCHANTING_TABLE,
+            Blocks.CAKE, Blocks.DRAGON_EGG);
 
     public InteractWithBlockTask(ItemTarget toUse, Direction direction, BlockPos target, Input interactInput, boolean walkInto, Vec3i interactOffset, boolean shiftClick) {
         this(toUse, direction, target, interactInput, walkInto, interactOffset, shiftClick, true);
@@ -247,6 +286,12 @@ public class InteractWithBlockTask extends Task {
         _ascent.stop(mod);
         // (2026-09-17) 脱险抱持不跨次进入 —— 新一次交互应当重新尝试 (static 计数仍生效)。
         _escaping = false;
+        // (2026-09-23) 绕行计时/路径不跨实例; static 轮次仍生效。
+        _detourTiming = false;
+        _detourAnchor = null;
+        _detourBlocks = null;
+        _detourIndex = 0;
+        _detourTask = null;
         // 任务一开始就清掉可能卡住的潜行(双通道), 否则 bot 会一路潜行着
         // 走到目标前 — 既难看, 也让用户误以为交互总是带潜行。
         if (!_shiftClick) {
@@ -274,6 +319,30 @@ public class InteractWithBlockTask extends Task {
             } else {
                 setDebugState("Clearing block above interaction target");
                 return _clearAboveTask;
+            }
+        }
+
+        // (2026-09-23) 水平绕行挖掘在飞: 抱持当前 DestroyBlockTask, 单块挖成
+        // (变空气)后放行, 让 CANT_REACH 分支挂下一块; finished 但没变空气或
+        // 单块 10s 超时 → 本轮失败, gate 重新计时(轮次 static 累加)。
+        if (_detourTask != null) {
+            BlockPos cur = (_detourBlocks != null && _detourIndex < _detourBlocks.size())
+                    ? _detourBlocks.get(_detourIndex) : null;
+            if (cur == null) {
+                _detourTask = null;
+            } else if (blockIsAir(mod, cur)) {
+                _detourTask = null;
+                _detourIndex++;
+            } else if (_detourTask.isFinished(mod)) {
+                detourRoundFail(mod, "block " + cur.toShortString() + " finished but not air");
+            } else if (System.currentTimeMillis() - _detourBlockSinceMs > DETOUR_BLOCK_TIMEOUT_MS) {
+                detourRoundFail(mod, "block " + cur.toShortString() + " timeout "
+                        + (DETOUR_BLOCK_TIMEOUT_MS / 1000) + "s");
+            } else {
+                setDebugState("Detouring around " + _target.toShortString() + ", breaking "
+                        + cur.toShortString() + " (" + (_detourIndex + 1) + "/"
+                        + _detourBlocks.size() + ")");
+                return _detourTask;
             }
         }
 
@@ -401,6 +470,13 @@ public class InteractWithBlockTask extends Task {
                     }
                 }
 
+                // (2026-09-23 水平绕行) 同层近场目标被实心环封堵 → 计时到就
+                // 挖侧面走廊。needsClimb 的垂直场景仍只归爬升协调器。
+                if (!needsClimb) {
+                    Task detour = tickDetour(mod);
+                    if (detour != null) return detour;
+                }
+
                 // Get to our goal then
                 if (!proc.isActive()) {
                     proc.setGoalAndPath(moveGoal);
@@ -497,6 +573,8 @@ public class InteractWithBlockTask extends Task {
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // (2026-09-17) 协调器可能正握着 customGoal + 按键, 所有退出路径都要收工。
         _ascent.stop(mod);
+        // (2026-09-23) 子任务由 task runner 收停; 引用清掉, static 轮次保留。
+        _detourTask = null;
     }
 
     @Override
@@ -591,6 +669,214 @@ public class InteractWithBlockTask extends Task {
 
     private String aboveShortString() {
         return _clearAbovePos != null ? _clearAbovePos.toShortString() : "?";
+    }
+
+    // ==================== (2026-09-23 水平绕行实现) ====================
+
+    /**
+     * 同层近场封堵 gate + 3s 计时 + 走廊执行。
+     * @return 非 null = 调用方应返回该任务; null = 无干预, 继续原 baritone 流程
+     */
+    private Task tickDetour(AltoClef mod) {
+        Vec3d pos = mod.getPlayer().getPos();
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        boolean gate = _direction == null
+                && feet.getY() == _target.getY()
+                && Math.abs(feet.getX() - _target.getX()) <= 3
+                && Math.abs(feet.getZ() - _target.getZ()) <= 3
+                && !mod.getClientBaritone().getPathingBehavior().isPathing()
+                && mod.getClientBaritone().getPathingBehavior().getPath().isEmpty();
+        if (!gate) {
+            _detourTiming = false;
+            return null;
+        }
+
+        // 已有走廊: 派下一块挖
+        if (_detourBlocks != null) {
+            if (_detourIndex >= _detourBlocks.size()) {
+                detourCompleted(mod);
+                return null;
+            }
+            BlockPos next = _detourBlocks.get(_detourIndex);
+            if (blockIsAir(mod, next)) {
+                _detourIndex++;
+                return null;
+            }
+            if (_detourTask == null) {
+                if (_detourRounds.getOrDefault(_target, 0) >= DETOUR_MAX_ROUNDS) {
+                    resetDetourState();
+                    _detourTiming = false;
+                    startEscape(mod, "detour rounds exhausted");
+                    return _wanderTask;
+                }
+                _detourTask = new DestroyBlockTask(next);
+                _detourBlockSinceMs = System.currentTimeMillis();
+                Debug.logMessage("(InteractWithBlockTask) [Detour] breaking " + next.toShortString()
+                        + " (" + (_detourIndex + 1) + "/" + _detourBlocks.size()
+                        + ") to reach " + _target.toShortString());
+                return _detourTask;
+            }
+            return _detourTask;
+        }
+
+        // 计时: 3s 内真实移动 >0.2 格 → 重新计时
+        if (!_detourTiming) {
+            _detourTiming = true;
+            _detourAnchor = pos;
+            _detourTimer.reset();
+            return null;
+        }
+        if (_detourAnchor != null && _detourAnchor.squaredDistanceTo(pos) > 0.04) {
+            _detourAnchor = pos;
+            _detourTimer.reset();
+            return null;
+        }
+        if (!_detourTimer.elapsed()) return null;
+
+        // 触发一轮
+        if (_detourRounds.size() > 256) _detourRounds.clear();
+        if (_detourRounds.getOrDefault(_target, 0) >= DETOUR_MAX_ROUNDS) {
+            _detourTiming = false;
+            startEscape(mod, "detour rounds exhausted");
+            return _wanderTask;
+        }
+        int round = _detourRounds.merge(_target, 1, Integer::sum);
+        List<BlockPos> blocks = planDetourPath(mod, feet);
+        _detourTiming = false;
+        if (blocks == null || blocks.isEmpty()) {
+            Debug.logMessage("(InteractWithBlockTask) [Detour] no valid side corridor for "
+                    + _target.toShortString() + " (round " + round + "/" + DETOUR_MAX_ROUNDS + ")");
+            return null;
+        }
+        _detourBlocks = blocks;
+        _detourIndex = 0;
+        Debug.logMessage("(InteractWithBlockTask) [Detour] corridor for " + _target.toShortString()
+                + ": " + blocks.size() + " block(s) " + blocks);
+        return null;
+    }
+
+    /**
+     * BFS(4 方向, 固定 y=targetY): 起点 feet → 目标 4 个水平邻位之一,
+     * 空气格 cost=1、可挖实心格 cost=100 (优先少挖)。返回需挖实心块序列
+     * (bot 侧 → 目标侧); 无通路或挖块超过 {@link #DETOUR_MAX_BLOCKS} 返回 null。
+     */
+    private List<BlockPos> planDetourPath(AltoClef mod, BlockPos start) {
+        PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Integer.compare(a.cost, b.cost));
+        Map<BlockPos, Node> best = new HashMap<>();
+        Node root = new Node(start, 0, null);
+        open.add(root);
+        best.put(start, root);
+        Node goal = null;
+        while (!open.isEmpty() && goal == null) {
+            Node cur = open.poll();
+            if (best.get(cur.pos) != cur) continue;
+            if (!cur.pos.equals(start) && cur.pos.getY() == _target.getY()
+                    && cur.pos.getManhattanDistance(_target) == 1) {
+                goal = cur;
+                break;
+            }
+            for (Direction d : Direction.Type.HORIZONTAL) {
+                BlockPos np = cur.pos.offset(d);
+                if (np.getY() != _target.getY()
+                        || Math.abs(np.getX() - _target.getX()) > 3
+                        || Math.abs(np.getZ() - _target.getZ()) > 3) {
+                    continue;
+                }
+                int cell = detourCellCost(mod, np);
+                if (cell < 0) continue;
+                int nc = cur.cost + cell;
+                Node ex = best.get(np);
+                if (ex == null || nc < ex.cost) {
+                    Node nn = new Node(np, nc, cur);
+                    best.put(np, nn);
+                    open.add(nn);
+                }
+            }
+        }
+        if (goal == null) return null;
+        List<BlockPos> seq = new ArrayList<>();
+        for (Node w = goal; w != null && !w.pos.equals(start); w = w.parent) {
+            if (detourCellCost(mod, w.pos) >= 100) seq.add(w.pos);
+        }
+        Collections.reverse(seq);
+        if (seq.isEmpty() || seq.size() > DETOUR_MAX_BLOCKS) return null;
+        return seq;
+    }
+
+    /**
+     * 格子通行判定。
+     * @return 1=空气可站; 100=实心可挖(挖空后可站); -1=不可通行
+     */
+    private int detourCellCost(AltoClef mod, BlockPos p) {
+        if (p.equals(_target)) return -1;
+        BlockState state = mod.getWorld().getBlockState(p);
+        if (!state.getFluidState().isEmpty()) return -1;
+        boolean headAir = blockIsAir(mod, p.up())
+                && mod.getWorld().getBlockState(p.up()).getFluidState().isEmpty();
+        BlockState floor = mod.getWorld().getBlockState(p.down());
+        boolean floorOk = floor.getFluidState().isEmpty() && WorldHelper.isSolid(mod, p.down());
+        if (state.isAir()) {
+            return (headAir && floorOk) ? 1 : -1;
+        }
+        if (!WorldHelper.isSolid(mod, p)) return -1; // 非实心非流体(门/栅栏)绕行不处理
+        Block block = state.getBlock();
+        if (block instanceof ShulkerBoxBlock || block instanceof BedBlock
+                || NEVER_DETOUR_BREAK.contains(block)) {
+            return -1;
+        }
+        if (!WorldHelper.canBreak(mod, p) || hasAdjacentLava(mod, p)) return -1;
+        // 挖空后玩家要站进此格: 头部必须已空、脚下有支撑
+        return (headAir && floorOk) ? 100 : -1;
+    }
+
+    private void detourCompleted(AltoClef mod) {
+        Debug.logMessage("(InteractWithBlockTask) [Detour] corridor open, re-pathing to "
+                + _target.toShortString());
+        _detourRounds.remove(_target);
+        resetDetourState();
+        // 让 baritone 按新几何立即重算, 不等 6s backoff。
+        ICustomGoalProcess proc = mod.getClientBaritone().getCustomGoalProcess();
+        if (proc.isActive()) proc.onLostControl();
+    }
+
+    private void detourRoundFail(AltoClef mod, String reason) {
+        Debug.logMessage("(InteractWithBlockTask) [Detour] round fail: " + reason
+                + " (rounds " + _detourRounds.getOrDefault(_target, 0)
+                + "/" + DETOUR_MAX_ROUNDS + ")");
+        resetDetourState();
+        _detourTiming = false;
+    }
+
+    private void resetDetourState() {
+        _detourBlocks = null;
+        _detourIndex = 0;
+        _detourTask = null;
+    }
+
+    /** 直查真实世界(绕过 tracker 黑名单): 保证刚挖开的格能被认成空气。 */
+    private static boolean blockIsAir(AltoClef mod, BlockPos pos) {
+        ClientWorld world = mod.getWorld();
+        if (world == null) return true;
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return true;
+        return world.getBlockState(pos).isAir();
+    }
+
+    private static boolean hasAdjacentLava(AltoClef mod, BlockPos p) {
+        for (Direction d : Direction.values()) {
+            if (mod.getWorld().getBlockState(p.offset(d)).getBlock() == Blocks.LAVA) return true;
+        }
+        return false;
+    }
+
+    private static final class Node {
+        final BlockPos pos;
+        final int cost;
+        final Node parent;
+        Node(BlockPos pos, int cost, Node parent) {
+            this.pos = pos;
+            this.cost = cost;
+            this.parent = parent;
+        }
     }
 
     private ClickResponse rightClick(AltoClef mod) {
