@@ -670,6 +670,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _skipStreak = 0;
         _inCave = false;
         _waterSkipped = 0;
+        // (2026-09-23 通道灌水感知) 节流戳/宽限随实例重入归零 (同 _waterSkipped 口径)。
+        _lastNearFloodScanMs = 0;
+        _waterFloodGraceUntilMs = 0;
         _protectedDigSkipped = 0;
         _unbreakableSkipped = 0;
         _digQueue.clear();
@@ -1208,6 +1211,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // (2026-09-23 通道灌水感知) 撤完换向后给灌水检测一个宽限: 收尾瞬间 bot
             // 可能仍站在湿通道里 (RunAway 没跑够/超时), 立刻重判会秒触发第二轮改道。
             _waterFloodGraceUntilMs = System.currentTimeMillis() + WATER_FLOOD_GRACE_MS;
+            // (2026-09-22 方向选水) 带上水源位置: 换向不仅排除原方向/逆方向,
             // 还排除朝向水源的方向 + 按"走行线水块数"选最干方向。旧行为只保证
             // "换个随机方向" —— 三面环水时新方向大概率还是扎进水里, 挖 2 格
             // 又触发改道, 循环烧时间。
