@@ -129,6 +129,8 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private static final double SHIELD_WATCHDOG_INTERVAL = 30;
     private static final float SHIELD_WATCHDOG_PRIORITY = 55;
     private static final int SHIELD_PLANKS_REQUIRED = 6;
+    // (2026-09-23) 每个原木/木头/菌柄可合成的木板数 (含去皮变种, 见 ItemHelper.LOG)。
+    private static final int PLANKS_PER_LOG = 4;
     private final TimerGame _shieldWatchdogTimer = new TimerGame(SHIELD_WATCHDOG_INTERVAL);
     // (2026-09-22 进洞即查) 外部 kick 标记: true = 下一次 getPriority 不等计时
     // 马上跑盾牌检查, 消耗后复位并重置 30s 周期。
@@ -338,16 +340,24 @@ public class WorldSurvivalChain extends SingleTaskChain {
             _shieldCheckKick = false;
             _shieldWatchdogTimer.reset();
             boolean offHandShield = mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD;
+            // (2026-09-23 用户"木板不够可肯定有原木") 木板材料按潜力计:
+            // 已合成木板 + 原木数×4 ≥ 6 (每个原木/木头/菌柄去皮与否都出4木板,
+            // 派发的造盾流程会先把原木转成木板)。旧口径只数已合成木板, 有原木
+            // 没木板时误判材料不够 (20260923-140827: planks=3 logs=17)。
+            int plankCount = mod.getItemStorage().getItemCount(ItemHelper.PLANKS);
+            int logCount = mod.getItemStorage().getItemCount(ItemHelper.LOG);
+            int plankPotential = plankCount + PLANKS_PER_LOG * logCount;
             if (!offHandShield && !mod.getItemStorage().hasItem(Items.SHIELD)
                     && mod.getItemStorage().hasItem(Items.IRON_INGOT)
-                    && mod.getItemStorage().getItemCount(ItemHelper.PLANKS) >= SHIELD_PLANKS_REQUIRED) {
+                    && plankPotential >= SHIELD_PLANKS_REQUIRED) {
                 // (2026-09-14 交易让位, 232015 场次) 交易进行中插队会开背包屏打断
                 // 丢金锭节奏 → 跳过本轮, 交易结束 (金锭耗尽/任务停 3s) 后下轮再合成。
                 if (TradeWithPiglinsTask.isTradeInProgress()) {
                     Debug.logMessage("[Shield-Watchdog] no shield + materials present, but piglin trading in progress — deferring to next check.");
                 } else {
                     Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present (iron ingot + "
-                            + mod.getItemStorage().getItemCount(ItemHelper.PLANKS) + " planks), crafting one.");
+                            + plankCount + " planks/" + logCount + " logs = " + plankPotential
+                            + " planks potential), crafting one.");
                     _shieldCraftTask = TaskCatalogue.getItemTask(Items.SHIELD, 1);
                     setTask(_shieldCraftTask);
                     return SHIELD_WATCHDOG_PRIORITY;
