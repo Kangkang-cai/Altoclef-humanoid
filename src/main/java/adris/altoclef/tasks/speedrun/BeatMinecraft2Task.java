@@ -535,6 +535,15 @@ public class BeatMinecraft2Task extends Task {
     private final Task _sleepThroughNightTask = new SleepThroughNightTask();
     private final Task _killDragonBedStratsTask = new KillEnderDragonWithBedsTask(new WaitForDragonAndPearlTask());
 
+    // (2026-09-23 死亡后失效保留子树, 事故 20260923-115851) 上次见到的连续
+    // 死亡计数; -1=尚未初始化。死亡使所有导航/挖块目标失效, 复活后旧子树
+    // 必须清空重派, 否则地下旧 DestroyBlock 的悬空保护会永远挡掉睡眠切换。
+    private int _lastDeathCountSeen = -1;
+    // (2026-09-23 睡眠路由窗口缓存) 上一拍夜间睡眠/弄床路由是否返回了任务。
+    // UserTaskChain 据此动态提升优先级: 路由放弃(睡觉30s冷却/找床约30s无机会)
+    // 返回 null 后, 下一优先级查询即回落到 50, 不堵塞食物/装备等有价值的事。
+    private boolean _nightSleepRoutedLastTick = false;
+
     // (2026-09-17 判据统一) 原 _surfaceFlipTimer/_stableUnderground 双稳态去抖已删:
     // 它包装的 WorldHelper.isDeepUnderground 现在本身就走 SurfaceHelper 的
     // 5 点多数投票 + 5s 驻留, 再叠一层 2s 去抖只会让结论多滞后 2s。见 isUndergroundDebounced。
@@ -951,6 +960,16 @@ public class BeatMinecraft2Task extends Task {
         // 旗子已刷新; onStop 清零, 不跨世界残留。
         ItemHelper.setDungeonPhaseActive(_ranStrongholdLocator);
 
+        // (2026-09-23 死亡边沿失效保留子树) 连续死亡计数增加 = 本拍是复活后
+        // 首 tick: 清空死前旧子树, 让下方夜间睡眠路由立即重新派发 (否则 _sub
+        // 保留的地下 DestroyBlock 在未加载区块里, ITaskRequiresGrounded 悬空
+        // 保护还会持续挡掉睡眠切换, 造成睡觉↔食物结构性横跳)。
+        int deathCount = mod.getWorldMemory().getConsecutiveDeathCount();
+        if (_lastDeathCountSeen >= 0 && deathCount != _lastDeathCountSeen) {
+            invalidateRetainedSubtree(mod);
+        }
+        _lastDeathCountSeen = deathCount;
+
         // (2026-08-27 烧炼期间不打断) 正在烧炼 (SmeltInFurnaceTask) 时, 无论它
         // 在烧料/接燃料/做木板燃料 (2x2 合成) 哪个子阶段, 都不要用"顺手拾取合成台 /
         // 熔炉"去打断 —— 否则刚放下的熔炉被重放/掉落, 烧↔回收横跳 (用户实测
@@ -984,6 +1003,7 @@ public class BeatMinecraft2Task extends Task {
         // 被抢去下矿, 睡完拆床永远做不完)。
         {
             Task nightSleepFirst = getNightSleepRouting(mod);
+            _nightSleepRoutedLastTick = nightSleepFirst != null;
             if (nightSleepFirst != null) {
                 return nightSleepFirst;
             }
@@ -3883,7 +3903,7 @@ public class BeatMinecraft2Task extends Task {
 
     /**
      * (2026-08-27 睡/床优先, 用户) 是否处于"主世界·夜间·可睡"优先时段。
-     * 该时段应优先睡/弄床, 推迟收合成台等侧线任务, 避免把睡床流程打断
+     * 该时段应优先睡/弄床, 推迟收合成表等侧线任务, 避免把睡床流程打断
      * (用户实测: 睡觉↔收合成台横跳, 摘床动作被 "Pick up crafting table"
      * 打断没做完)。与睡眠路由 (onTick 内) 的判定保持一致。
      */
@@ -3903,6 +3923,26 @@ public class BeatMinecraft2Task extends Task {
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         if (effectivelyDeep || belowSeaLevel) return false;
         return WorldHelper.canSleep();
+    }
+
+    /**
+     * (2026-09-23 死亡后失效保留子树) 走框架的 {@link Task#clearRetainedSub}
+     * 接缝: 死亡后旧目标(挖块/导航)已无意义, 让本拍 onTick 路由全新派发。
+     */
+    private void invalidateRetainedSubtree(AltoClef mod) {
+        clearRetainedSub(mod);
+        Debug.logToFile("altoclef_diag.log",
+                "[DeathReset] player died; beat retained subtree invalidated, re-dispatching");
+    }
+
+    /**
+     * (2026-09-23 睡眠路由窗口) 上一拍夜间睡眠/弄床路由是否活跃。供
+     * UserTaskChain 动态提升优先级 — 严格跟随路由: 睡觉尝试 30s 放弃冷却
+     * / 找床约 30s 无机会放弃期间, 路由返回 null, 优先级自动回落 50,
+     * 不堵塞食物/装备等有价值的事。
+     */
+    public boolean isNightSleepRoutingActive() {
+        return _nightSleepRoutedLastTick;
     }
 
     /**

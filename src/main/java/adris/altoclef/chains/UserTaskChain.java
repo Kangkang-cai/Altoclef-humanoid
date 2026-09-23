@@ -6,6 +6,7 @@ import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.util.time.Stopwatch;
 
 // A task chain that runs a user defined task at the same priority.
@@ -63,6 +64,15 @@ public class UserTaskChain extends SingleTaskChain {
 
     @Override
     public float getPriority(AltoClef mod) {
+        // (2026-09-23 睡眠窗口优先, 事故 20260923-115851) beat 夜间睡眠/弄床
+        // 路由活跃时提升到 58 (>Food 收集食物 55): 否则睡眠任务在链层永远被
+        // Food 抢占, 一个 tick 都跑不到, 还与 Food 的悬空让位构成结构性死锁。
+        // 严格跟随上一拍路由结果: 睡觉失败 30s 冷却 / 找床约 30s 无机会放弃
+        // 期间路由返回 null, 优先级立即回落 50, 保持"长期找不到床不堵塞有
+        // 价值的事"的既有设计。Mob Defense 65、World Survival 95 仍高于此。
+        if (_mainTask instanceof BeatMinecraft2Task beat && beat.isNightSleepRoutingActive()) {
+            return 58;
+        }
         return 50;
     }
 

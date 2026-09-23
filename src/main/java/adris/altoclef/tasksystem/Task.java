@@ -190,6 +190,25 @@ public abstract class Task {
         _parkedAtMs = 0;
     }
 
+    /**
+     * (2026-09-23 死亡后失效保留子树, 事故 20260923-115851) 强制清空当前
+     * 子任务并清掉 bounce 去抖记忆。供子类在"世界状态整体失效"(如玩家死亡)
+     * 后调用: 旧 _sub 的导航/挖块目标已无意义, 下一拍 onTick 须全新派发。
+     * 与普通 stop 的区别 —— 树可能正处于链挂起状态 (interrupt 后 _first=true
+     * 且不 active), stop() 此时直接 return 不落盘, 摘除即可; 仅当它仍 active
+     * 时才走完整 stop。
+     */
+    protected void clearRetainedSub(AltoClef mod) {
+        if (_sub != null) {
+            if (_sub._active) {
+                _sub.stop(mod);
+            }
+            _sub = null;
+        }
+        _lastStoppedSub = null;
+        _lastSwitchMs = 0;
+    }
+
     public void stop(AltoClef mod) {
         stop(mod, null);
     }
