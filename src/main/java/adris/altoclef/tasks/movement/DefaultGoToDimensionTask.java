@@ -53,6 +53,8 @@ public class DefaultGoToDimensionTask extends Task {
     private boolean _netherBedSpawnStarted = false;
     private boolean _netherBedSpawnDone = false;
     private static final double NETHER_PORTAL_BED_SPAWN_RANGE = 8.0;
+    // 门洞里往外撤的粘滞落脚点 (选定后不每 tick 重选, 避免 GetToBlock 目标抖动)
+    private BlockPos _netherExitTarget = null;
 
     public DefaultGoToDimensionTask(Dimension target) {
         _target = target;
@@ -187,12 +189,17 @@ public class DefaultGoToDimensionTask extends Task {
     }
 
     private Task goToNetherFromOverworldTask(AltoClef mod) {
+        // (2026-09-23 床闸门提到所有进门路由之前) 旧写法把闸门放在
+        // netherPortalIsClose 分支里, 而刚被打火石点亮的门受 BlockTracker 扫描
+        // 节流尚未入缓存 (20260923-085300 实锤: 点亮后 0.1s 外层重判
+        // anyFound(NETHER_PORTAL)=false) → 闸门被整体绕过, 落到 lastUsed 分支
+        // GetToBlock(门洞内部坐标) 原样走进去, vanilla 4s 后传走, 床一次没放。
+        Task bedSpawn = netherPortalBedSpawnTask(mod);
+        if (bedSpawn != null) {
+            return bedSpawn;
+        }
+
         if (netherPortalIsClose(mod)) {
-            // (2026-09-22) 进门前先就地放床/右键设重生点, 完成后才真正进门。
-            Task bedSpawn = netherPortalBedSpawnTask(mod);
-            if (bedSpawn != null) {
-                return bedSpawn;
-            }
             setDebugState("Going to nether portal");
             return new EnterNetherPortalTask(Dimension.NETHER);
         }
@@ -235,20 +242,27 @@ public class DefaultGoToDimensionTask extends Task {
      * <ul>
      *   <li>未开始: 必须已走到最近的已点亮下界门 XZ {@value #NETHER_PORTAL_BED_SPAWN_RANGE}
      *       格内才启动 — 远的时候让 EnterNetherPortalTask/导航先走, 绝不会在离门
-     *       很远的地方提前放床;</li>
+     *       很远的地方提前放床。门检测先走 BlockTracker, 刚点亮/扫描滞后时世界
+     *       直扫兜底 (20260923-085300: 旧实现只认缓存, 打火后被直接绕过);</li>
      *   <li>已开始: 保活床任务到 isFinished (设点成功 / 睡眠放弃 / 收床失败),
      *       期间 CollectBedTask 可能为收床走到 96 格外, 不中途撤回 (同末地
-     *       shouldForce 语义);</li>
+     *       shouldForce 语义)。若人已站在门洞里 (桶浇造门结束时人就在门里),
+     *       先导航到门外落脚点 — vanilla 要在门内连续站满 4s 才传送, 离开即
+     *       清零, 否则床还没放就被传走;</li>
      *   <li>完成: 闩 {@code _netherBedSpawnDone} 永久放行进门; 床任务自身有
      *       超时/放弃出口, 不会卡死进门流程。</li>
      * </ul>
-     * @return 要执行的床任务; null = 放行进入传送门
+     * @return 要执行的床任务/撤出任务; null = 放行进入传送门
      */
     private Task netherPortalBedSpawnTask(AltoClef mod) {
         if (_netherBedSpawnDone) {
             return null;
         }
         if (_netherBedSpawnStarted) {
+            Task exit = stepOutOfNetherPortalTask(mod);
+            if (exit != null) {
+                return exit;
+            }
             if (_bedSpawnBeforeNetherTask.isFinished(mod)) {
                 _netherBedSpawnStarted = false;
                 _netherBedSpawnDone = true;
@@ -261,21 +275,108 @@ public class DefaultGoToDimensionTask extends Task {
             setDebugState("Setting spawn near nether portal");
             return _bedSpawnBeforeNetherTask;
         }
-        Optional<BlockPos> nearest = mod.getBlockTracker().getNearestTracking(
-                mod.getPlayer().getPos(), Blocks.NETHER_PORTAL);
-        if (nearest.isPresent()
-                && WorldHelper.inRangeXZ(mod.getPlayer(), WorldHelper.toVec3d(nearest.get()),
+        BlockPos portal = nearestLitNetherPortal(mod);
+        if (portal != null
+                && WorldHelper.inRangeXZ(mod.getPlayer(), WorldHelper.toVec3d(portal),
                         NETHER_PORTAL_BED_SPAWN_RANGE)) {
             _netherBedSpawnStarted = true;
-            Debug.logMessage("(NetherBedSpawn) At nether portal " + nearest.get().toShortString()
+            Debug.logMessage("(NetherBedSpawn) At nether portal " + portal.toShortString()
                     + ", setting spawn point in place before entering.");
             Debug.logToFile("altoclef_diag.log", "[NetherBedSpawn]\tstart at portal "
-                    + nearest.get().toShortString() + " player="
+                    + portal.toShortString() + " player="
                     + mod.getPlayer().getBlockPos().toShortString());
+            // 造门任务刚结束时人可能正站在门洞里: 先撤出来再放床。
+            Task exit = stepOutOfNetherPortalTask(mod);
+            if (exit != null) {
+                return exit;
+            }
             setDebugState("Setting spawn near nether portal");
             return _bedSpawnBeforeNetherTask;
         }
         return null;
+    }
+
+    /**
+     * (2026-09-23) 最近的已点亮下界门。BlockTracker 有直接返回; 缓存未收录
+     * (刚打火点亮 / 扫描节流滞后) 时以玩家为中心直扫真实世界兜底, 并顺手把门块
+     * 注册回 tracker (注册后 netherPortalIsClose / EnterNetherPortalTask 也能看见)。
+     * 扫描盒 17x11x17: XZ r=8 与启动门限同口径 — 造门结束人就在门旁/门里,
+     * 远处的门由 lastUsed/remembered 导航负责, 不需要这里看见。
+     */
+    private BlockPos nearestLitNetherPortal(AltoClef mod) {
+        Optional<BlockPos> tracked = mod.getBlockTracker().getNearestTracking(
+                mod.getPlayer().getPos(), Blocks.NETHER_PORTAL);
+        if (tracked.isPresent()) {
+            return tracked.get();
+        }
+        BlockPos origin = mod.getPlayer().getBlockPos();
+        BlockPos nearest = null;
+        double nearestDistSq = Double.MAX_VALUE;
+        for (BlockPos pos : WorldHelper.scanRegion(mod, origin.add(-8, -5, -8), origin.add(8, 5, 8))) {
+            if (!mod.getChunkTracker().isChunkLoaded(pos)) continue;
+            if (mod.getWorld().getBlockState(pos).getBlock() != Blocks.NETHER_PORTAL) continue;
+            mod.getBlockTracker().addBlock(Blocks.NETHER_PORTAL, pos);
+            double distSq = pos.getSquaredDistance(mod.getPlayer().getPos());
+            if (distSq < nearestDistSq) {
+                nearestDistSq = distSq;
+                nearest = pos;
+            }
+        }
+        return nearest;
+    }
+
+    /**
+     * (2026-09-23) 玩家正站在下界门洞里时, 导航到门外最近的落脚点 (头脚两格
+     * 空气 + 脚下实心 + 均非门块), 抢在 vanilla 4s 传送计时走完前撤出; 离开
+     * 门洞即返回 null。落脚点粘滞复用 {@link #_netherExitTarget}, 人离开后清空。
+     */
+    private Task stepOutOfNetherPortalTask(AltoClef mod) {
+        boolean inside = mod.getWorld().getBlockState(mod.getPlayer().getBlockPos()).getBlock()
+                == Blocks.NETHER_PORTAL;
+        if (!inside) {
+            _netherExitTarget = null;
+            return null;
+        }
+        BlockPos safe = _netherExitTarget;
+        if (safe != null && !isSafeStandPos(mod, safe)) {
+            safe = null;
+        }
+        if (safe == null) {
+            BlockPos origin = mod.getPlayer().getBlockPos();
+            double safeDistSq = Double.MAX_VALUE;
+            for (BlockPos pos : WorldHelper.scanRegion(mod, origin.add(-3, -1, -3), origin.add(3, 1, 3))) {
+                if (!isSafeStandPos(mod, pos)) continue;
+                double distSq = pos.getSquaredDistance(mod.getPlayer().getPos());
+                if (distSq < safeDistSq) {
+                    safeDistSq = distSq;
+                    safe = pos;
+                }
+            }
+        }
+        if (safe == null) {
+            // 门洞外 3 格内一无可站 (极罕见, 三面封死): 不硬挡, 交给床任务自己
+            // 找放床区域 — 桶浇门本来就没有四角/侧墙, 两侧通常开放。
+            Debug.logWarning("(NetherBedSpawn) Inside portal but no safe stand within 3 blocks, bed task takes over");
+            return null;
+        }
+        if (!safe.equals(_netherExitTarget)) {
+            _netherExitTarget = safe;
+            Debug.logMessage("(NetherBedSpawn) Standing inside lit portal, stepping out to "
+                    + safe.toShortString() + " before setting spawn.");
+            Debug.logToFile("altoclef_diag.log", "[NetherBedSpawn]\tinside portal -> exit to "
+                    + safe.toShortString() + " player=" + mod.getPlayer().getBlockPos().toShortString());
+        }
+        setDebugState("Stepping out of nether portal before setting spawn");
+        return new GetToBlockTask(safe, false);
+    }
+
+    private boolean isSafeStandPos(AltoClef mod, BlockPos pos) {
+        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+        if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.NETHER_PORTAL) return false;
+        if (!WorldHelper.isAir(mod, pos) || !WorldHelper.isAir(mod, pos.up())) return false;
+        BlockPos below = pos.down();
+        if (mod.getWorld().getBlockState(below).getBlock() == Blocks.NETHER_PORTAL) return false;
+        return WorldHelper.isSolid(mod, below);
     }
 
     /**
