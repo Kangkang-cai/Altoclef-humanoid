@@ -127,6 +127,21 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 推进; 不在海洋(已上岸)清除。目标稳定, 不会每 tick 抖动。
     private BlockPos _landTarget = null;
 
+    // (2026-09-23 岩浆湖记忆导航) 地表/下界找不到可直接舀的源时, 优先导航到
+    // KnowledgeMemory 里亲眼见过并落盘的岩浆湖锚点, 替代无方向 wander ("以后
+    // 需要岩浆时直接用记住的湖")。粘性子任务 (同 _exploreTask 铁律: 每 tick
+    // 新建实例会导致目标每 tick 换、baritone 永远在重算)。
+    private GetToXZTask _lakeNavTask = null;
+    private BlockPos _lakeNavTarget = null;
+    // 到达/导航结束的湖锚点短期拉黑, 防"到达→附近找不到源→再选同一个"死循环。
+    // static + TTL: 本任务实例会被框架频繁重建, 实例层冷却会被绕过 (铁律,
+    // 同 _traceBlacklist)。
+    private static final Map<BlockPos, Long> _lakeBlacklist = new HashMap<>();
+    private static final long LAKE_BLACKLIST_TTL_MS = 120_000;
+    // 到达判定: XZ 6 格内视为已到湖边 —— trackBlock(LAVA) 近区扫描自会接管找
+    // 源, 不需要踩到锚点头上。
+    private static final double LAKE_NAV_ARRIVE_XZ = 6.0;
+
     private boolean wasWandering = false;
 
     public CollectBucketLiquidTask(String liquidName, Item filledBucket, int targetCount, Block toCollect) {
@@ -444,11 +459,77 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
         // 不在海洋 (已上岸/内陆): 清除陆地缓存, 恢复有界探索
         _landTarget = null;
+        // (2026-09-23 岩浆湖记忆) 到了地表/在下界仍无可直接舀的源: 若记忆里有
+        // 亲眼见过并跨会话记住的岩浆湖, 直接导航过去, 不再无方向 wander。仅岩浆
+        // 走此路 (水没有"湖记忆")。地下场景已被上面的 GoToSurfaceTask 分支接走。
+        if (_toCollect == Blocks.LAVA) {
+            Task lakeTask = getRememberedLakeTask(mod);
+            if (lakeTask != null) return lakeTask;
+        }
         // (2026-09-04 用户"找lava随机方向原地打转") 地表探索用持久 heading 步进
         // 探索替代 TimeoutWanderTask: 每段沿当前方向走 48 格 (GetToXZTask, 到达后
         // 父任务重估, 有液体源就近收 / 无则下一步), 每段仅 ±25° 小抖动不回头,
         // 持续朝大致方向推进, 不再每段重估随机换方向原地打转。
         return getSurfaceExploreTask(mod);
+    }
+
+    /**
+     * (2026-09-23 岩浆湖记忆) 取 KnowledgeMemory 中最近的 LAVA_LAKE 锚点并粘性
+     * 导航过去 (跨会话持久化, 无距离上限 —— 与找堡垒同款"记得就奔过去"语义)。
+     * 返回 null = 没有可用记忆, 交回外层探索。到达 XZ {@value #LAKE_NAV_ARRIVE_XZ}
+     * 格 (近区 trackBlock 扫描会接管找源), 或导航子任务自行结束, 就把锚点拉黑
+     * {@value #LAKE_BLACKLIST_TTL_MS}ms 并重选, 防同一湖死循环。
+     */
+    private Task getRememberedLakeTask(AltoClef mod) {
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        if (_lakeNavTask != null) {
+            boolean close = _lakeNavTarget != null
+                    && horizontalSq(feet, _lakeNavTarget) <= LAKE_NAV_ARRIVE_XZ * LAKE_NAV_ARRIVE_XZ;
+            if (!close && _lakeNavTask.isActive() && !_lakeNavTask.isFinished(mod)) {
+                setDebugState("Navigating to remembered lava lake -> "
+                        + _lakeNavTarget.getX() + "," + _lakeNavTarget.getZ());
+                return _lakeNavTask;
+            }
+            // 到达 或 导航结束: 近区若有源, 外层前面的收集分支下一 tick 会接走;
+            // 没有则拉黑本锚点重选, 不卡在同一处。
+            if (_lakeNavTarget != null) {
+                _lakeBlacklist.put(_lakeNavTarget.toImmutable(),
+                        System.currentTimeMillis() + LAKE_BLACKLIST_TTL_MS);
+                Debug.logMessage("[LavaMemory] 湖锚点导航结束, 短期拉黑重估 " + _lakeNavTarget.toShortString());
+            }
+            _lakeNavTask = null;
+            _lakeNavTarget = null;
+        }
+        long now = System.currentTimeMillis();
+        _lakeBlacklist.entrySet().removeIf(e -> now > e.getValue());
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        // 1e7 格上限 ≈ 不限距离: 记忆是"亲眼见过的重要位置", 与堡垒记忆一致。
+        for (BlockPos center : mod.getKnowledgeMemory().getRememberedCenters(
+                adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
+                mod.getPlayer().getPos(), 1.0e7)) {
+            if (_lakeBlacklist.containsKey(center)) continue;
+            double sq = center.getSquaredDistance(feet);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = center;
+            }
+        }
+        if (best == null) return null;
+        _lakeNavTarget = best.toImmutable();
+        _lakeNavTask = new GetToXZTask(best.getX(), best.getZ());
+        setDebugState("Heading to remembered lava lake -> " + best.getX() + "," + best.getZ()
+                + " (d=" + (int) Math.sqrt(bestSq) + ")");
+        Debug.logMessage("[LavaMemory] 凭记忆前往岩浆湖 " + best.toShortString()
+                + " (d=" + (int) Math.sqrt(bestSq) + ")");
+        return _lakeNavTask;
+    }
+
+    /** XZ 水平距离平方 (忽略高度, GetToXZTask/GoalXZ 只认 XZ)。 */
+    private static double horizontalSq(BlockPos a, BlockPos b) {
+        double dx = a.getX() - b.getX();
+        double dz = a.getZ() - b.getZ();
+        return dx * dx + dz * dz;
     }
 
     /**
