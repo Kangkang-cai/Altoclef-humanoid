@@ -192,7 +192,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
             if (furnacePos != null
                     && !_doTask.isFurnaceDrained()
                     && nowMs - _lastFurnaceScreenMs > SMELT_AWAY_GIVEUP_MS
-                    && mod.getPlayer().getSquaredDistance(furnacePos)
+                    && furnacePos.getSquaredDistance(mod.getPlayer().getPos())
                             > (double) SMELT_AWAY_MAX_DIST * SMELT_AWAY_MAX_DIST) {
                 int invTarget = 0;
                 for (ItemTarget t : _itemTargets) {

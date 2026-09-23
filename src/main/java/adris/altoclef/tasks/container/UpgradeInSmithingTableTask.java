@@ -103,6 +103,14 @@ public class UpgradeInSmithingTableTask extends ResourceTask {
     }
 
     @Override
+    protected void onResourceStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-23 行为栈泄漏修复) 不 push 也不 pop: 行为层由父类
+        // ResourceTask.onStart/onStop 统一管理。旧代码此处误写成 push() (语义上
+        // 应为 pop), 与 onResourceStart 的多余 push 叠加, 每执行一次锻造净漏
+        // 2 层行为栈。保留空 override 仅因父类该抽象方法必须实现。
+    }
+
+    @Override
     protected boolean isEqualResource(ResourceTask other) {
         if (other instanceof UpgradeInSmithingTableTask task) {
             return task._tool.equals(_tool) && task._output.equals(_output) && task._material.equals(_material);
