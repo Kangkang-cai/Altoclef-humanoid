@@ -90,7 +90,13 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // (现场 pathing=true 全程); (b) 只会 hold(JUMP) 上浮, 隧道顶封死时按跳无效,
     // bot 在水下 air=-0.04 掉血 18s 淹死。新增: 空气危急(<25%)且在水中时,
     // 以高优先级导航到最近可呼吸方块 (AIR/CAVE_AIR/VOID_AIR)。
-    private static final double DROWN_ESCAPE_AIR_FRACTION = 0.25;
+    // (2026-09-23 用户 12:13 淹死复盘: 空气 0.25 才救太晚) 现场 bot 水底采掘时
+    // air 从 0.77 一路耗到 0.25 才触发逃生, 氧气白白耗掉大半 + 逃生又卡压顶挖不了,
+    // 最终空气 -0.04 健康归零淹死。水下采掘任务(SwimDive)只在 air<0.5 才让位,
+    // 逃生阈值若不匹配就会造成"0.5~0.25 之间的氧气被采掘任务无脑耗干"。
+    // (2026-09-23 用户实测) 0.5 仍偶发压顶逃生慢半拍, 实测 0.7 触发最稳妥:
+    // 氧气还剩 7 成就立即抬头/挖压顶, 给食物采购等水下动作留足余量, 呼吸永远优先。
+    private static final double DROWN_ESCAPE_AIR_FRACTION = 0.7;
     private static final int DROWN_ESCAPE_SEARCH_RADIUS = 16;
     private static final float DROWN_ESCAPE_PRIORITY = 95; // 低于岩浆/火焰(100), 高于常规任务
     private final TimerGame _drownReissueTimer = new TimerGame(1); // 溺水时限紧, 1s 重发冷却
@@ -473,19 +479,27 @@ public class WorldSurvivalChain extends SingleTaskChain {
             return _mainTask != null ? DROWN_ESCAPE_PRIORITY : Float.NEGATIVE_INFINITY;
         }
 
-        // ★★ (2026-09-22 用户定案: 垂直上浮优先) 溺水最自然的出路就是向上浮。
-        // 头顶上方若是空气/水 → 直接上浮即可, 完全不依赖 baritone (它水下会
-        // 因头顶挡块而寻路失败); 头顶是可碎方块 → 挖一格就通气 (现场 (100,63,-231)
-        // 空气、bot 在 (101,61,-231), 头顶 (101,63,-231) 挡块, 挖掉即通);
-        // 只有垂直方向被实心厚顶/不可碎封死时才回退 findNearestBreathable 找侧气室。
+        // ★★ (2026-09-22 用户定案: 垂直上浮优先, 2026-09-23 补"先从 feet.up(1) 抠压顶")
+        // 溺水最自然的出路就是向上浮。自下往上找第一块非空气/非水的方块(压顶):
+        //  - 它若是空气/水 → 直接上浮, 完全不依赖 baritone (它水下会因头顶挡块而寻路失败);
+        //  - 它是可碎方块 → 挖掉这一块 (现场 (1030,19,-320) 水底, feet.up(1)=(1030,20,-320)
+        //    铁矿石压顶, feet.up(2)=(1030,21,-320) 才是旧的 cap。旧代码只查 up(2), 漏掉
+        //    紧贴头顶的 up(1), 反让 DestroyBlockTask 去清 cap 前方 occluder 卡死淹死);
+        //  - 垂直方向从 up(1) 起被实心厚顶/不可碎封死 → 回退 findNearestBreathable。
+        // 判断必须覆盖 feet.up(1) 与 feet.up(2) 两格: 水底时脚在 y, 身体占 y~y+2,
+        // 真正挡住上浮的是这区间里的第一块实心方块。
         BlockPos feetPos = p.getBlockPos();
-        BlockPos up = feetPos.up(2); // bot 身高占 feet + up(1), 正头顶上方是 up(2)
-        boolean upLoaded = mod.getChunkTracker().isChunkLoaded(up);
-        boolean upBreathable = upLoaded
-                && (WorldHelper.isAir(mod, up)
-                    || mod.getWorld().getBlockState(up).getBlock() == Blocks.WATER);
-        if (upBreathable) {
-            // 头顶可上浮 → 直接向上游, 绕过 baritone 水下寻路死区。
+        BlockPos up1 = feetPos.up(1);
+        BlockPos up2 = feetPos.up(2);
+        // 从 up(1) 开始: 若整格都是可呼吸(空气/水)则该格可穿过, 继续看 up(2)。
+        boolean up1Breathable = mod.getChunkTracker().isChunkLoaded(up1)
+                && (WorldHelper.isAir(mod, up1)
+                    || mod.getWorld().getBlockState(up1).getBlock() == Blocks.WATER);
+        boolean up2Breathable = mod.getChunkTracker().isChunkLoaded(up2)
+                && (WorldHelper.isAir(mod, up2)
+                    || mod.getWorld().getBlockState(up2).getBlock() == Blocks.WATER);
+        if (up1Breathable && up2Breathable) {
+            // 头顶两格都通 → 直接向上游, 绕过 baritone 水下寻路死区。
             _loggedNoBreathable = false;
             _drownSwimTarget = null;
             try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
@@ -499,27 +513,47 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 _loggedSwimUpOnce = true;
                 String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
                         + " -> SWIM UP (vertical) player=" + feetPos
-                        + " head=" + up.toShortString();
+                        + " head=" + up1.toShortString();
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
             }
             return DROWN_ESCAPE_PRIORITY;
         }
         _loggedSwimUpOnce = false;
-        // 头顶是可碎方块 (挡块) → 挖一格, 挖通后顶格变空气/水, 上浮即出头。
-        if (upLoaded && WorldHelper.canBreak(mod, up)) {
+        // 紧贴头顶 up(1) 就有实心方块 (现场的 feet.up(1) 铁矿石) → 优先挖它,
+        // 这是最靠近的压顶, 挖掉后身体就有上浮空间。别再派 cap(up2) 让它去清 occluder。
+        if (mod.getChunkTracker().isChunkLoaded(up1)
+                && !WorldHelper.isAir(mod, up1)
+                && mod.getWorld().getBlockState(up1).getBlock() != Blocks.WATER
+                && WorldHelper.canBreak(mod, up1)) {
             _drownSwimTarget = null;
-            setTask(new DestroyBlockTask(up));
+            setTask(new DestroyBlockTask(up1));
             _drownReissueTimer.reset();
             _drownPathlessTimer.reset();
             String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
-                    + " -> DIG UP cap " + up.toShortString()
+                    + " -> DIG UP cap(1) " + up1.toShortString()
                     + " player=" + feetPos;
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
             return DROWN_ESCAPE_PRIORITY;
         }
-        // 垂直被实心厚顶/不可碎封死 → 回退 findNearestBreathable 找侧气室。
+        // up(1) 通了但 up(2) 有实心方 → 挖 up(2)。
+        if (mod.getChunkTracker().isChunkLoaded(up2)
+                && !WorldHelper.isAir(mod, up2)
+                && mod.getWorld().getBlockState(up2).getBlock() != Blocks.WATER
+                && WorldHelper.canBreak(mod, up2)) {
+            _drownSwimTarget = null;
+            setTask(new DestroyBlockTask(up2));
+            _drownReissueTimer.reset();
+            _drownPathlessTimer.reset();
+            String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
+                    + " -> DIG UP cap(2) " + up2.toShortString()
+                    + " player=" + feetPos;
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return DROWN_ESCAPE_PRIORITY;
+        }
+        // up(1)/up(2) 均不可穿过也不可碎 (实心厚顶/不可碎) → 回退 findNearestBreathable。
         _drownSwimTarget = null;
         BlockPos air = findNearestBreathable(mod);
         if (air == null) {
