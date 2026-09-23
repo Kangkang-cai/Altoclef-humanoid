@@ -44,7 +44,10 @@ public class UpgradeInSmithingTableTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-        mod.getBehaviour().push();
+        // (2026-09-23 行为栈泄漏修复) 不在此 push(): 父类 ResourceTask.onStart
+        // 已 push 并在 onStop 统一 pop, conversion slots 注册在父类层即可随任务
+        // 结束清除。旧代码此处 push、onResourceStop 里竟误写成又一次 push (应为
+        // pop), 每执行一次锻造净泄漏 2 层行为栈。
         mod.getBehaviour().markSlotAsConversionSlot(SmithingTableSlot.INPUT_SLOT_TOOL, stack -> _tool.matches(stack.getItem()));
         mod.getBehaviour().markSlotAsConversionSlot(SmithingTableSlot.INPUT_SLOT_MATERIALS, stack -> _material.matches(stack.getItem()));
     }
@@ -97,11 +100,6 @@ public class UpgradeInSmithingTableTask extends ResourceTask {
 
         setDebugState("Smithing...");
         return _innerTask;
-    }
-
-    @Override
-    protected void onResourceStop(AltoClef mod, Task interruptTask) {
-        mod.getBehaviour().push();
     }
 
     @Override

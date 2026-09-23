@@ -61,6 +61,20 @@ public class SmeltInFurnaceTask extends ResourceTask {
     private String _stallSnap = null;
     private int _stallOpenTicks = 0;
 
+    // (2026-09-23 远离看门狗) 最近一次熔炉界面真实打开的墙钟; 0 = 本实例从未开屏
+    // (冷启动合法找生料/燃料阶段, 不计时)。原有"只统计开屏 tick"的看门狗有盲区:
+    // bot 开屏填料后被怪追/主动下矿越走越远, 界面再没打开过 → 零进展计数永不攒表
+    // (20260923-155135 实锤 16:13:39 填料下矿, 到 16:21 距炉 90 格/8 分钟, 任务
+    // 仍挂死在 gear 子树)。
+    private long _lastFurnaceScreenMs = 0;
+    // 与 DoSmeltInFurnaceTask.getMaxWalkDistance / 在途账 SMELT_RETURN_* 同口径:
+    // 用户 2026-09-22 定案"1.5min 内 64 格内非空炉直接回去, 否则别白烧"。
+    // 触发须三条件 AND: 开屏后炉内仍非空 + 关屏超过 90s + 人在 64 格外。
+    // 炉边守卫驻留 (<64 格) 不误伤; 取燃料远足 90s 内回炉重开屏即刷新;
+    // 从未开屏的冷启动采集 (可能合法下矿数分钟) 因 _lastFurnaceScreenMs=0 不计时。
+    private static final long SMELT_AWAY_GIVEUP_MS = 90_000;
+    private static final int SMELT_AWAY_MAX_DIST = 64;
+
     // (2026-09-12 v20 填料期豁免) 冶炼链当前锁定的炉位 — 静态跨层信号, 与
     // FurnaceSmeltGuardTask.getActiveGuardedFurnacePos 同先例。区别: 守卫静态口
     // 只在守卫交接后生效, 而排空闸门 (BeatMinecraft2Task 进下界前) 的 1s 扫描
@@ -108,7 +122,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
         if (_targets.length != 1) {
             Debug.logWarning("Tried smelting multiple targets, only one target is supported at a time!");
         }
-        mod.getBehaviour().push();
+        // (2026-09-23 行为栈泄漏修复) 绝不能在此再 push(): ResourceTask.onStart
+        // 已经 push 过一层 (并保护目标产物), onResourceStart 是它的扩展钩子, 契约
+        // 是"直接往当前层加项, 由 ResourceTask.onStop 统一 pop" (对照
+        // CraftInTableTask.onResourceStart 空体)。上游 2022 提交 909a46f0 在此多
+        // push 了一次却全类无对应 pop —— 每次熔炼结束只弹出 conversionSlots 层,
+        // ResourceTask 那层 (含 cooked_* / iron_ingot 等产物保护) 永久焊死在栈上,
+        // 后续所有任务 push 都复制继承 → 烧过的产物整场游戏都被判 isProtected
+        // (2026-09-23 16:21 实锤: 熟肉27块全 [PROT], 残血被逼吃浆果)。谓词注册
+        // 在父类层后随父类 onStop 的 pop 一并清除, 生命周期完全一致。
         mod.getBehaviour().markSlotAsConversionSlot(FurnaceSlot.INPUT_SLOT_MATERIALS, stack -> {
             // Eventually do multiple targets
             return _targets[0].getMaterial().matches(stack.getItem());
@@ -134,8 +156,12 @@ public class SmeltInFurnaceTask extends ResourceTask {
         }
         // 看门狗主体: 只统计熔炉界面打开的 tick (去程取燃料/守卫驻留期界面
         // 关着, 不计时, 不误伤合法的长时间取料)。
-        if (mod.getPlayer() != null
-                && mod.getPlayer().currentScreenHandler instanceof FurnaceScreenHandler) {
+        long nowMs = System.currentTimeMillis();
+        boolean screenOpen = mod.getPlayer() != null
+                && mod.getPlayer().currentScreenHandler instanceof FurnaceScreenHandler;
+        if (screenOpen) {
+            // 开过屏即登记: 远离看门狗以此为"最后一次照看炉子"的时间戳。
+            _lastFurnaceScreenMs = nowMs;
             ItemStack out = StorageHelper.getItemStackInSlot(FurnaceSlot.OUTPUT_SLOT);
             ItemStack mat = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_MATERIALS);
             ItemStack fuel = StorageHelper.getItemStackInSlot(FurnaceSlot.INPUT_SLOT_FUEL);
@@ -151,7 +177,30 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 _stallOpenTicks++;
             }
             if (_stallOpenTicks >= SMELT_STALL_GIVEUP_TICKS) {
-                giveUp(mod, out, mat, fuel, invTarget);
+                giveUp(mod, "stall-open-60s", out, mat, fuel, invTarget);
+                return null;
+            }
+        } else if (mod.getPlayer() != null && _lastFurnaceScreenMs > 0) {
+            // (2026-09-23 远离看门狗) 开屏填料/收货后再没回到炉边, 且最后一次
+            // 观察时炉内仍有我们的料/产物 → 物理上已放弃这座炉。三个条件缺一不可:
+            //  - !isFurnaceDrained(): 最后缓存非空 (已排空的炉无需守, isFinished
+            //    自身会结束; 该口径内含 _cacheKnown, 冷启动空缓存不会误入);
+            //  - 关屏 >90s: 与在途炉账 1.5min 回程窗口同口径;
+            //  - 人在 64 格外: 与 getMaxWalkDistance 同口径, 炉边守卫/附近砍树
+            //    取燃料不误伤 (90s 内回炉重开屏也会刷新时间戳)。
+            BlockPos furnacePos = _doTask.getKnownCachePos();
+            if (furnacePos != null
+                    && !_doTask.isFurnaceDrained()
+                    && nowMs - _lastFurnaceScreenMs > SMELT_AWAY_GIVEUP_MS
+                    && mod.getPlayer().getSquaredDistance(furnacePos)
+                            > (double) SMELT_AWAY_MAX_DIST * SMELT_AWAY_MAX_DIST) {
+                int invTarget = 0;
+                for (ItemTarget t : _itemTargets) {
+                    invTarget += mod.getItemStorage().getItemCountInventoryOnly(t.getMatches());
+                }
+                giveUp(mod, "away>" + SMELT_AWAY_MAX_DIST + "blocks+"
+                        + (SMELT_AWAY_GIVEUP_MS / 1000) + "s-no-screen",
+                        ItemStack.EMPTY, ItemStack.EMPTY, ItemStack.EMPTY, invTarget);
                 return null;
             }
         }
@@ -161,18 +210,22 @@ public class SmeltInFurnaceTask extends ResourceTask {
     /**
      * (2026-09-10) 活锁看门狗触发: 放弃本实例 (isFinished 短路放行, 炉内遗留
      * 现状保留不强行腾), 记快照日志定案现场, 触发层 static 冷却。
+     *
+     * @param reason 放弃原因标签: stall-open-60s (界面内零进展活锁) 或
+     *               away>64blocks+90s-no-screen (远离看门狗, 此时界面关着,
+     *               out/mat/fuel 传 EMPTY, 炉内真实内容看 cache= 快照)。
      */
-    private void giveUp(AltoClef mod, ItemStack out, ItemStack mat, ItemStack fuel, int invTarget) {
+    private void giveUp(AltoClef mod, String reason, ItemStack out, ItemStack mat, ItemStack fuel, int invTarget) {
         _gaveUp = true;
         _staticGaveUpUntilMs = System.currentTimeMillis() + SMELT_GIVEUP_COOLDOWN_MS;
-        String msg = "[SmeltGiveUp]\t零进展 " + (SMELT_STALL_GIVEUP_TICKS / 20)
-                + "s(界面开启口径) 放弃烧炼"
+        String msg = "[SmeltGiveUp]\t放弃烧炼 reason=" + reason
                 + " output=" + out.getCount() + " material=" + mat.getCount()
                 + " fuel=" + fuel.getCount() + " invTarget=" + invTarget
                 + " cache=" + describeFurnaceCache();
         Debug.logMessage(msg);
         Debug.logToFile("altoclef_diag.log", msg);
         // 关屏 (MC 自动把光标物品弹回背包/掉落), 遗留物保持现状 — 放弃语义。
+        // 远离触发时界面本就关着, 调用无害。
         StorageHelper.closeScreen();
     }
 
@@ -383,6 +436,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
         private BlockPos _cachePos = null;
         // 是否已实际观察到炉内数据 (打开过熔炉且坐标未切换)。
         private boolean _cacheKnown = false;
+
+        /**
+         * (2026-09-23 远离看门狗) 真实开屏绑定过的炉位坐标; 从未观察到任何
+         * 炉子 (冷启动) 时返回 null。供外层 SmeltInFurnaceTask 判断"人是否已
+         * 远离我们最后照看的那座炉"。
+         */
+        BlockPos getKnownCachePos() {
+            return _cacheKnown ? _cachePos : null;
+        }
 
         // (2026-09-12 界面闪烁修复) 开屏 latch —— 界面刚打开后的最短显示时长。
         // 现场 20260912-085838 (用户"熔炉界面一闪一闪地开合"): bot 走到炉前
