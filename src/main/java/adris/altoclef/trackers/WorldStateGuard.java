@@ -9,8 +9,11 @@ import adris.altoclef.tasks.container.SmeltInFurnaceTask;
 import adris.altoclef.tasks.movement.BearingExpeditionTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.FortressExploreTask;
+import adris.altoclef.tasks.movement.GetToOuterEndIslandsTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
+import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -80,6 +83,28 @@ public final class WorldStateGuard {
         Debug.logMessage("[WorldGuard] world changed " + from + " -> " + now
                 + ", cleared " + ok + " states"
                 + (failed > 0 ? " (" + failed + " failed)" : ""));
+        // (2026-09-23 用户"两个世界完全没有任何关系") static 清完还不够:
+        // BeatMinecraft2Task 是 UserTaskChain 上的长驻实例, 其一次性闩锁
+        // (_woodStockpiled/_restockArmed/_bedInsuranceDone)、缓存子任务、计时器
+        // 全部随实例存活 —— 旧世界攒满过25原木, 新世界开局直接变成补货6模式。
+        // 直接用全新实例替换当前用户任务, 构造即零联系, 未来新增实例字段也自动覆盖。
+        replaceUserTask(mod);
+    }
+
+    private static void replaceUserTask(AltoClef mod) {
+        Task current = mod.getUserTaskChain().getCurrentTask();
+        Task fresh = null;
+        if (current instanceof BeatMinecraft2Task) {
+            fresh = new BeatMinecraft2Task();
+        } else if (current instanceof GetToOuterEndIslandsTask) {
+            // 该任务 onStart 内嵌 new BeatMinecraft2Task(), 换新才能连带刷新。
+            fresh = new GetToOuterEndIslandsTask();
+        }
+        if (fresh != null) {
+            mod.runUserTask(fresh, () -> { });
+            Debug.logMessage("[WorldGuard] user task replaced with a fresh instance: "
+                    + current.getClass().getSimpleName());
+        }
     }
 
     private static void register(String name, Runnable reset) {

@@ -456,6 +456,12 @@ public class BeatMinecraft2Task extends Task {
     // woodRestockThreshold（低水位）才重新去囤，避免 64 根用掉 1 根
     // 就被"收集 64 原木"任务拽回去挖树的优先级过高问题。
     private boolean _woodStockpiled = false;
+    // (2026-09-23 补货闩锁, 用户"少一个就restocking不合理") 旧逻辑用
+    // logCount < woodRestockThreshold(6) 同时做触发线和持权条件: 补货任务目标
+    // 虽是 25, 但原木一到 6 门控就放行, 25 目标被 Food(prio55>beat50) 抢走,
+    // 实际变成 "5→砍到6→走→用1棵→5→再砍"。改为闩锁: 跌破 6 武装, 粘到
+    // logCount >= minWoodLogs(25) 才解除, 期间被打断后仍会继续攒满。
+    private boolean _restockArmed = false;
     // (2026-08-27 48原木一次性粘性实例, 用户原则) 木头囤货作为"一次性任务"：
     // 一旦派发就把实例粘住，跑完（isFinished）才释放，绝不每 tick 新建一个
     // 48 原木任务把其他任务链压没（用户实测: 需工具→需木棍→需木板→需原木,
@@ -3061,31 +3067,39 @@ public class BeatMinecraft2Task extends Task {
         // 本方法全程复用同一判定, 诊断串也用它, 避免"门控用的口径"与"日志写的口径"分家。
         boolean woodTaskActive = (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))
                 || woodMiningActiveInChain(mod);
-        // (2026-09-01 用户"地下不触发收集木头, 除非原木<4") 地下时原木 ≥
-        // woodRestockThreshold(4) 就地继续挖矿, 不回地表/不就地砍树 — 否则
-        // minWoodLogs(25) 未攒够就让 bot 在原木还很多时频繁回地表打断下矿
-        // (日志 10:35 "Returning to surface to collect wood" 实锤)。只有跌破
-        // 4 才算真缺木头, 才回地表。地表逻辑仍按原 minWoodLogs 攒满。
-        if ((isUndergroundDebounced(mod) || isInPit(mod)) && logCount >= _config.woodRestockThreshold) {
+        // (2026-09-23 补货闩锁) 闩锁武装/解除:
+        //  - 囤满过一次后, 原木跌破 woodRestockThreshold(6) 即武装;
+        //  - 武装后粘到 logCount >= minWoodLogs(25) 才解除。旧口径用 logCount<6
+        //    同时做触发和持权, 原木到 6 就放行, 25 目标永远攒不满。
+        if (_woodStockpiled) {
+            if (_restockArmed) {
+                if (logCount >= _config.minWoodLogs) {
+                    _restockArmed = false;
+                }
+            } else if (logCount < _config.woodRestockThreshold) {
+                _restockArmed = true;
+            }
+        }
+        // 本轮是否真需要木头: 首次囤货看 <25; 囤满后只看闩锁。
+        boolean needsWood = !_woodStockpiled
+                ? logCount < _config.minWoodLogs
+                : _restockArmed;
+        // (2026-09-01 用户"地下不触发收集木头, 除非原木跌破水位") 地下且
+        // 不缺木头就就地继续挖矿, 不回地表/不就地砍树。闩锁武装后地下也
+        // 持权(直到攒满), 避免"砍到6又回地下"的旧循环。
+        if (!needsWood && (isUndergroundDebounced(mod) || isInPit(mod))) {
             return null;
         }
-        // (2026-08-22) 地表资源前置: 树只长在地表。深处矿洞/水下时先挖回
-        // 地表再收集 — Baritone 垂直挖穿几十格岩层耗时数分钟, 若直接派收集
-        // 任务会被进度检查误判"不可达"而"挖一半就放弃换目标"。
-        if ((!_woodStockpiled && logCount < _config.minWoodLogs)
-                || (_woodStockpiled && logCount < _config.woodRestockThreshold)) {
-            // (2026-08-27 原木↔回表面横跳修复) 已有进行中的原木收集任务时
-            // 别再用"回表面"反复打断 (导航路线若中途低于表面会触发横跳)。
-            // (2026-09-17 口径扩展, 事故 20260917-143638) 旧口径只认私有实例
-            // `_woodStockpileTask` —— 床链内部的 MineAndCollectTask(木头) 不是它, 于是
-            // 门控认为"没人砍木", 把正在为自己供料的床链整个顶掉: 3 羊毛已到手、
-            // 只差 3 木板, 14:38:02 被 GoToSurfaceTask 抢走, 整夜再没做床 (次日
-            // t=1691 背包 3 羊毛+3 木板已满足配方却无人发起)。
-            // 现在 woodTaskActive 同时涵盖"链上确有一个木头目标的采集任务"。
-            if (!woodTaskActive && (isUndergroundDebounced(mod) || isInPit(mod))) {
-                setDebugState("Returning to surface to collect wood.");
-                return new GoToSurfaceTask();
-            }
+        // (2026-08-22) 地表资源前置: 树只长在地表。深处矿洞/水下缺木头时先
+        // 挖回地表再收集 — Baritone 垂直挖穿几十格岩层耗时数分钟, 若直接派
+        // 收集任务会被进度检查误判"不可达"而"挖一半就放弃换目标"。
+        // (2026-09-17 口径扩展, 事故 20260917-143638) 链上已有木头采集任务
+        // (如床链内部的 MineAndCollectTask) 时别再用"回表面"打断它: 旧口径
+        // 只认私有实例 _woodStockpileTask, 床链供料时被 GoToSurface 抢走近
+        // 一整夜。woodTaskActive 同时涵盖"链上确有木头目标的采集任务"。
+        if (needsWood && !woodTaskActive && (isUndergroundDebounced(mod) || isInPit(mod))) {
+            setDebugState("Returning to surface to collect wood.");
+            return new GoToSurfaceTask();
         }
         if (!_woodStockpiled) {
             if (logCount >= _config.minWoodLogs) {
@@ -3106,16 +3120,15 @@ public class BeatMinecraft2Task extends Task {
                 }
                 return prependAxeForWood(mod, _woodStockpileTask);
             }
-        } else if (logCount < _config.woodRestockThreshold) {
-            // (2026-09-17 显示口径修正) 旧串 "Restocking wood (logs): 3/4" 里的 4 是
-            // 【触发水位】, 收集目标其实是 minWoodLogs(25) —— 用户据此误读为"只补 4 个,
-            // 用掉 1 个就又补"。这里把水位与目标同时写出来; 前缀保持原样以兼容既有判据。
-            setDebugState("Restocking wood (logs): " + logCount + "/" + _config.woodRestockThreshold
-                    + " (waterline, settle target " + _config.minWoodLogs + ")");
+        } else if (_restockArmed) {
+            // (2026-09-23 闩锁口径) 分母是真正的收集目标 25, 不再写触发水位。
+            setDebugState("Restocking wood (logs): " + logCount + "/" + _config.minWoodLogs
+                    + " (latch armed below " + _config.woodRestockThreshold + ")");
             diagIronPhase(mod, "restock wood",
                     "logCount=" + logCount
-                            + " restockThresh=" + _config.woodRestockThreshold
                             + " settleTarget=" + _config.minWoodLogs
+                            + " restockThresh=" + _config.woodRestockThreshold
+                            + " latchArmed=" + _restockArmed
                             + " woodTaskActive=" + woodTaskActive);
             if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
                 _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.minWoodLogs);

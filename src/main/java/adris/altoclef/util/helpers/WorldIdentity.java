@@ -38,8 +38,16 @@ public final class WorldIdentity {
             var server = MinecraftClient.getInstance().getServer();
             if (server != null) {
                 Path root = server.getSavePath(WorldSavePath.ROOT);
-                if (root != null && root.getFileName() != null) {
-                    return root.getFileName().toString();
+                if (root != null) {
+                    // (2026-09-23 根因修复) 1.18.2 的 getSavePath(ROOT) 实际返回
+                    // `saves/<目录>/.` —— Session.getDirectory 对 ROOT 没有特判,
+                    // 而是 resolve(ROOT.getRelativePath()), ROOT 的相对路径字面量是
+                    // ".", 不 normalize 时 getFileName() 恒为 ".", 导致所有存档
+                    // 标识相同 (knowledge.log 全是 w2:., WorldStateGuard 永不触发)。
+                    Path norm = root.normalize();
+                    if (norm.getFileName() != null) {
+                        return norm.getFileName().toString();
+                    }
                 }
                 if (server.getSaveProperties() != null
                         && server.getSaveProperties().getLevelName() != null) {
