@@ -127,10 +127,21 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // 是"直接往当前层加项, 由 ResourceTask.onStop 统一 pop" (对照
         // CraftInTableTask.onResourceStart 空体)。上游 2022 提交 909a46f0 在此多
         // push 了一次却全类无对应 pop —— 每次熔炼结束只弹出 conversionSlots 层,
-        // ResourceTask 那层 (含 cooked_* / iron_ingot 等产物保护) 永久焊死在栈上,
-        // 后续所有任务 push 都复制继承 → 烧过的产物整场游戏都被判 isProtected
-        // (2026-09-23 16:21 实锤: 熟肉27块全 [PROT], 残血被逼吃浆果)。谓词注册
-        // 在父类层后随父类 onStop 的 pop 一并清除, 生命周期完全一致。
+        // ResourceTask 那层 (含 cooked_* / iron_ingot 等产物保护) 永久焊死在栈上。
+        // 熟肉跨任务累积的真实机制 (独立审查 2026-09-23 坐实): 新栈 State 的
+        // protectedItems 从全局 AltoClefSettings 快照初始化 (BotBehaviour L407),
+        // addProtectedItems 又立即 applyState 反向写回全局 (L453-454); 焊死层长期
+        // 是各任务 pop 的恢复点, 每烧一种产物全局列表只增不减, 后续新任务的栈层
+        // 全部快照继承 → 烧过的产物整场被判 isProtected (16:20 实锤四种熟肉同时
+        // [PROT], 残血被逼吃浆果)。删除多余 push 后, 任务正常 stop 弹回 beat 层,
+        // applyState 把全局列表回写为不含产物, 累积环即断。谓词注册在父类层后随
+        // 父类 onStop 的 pop 一并清除, 生命周期完全一致。
+        // (2026-09-23 独立审查 Low-2) 远离看门狗时间戳在 (重新) 启动时初始化/刷新:
+        // 任务被高优链 (Mob Defense 等) interrupt 挂起期间墙钟照走, resume 会重跑
+        // onStart → 本钩子, 此处刷新给完整 90s 新窗口, 避免恢复首 tick 即误放弃。
+        // 冷启动首次虽也置值, 但从未开屏时 _cacheKnown=false → getKnownCachePos()
+        // 为 null, 远离分支天然不触发, 不影响"冷启动合法找料下矿不计时"。
+        _lastFurnaceScreenMs = System.currentTimeMillis();
         mod.getBehaviour().markSlotAsConversionSlot(FurnaceSlot.INPUT_SLOT_MATERIALS, stack -> {
             // Eventually do multiple targets
             return _targets[0].getMaterial().matches(stack.getItem());
@@ -181,13 +192,22 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 return null;
             }
         } else if (mod.getPlayer() != null && _lastFurnaceScreenMs > 0) {
+            // (2026-09-23 独立审查 Medium-1 加固) 合法远行 (回收孤儿炉/取燃料/
+            // 猎生料) 期间冻结远离计时: 把基准戳续到当前, 子任务结束后给完整
+            // 新窗口, 而非远行 3 分钟回来当 tick 就触发放弃。
+            if (_doTask.isAwayOnLegitimateErrand()) {
+                _lastFurnaceScreenMs = nowMs;
+                return _doTask;
+            }
             // (2026-09-23 远离看门狗) 开屏填料/收货后再没回到炉边, 且最后一次
             // 观察时炉内仍有我们的料/产物 → 物理上已放弃这座炉。三个条件缺一不可:
             //  - !isFurnaceDrained(): 最后缓存非空 (已排空的炉无需守, isFinished
             //    自身会结束; 该口径内含 _cacheKnown, 冷启动空缓存不会误入);
             //  - 关屏 >90s: 与在途炉账 1.5min 回程窗口同口径;
             //  - 人在 64 格外: 与 getMaxWalkDistance 同口径, 炉边守卫/附近砍树
-            //    取燃料不误伤 (90s 内回炉重开屏也会刷新时间戳)。
+            //    取燃料不误伤 (90s 内回炉重开屏也会刷新时间戳);
+            //  - 为该炉取料/取燃料/回收的活跃子任务 (上方 isAwayOnLegitimateErrand)
+            //    全程豁免。
             BlockPos furnacePos = _doTask.getKnownCachePos();
             if (furnacePos != null
                     && !_doTask.isFurnaceDrained()
@@ -446,6 +466,26 @@ public class SmeltInFurnaceTask extends ResourceTask {
             return _cacheKnown ? _cachePos : null;
         }
 
+        // (2026-09-23 远离看门狗豁免, 独立审查 Medium-1) 最近一次派发的取生料
+        // 任务引用; 仅在其 isActive 期间豁免, 结束后自动失效, 无需显式清空。
+        private Task _materialErrand = null;
+
+        /**
+         * (2026-09-23 独立审查加固) bot 是否正在为这座炉执行【合法远行】子任务:
+         * 孤儿炉回收 (RecoverFurnaceTask 行走无距离上限)、取燃料提交期
+         * (_fuelCommitted: CollectFuelTask 追煤矿脉/降级找树无距离约束)、
+         * 猎生料 (_materialErrand: KillAndLoot 等)。这些路径下走出 64 格且
+         * 超过 90s 是正常工作而非遗弃炉子, 外层远离看门狗须暂停计时; 否则
+         * 会出现"在途账 90s/64 口径刚把 bot 引回非空炉、看门狗又因开屏后
+         * 缺燃料远足而放弃同一座炉"的自相矛盾, giveUp 拆 wrapper 还会连带
+         * 杀掉回收子任务 (可能双炉料一起丢)。
+         */
+        boolean isAwayOnLegitimateErrand() {
+            if (_recoverTask != null && _recoverTask.isActive()) return true;
+            if (_fuelCommitted) return true;
+            return _materialErrand != null && _materialErrand.isActive();
+        }
+
         // (2026-09-12 界面闪烁修复) 开屏 latch —— 界面刚打开后的最短显示时长。
         // 现场 20260912-085838 (用户"熔炉界面一闪一闪地开合"): bot 走到炉前
         // ~1.8s + 点开界面 ~0.2s, 界面刚开 containerSubTask 就判"无事可做"
@@ -603,7 +643,10 @@ public class SmeltInFurnaceTask extends ResourceTask {
             }
             if (StorageHelper.countItemsInInventoryReal(mod, materialTarget.getMatches()) < materialsNeeded) {
                 setDebugState("Getting Materials");
-                return getMaterialTask(_target.getMaterial());
+                // (2026-09-23 远离看门狗豁免) 持有引用供外层判断"合法远行中":
+                // 猎生料 (KillAndLoot 等) 可能合法走出 64 格且超过 90s。
+                _materialErrand = getMaterialTask(_target.getMaterial());
+                return _materialErrand;
             }
 
             // We don't have enough fuel...

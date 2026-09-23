@@ -44,10 +44,12 @@ public class UpgradeInSmithingTableTask extends ResourceTask {
 
     @Override
     protected void onResourceStart(AltoClef mod) {
-        // (2026-09-23 行为栈泄漏修复) 不在此 push(): 父类 ResourceTask.onStart
-        // 已 push 并在 onStop 统一 pop, conversion slots 注册在父类层即可随任务
-        // 结束清除。旧代码此处 push、onResourceStop 里竟误写成又一次 push (应为
-        // pop), 每执行一次锻造净泄漏 2 层行为栈。
+        // (2026-09-23 行为栈泄漏修复, 计数经独立审查核实) 不在此 push(): 父类
+        // ResourceTask.onStart 已 push 并在 onStop 统一 pop, conversion slots 注册
+        // 在父类层即可随任务结束清除。旧代码此处 push、onResourceStop 里竟误写成
+        // 又一次 push (应为 pop), 一次生命周期 3 push / 1 pop 净泄漏 2 层行为栈;
+        // 焊死层借 BotBehaviour 与全局 AltoClefSettings 的 protectedItems 双向同步
+        // (新层快照读全局 L407, add 后写回 L453-454) 把工具/材料保护永久固化。
         mod.getBehaviour().markSlotAsConversionSlot(SmithingTableSlot.INPUT_SLOT_TOOL, stack -> _tool.matches(stack.getItem()));
         mod.getBehaviour().markSlotAsConversionSlot(SmithingTableSlot.INPUT_SLOT_MATERIALS, stack -> _material.matches(stack.getItem()));
     }
