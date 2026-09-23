@@ -350,6 +350,27 @@ public class EntityTracker extends Tracker {
     }
 
     /**
+     * (2026-09-23 统一生物感知, 事故 20260923-140827) 该实体当前是否应被
+     * "感知": 本拍可直接看见/听见, 或距上次直接感知仍在 20s 记忆窗口内
+     * ({@link #PERCEIVE_MEMORY_TICKS})。与本类 update 循环里实体注册的门控
+     * 是同一口径, 供 {@link EntityHelper#isAngryAtPlayer} 等外部判定复用 —
+     * 旧的 canSee 即时门控在怪绕地形时每拍翻转, 会让威胁池瞬空、逃跑任务
+     * 在 8/45 格就假完成。
+     */
+    public boolean isEntityPerceived(Entity entity) {
+        if (entity == null || !entity.isAlive()) return false;
+        if (VisibilityHelper.isEntityVisible(_mod, entity)
+                || _mod.getSoundTracker().isEntityAudible(entity.getPos())) {
+            return true;
+        }
+        Long lastPerceived;
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            lastPerceived = _lastPerceivedTick.get(entity);
+        }
+        return lastPerceived != null && (WorldHelper.getTicks() - lastPerceived) < PERCEIVE_MEMORY_TICKS;
+    }
+
+    /**
      * Is a player loaded/within render distance?
      * @param name Username on a multiplayer server
      */

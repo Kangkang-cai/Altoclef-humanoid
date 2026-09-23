@@ -33,7 +33,15 @@ public class EntityHelper {
     public static boolean isAngryAtPlayer(AltoClef mod, Entity mob) {
         boolean hostile = isGenerallyHostileToPlayer(mod, mob);
         if (mob instanceof LivingEntity entity) {
-            return hostile && entity.canSee(mod.getPlayer());
+            // (2026-09-23 统一 20s 持久感知, 事故 20260923-140827) 旧实现:
+            // hostile && entity.canSee(player)。怪绕地形/树叶时 canSee 每拍翻转,
+            // EntityTracker 威胁池瞬空 → ProgressiveRunAway 在 8/45 格就"2s 无
+            // 威胁"假完成, bot 一步没跑远被砍死。改为走 EntityTracker 的统一
+            // 感知判定 (看见/听见 或 20s 记忆窗口), forcefield/击杀/威胁评估等
+            // 所有调用点自动统一。cheatScan 时感知门控豁免。
+            if (!hostile) return false;
+            if (mod.getModSettings().isCheatScan()) return true;
+            return mod.getEntityTracker().isEntityPerceived(entity);
         }
         return hostile;
     }
