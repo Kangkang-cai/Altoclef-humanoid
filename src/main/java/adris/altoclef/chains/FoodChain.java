@@ -152,12 +152,16 @@ public class FoodChain extends SingleTaskChain {
         // 使用物品强制减速 → 跳跃/坠落中开吃 = 跳距砍半, 落点差一格就是岩浆/深坑。
         // 口径与 ITaskRequiresGrounded 相同 (onGround/swimming/touchingWater/
         // climbing 任一即算"稳定"), 空中一律不吃, 落地下一 tick 自动恢复 —— 最多
-        // 晚 1~2 秒吃上, 换跳跃全程满速。同时挡住前台接管 (62) 和异步补食两条路。
-        if (!(mod.getPlayer().isOnGround() || mod.getPlayer().isSwimming()
-                || mod.getPlayer().isTouchingWater() || mod.getPlayer().isClimbing())) {
+        // 晚 1~2 秒吃上, 换跳跃全程满速。挡住前台进食 (62) 和异步补食两条路。
+        // (2026-09-23 收窄, 事故 20260923-140827) 旧实现空中直接 return
+        // NEGATIVE_INFINITY, 连收集食物 (55) 一起退出 —— baritone 赶路自己跳地形
+        // 悬空一拍 → Food 退场 beat 50 接管, 落地又拿回, 每 0.4s 横跳、导航反复
+        // 中断。改为只标记 airborne: 进食路径跳过, 收集判定照常。
+        boolean airborne = !(mod.getPlayer().isOnGround() || mod.getPlayer().isSwimming()
+                || mod.getPlayer().isTouchingWater() || mod.getPlayer().isClimbing());
+        if (airborne) {
             stopEat(mod);
             logFoodDiag(mod, "wait", "airborne");
-            return Float.NEGATIVE_INFINITY;
         }
 
         /*
@@ -201,7 +205,11 @@ public class FoodChain extends SingleTaskChain {
             _requestFillup = false;
         }
 
-        if (hasFood && (needEat || _requestFillup) && _cachedPerfectFood.isPresent() && !mod.getMLGBucketChain().isChorusFruiting()) {
+        // (2026-09-23) airborne 时不进食: 整个 if/else 跳过, 落入下方收集食物
+        // 判定 (stopEat 已在上面调用)。
+        if (airborne) {
+            // no-op: fall through to collection decision
+        } else if (hasFood && (needEat || _requestFillup) && _cachedPerfectFood.isPresent() && !mod.getMLGBucketChain().isChorusFruiting()) {
             if (needEat) {
                 // (2026-09-06 战后前台进食修复, 用户"打完架血量低不恢复, 继续挖铁")
                 // 真饿/低血时不再走异步后台进食 —— 异步右键会被获胜任务链 tick 里的
