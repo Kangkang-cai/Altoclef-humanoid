@@ -1,10 +1,12 @@
 package adris.altoclef.mixins;
 
+import adris.altoclef.util.helpers.DropValuationHelper;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -44,6 +46,21 @@ public class PlayerDamageMixin {
             name = name.substring("death.attack.".length());
         }
         PlayerDamageCauseHolder.record(name);
+        // (2026-09-23) 死亡屏上客户端实体/区块被卸载, 无法扫描掉落物
+        // (MC-169113/MC-254610)。改为在伤害 HEAD (背包尚未掉落) 快照:
+        // 当前背包任一槽位是否含珍贵物品。每次受伤都刷新, 致命伤时的快照
+        // 即死亡掉落内容。环境伤害 (drown/lava/饥饿...) 同样走到这里。
+        PlayerEntity self = (PlayerEntity) (Object) this;
+        boolean highValue = false;
+        int size = self.getInventory().size();
+        for (int i = 0; i < size; i++) {
+            ItemStack stack = self.getInventory().getStack(i);
+            if (DropValuationHelper.isHighValue(stack)) {
+                highValue = true;
+                break;
+            }
+        }
+        PlayerDamageCauseHolder.recordCarriedHighValue(highValue);
         Entity attacker = source.getAttacker();
         if (attacker == null) return;
         HitRegistry.onPlayerDamagedBy(attacker);

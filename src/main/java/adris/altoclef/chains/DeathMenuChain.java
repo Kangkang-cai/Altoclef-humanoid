@@ -3,8 +3,6 @@ package adris.altoclef.chains;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
-import adris.altoclef.tasks.movement.DeathRecoveryTask;
-import adris.altoclef.util.helpers.DropValuationHelper;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.Dimension;
@@ -98,34 +96,34 @@ public class DeathMenuChain extends TaskChain {
                         // 目标类, public static 辅助方法被拒应用 → 19:06 启动崩溃实锤。)
                         String deathCause = PlayerDamageCauseHolder.consumeLastDeathCause();
 
-                        // (2026-09-17 空墓过滤, 用户"没有大量物资的情况就不要拾取了, 比如食物, 矿物")
-                        // 取样时机是唯一可靠的: 此刻玩家仍停在死亡点、该区块仍在加载,
-                        // 死亡掉落物实体已生成并同步到客户端 (死亡屏出现后再等 2s ≈ 40 tick,
-                        // 本地集成服务器足够)。复活之后墓地区块可能已被卸载, 那时扫描只会
-                        // 得到空 —— 把"真掉落物"误判成"没有", 所以判据必须在此刻取样。
-                        // 判据: 高价值物(装备/工具/护甲/附魔/稀有素材)任一 → 必捡;
-                        //       否则普通物资总件数需 ≥ deathRecoveryMinOrdinaryDropCount。
-                        DropValuationHelper.Assessment assessment = DropValuationHelper.assess(
-                                DropValuationHelper.scanNear(deathPos, DeathRecoveryTask.getPickupRadius()));
-                        if (assessment.worthRecovery(mod.getModSettings().getDeathRecoveryMinOrdinaryDropCount())) {
+                        // (2026-09-23 评估改用死亡前持有快照) 旧实现"死亡屏等 2s
+                        // 扫描掉落物实体"从根上不成立: 死亡屏上服务端停止向客户端
+                        // 发送更新, 死亡动画结束后约 1s 客户端侧区块/实体被卸载
+                        // (Mojang MC-169113/MC-254610, Works As Intended) ——
+                        // 实测跨 3 个会话 6 次死亡扫描结果全为 0, 连食物/木头都
+                        // 丢掉。现在 PlayerDamageMixin 在每次伤害 HEAD (背包尚未
+                        // 掉落) 时快照"是否持有珍贵物品", 致命伤时的快照即掉落
+                        // 内容。用户拍板: 只看珍贵物品 (装备/工具/护甲/附魔/稀有
+                        // 素材, 木石工具与皮革甲除外), 不再统计普通物资数量。
+                        boolean carriedHighValue = PlayerDamageCauseHolder.consumeLastDeathCarriedHighValue();
+                        if (carriedHighValue) {
                             mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
                             String msg = String.format(
-                                    "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s drops[%s]",
+                                    "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=Y]",
                                     deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                    deathTick, _deathCount + 1, deathCause, assessment.describe());
+                                    deathTick, _deathCount + 1, deathCause);
                             Debug.logMessage(msg);
                             Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
                         } else {
-                            // 不值得回去捡 → 只推进连续死亡 streak, 不写墓碑。
+                            // 没带珍贵物 → 只推进连续死亡 streak, 不写墓碑。
                             // 墓碑表保持原样(可能仍是上一次值得捡的墓, 或空), 链层
                             // getDeathGrave() 因此取到空 → 完全不介入: 不搞镐、不白跑、
                             // 不打断主任务。
                             mod.getWorldMemory().noteDeathWithoutGrave(deathTick);
                             String msg = String.format(
-                                    "DEATH GRAVE skipped (drops not worth recovering): dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s drops[%s] ordinaryThreshold=%d",
+                                    "DEATH GRAVE skipped (no high-value carried): dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=N]",
                                     deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                    deathTick, _deathCount + 1, deathCause, assessment.describe(),
-                                    mod.getModSettings().getDeathRecoveryMinOrdinaryDropCount());
+                                    deathTick, _deathCount + 1, deathCause);
                             Debug.logMessage(msg);
                             Debug.logToFile("death_recovery.log", "[SKIP GRAVE] " + msg);
                         }

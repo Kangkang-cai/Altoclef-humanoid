@@ -437,21 +437,6 @@ public class Settings implements IFailableConfigFile {
     private boolean deathRecoveryDegradeScan = true;
 
     /**
-     * (2026-09-17 空墓过滤, 用户定案) 死亡瞬间在死亡点附近扫到的掉落物里
-     * 【没有高价值物】时, 普通物资(食物/原木/石与矿物/建材…)需要达到的总件数,
-     * 低于它就不记录墓碑、此后完全不去拾取。
-     *
-     * 用户现场: 死亡时背包本就空(outOfWorld), 墓碑附近什么都没有, 但链层仍
-     * 按正常墓处理 —— 空耗 74 秒造石镐 + 跑到墓碑 + 原地打转 wander。
-     * 用户原话: "对于没有大量物资的情况就不要拾取了, 比如食物, 矿物"。
-     *
-     * 高价值物清单与判定见 DropValuationHelper.isHighValue(装备/工具/护甲/
-     * 附魔物/稀有素材, 木石工具与皮革甲除外) —— 只要掉了一件就必回。
-     * Set to 0 to disable the threshold (any drop at all → always recover).
-     */
-    private int deathRecoveryMinOrdinaryDropCount = 16;
-
-    /**
      * Maximum time (in real-game seconds) we will spend on a single recovery
      * attempt (navigation + picking up drops). If we haven't finished by
      * then the grave is abandoned and the memory is cleared.
@@ -1095,10 +1080,6 @@ public class Settings implements IFailableConfigFile {
 
     public boolean shouldDeathRecoveryDegradeScan() {
         return deathRecoveryDegradeScan;
-    }
-
-    public int getDeathRecoveryMinOrdinaryDropCount() {
-        return deathRecoveryMinOrdinaryDropCount;
     }
 
     public int getDeathRecoveryTimeoutSeconds() {
