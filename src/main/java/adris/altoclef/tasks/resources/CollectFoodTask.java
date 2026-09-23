@@ -88,6 +88,14 @@ public class CollectFoodTask extends Task {
     // 兜底探索从"小范围随机/平原偏置"切换为 OverworldExpeditionTask
     // (锁定方位角一路向, 不回头、不下海), 发现食物仍照常捡/猎/收。
     private boolean _expeditionMode = false;
+    // (2026-09-23 远征时钟烧炼豁免, 20260923-201942 实锤) 本任务被烧炼整任务
+    // 替换 (beat alwaysCookRawFood 直接派 SmeltInFurnaceTask) 时记录挂起墙钟与
+    // 打断者; resume 时若打断者是烧炼任务, 把挂起时长补进无进展时钟起点 —
+    // 生肉潜力在落袋时已按熟肉计足 (getFoodPotential), 做炉/填料/守炉/取货
+    // 实测单炉 2 分钟+, 期间潜力零增长, 但这是食物加工不是"找不到食物",
+    // 不应凑满 300s 误触发远征。床/战斗等其他打断不补偿 (维持跨打断累计原设计)。
+    private long _suspendedAtMs = -1;
+    private Task _lastInterruptTask = null;
     private final TimerGame _checkNewOptionsTimer = new TimerGame(10);
     private SmeltInFurnaceTask _smeltTask = null;
     // 终端资源任务槽 (到达型语义): 挖掘/采集/交互/合成/猎杀/拾取 —— 到达(或目的失效)
@@ -314,6 +322,22 @@ public class CollectFoodTask extends Task {
 
         mod.getBlockTracker().trackBlock(Blocks.HAY_BLOCK);
         mod.getBlockTracker().trackBlock(Blocks.SWEET_BERRY_BUSH);
+
+        // (2026-09-23 远征时钟烧炼豁免) 被烧炼整任务打断后恢复: 把挂起墙钟补进
+        // 无进展时钟起点 (时钟"暂停"那么久)。首次启动 _suspendedAtMs=-1 不补;
+        // 打断者不是 SmeltInFurnaceTask (床/战斗/木柴等) 不补, 维持原跨打断累计。
+        if (_suspendedAtMs > 0) {
+            long pausedMs = System.currentTimeMillis() - _suspendedAtMs;
+            if (_lastInterruptTask instanceof SmeltInFurnaceTask
+                    && FoodChain.s_foodSearchStartMs > 0 && pausedMs > 0) {
+                FoodChain.s_foodSearchStartMs += pausedMs;
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-EXPEDITION]\tclock frozen for " + (pausedMs / 1000)
+                                + "s during smelting interruption, search timer shifted");
+            }
+            _suspendedAtMs = -1;
+            _lastInterruptTask = null;
+        }
     }
 
     @Override
@@ -334,6 +358,15 @@ public class CollectFoodTask extends Task {
         // 潜力瞬时冲高 → 计时清零 → 吃掉回落 → 再杀, "无增长 300s"永远攒不满,
         // 远征迟迟不触发)。改为: 新高必须【持续】FOOD_GAIN_CONFIRM_MS 才算真进展
         // 重置计时; 捡了马上吃掉/丢掉的尖峰不清零时钟。大幅损失 (-15) 仍立即重计。
+        // (2026-09-23 烧炼豁免) 本任务内部烧炼子任务 (_smeltTask, tryCookRawFood
+        // 建立的批量烤肉/烤薯) 存活期间冻结时钟: 生肉落袋时潜力已按熟肉计足,
+        // 做炉/填料/守炉/取货 (实测单炉 2min+) 零潜力增长, 不是"找不到食物"。
+        // beat alwaysCookRawFood 直接派烧炼把本任务整任务替换的场景, 由
+        // onStop/onStart 的挂起补偿处理, 不走这里。
+        if (_smeltTask != null && _smeltTask.isActive() && !_smeltTask.isFinished(mod)) {
+            FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+            FoodChain.s_foodGainPendingSinceMs = -1;
+        }
         if (!FoodChain.s_foodExpeditionActive) {
             long nowMs = System.currentTimeMillis();
             if (potentialFood + 15 < FoodChain.s_foodSearchBestPotential) {
@@ -668,6 +701,10 @@ public class CollectFoodTask extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-23 远征时钟烧炼豁免) 记录挂起时刻与打断者, 供 resume 时
+        // (onStart) 按打断类型决定是否补偿无进展时钟。
+        _suspendedAtMs = System.currentTimeMillis();
+        _lastInterruptTask = interruptTask;
         mod.getBlockTracker().stopTracking(Blocks.HAY_BLOCK);
         mod.getBlockTracker().stopTracking(Blocks.SWEET_BERRY_BUSH);
         for (CropTarget crop : CROPS) {
@@ -684,7 +721,14 @@ public class CollectFoodTask extends Task {
         // isFinished 永远卡在 false → 任务不完成 → 即使羊肉已在背包仍持续捡取/
         // 杀羊, 并高频重建拾取任务(altoclef_diag.log [PickupFirst] 1 秒 16 次实锤)。
         // 与项目"计数必须用真实背包, 杜绝 tracker 缓存误判"的原则一致。
-        return calculateFoodPotential(mod) >= _unitsNeeded;
+        // (2026-09-23 远征死锁修复, 20260923-201942 实锤) 达标线必须与 onTick 的
+        // foodMet 同口径用 effectiveTarget: 远征触发把目标从 240 降到 120 时,
+        // 若触发瞬间库存已 >=120 (本场 142), onTick 判达标每 tick return null
+        // (远征子任务 49ms 即被拆), isFinished 却仍按原 240 恒 false → beat
+        // shouldForce 每 tick 强派这个僵尸任务, bot 原地冻结 47s 到手动关游戏。
+        // _ignoreExpeditionReduction 的下界前 150 硬闸实例 effectiveTarget 恒为
+        // 原值, 行为不变。
+        return calculateFoodPotential(mod) >= effectiveTarget(mod);
     }
 
     @Override
