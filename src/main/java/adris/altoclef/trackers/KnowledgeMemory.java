@@ -102,7 +102,18 @@ public final class KnowledgeMemory {
         // ⚠ inference=false: 要塞/末地门是地下结构, 不给随机候选偏置与
         //   "结构邻近推理可见"当线索 (与 BLAZE_SPAWNER 同理, 防透视)。
         STRONGHOLD(new Block[]{}, 0, 0, 1, false),
-        END_PORTAL(new Block[]{}, 0, 0, 1, false);
+        END_PORTAL(new Block[]{}, 0, 0, 1, false),
+        // (2026-09-23 岩浆湖记忆, 用户"路过的岩浆湖也要像堡垒那样记住, 找岩浆时
+        // 直接用") 记【亲眼看见】的岩浆湖锚点 (成片静止岩浆源中通过真视线判定的
+        // 那个源), 供舀岩浆/造门时直接导航过去, 不再无方向 wander; 跨会话落盘。
+        // ⚠ landmarks 留空: 绝不走 BlockTracker 全局追踪 LAVA —— 下界岩浆海会
+        //   刷爆感知缓存 (trackBlock 全量重扫, 0918 卡死事故同款 perf 红线)。
+        //   记录走专属字面扫描器 scanLavaLake (有界椭球 + 真视线 + "成片"确认,
+        //   单格渗漏/小水洼不认 —— 用户强调"一定是岩浆湖")。
+        // ⚠ inference=false: 湖不是结构线索, 不参与候选偏置/推理可见。
+        // ⚠ mergeDistance=48: 一片湖只留一个锚点; maxCenters=40: 沿岩浆海长
+        //   跑也够用 (其余类型沿用 20)。
+        LAVA_LAKE(new Block[]{}, 0, 0, 1, false, 48, 40);
 
         final Block[] landmarks;
         final double minCandidateRadius;
@@ -120,19 +131,33 @@ public final class KnowledgeMemory {
          */
         final double mergeDistance;
 
+        /**
+         * (2026-09-23) 该类型最多记住的中心数。岩浆湖沿下界岩浆海会持续遇到,
+         * 给到 40; 其余类型沿用全局默认 {@value #MAX_CENTERS_PER_TYPE}。
+         */
+        final int maxCenters;
+
         StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
                       boolean inference) {
-            this(landmarks, minRadius, maxRadius, candidatesPerCenter, inference, MERGE_DISTANCE);
+            this(landmarks, minRadius, maxRadius, candidatesPerCenter, inference, MERGE_DISTANCE,
+                    MAX_CENTERS_PER_TYPE);
         }
 
         StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
                       boolean inference, double mergeDistance) {
+            this(landmarks, minRadius, maxRadius, candidatesPerCenter, inference, mergeDistance,
+                    MAX_CENTERS_PER_TYPE);
+        }
+
+        StructureType(Block[] landmarks, double minRadius, double maxRadius, int candidatesPerCenter,
+                      boolean inference, double mergeDistance, int maxCenters) {
             this.landmarks = landmarks;
             this.minCandidateRadius = minRadius;
             this.maxCandidateRadius = maxRadius;
             this.candidatesPerCenter = candidatesPerCenter;
             this.inference = inference;
             this.mergeDistance = mergeDistance;
+            this.maxCenters = maxCenters;
         }
     }
 
@@ -176,6 +201,7 @@ public final class KnowledgeMemory {
         _scanCounter++;
         if (_scanCounter % SCAN_INTERVAL_TICKS != 0) return;
         scanLandmarksByPerception();
+        scanLavaLakeByLiteralPerception();
     }
 
     /**
@@ -198,6 +224,85 @@ public final class KnowledgeMemory {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // (2026-09-23 岩浆湖记忆) 路过式扫描 —— 不依赖 BlockTracker 追踪 LAVA
+    // (下界岩浆海会刷爆感知缓存, trackBlock 全量重扫是 perf 红线), 改为每 20t
+    // 做一次有界字面扫描, 三道闸认"湖":
+    //   ① 字面椭球 (h24/v5) 找【暴露的静止岩浆源】(level==8 且正上方空气) ——
+    //      被岩石压住的不算, 流动岩浆不算;
+    //   ② 只对最近的 LAKE_LOS_CHECKS 个候选做真视线判定 (isBlockPerceivable),
+    //      亲眼看见才认, 不透视 (同地标扫描护栏);
+    //   ③ 锚点周围 h8/v4 盒内暴露静止源 ≥ LAKE_MIN_EXPOSED_SOURCES (12) 才入账
+    //      —— 单格渗漏/小水洼不是"湖" (用户"一定是岩浆湖")。
+    // 已在记住的湖 (mergeDistance 内, 含跨会话持久化锚点) 直接早退: 沿湖长跑
+    // 时扫描成本近乎零, 也防止跨会话重复落盘。
+    // =========================================================================
+    private static final int LAKE_SCAN_RADIUS_XZ = 24;
+    private static final int LAKE_SCAN_RADIUS_Y = 5;
+    private static final int LAKE_LOS_CHECKS = 4;
+    private static final int LAKE_CONFIRM_RADIUS_XZ = 8;
+    private static final int LAKE_CONFIRM_RADIUS_Y = 4;
+    private static final int LAKE_MIN_EXPOSED_SOURCES = 12;
+
+    private void scanLavaLakeByLiteralPerception() {
+        if (_mod.getWorld() == null || _mod.getPlayer() == null) return;
+        BlockPos feet = _mod.getPlayer().getBlockPos();
+        // 已在记住的湖附近 → 不重扫 (getRememberedCenters 含跨会话持久化锚点,
+        // 按存档:维度隔离)。
+        Vec3d feetCenter = new Vec3d(feet.getX() + 0.5, feet.getY() + 0.5, feet.getZ() + 0.5);
+        if (!getRememberedCenters(StructureType.LAVA_LAKE, feetCenter,
+                StructureType.LAVA_LAKE.mergeDistance).isEmpty()) {
+            return;
+        }
+        int hSq = LAKE_SCAN_RADIUS_XZ * LAKE_SCAN_RADIUS_XZ;
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dy = -LAKE_SCAN_RADIUS_Y; dy <= LAKE_SCAN_RADIUS_Y; dy++) {
+            for (int dx = -LAKE_SCAN_RADIUS_XZ; dx <= LAKE_SCAN_RADIUS_XZ; dx++) {
+                for (int dz = -LAKE_SCAN_RADIUS_XZ; dz <= LAKE_SCAN_RADIUS_XZ; dz++) {
+                    if (dx * dx + dz * dz > hSq) continue; // 水平圆截断
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (isExposedLavaSource(p)) candidates.add(p);
+                }
+            }
+        }
+        if (candidates.isEmpty()) return;
+        candidates.sort((a, b) -> Double.compare(a.getSquaredDistance(feet), b.getSquaredDistance(feet)));
+        int checks = 0;
+        for (BlockPos candidate : candidates) {
+            // 最近的几个都看不见 (背对/遮挡) 就等下一轮, 与地标扫描同款节流。
+            if (++checks > LAKE_LOS_CHECKS) return;
+            if (!VisibilityHelper.isBlockPerceivable(_mod, candidate)) continue;
+            if (countExposedLavaSourcesAround(candidate) >= LAKE_MIN_EXPOSED_SOURCES) {
+                remember(StructureType.LAVA_LAKE, candidate);
+                return;
+            }
+        }
+    }
+
+    /** 静止岩浆源 (level 8) 且正上方是空气 —— 即"湖面"上可被看见/可舀的方块。 */
+    private boolean isExposedLavaSource(BlockPos pos) {
+        var world = _mod.getWorld();
+        if (world == null) return false;
+        var state = world.getBlockState(pos);
+        if (state.getBlock() != Blocks.LAVA) return false;
+        var fluid = state.getFluidState();
+        if (!fluid.isStill() || fluid.getLevel() != 8) return false;
+        return world.getBlockState(pos.up()).isAir();
+    }
+
+    /** 统计 center 周围盒内的暴露静止岩浆源数 ("成片"判据, 不数墙后埋着的)。 */
+    private int countExposedLavaSourcesAround(BlockPos center) {
+        int count = 0;
+        for (int dy = -LAKE_CONFIRM_RADIUS_Y; dy <= LAKE_CONFIRM_RADIUS_Y; dy++) {
+            for (int dx = -LAKE_CONFIRM_RADIUS_XZ; dx <= LAKE_CONFIRM_RADIUS_XZ; dx++) {
+                for (int dz = -LAKE_CONFIRM_RADIUS_XZ; dz <= LAKE_CONFIRM_RADIUS_XZ; dz++) {
+                    if (isExposedLavaSource(center.add(dx, dy, dz))) count++;
+                }
+            }
+        }
+        return count;
     }
 
     /**
@@ -311,7 +416,7 @@ public final class KnowledgeMemory {
                     Map<StructureType, LinkedHashSet<BlockPos>> byType =
                             _centersByKey.computeIfAbsent(parts[0], k -> new EnumMap<>(StructureType.class));
                     LinkedHashSet<BlockPos> set = byType.computeIfAbsent(type, t -> new LinkedHashSet<>());
-                    if (set.size() < MAX_CENTERS_PER_TYPE && set.add(p)) loaded = true;
+                    if (set.size() < type.maxCenters && set.add(p)) loaded = true;
                 } catch (NumberFormatException ignored) {
                 }
             }
@@ -340,7 +445,7 @@ public final class KnowledgeMemory {
                 _centersByKey.computeIfAbsent(key, k -> new EnumMap<>(StructureType.class));
         LinkedHashSet<BlockPos> set = byType.computeIfAbsent(type, t -> new LinkedHashSet<>());
         if (set.contains(pos)) return;
-        if (set.size() >= MAX_CENTERS_PER_TYPE) return;
+        if (set.size() >= type.maxCenters) return;
         set.add(pos);
         try {
             java.nio.file.Files.write(knowledgeFile(),
@@ -424,7 +529,7 @@ public final class KnowledgeMemory {
                 return;
             }
         }
-        if (centers.size() >= MAX_CENTERS_PER_TYPE) {
+        if (centers.size() >= type.maxCenters) {
             return;
         }
         BlockPos center = pos.toImmutable();
