@@ -360,6 +360,27 @@ public class ConstructNetherPortalSpeedrunTask extends adris.altoclef.tasksystem
             }
         }
 
+        // (2026-09-23 岩浆湖记忆兜底) BlockTracker 缓存没扫到湖时, 用亲眼见过/
+        // 跨会话记住的岩浆湖锚点。记忆锚点本身已通过"成片 ≥12"确认, 直接取最近
+        // (沿用本方法原有的无距离/高度过滤口径)。
+        if (nearestLake == null) {
+            for (BlockPos pos : mod.getKnowledgeMemory().getRememberedCenters(
+                    adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
+                    new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
+                            playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
+                    1.0e7)) {
+                double sqDist = playerPos.getSquaredDistance(pos);
+                if (sqDist < nearestSqDistance) {
+                    nearestSqDistance = sqDist;
+                    nearestLake = pos;
+                }
+            }
+            if (nearestLake != null) {
+                Debug.logMessage("(Lava anchor: remembered lake selected at "
+                        + nearestLake.toShortString() + ")");
+            }
+        }
+
         return nearestLake;
     }
 

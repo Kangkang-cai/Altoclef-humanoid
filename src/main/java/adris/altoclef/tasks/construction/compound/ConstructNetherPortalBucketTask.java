@@ -393,6 +393,31 @@ public class ConstructNetherPortalBucketTask extends Task {
             }
         }
 
+        // (2026-09-23 岩浆湖记忆兜底) 脚边字面扫描和 BlockTracker 临时缓存都没
+        // 命中时, 用 KnowledgeMemory 里亲眼见过/跨会话记住的岩浆湖锚点。同款
+        // 100 格 + 高度差 16 过滤 —— 锚点是"湖", 过滤口径保持不变, 不复活深洞
+        // 绕远老问题。
+        if (nearestLake == null) {
+            for (BlockPos pos : mod.getKnowledgeMemory().getRememberedCenters(
+                    adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
+                    new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
+                            playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
+                    MAX_SEARCH_DISTANCE)) {
+                if (Math.abs(pos.getY() - playerPos.getY()) > 16) {
+                    continue;
+                }
+                double sqDist = playerPos.getSquaredDistance(pos);
+                if (sqDist < nearestSqDistance) {
+                    nearestSqDistance = sqDist;
+                    nearestLake = pos;
+                }
+            }
+            if (nearestLake != null) {
+                Debug.logMessage("(Lava anchor: remembered lake selected at "
+                        + nearestLake.toShortString() + ")");
+            }
+        }
+
         return nearestLake;
     }
 
