@@ -561,6 +561,17 @@ public class BeatMinecraft2Task extends Task {
     // 阶段已有 45s 保护窗(preNetherGreedyCooldownSeconds), 普通阶段 3s 乒乓风险可控。
     private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 3;
     private final TimerGame _greedyOreCheckCooldown = new TimerGame(GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
+    // (2026-09-23 战后补扫, 20260923-155135 场实锤) beat 被高优链 (Mob Defense/
+    // Food 等) 抢占期间整棵任务树挂起, onTick 不执行 → 贪心探针不跑。该场逃命
+    // 时 bot 以冲刺 5 次穿过一处废弃矿井钻石脉 (620,11,-272, recorder 真 LOS,
+    // d 最近 2.5), 每次可见窗口仅 0.6~1.2s; 4 次链主是 Mob Defense, 唯一一次
+    // beat 持权仅 0.8s 且 3s 冷却未到 → 探针一次没跑成, 战后 bot 再没回去。
+    // 修法不加额外条件: onTick 自检 tick 空档, 一旦发现被抢占过就挂一次性探针
+    // 闩 + forceElapse 冷却; 探针实际执行后立刻清闩 (即使恢复当 tick 被更早的
+    // 分支 return, 闩也会留到走到探针块的那一 tick)。
+    private boolean _greedyProbeLatch = false;
+    private long _lastOnTickGameTick = -1;
+    private static final long RESUME_GAP_TICKS = 5;
     // (2026-09-08 烧肉 ping-pong 修复) 烧炼任务实例缓存保活。本分支原来每 tick
     // new SmeltInFurnaceTask, 且选肉按 RAW_FOODS 顺序 + getItemStorage().hasItem
     // (不含光标) —— 搬运子任务把生肉拿起在光标上的那一 tick, hasItem(生肉)=false
@@ -921,6 +932,17 @@ public class BeatMinecraft2Task extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-23 战后补扫) 自检 onTick 空档: 两次 onTick 间隔超过
+        // RESUME_GAP_TICKS 说明 beat 曾被高优链抢占挂起过 → 恢复后强制补一次
+        // 贪心探针 (见 _greedyProbeLatch 字段注释)。
+        long beatTickNow = WorldHelper.getTicks();
+        if (_lastOnTickGameTick >= 0 && beatTickNow - _lastOnTickGameTick > RESUME_GAP_TICKS) {
+            _greedyProbeLatch = true;
+            _greedyOreCheckCooldown.forceElapse();
+            Debug.logToFile("altoclef_diag.log", "[GreedyOre] control resumed after "
+                    + (beatTickNow - _lastOnTickGameTick) + "t suspended — forcing probe");
+        }
+        _lastOnTickGameTick = beatTickNow;
         /*
         if in the overworld:
           if end portal found:
@@ -2295,7 +2317,10 @@ public class BeatMinecraft2Task extends Task {
                             return _greedyOreTask;
                         }
                     }
-                    if (_greedyOreCheckCooldown.elapsed() && MinecraftClient.getInstance().currentScreen == null) {
+                    if ((_greedyOreCheckCooldown.elapsed() || _greedyProbeLatch) && MinecraftClient.getInstance().currentScreen == null) {
+                        // (2026-09-23 战后补扫) 探针实际执行, 一次性闩立即清除;
+                        // 容器界面开着时本次进不来, 闩保留到下一个可执行 tick。
+                        _greedyProbeLatch = false;
                         // 纯函数静态版 hasAnyVisibleOreWork (不实例化探针,
                         // 避免 onStart trackBlock 引用计数泄漏)。
                         if (CollectVisibleOresTask.hasAnyVisibleOreWork(mod)) {
