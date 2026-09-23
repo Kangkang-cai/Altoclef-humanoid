@@ -586,7 +586,8 @@ public class FoodChain extends SingleTaskChain {
                 float hungerNotFilledPenalty = hungerNotFilled * _config.foodPickHungerNotFilledPenaltyMultiplier;
 
                 float score;
-                if (health < _config.alwaysEatWhenBelowHealth) {
+                boolean healingMode = health < _config.alwaysEatWhenBelowHealth;
+                if (healingMode) {
                     // (2026-09-06 22:40 羊排不吃修复, 用户"背包有13块羊排怎么不吃")
                     // 低血=为回血而吃: 回血速度由【饱食度】驱动, 大餐 (熟羊肉
                     // hunger6/sat0.8) 恢复量全面优于面包 (hunger5/sat0.6)。
@@ -594,18 +595,25 @@ public class FoodChain extends SingleTaskChain {
                     // gainedHunger=3 浪费 3 点 → -6, 面包浪费 2 → -4; 饱食加成
                     // 只差 0.2×8=1.6, 净分面包 0.8 > 羊肉 0.4 → 永远选面包。
                     // 低血时取消一切浪费/未填满惩罚, 直接最大化进食后恢复量。
+                    // (2026-09-23 残血吃浆果事故, 用户"回血时先吃饱食度恢复最快的")
+                    // 受保护 -1000 惩罚在回血分支同样取消: 09-18 保护惩罚的本意是
+                    // "普通饥饿时别消耗任务储备粮", 但任务保护(如 SmeltInFurnaceTask
+                    // 挂起未释放把熟肉全锁 [PROT]) 与保命需求冲突时保命优先 —
+                    // 16:21 实锤 health=4.5 背包熟肉27块全 [PROT], bot 连吃5个
+                    // 甜浆果(+2/个)才补满, 回血窗口被浪费。回血分支只认恢复量。
                     score = saturationGoodScore + gainedHunger;
                 } else {
                     score = saturationGoodScore - saturationLossPenalty - hungerLossPenalty - hungerNotFilledPenalty;
+                    // (2026-09-18 受保护食物兜底进食) 见上方 protectedFood 注释:
+                    // 重罚到普通食物之后, 只剩受保护食物时才轮到它 (防饿死)。
+                    // (2026-09-23) 仅普通饥饿分支生效; 回血分支保命优先, 不罚。
+                    if (protectedFood) {
+                        score -= _config.foodPickProtectedPenalty;
+                    }
                 }
 
                 if (stack.getItem() == Items.ROTTEN_FLESH) {
                     score -= _config.foodPickRottenFleshPenalty;
-                }
-                // (2026-09-18 受保护食物兜底进食) 见上方 protectedFood 注释:
-                // 重罚到普通食物之后, 只剩受保护食物时才轮到它 (防饿死)。
-                if (protectedFood) {
-                    score -= _config.foodPickProtectedPenalty;
                 }
                 if (score > bestFoodScore) {
                     bestFoodScore = score;
