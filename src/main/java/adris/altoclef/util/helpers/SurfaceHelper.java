@@ -23,21 +23,22 @@ import net.minecraft.world.World;
  * </ul>
  * 所以判据必须问的是【地球物理】问题: 我头顶之上有多少【地层】? 而不是【视觉】问题: 天空挡没挡住?
  *
- * <h3>口径 = 判据流水线 (任一判据成立即"地表"; 全部不成立才"地下"; 20260918 裁撤判据3 环探, 判据8 升主判据)</h3>
+ * <h3>口径 = 判据流水线 (短路 OR: 任一判据成立即"地表"; 全部不成立才"地下"; 20260923 判据6 提前)</h3>
  * <pre>
  *   判据0 维度退化    非主世界 → 退回 y &lt; 58 (下界有基岩顶、末地有穹顶, 海拔法无意义)
- *   判据8 地表签名【主判据, 最先表决】 脚下踩着/身旁长着只在露天生成的方块 → 判地表。
- *        两级: 近扫(脚下+半径2 脚/头两高度) 与 远扫(自身高度 ±3、水平半径 12, 岩石山地/恶地坡面
- *        脚下是石头时靠它) = 人判地表的"脚下质感 + 身旁景物"通道; 只读脚下与身旁, 不依赖头顶柱
- *        数据, 爬升临破土场景它先说话 (用户拍板 20260918 "他是主要判据"); 液体护栏防湖底误判
+ *   判据6 深度拦截【最先表决, 20260923 提前】 主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下。
+ *        物理事实先于一切扫描; 旧位置在判据8 之后, 判据8 短路打响时它根本没机会执行。
+ *   判据8 地表签名【主判据】 脚下踩着/身旁长着只在露天生成的方块 → 判地表。三级:
+ *        强签名(脚下草方块/沙/陶瓦等地形块, 独立通道) ;
+ *        弱签名(草丛/花/蕨等植被) 近扫(半径2 脚/头两高度), <b>近场出现繁茂洞穴专属方块
+ *        (苔藓/洞穴藤蔓/孢子花/垂根/垂滴叶) 时否决</b> —— 苔藓块上天然长草(52%)不需天光;
+ *        远扫(自身高度 ±3、水平半径12, 岩石山地/恶地坡面脚下是石头时靠它), 仅近场无地下标记时执行。
+ *        全部命中需过 LOS 透视门; 液体护栏防湖底误判 (用户拍板 20260918 "他是主要判据")
  *   判据1 地形埋深    5 点采样(自身列 + 4 水平邻柱同高)的【头顶地形格数中位数】≤ 4 → 地表
  *   判据2 植被不算地板 取值时跳过树叶/原木/植物 → 树冠/藤蔓不构成"埋" (内建于扫描, 非独立判据)
  *   判据4 确认窗      非对称: 判"地下"须【持续】≥5s 才提交 (用户"一秒离开不许触发回升");
  *                     判"地表"只须 0.5s (临破土/出洞快确认)
  *   判据5 未知不翻面  采样列区块未加载 → 该列记 UNKNOWN; 有效点 &lt; 3 时维持现状, 不许翻面
- *   判据6 深度拦截    主世界 y &lt; 0 (负 Y 深板岩层) → 无条件判地下
- *        (依据: 天然地形不存在这么深的通天露天柱; 深处客户端头顶柱视图有整体缺失的异常,
- *         20260918-092740: 超大洞穴 y=-44 五列同时 buried=0 稳定 40s+, 深度物理事实兜底)
  *   判据7 (已并入判据1) 20260918-1050: 判据1 换轴为"从 wsTop 向下拨植被到真实地形"后,
  *        服务端高度图本身就是埋深的锚, 数据洞走保守分支 —— 独立的 hb&gt;32 判据不再需要
  * </pre>
@@ -203,6 +204,7 @@ public final class SurfaceHelper {
         _flapCounted = false;
         invalidateCoordinateCaches();
         _lastDim = null;
+        _lastUndergroundVeto = false;
     }
 
     // ==================================================================
@@ -374,15 +376,16 @@ public final class SurfaceHelper {
             return pos.getY() < NON_OVERWORLD_DEEP_Y;
         }
 
-        // 判据8【主判据, 最先表决】: 地表签名 —— 脚下踩着/身旁长着只在露天生成的方块。
-        // 人判地表的第一反应就是"我看到草和花了" (用户拍板 20260918: "判据8 必须前移, 他是主要判据")。
-        // 快速、不依赖头顶柱数据 (只读脚下与身旁), 所以爬升临破土/刚破土的场景它先说话,
-        // 不会被深部数据异常或迟滞拖住。 lush 洞穴的苔藓/杜鹃/粘土已刻意排除, 井下不会误触发。
-        if (nearbySurfaceSignature(mod, pos)) return false;
+        // 判据6: 深度拦截 (20260923 提前到判据8之前) —— 判据8 是短路表决, 若它先打响,
+        // 深度拦截根本没机会执行; y&lt;0 是物理事实, 应最先表决。
+        if (pos.getY() < DEEP_CRUST_Y) return true;
 
-        // 判据8【主判据, 最先表决】: 地表签名 —— 脚下踩着/身旁/远扫范围内长着只在露天生成的
-        // 方块, 且【透视门 LOS】射线可达 (隔墙的草地不算, 20260918 用户点破)。
+        // 判据8【主判据】: 地表签名 —— 脚下踩着/身旁/远扫范围内长着只在露天生成的方块,
+        // 且【透视门 LOS】射线可达 (隔墙的草地不算, 20260918 用户点破)。
         // 人判地表的第一反应就是"我看到草和花了" (用户拍板 20260918: "他是主要判据")。
+        // 快速、不依赖头顶柱数据 (只读脚下与身旁), 所以爬升临破土/刚破土的场景它先说话。
+        // 20260923: 繁茂洞穴苔藓块上天然生成短草(52%)/高草(10%)不需天光, 弱签名曾因此误命中
+        // → 近场出现 lush 专属方块时否决弱签名 (强签名脚下草方块保留, 真地表杜鹃树不受影响)。
         if (nearbySurfaceSignature(mod, pos)) return false;
 
         // 判据1【三次换轴后的最终语义】: 拨开头顶植被后, 距地表地形的格数 (中位数)。
@@ -395,30 +398,17 @@ public final class SurfaceHelper {
         // (UNKNOWN = Integer.MIN_VALUE, 不挡这条就等价于 "埋深极小 → 恒判地表", 20260918 死因同款)
         if (buried == UNKNOWN) return _init && _below;
 
-        // 判据6: 深度拦截 —— 负 Y 深板岩层不存在天然露天 (物理锚; wsTop 哨兵时的兜底)
-        if (pos.getY() < DEEP_CRUST_Y) return true;
-
         if (buried <= NEAR_SURFACE_MAX) return false;
 
         return true;
     }
 
     /**
-     * 判据8: 地表签名方块 —— 只在露天表层天然生成的方块。
-     *
-     * <p>地形块 (脚下): 草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦。天然只在露天表层生成
-     * (沙/红沙=沙漠/滩头/恶地, 雪块=雪原表面, 陶瓦=恶地表层)。
-     * 植被 (脚/头高度, 半径 ≤2): 草/高草/蕨/大蕨、花(整族)、仙人掌、枯灌木、甘蔗 ——
-     * 草和花需要天光才能存活, 仙人掌/枯灌木只在沙漠/恶地表层。
-     *
-     * <p>刻意<b>不纳入</b>: 树叶 (繁茂洞穴的杜鹃树也有, 且"跳过不算遮挡"已等价利用)、
-     * 原木 (废弃矿井橡木柱干扰)、粘土 (湖底/河底水下 + 繁茂洞穴, 两处都不是露天活动层)、
-     * 苔藓/杜鹃 (繁茂洞穴)、沙砾 (水下/地下都生成)、云层 (纯渲染, 无方块数据可查)。
-     *
-     * <p>液体护栏: 脚/头浸在水里时不认签名 (湖底/河底的沙和粘土不是露天活动层)。
-     * 缓存 {@link #SIGNATURE_CACHE_MS}。
+     * 判据8 强签名【脚下地形块】: 草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦。
+     * 天然只在露天表层生成。<b>不受地下反证影响</b>: 繁茂洞穴地面是苔藓块而非草方块,
+     * bot 自行在地下放置这些方块的极端情况代价可接受。
      */
-    private static boolean isSurfaceSignature(net.minecraft.block.BlockState s) {
+    private static boolean isStrongSurfaceSignature(net.minecraft.block.BlockState s) {
         net.minecraft.block.Block b = s.getBlock();
         return b == net.minecraft.block.Blocks.GRASS_BLOCK
                 || b == net.minecraft.block.Blocks.PODZOL
@@ -426,9 +416,19 @@ public final class SurfaceHelper {
                 || b == net.minecraft.block.Blocks.SAND
                 || b == net.minecraft.block.Blocks.RED_SAND
                 || b == net.minecraft.block.Blocks.SNOW_BLOCK
-                || b == net.minecraft.block.Blocks.TERRACOTTA
-                // 植被 (只在露天天然生成)
-                || b == net.minecraft.block.Blocks.GRASS
+                || b == net.minecraft.block.Blocks.TERRACOTTA;
+    }
+
+    /**
+     * 判据8 弱签名【植被】: 草丛/高草/蕨/大蕨、花(整族)、仙人掌、枯灌木、甘蔗。
+     *
+     * <p>旧注释假设"草和花需要天光才能存活"——<b>对草丛不成立</b>: 繁茂洞穴的苔藓块
+     * 天然生成短草(52%)/高草(10%)/杜鹃, 骨粉催苔藓也能在无天光处长草 (20260923 实锤事故)。
+     * 故弱签名表决时必须过 {@link #isUndergroundSignature} 的近场反证。
+     */
+    private static boolean isWeakSurfaceSignature(net.minecraft.block.BlockState s) {
+        net.minecraft.block.Block b = s.getBlock();
+        return b == net.minecraft.block.Blocks.GRASS
                 || b == net.minecraft.block.Blocks.TALL_GRASS
                 || b == net.minecraft.block.Blocks.FERN
                 || b == net.minecraft.block.Blocks.LARGE_FERN
@@ -436,6 +436,26 @@ public final class SurfaceHelper {
                 || b == net.minecraft.block.Blocks.DEAD_BUSH
                 || b == net.minecraft.block.Blocks.SUGAR_CANE
                 || s.isIn(BlockTags.FLOWERS);
+    }
+
+    /**
+     * 判据8 反证: <b>繁茂洞穴专属方块</b> —— 近场出现即说明"我在洞里, 看到的草是苔藓草,
+     * 不是露天草", 弱签名一律否决 (20260923 用户拍板"地下签名反证")。
+     *
+     * <p>刻意<b>不纳入</b>: 杜鹃/杜鹃花丛 (地表杜鹃树本身, 真地表)、缠根泥土 (地表杜鹃树下
+     * 即有)、原木/树叶 (废弃矿井与所有树木)、粘土 (湖底)。真地表杜鹃树下 bot 脚下是草方块,
+     * 强签名通道独立判地表, 与本反证互不干扰。
+     */
+    private static boolean isUndergroundSignature(net.minecraft.block.BlockState s) {
+        net.minecraft.block.Block b = s.getBlock();
+        return b == net.minecraft.block.Blocks.MOSS_BLOCK
+                || b == net.minecraft.block.Blocks.MOSS_CARPET
+                || b == net.minecraft.block.Blocks.CAVE_VINES
+                || b == net.minecraft.block.Blocks.CAVE_VINES_PLANT
+                || b == net.minecraft.block.Blocks.SPORE_BLOSSOM
+                || b == net.minecraft.block.Blocks.HANGING_ROOTS
+                || b == net.minecraft.block.Blocks.BIG_DRIPLEAF
+                || b == net.minecraft.block.Blocks.SMALL_DRIPLEAF;
     }
 
     /** 判据8 结果缓存时长 (近扫 ~50 次块读; 远扫最坏 ~4400 次, 靠 500ms 缓存 + 2 格网格键摊平)。 */
@@ -455,8 +475,15 @@ public final class SurfaceHelper {
     private static BlockPos _sigPos = null;
 
     /**
-     * 判据8 主体 (两级): ①近扫 —— 脚下地形块 + 脚/头高度半径 ≤2 环内植被;
-     * ②远扫 —— 自身高度 ±3、水平半径 ≤12 内任意露天签名块 (岩石山地/恶地坡面正例)。
+     * 最近一次扫描的"近场地下反证"结果。仅在 true↔false 翻转时打一行诊断 (不按 tick 刷)
+     * —— 验证繁茂洞穴修复是否生效的观测量: 进洞应见 {@code marker found -> ... vetoed}。
+     */
+    private static boolean _lastUndergroundVeto = false;
+
+    /**
+     * 判据8 主体: ①强签名 —— 脚下地形块直接判地表 (不经地下反证);
+     * ②近扫 —— 脚/头高度半径 ≤2, 同时收集弱签名与地下标记; 近场有地下标记 → 弱签名否决;
+     * ③远扫 —— 仅近场无地下标记时, 自身高度 ±3、水平半径 12 内任意签名 (岩石山地正例)。
      * 结果缓存 (键按 2 格网格取整, 走动时不必每 tick 全量重扫); 浸在液体里时恒 false
      * (水下沙/粘土不是露天活动层)。
      */
@@ -473,32 +500,51 @@ public final class SurfaceHelper {
         // 液体护栏: 头或脚浸在液体里 → 不认签名
         if (w.getBlockState(pos).getMaterial().isLiquid()
                 || w.getBlockState(pos.up()).getMaterial().isLiquid()) return false;
-        // ①近扫: 脚下地形块
-        if (isSurfaceSignature(w.getBlockState(pos.down()))) {
+        // ①强签名: 脚下地形块 —— 独立通道, 不受地下反证影响
+        if (isStrongSurfaceSignature(w.getBlockState(pos.down()))) {
             _sigYes = true;
             return true;
         }
-        // ①近扫: 脚/头高度, 半径 ≤2 (25 格 × 2 高度 ≈ 50 次块读); 命中需过透视门
+        // ②近扫 (半径 ≤2, 脚/头两高度 ≈ 50 次块读): 同时收集弱签名与地下标记。
+        // 脚下也纳入地下标记 —— 苔藓地面是繁茂洞穴最可靠的锚。
+        boolean underground = isUndergroundSignature(w.getBlockState(pos.down()));
+        boolean weakVisible = false;
         BlockPos.Mutable m = new BlockPos.Mutable();
         for (int dy = 0; dy <= 1; dy++) {
             for (int dx = -2; dx <= 2; dx++) {
                 for (int dz = -2; dz <= 2; dz++) {
                     m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
-                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))
+                    var state = w.getBlockState(m.toImmutable());
+                    if (isUndergroundSignature(state)) underground = true;
+                    if (!weakVisible && isWeakSurfaceSignature(state)
                             && losToSignature(mod, m.toImmutable(), 6)) {
-                        _sigYes = true;
-                        return true;
+                        weakVisible = true;
                     }
                 }
             }
         }
-        // ②远扫: 自身高度 ±3, 水平半径 ≤12 (最坏 ~4400 次块读, 500ms 缓存 + 命中早退);
-        // 每个命中都过透视门 LOS —— 隔着岩壁的草地不是"我看到地表" (20260918 用户点破)
+        if (underground != _lastUndergroundVeto) {
+            _lastUndergroundVeto = underground;
+            Debug.logMessage("[Surface] lush cave marker "
+                    + (underground
+                            ? "found -> weak signatures vetoed (y=" + pos.getY() + ")"
+                            : "cleared -> weak signatures restored"));
+        }
+        // 近场在繁茂洞穴内 → 苔藓草弱签名否决, 远扫同样禁止 (±3 高度内扫到的仍是洞内)
+        if (underground) return false;
+        if (weakVisible) {
+            _sigYes = true;
+            return true;
+        }
+        // ③远扫: 自身高度 ±3, 水平半径 ≤12 (最坏 ~4400 次块读, 500ms 缓存 + 命中早退);
+        // 每个命中都过透视门 LOS —— 隔着岩壁的草地不是"我看到地表" (20260918 用户点破)。
+        // 强/弱签名都查: 石山旁的相邻台地可能直接是草方块。
         for (int dy = -SIGNATURE_FAR_Y_TOLERANCE; dy <= SIGNATURE_FAR_Y_TOLERANCE; dy++) {
             for (int dx = -SIGNATURE_FAR_RADIUS; dx <= SIGNATURE_FAR_RADIUS; dx++) {
                 for (int dz = -SIGNATURE_FAR_RADIUS; dz <= SIGNATURE_FAR_RADIUS; dz++) {
                     m.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
-                    if (isSurfaceSignature(w.getBlockState(m.toImmutable()))
+                    var state = w.getBlockState(m.toImmutable());
+                    if ((isStrongSurfaceSignature(state) || isWeakSurfaceSignature(state))
                             && losToSignature(mod, m.toImmutable(), SIGNATURE_FAR_RADIUS + 3)) {
                         _sigYes = true;
                         return true;
