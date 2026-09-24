@@ -42,6 +42,12 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
         return true;
     }
 
+    /** (2026-09-24) 主世界觅食远征开启出洞安全引导 (前 3 个导航强制草方块等地表落点)。 */
+    @Override
+    protected boolean useSurfaceExitGuide() {
+        return true;
+    }
+
     @Override
     protected boolean diagSwitchState(AltoClef mod) {
         return mod.getWorld() != null

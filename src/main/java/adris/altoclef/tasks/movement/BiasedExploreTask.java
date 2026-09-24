@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.SurfaceExitGuide;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -338,6 +339,12 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             updateFoodBiomeBias(mod);
         }
 
+        // (2026-09-24 出洞安全引导) 食物探索到达当前落点时报一次成功计数;
+        // guide 内部仅在武装期且当前确在地表时计数, 非武装/穿洞到达均为 no-op。
+        if (_foodExplore && _currentTarget != null && arrivedAtCurrentTarget(mod)) {
+            SurfaceExitGuide.recordArrived(mod, _currentTarget);
+        }
+
         if (_currentTarget == null || arrivedAtCurrentTarget(mod)) {
             // (2026-09-17 作废时机修正) 到的是 48 格外的【落脚点】, 不是目标点。
             // 原实现在这里无条件把 _currentBiasTarget 记为已访问 → 每个目标只贡献
@@ -382,6 +389,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // We're not making progress toward this step: pick a different direction.
         if (!_progressChecker.check(mod)) {
             _failCounter++;
+            // (2026-09-24 出洞安全引导) 武装期内的失败步必为 guide 安全落点:
+            // 上报拉黑防下一 tick 确定性重选同一个不可达点。
+            if (_foodExplore && SurfaceExitGuide.isArmed(mod)) {
+                SurfaceExitGuide.reject(_currentTarget);
+            }
             _failedTargets.add(_currentTarget);
             // Unreachable step: don't steer towards its bias target again either.
             // (2026-09-17) 只在【本步确实朝它走】时才拉黑 (随机抖动步失败跟它无关,
@@ -460,6 +472,19 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     private BlockPos chooseNewTarget(AltoClef mod, Vec3d pos) {
+        // (2026-09-24 出洞安全引导) 食物探索在武装期内: 目标只能是 guide 给出的
+        // 草方块等强签名露天 3D 落点 (本任务 onTick 用 GoalNear 三维导航, 会逼
+        // baritone 爬上地表而非穿洞)。找不到点的 tick 返回 null, onTick 不发任何
+        // 导航, 绝不退回可能落进洞里的普通探索点。
+        if (_foodExplore && SurfaceExitGuide.isArmed(mod)) {
+            double angle = Double.isNaN(_heading) ? Math.random() * 2 * Math.PI : _heading;
+            BlockPos safe = SurfaceExitGuide.findSafeLanding(mod, angle);
+            if (safe != null) {
+                _lastWasBiased = false;
+                logBiasStep(mod, safe, -1, -1, "surface-exit forced landing");
+            }
+            return safe;
+        }
         // (2026-09-04 用户"在水里不需要什么高级导航") 玩家已在水里(海洋)时, 探索
         // 应直接游向最近陆地, 而不是拒绝所有海洋方向 → 四周全海 → "no dry target"
         // 每 5s 失败重试卡死 (日志实锤: [No-Ocean] ... refusing to swim + Explore found

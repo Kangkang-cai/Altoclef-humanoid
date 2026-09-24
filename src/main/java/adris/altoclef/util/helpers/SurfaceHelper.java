@@ -407,8 +407,11 @@ public final class SurfaceHelper {
      * 判据8 强签名【脚下地形块】: 草方块/灰化土/菌丝体/沙/红沙/雪块/陶瓦。
      * 天然只在露天表层生成。<b>不受地下反证影响</b>: 繁茂洞穴地面是苔藓块而非草方块,
      * bot 自行在地下放置这些方块的极端情况代价可接受。
+     *
+     * (2026-09-24) 改 public: {@link SurfaceExitGuide} 出洞安全落点扫描复用本集合
+     * 作为"必落草方块等地表块"的唯一真相源, 不另起一份清单。
      */
-    private static boolean isStrongSurfaceSignature(net.minecraft.block.BlockState s) {
+    public static boolean isStrongSurfaceSignature(net.minecraft.block.BlockState s) {
         net.minecraft.block.Block b = s.getBlock();
         return b == net.minecraft.block.Blocks.GRASS_BLOCK
                 || b == net.minecraft.block.Blocks.PODZOL
@@ -630,6 +633,13 @@ public final class SurfaceHelper {
             logTransition(mod, raw);
             _flapRejected = 0;
             _below = raw;
+            // (2026-09-24 出洞安全引导) 确认翻面才通知 (候选窗内的抖动不武装):
+            // below→surface 武装"前 3 个导航必落草方块等地表块"; 翻回 below 保留配额。
+            if (raw) {
+                SurfaceExitGuide.onBackBelow(mod);
+            } else {
+                SurfaceExitGuide.onReachedSurface(mod);
+            }
         }
         return _below;
     }

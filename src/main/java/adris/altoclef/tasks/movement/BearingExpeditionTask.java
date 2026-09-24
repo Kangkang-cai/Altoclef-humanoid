@@ -5,9 +5,11 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.WorldHelper;
+import adris.altoclef.util.helpers.SurfaceExitGuide;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.pathing.goals.Goal;
+import baritone.api.pathing.goals.GoalNear;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -77,6 +79,8 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
     protected boolean _escaped = false;
 
     private BlockPos _currentTarget;
+    /** 出洞安全引导武装期内正在逼近的 3D 安全落点 (null = 未占用引导分支)。 */
+    private BlockPos _safeExitTarget = null;
     protected String _persistKey;
     private long _tickId = 0;
     private int _failCounter = 0;
@@ -120,6 +124,14 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         return false;
     }
 
+    /**
+     * 是否启用出洞安全引导 (2026-09-24): 仅主世界觅食远征开启 —— 出地表后前 3 个
+     * 导航必落草方块等强签名露天点, 防洞口边缘横跳。下界/诡异森林远征不开。
+     */
+    protected boolean useSurfaceExitGuide() {
+        return false;
+    }
+
     /** 超时放弃时的补充说明 (可选)。 */
     protected String timeoutDetail(AltoClef mod) {
         return "";
@@ -135,6 +147,7 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         _progress.reset();
         _failCounter = 0;
         _currentTarget = null;
+        _safeExitTarget = null;
         _tickId = 0;
         _lastLoggedRadius = 0;
         _escaped = false;
@@ -162,6 +175,18 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         maybeLogExpedition(mod);
 
         boolean swimming = swimSteering() && isPlayerInWater(mod);
+
+        // (2026-09-24 出洞安全引导) 武装期内所有导航目标改走 SurfaceExitGuide:
+        // 必须是草方块/沙/雪等强签名的露天落点 (带真实站立 y, 3D GoalNear),
+        // 且距出洞锚点 ≥24 格。绝不能落回纯 XZ 目标 —— GoalXZWithin 任意高度
+        // 达成, baritone 会选下坡穿洞的便宜路把 bot 领回深处 (洞口横跳根因)。
+        // 已在水里时交游泳引导, 不走本分支。
+        if (useSurfaceExitGuide() && !swimming && SurfaceExitGuide.isArmed(mod)) {
+            // 接管期作废可能残留的旧纯 XZ 目标, 防解除引导后旧 GoalXZWithin 复活。
+            _currentTarget = null;
+            return tickSurfaceExit(mod);
+        }
+        _safeExitTarget = null;
 
         if (_currentTarget == null || xzDistance(mod.getPlayer().getBlockPos(), _currentTarget) <= ARRIVE_XZ) {
             _currentTarget = pickTarget(mod, swimming);
@@ -196,6 +221,62 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         }
         setDebugState(diagTag() + " (locked bearing)");
         return null;
+    }
+
+    // ------------------------------------------------------------------ //
+    // 出洞安全引导 (2026-09-24)
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 武装期 onTick 分流: 扫描并逼近 SurfaceExitGuide 的 3D 安全落点, 到达后
+     * 按成功计数 (guide 内部要求当前确在地表, 穿洞路径走到的列点不计数)。
+     * 找不到点的 tick 不发任何导航 (绝不退回穿洞 XZ 目标)。
+     */
+    private Task tickSurfaceExit(AltoClef mod) {
+        if (_safeExitTarget != null
+                && xzDistance(mod.getPlayer().getBlockPos(), _safeExitTarget) <= ARRIVE_XZ) {
+            SurfaceExitGuide.recordArrived(mod, _safeExitTarget);
+            _safeExitTarget = null;
+        }
+        if (_safeExitTarget == null) {
+            _safeExitTarget = SurfaceExitGuide.findSafeLanding(mod, currentBearing());
+            if (_safeExitTarget == null) {
+                setDebugState(diagTag() + " surface-exit armed, no safe landing this tick");
+                return null;
+            }
+            _progress.reset();
+            mod.getClientBaritone().getCustomGoalProcess()
+                    .setGoalAndPath(new GoalNear(_safeExitTarget, 2));
+            return null;
+        }
+        if (!_progress.check(mod)) {
+            // 全量规划期 0 位移不算失败, 与普通步同一口径。
+            if (mod.getClientBaritone().getPathingBehavior().getInProgress().isPresent()) {
+                setDebugState(diagTag() + " surface-exit waiting for pathfinder");
+                return null;
+            }
+            Debug.logMessage(diagTag() + " surface-exit step failed, rescanning a safe landing.");
+            SurfaceExitGuide.reject(_safeExitTarget);
+            _safeExitTarget = null;
+            return null;
+        }
+        if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+            mod.getClientBaritone().getCustomGoalProcess()
+                    .setGoalAndPath(new GoalNear(_safeExitTarget, 2));
+        }
+        setDebugState(diagTag() + " surface-exit -> " + _safeExitTarget.toShortString()
+                + " (" + SurfaceExitGuide.remaining() + " safe nav left)");
+        return null;
+    }
+
+    /** 当前锁定方位角 + 试探偏置 (不抖动、不写回); 尚未有方位时随机一个。 */
+    private double currentBearing() {
+        Double stored = _headingByKey.get(_persistKey);
+        if (stored == null || Double.isNaN(stored)) {
+            stored = Math.random() * 2 * Math.PI;
+        }
+        Double probe = _probeOffsetByKey.get(_persistKey);
+        return stored + (probe == null ? 0.0 : probe);
     }
 
     // ------------------------------------------------------------------ //
