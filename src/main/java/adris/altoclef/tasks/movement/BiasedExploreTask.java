@@ -131,9 +131,6 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。
     // 全部落水才判该方向不可用, 换角度重试。
     private static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
-    // (2026-09-24 AIR-TARGET 逐级缩步) 48 格落点嵌实体时, 沿同方位角逐级缩短的
-    // 步长序列 (短于当前步长的档才会试, biased 不越过目标由外层 stepLen 已截断保证)。
-    private static final double[] SHORTER_AIR_STEPS = {32, 16, 8};
 
     // [FOOD-BIOME] 找食物/找动物专用的食物富集群系偏置 (foodExplore=true 时才启用)。
     // 五级 (2026-09-23 用户两次拍板"平原优先, 森林兜底"+"森林也是有差别的"):
@@ -574,26 +571,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 boolean feetOk = feet.isAir() || feet.getMaterial().isLiquid();
                 boolean headOk = head.isAir() || head.getMaterial().isLiquid();
                 if (!feetOk || !headOk) {
-                    // (2026-09-24 用户拍板"缩短步长逐级试") 原步长落点嵌在实体方块
-                    // (陡崖侧面/高度图与方块瞬时不同步) 时, 先不换方向, 沿【同方位角】
-                    // 把步长 48→32→16→8 逐级缩短重取, 第一处脚+头可站的落点即采用;
-                    // 后续 void/干落点/海洋/宽水闸门照常检查。四级全是固体才放弃
-                    // 这个角度。修 +1 off-by-one 后正常地形不会走到这, 这里只兜
-                    // 真实陡崖/数据瞬时不同步的残余场景, 避免原地 churn。
-                    BlockPos closer = findShorterAirLanding(mod, pos, angle, stepLen);
-                    if (closer == null) {
-                        Debug.logToFile("altoclef_diag.log",
-                                "[AIR-TARGET] reject solid landing " + candidate.toShortString()
-                                        + " (feet=" + feet.getBlock() + " head=" + head.getBlock()
-                                        + "), no shorter landing on bearing "
-                                        + (int) Math.toDegrees(angle) + " deg");
-                        continue;
-                    }
                     Debug.logToFile("altoclef_diag.log",
-                            "[AIR-TARGET] solid landing " + candidate.toShortString()
-                                    + " (feet=" + feet.getBlock() + ") -> shorter step "
-                                    + closer.toShortString());
-                    candidate = closer;
+                            "[AIR-TARGET] reject solid landing " + candidate.toShortString()
+                                    + " (feet=" + feet.getBlock() + " head=" + head.getBlock() + ")");
+                    logHeightmapProbe(mod, candX, candZ, fallbackY, candY, feet, head);
+                    continue;
                 }
             }
             // (2026-09-21 末地虚空护栏) 落点列必须真实存在地面。上面的 AIR-TARGET 校验
@@ -799,32 +781,40 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         return !state.getFluidState().isEmpty() || state.getBlock() == Blocks.WATER;
     }
 
-    /**
-     * (2026-09-24 AIR-TARGET 逐级缩步, 用户拍板) 沿 {@code angle} 把步长从
-     * currentStep 向 {@link #SHORTER_AIR_STEPS} 逐级缩短, 返回第一个脚+头为
-     * 空气/流体的地表落点; 全实体返回 null。y 口径与正常步点一致
-     * (foodExplore 忽略树冠); 未加载列跳过, 不猜。
-     */
-    private BlockPos findShorterAirLanding(AltoClef mod, Vec3d pos, double angle, double currentStep) {
-        int fallbackY = (int) Math.floor(pos.y);
-        for (double d : SHORTER_AIR_STEPS) {
-            if (d >= currentStep) continue;
-            int x = (int) Math.floor(pos.x + Math.cos(angle) * d);
-            int z = (int) Math.floor(pos.z + Math.sin(angle) * d);
-            BlockPos col = new BlockPos(x, 0, z);
-            if (!mod.getChunkTracker().isChunkLoaded(col)) continue;
-            int y = _foodExplore
-                    ? surfaceYNoLeavesAt(mod, x, z, fallbackY)
-                    : surfaceYAt(mod, x, z, fallbackY);
-            BlockPos cand = new BlockPos(x, y, z);
-            BlockState feet = mod.getWorld().getBlockState(cand);
-            BlockState head = mod.getWorld().getBlockState(cand.up());
-            if ((feet.isAir() || feet.getMaterial().isLiquid())
-                    && (head.isAir() || head.getMaterial().isLiquid())) {
-                return cand;
+    // [HM-DIAG] 临时诊断 (2026-09-24 高度图失效排查): AIR-TARGET 固体拒绝时, 把该列
+    // 两种高度图原始返回、chunk 加载状态/实际类名、y 窗口真实方块全打出来。只打
+    // 前 HM_DIAG_MAX 条, 闭环后删除。
+    private static int _hmDiagCount = 0;
+    private static final int HM_DIAG_MAX = 10;
+
+    private static void logHeightmapProbe(AltoClef mod, int x, int z, int fallbackY,
+                                          int usedY, BlockState feetState, BlockState headState) {
+        if (_hmDiagCount >= HM_DIAG_MAX) return;
+        _hmDiagCount++;
+        try {
+            int bottomY = mod.getWorld().getBottomY();
+            boolean trackerLoaded = mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z));
+            Object chunk = mod.getWorld().getChunk(x >> 4, z >> 4);
+            int rawSurface = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
+            int rawNoLeaves = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+            int rawMotion = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING, x, z);
+            StringBuilder col = new StringBuilder();
+            for (int y = fallbackY - 4; y <= fallbackY + 4; y++) {
+                col.append(y).append('=').append(mod.getWorld().getBlockState(new BlockPos(x, y, z)).getBlock())
+                        .append(' ');
             }
+            Debug.logToFile("altoclef_diag.log",
+                    "[HM-DIAG] col=(" + x + "," + z + ") fallbackY=" + fallbackY + " usedY=" + usedY
+                            + " trackerLoaded=" + trackerLoaded
+                            + " chunkClass=" + (chunk == null ? "null" : chunk.getClass().getSimpleName())
+                            + " bottomY=" + bottomY
+                            + " rawWorldSurface=" + rawSurface
+                            + " rawNoLeaves=" + rawNoLeaves
+                            + " rawMotion=" + rawMotion
+                            + " | column: " + col);
+        } catch (Throwable t) {
+            Debug.logToFile("altoclef_diag.log", "[HM-DIAG] probe threw: " + t);
         }
-        return null;
     }
 
     /**
@@ -925,36 +915,31 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-08-31) 该 xz 坐标的地表【站立空气格】高度。列未加载时返回 fallback
-     * (玩家当前 y), 避免坏算。用于把探索目的地 y 固定在地表, 防止找床/羊/树/
-     * 村庄时目标定位到地下或天上。
-     * (2026-09-24 off-by-one 事故, 20260924-092744 实锤 + javap 字节码坐实)
-     * World.getTopY 返回的是最高匹配方块【自身】的 y, 不是其上方空气格:
-     * Heightmap.trackUpdate 存 y+1, 但 Chunk.sampleHeightmap(=World.getTopY)
-     * 又减 1 —— 地面方块在 y=N 时 getTopY 返回 N (固体格), 站立点必须 N+1。
-     * 旧码直接 return wsTop 把落点放进方块内部, AIR-TARGET 预检必然拒绝;
-     * 过去靠 15% 随机步+水面列放行稀释没爆死, FOOD-BIOME 改 100% 直奔+干落点
-     * 后在山地放大成 0.55s/次的必败循环 (15708 次 feet=stone/gravel)。
+     * (2026-08-31) 该 xz 坐标的地表站立高度 (最高非空气方块上方一格)。列未加载时
+     * 返回 fallback(玩家当前 y), 避免坏算。用于把探索目的地 y 固定在地表, 防止
+     * 找床/羊/树/村庄时目标定位到地下或天上。
      */
     private int surfaceYAt(AltoClef mod, int x, int z, int fallbackY) {
         if (mod.getWorld() == null) return fallbackY;
         if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
-        // (20260918) WORLD_SURFACE 高度图: 服务端随区块下发, 比逐格下扫可信。
+        // (20260918 用户"探索不许再导航到地下") 旧实现自 y=319 逐块向下扫"第一个非空气"——
+        // 深处/数据洞时客户端把头顶柱装成空气, 扫描会一路落到洞穴底, 落点直接进地下
+        // (20260918-094844 实锤)。改用 WORLD_SURFACE 高度图: 服务端随区块下发, 深处稳定
+        // (SurfaceHelper 三次事故定案的"唯一可信锚")。语义等价: 最高非空气方块顶 + 1 = 落脚空气格。
         int wsTop = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
-        // 空列 getTopY = bottomY-1 (-65); bottomY+1(-63) 哨兵一并兜住。
-        if (wsTop <= mod.getWorld().getBottomY() + 1) return fallbackY;
-        return wsTop + 1; // 见方法头注释: getTopY 是方块自身 y, +1 才是站立空气格。
+        if (wsTop <= mod.getWorld().getBottomY() + 1) return fallbackY; // 哨兵 (未加载/空高度图)
+        return wsTop;
     }
 
     /**
-     * (2026-09-23 [FOOD-BIOME] M2/M3) 该 xz 坐标【忽略树叶/蘑菇冠】的地表
-     * 【站立空气格】高度: MOTION_BLOCKING_NO_LEAVES 高度图给出的是地面方块
-     * (草/泥/沙/水/树干柱顶), 不含橡木/白桦/深色橡树叶与巨型蘑菇冠; 同样
-     * 按 {@link #surfaceYAt} 的结论 +1 取站立格 (2026-09-24 off-by-one 修复)。
+     * (2026-09-23 [FOOD-BIOME] M2/M3, 独立审查加固) 该 xz 坐标【忽略树叶/蘑菇冠】
+     * 的地表站立高度: MOTION_BLOCKING_NO_LEAVES 高度图顶 = 地面 (草/泥/沙/水/
+     * 树干柱顶), 不含橡木/白桦/深色橡树叶与巨型蘑菇冠。
      * <ul>
-     *   <li>M2: 森林步点与扫描目标统一用本口径, 步点不落在树冠顶 → baritone
-     *       不砍叶爬冠、地面群系点不被 6s 超时误判 unreachable 拉黑。</li>
-     *   <li>M3: O(1) 高度图查询取代逐列从 y=319 下扫。</li>
+     *   <li>M2: 森林步点与扫描目标统一用本口径, 步点不再落在树冠顶 → baritone
+     *       不再砍叶爬冠、可达的地面群系点不再被 6s 超时误判 unreachable 拉黑。</li>
+     *   <li>M3: 高度图是服务端随区块下发的 O(1) 查询, 取代 WorldHelper
+     *       .getGroundHeight 从 y=319 逐格下扫 (~190 次 getBlockState/列)。</li>
      * </ul>
      * 哨兵口径与 {@link #surfaceYAt} 一致: 世界为空/未加载返回 fallbackY。
      */
@@ -963,7 +948,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
         int top = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
         if (top <= mod.getWorld().getBottomY() + 1) return fallbackY;
-        return top + 1; // getTopY 是方块自身 y, +1 才是站立空气格。
+        return top;
     }
 
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
@@ -1070,11 +1055,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 } else {
                     continue;
                 }
-                // 目标定位到该列【忽略树冠的地表站立空气格】(M2, 高度图 O(1) 同取代
-                // 逐格下扫的 getGroundHeight=M3): 与步点 candY 完全同一口径, 否则森林里
-                // 目标在地面、步点在树冠顶 → 爬冠超时误拉黑。surfaceYNoLeavesAt 内部已
-                // 对 getTopY +1 (getTopY 是地面方块自身 y, 见该函数注释); 未加载列回退
-                // 玩家 y。
+                // 目标定位到该列【忽略树冠的地表】(M2, 高度图 O(1) 同取代逐格下扫
+                // 的 getGroundHeight=M3): 与步点 candY 完全同一口径, 否则森林里
+                // 目标在地面、步点在树冠顶 → 爬冠超时误拉黑。getTopY 返回最高匹配
+                // 方块上方的空气格 y, 直接就是站立点, 不再 +1; 未加载列回退玩家 y。
                 int sy = surfaceYNoLeavesAt(mod, check.getX(), check.getZ(), check.getY());
                 BlockPos landing = new BlockPos(check.getX(), sy, check.getZ());
                 // (2026-09-16 用户"收集食物不要在水上") 富食 biome 也可能铺在水面
