@@ -690,6 +690,51 @@ public class TaskCatalogue {
         return _itemToResourceTask.get(item).getResource(count);
     }
 
+    // =====================================================================
+    // (2026-09-24 隔离实例通道, 用户"盾牌触发, 开一个熔炉, 放一个铁进去")
+    // 与 getItemTask 的区别: 不查/不写 CataloguedResource._liveInstance 合并槽,
+    // 每次直接新建独立任务。用途: 盾牌看门狗要自己烧 1 铁, 不能挂在 gear 链
+    // 已有的 x9 炉子上等 9 锭烧完 (20260924 实锤盾迟到 1m45s)。
+    // 不影响 09-16 守炉死循环修复: 该修复依赖默认 getResource 路径, 此通道独立。
+    // detached 上下文深度: 构造期间产出的 CraftInTableTask 据此捕获 detached 标志,
+    // 使其内部材料收集继续走独立通道 (跨 tick 后上下文已消失, 故必须构造时捕获)。
+    // =====================================================================
+    private static int _detachedDepth = 0;
+
+    /** 当前是否处于隔离资源构造上下文 (供 CraftInTableTask 构造时捕获)。 */
+    public static boolean isDetachedContext() {
+        return _detachedDepth > 0;
+    }
+
+    /** 新建一个完全独立、不参与实例合并的资源任务。 */
+    public static ResourceTask newDetachedItemTask(String name, int count) {
+        if (!taskExists(name)) {
+            Debug.logWarning("Detached task " + name + " does not exist. Error possibly.");
+            Debug.logStack();
+            return null;
+        }
+        _detachedDepth++;
+        try {
+            return _nameToResourceTask.get(name).newDetachedResource(count);
+        } finally {
+            _detachedDepth--;
+        }
+    }
+
+    public static ResourceTask newDetachedItemTask(Item item, int count) {
+        if (!taskExists(item)) {
+            Debug.logWarning("Detached task " + item + " does not exist. Error possibly.");
+            Debug.logStack();
+            return null;
+        }
+        _detachedDepth++;
+        try {
+            return _itemToResourceTask.get(item).newDetachedResource(count);
+        } finally {
+            _detachedDepth--;
+        }
+    }
+
     public static ResourceTask getItemTask(ItemTarget target) {
         if (target.isCatalogueItem()) {
             return getItemTask(target.getCatalogueName(), target.getTargetCount());
@@ -1044,6 +1089,15 @@ public class TaskCatalogue {
             }
             _liveInstance = result;
             return _liveInstance;
+        }
+
+        /**
+         * (2026-09-24 隔离实例) 直接新建任务, 不查/不写 _liveInstance 槽,
+         * 也不套用 mineIfPresent/forceDimension (detached 调用方如需可自行处理)。
+         * 由 TaskCatalogue.newDetachedItemTask 在 detached 上下文内调用。
+         */
+        public ResourceTask newDetachedResource(int count) {
+            return _getResource.apply(count);
         }
     }
 }

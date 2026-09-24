@@ -19,6 +19,9 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
 
     private final RecipeTarget[] _targets;
     private final boolean _ignoreUncataloguedSlots;
+    // (2026-09-24 隔离实例) true = 派材料子任务时走 TaskCatalogue.newDetachedItemTask,
+    // 不命中共享活实例槽 (盾牌看门狗: 自己烧 1 铁, 不挂 gear 的 x9 炉子)。
+    private final boolean _detached;
     private boolean _finished = false;
     // (2026-08-31 材料收集粘滞) 缓存"当前正在收集的某个材料子任务"实例。
     // 一旦派发了 getItemTask(某材料) 且未完成, 就持续返回同一实例, 不因每 tick
@@ -28,8 +31,13 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
     private Task _activeCollectTask = null;
 
     public CollectRecipeCataloguedResourcesTask(boolean ignoreUncataloguedSlots, RecipeTarget... targets) {
+        this(ignoreUncataloguedSlots, false, targets);
+    }
+
+    public CollectRecipeCataloguedResourcesTask(boolean ignoreUncataloguedSlots, boolean detached, RecipeTarget... targets) {
         _targets = targets;
         _ignoreUncataloguedSlots = ignoreUncataloguedSlots;
+        _detached = detached;
     }
 
     @Override
@@ -117,7 +125,10 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 // 否则背包计数不含合成格 → 材料一进合成格就"变没" → 反复收集喂光)
                 if (!StorageHelper.itemTargetOwnedIncludingCraftGrid(mod, StorageHelper.Ownership.POSSESS, itemTarget)) {
                     setDebugState("Getting " + itemTarget);
-                    _activeCollectTask = TaskCatalogue.getItemTask(catalogueMaterialName, count);
+                    // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
+                    _activeCollectTask = _detached
+                            ? TaskCatalogue.newDetachedItemTask(catalogueMaterialName, count)
+                            : TaskCatalogue.getItemTask(catalogueMaterialName, count);
                     Debug.logTrace("craft-material", "派发收集材料 " + catalogueMaterialName + " x" + count
                             + ", 真实持有(±合成格)=" + StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, itemTarget.getMatches())
                             + ", 目标=" + itemTarget.toString());
@@ -132,7 +143,10 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 // 计入"已有", 避免材料进合成格后被误判缺失反复收集。
                 if (mod.getItemStorage().getItemCountReal(item) + StorageHelper.countItemsInCraftGrid(mod, item) < count) {
                     setDebugState("Getting " + item.getTranslationKey());
-                    _activeCollectTask = TaskCatalogue.getItemTask(item, count);
+                    // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
+                    _activeCollectTask = _detached
+                            ? TaskCatalogue.newDetachedItemTask(item, count)
+                            : TaskCatalogue.getItemTask(item, count);
                     return _activeCollectTask;
                 }
             }

@@ -366,7 +366,9 @@ public class WorldSurvivalChain extends SingleTaskChain {
                             + ingotCount + " ingots/" + rawIronCount + " raw iron = " + ironPotential
                             + " iron; " + plankCount + " planks/" + logCount + " logs = " + plankPotential
                             + " planks potential), crafting one.");
-                    _shieldCraftTask = TaskCatalogue.getItemTask(Items.SHIELD, 1);
+                    // (2026-09-24 用户"干净的, 盾牌触发, 开一个熔炉, 放一个铁进去")
+                    // 走 detached 隔离通道: 独立炉子只烧 1 铁, 不挂 gear 链的 x9 炉子。
+                    _shieldCraftTask = TaskCatalogue.newDetachedItemTask(Items.SHIELD, 1);
                     setTask(_shieldCraftTask);
                     return SHIELD_WATCHDOG_PRIORITY;
                 }

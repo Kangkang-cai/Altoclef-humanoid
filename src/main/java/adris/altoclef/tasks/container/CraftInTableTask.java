@@ -2,6 +2,7 @@ package adris.altoclef.tasks.container;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.CraftGenericManuallyTask;
 import adris.altoclef.tasks.CraftGenericWithRecipeBooksTask;
 import adris.altoclef.tasks.CraftInInventoryTask;
@@ -49,13 +50,14 @@ public class CraftInTableTask extends ResourceTask {
     public CraftInTableTask(RecipeTarget[] targets) {
         super(extractItemTargets(targets));
         _targets = targets;
-        _craftTask = new DoCraftInTableTask(_targets);
+        // (2026-09-24) 构造瞬间捕获 detached 上下文: onTick 跨 tick 后上下文已消失。
+        _craftTask = new DoCraftInTableTask(_targets, true, false, TaskCatalogue.isDetachedContext());
     }
 
     public CraftInTableTask(RecipeTarget target, boolean collect, boolean ignoreUncataloguedSlots) {
         super(new ItemTarget(target.getOutputItem(), target.getTargetCount()));
         _targets = new RecipeTarget[]{target};
-        _craftTask = new DoCraftInTableTask(_targets, collect, ignoreUncataloguedSlots);
+        _craftTask = new DoCraftInTableTask(_targets, collect, ignoreUncataloguedSlots, TaskCatalogue.isDetachedContext());
     }
 
     public CraftInTableTask(RecipeTarget target) {
@@ -142,15 +144,15 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     // 租用时维持收输出子树不翻面, 避免"搬堆叠 ↔ 清光标"每 2s 互相拆台。
     private Task _receiveTask = null;
 
-    public DoCraftInTableTask(RecipeTarget[] targets, boolean collect, boolean ignoreUncataloguedSlots) {
+    public DoCraftInTableTask(RecipeTarget[] targets, boolean collect, boolean ignoreUncataloguedSlots, boolean detached) {
         super(Blocks.CRAFTING_TABLE, new ItemTarget("crafting_table"));
-        _collectTask = new CollectRecipeCataloguedResourcesTask(ignoreUncataloguedSlots, targets);
+        _collectTask = new CollectRecipeCataloguedResourcesTask(ignoreUncataloguedSlots, detached, targets);
         _targets = targets;
         _collect = collect;
     }
 
     public DoCraftInTableTask(RecipeTarget[] targets) {
-        this(targets, true, false);
+        this(targets, true, false, false);
     }
 
     @Override
