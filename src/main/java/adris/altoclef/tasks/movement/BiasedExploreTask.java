@@ -568,13 +568,19 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             if (!SurfaceHelper.isBelowSurface(mod)) {
                 BlockState feet = mod.getWorld().getBlockState(candidate);
                 BlockState head = mod.getWorld().getBlockState(candidate.up());
-                boolean feetOk = feet.isAir() || feet.getMaterial().isLiquid();
-                boolean headOk = head.isAir() || head.getMaterial().isLiquid();
+                // (2026-09-24 HM-DIAG 实证) 高原台面脚下常有 tall grass/蒲公英/花:
+                // 它们 isAir=false 但无碰撞体积, 人完全可以站进去。旧门只认
+                // 空气/流体, 把花草当固体拒 (同场 12 次 AIR-TARGET, 列实测
+                // grass_block→dandelion→air, rawMotion 指花格)。改用
+                // material.blocksMovement(): 草/花/苗/流体=false 放行 (流体由
+                // 下方 isDryLanding/isTargetInWater 处理), 石头/泥土/树叶=true
+                // 仍拒绝 (树冠拒入语义不变)。
+                boolean feetOk = !feet.getMaterial().blocksMovement();
+                boolean headOk = !head.getMaterial().blocksMovement();
                 if (!feetOk || !headOk) {
                     Debug.logToFile("altoclef_diag.log",
                             "[AIR-TARGET] reject solid landing " + candidate.toShortString()
                                     + " (feet=" + feet.getBlock() + " head=" + head.getBlock() + ")");
-                    logHeightmapProbe(mod, candX, candZ, fallbackY, candY, feet, head);
                     continue;
                 }
             }
@@ -779,42 +785,6 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // getFluidState 覆盖 WATER / 流动水以及含水方块 (海草等); 岩浆同样非空,
         // 一并拒绝 (站在岩浆上不是落点)。
         return !state.getFluidState().isEmpty() || state.getBlock() == Blocks.WATER;
-    }
-
-    // [HM-DIAG] 临时诊断 (2026-09-24 高度图失效排查): AIR-TARGET 固体拒绝时, 把该列
-    // 两种高度图原始返回、chunk 加载状态/实际类名、y 窗口真实方块全打出来。只打
-    // 前 HM_DIAG_MAX 条, 闭环后删除。
-    private static int _hmDiagCount = 0;
-    private static final int HM_DIAG_MAX = 10;
-
-    private static void logHeightmapProbe(AltoClef mod, int x, int z, int fallbackY,
-                                          int usedY, BlockState feetState, BlockState headState) {
-        if (_hmDiagCount >= HM_DIAG_MAX) return;
-        _hmDiagCount++;
-        try {
-            int bottomY = mod.getWorld().getBottomY();
-            boolean trackerLoaded = mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z));
-            Object chunk = mod.getWorld().getChunk(x >> 4, z >> 4);
-            int rawSurface = mod.getWorld().getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
-            int rawNoLeaves = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
-            int rawMotion = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING, x, z);
-            StringBuilder col = new StringBuilder();
-            for (int y = fallbackY - 4; y <= fallbackY + 4; y++) {
-                col.append(y).append('=').append(mod.getWorld().getBlockState(new BlockPos(x, y, z)).getBlock())
-                        .append(' ');
-            }
-            Debug.logToFile("altoclef_diag.log",
-                    "[HM-DIAG] col=(" + x + "," + z + ") fallbackY=" + fallbackY + " usedY=" + usedY
-                            + " trackerLoaded=" + trackerLoaded
-                            + " chunkClass=" + (chunk == null ? "null" : chunk.getClass().getSimpleName())
-                            + " bottomY=" + bottomY
-                            + " rawWorldSurface=" + rawSurface
-                            + " rawNoLeaves=" + rawNoLeaves
-                            + " rawMotion=" + rawMotion
-                            + " | column: " + col);
-        } catch (Throwable t) {
-            Debug.logToFile("altoclef_diag.log", "[HM-DIAG] probe threw: " + t);
-        }
     }
 
     /**
