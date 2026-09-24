@@ -615,6 +615,16 @@ public class ItemHelper {
         // 当前背包数量 ≤ 保留量时不丢 (合成熔炉/石镐/石剑常用, 丢光了会卡死)。
         if (item == Items.STICK)
             return false;
+        // (2026-09-24 最后镐保护) 丢掉它之后背包再无同级/更好镐 → 不可丢。
+        // 现场 20260924-202519: 满包腾位 (446 圆石) 把唯一木镐选为垃圾 (09-03
+        // "直接丢名单"含木/石工具, 但它是当时唯一镐), 光标滞留 8s 被
+        // PlayerInteractionFixChain 抛出 → pick-escape 捡回后热栏装备又被豁免
+        // 挡住 → 爬升通道手挖石头 3.5 分钟 (hand=water_bucket 铁证)。本方法是
+        // getGarbageSlot / 光标抛丢 / 合成抛光标共用的单一收口, 在此统一堵上;
+        // 与 getRandomThrowableSlot 的"镐永不丢"(08-25 用户) 同族 — 有同级或
+        // 更好镐时仍可丢 (尊重 09-03 名单释放背包位的本意)。
+        if (adris.altoclef.util.helpers.StorageHelper.wouldLeaveNoPickaxe(mod, stack))
+            return false;
         if (isReservedBlockUnderLimit(mod, stack))
             return false;
         return mod.getModSettings().isThrowaway(stack.getItem()) || mod.getModSettings().shouldThrowawayUnusedItems();

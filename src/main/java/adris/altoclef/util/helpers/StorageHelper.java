@@ -757,6 +757,10 @@ public class StorageHelper {
         if (!(stack.getItem() instanceof PickaxeItem thisPick)) return false;
         int level = thisPick.getMaterial().getMiningLevel();
         for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
+            // (2026-09-24 光标盲区) 评估对象在光标上时 (满包腾位把镐拿上光标再抛
+            // 的路径), 光标槽里的"这把"不能算作"还剩的镐" — 否则 self 比对 (引用
+            // 不同对象) 失效, 自己护自己, 保护被绕过 (20260924-202519 正是此场景)。
+            if (Slot.isCursor(slot)) continue;
             ItemStack s = getItemStackInSlot(slot);
             if (s.isEmpty() || s == stack) continue;
             if (s.getItem() instanceof PickaxeItem other && other.getMaterial().getMiningLevel() >= level) {

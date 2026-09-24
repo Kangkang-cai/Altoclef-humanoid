@@ -110,14 +110,17 @@ public class PlayerInteractionFixChain extends TaskChain {
 
                 // if baritone is running, only accept tools OUTSIDE OF HOTBAR!
                 // Baritone will take care of tools inside the hotbar.
+                // (2026-09-24 热栏豁免移除) 上述假设实测不成立: 20260924-202519
+                // 镐在热栏, baritone 寻路挖掘 (GoToSurfaceTask 爬升) 3.5 分钟
+                // hand=water_bucket 不换工具 → 手速挖石头。且本分支只在"当前手持
+                // 不能采收正在挖的方块"时触发 (上方已过滤 current suitable), 装备
+                // 后 current 变 suitable 自动停手, 不与 baritone 的放块选槽打架;
+                // 任务层装备优先权由 taskToolEquipDefers 保持 (2026-09-16)。
                 if (bestToolSlot.isPresent() && !bestToolSlot.get().equals(currentEquipped)) {
                     // ONLY equip if the item class is STRICTLY different (otherwise we swap around a lot)
                     if (StorageHelper.getItemStackInSlot(currentEquipped).getItem() != StorageHelper.getItemStackInSlot(bestToolSlot.get()).getItem()) {
-                        boolean isAllowedToManage = !mod.getClientBaritone().getPathingBehavior().isPathing() || bestToolSlot.get().getInventorySlot() >= 9;
-                        if (isAllowedToManage) {
-                            Debug.logMessage("Found better tool in inventory, equipping.");
-                            mod.getSlotHandler().forceEquipSlot(bestToolSlot.get());
-                        }
+                        Debug.logMessage("Found better tool in inventory, equipping.");
+                        mod.getSlotHandler().forceEquipSlot(bestToolSlot.get());
                     }
                 }
             }
