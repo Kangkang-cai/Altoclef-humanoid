@@ -22,10 +22,15 @@ import net.minecraft.util.math.Vec3d;
  * 看"正在导航"。此时沿用海底拾取验证过的下潜输入模式 (面向+前进+潜行下沉+疾跑)
  * 短暂下潜几秒，重新咬合水面/绕过顶住的水面，解除"原地划水"。
  *
- * 设计要点 (与 SwingThroughChain 完全同构，后台反应非任务)：
- *  - 是【后台反应】，不是任务：只在本机输入层 hold/release，绝不 setTask()/
- *    subTask()，不改任务优先级、不参与任务树，getPriority() 恒返回
- *    NEGATIVE_INFINITY，仲裁层面永不抢占，只在水下卡住时短暂注入输入。
+ * 设计要点 (与 SwingThroughChain 同构，后台反应非任务)：
+ *  - 是【后台反应】，不是任务：绝不 setTask()/subTask()，不改任务优先级数值、
+ *    不参与任务树。但 (2026-09-24 修订) dive/place 激活期 getPriority 临时返回
+ *    DIVE_CONTROL_PRIORITY=60 持权接管仲裁 —— 原先"恒 -Inf 永不抢权 + 原版键
+ *    注入"被实锤无效: baritone 寻路期玩家 input 是 PlayerMovementInput, 只读
+ *    baritone 强制表 (反编译字节码), 原版 KeyBinding 层全被旁路; 且 alto 跑在
+ *    tick HEAD、baritone 写表在玩家 tick 前, 不让主任务让位就无法赢得写时序。
+ *    持权期主任务 SingleTaskChain.onInterrupt 只 interrupt 不销毁, 归还后
+ *    reset() 原任务继续 (MobDefense/WorldSurvival 抢权同款成熟模式)。
  *  - 触发条件（严格收窄，避免误伤正常游泳）：
  *      (1) 玩家确实在水中 (isTouchingWater())，且【不在船上】：
  *          船上注水潜行会下船，破坏 BoatCrossingTask。
@@ -84,6 +89,18 @@ public class SwimDiveChain extends TaskChain {
     // TASK_NOT_MOVEMENT 拦下（20260915-231536 场次整场 0 条 SWIM-DIVE 实锤）。
     private static final String MINING_PACKAGE = "adris.altoclef.tasks.construction.";
 
+    // ==== (2026-09-24 持权仲裁) dive/place 激活期临时接管 ====
+    // 根因 (20260924-1856 会话实锤): dive 曾用 mod.getInputControls().hold(...) 走
+    // 原版 KeyBinding 层, 但 baritone 寻路期间玩家 input 被换成 PlayerMovementInput,
+    // 其 tick() 只读 InputOverrideHandler.isInputForcedDown (反编译字节码实锤,
+    // 无原版回退) → hold/release 全被旁路, dive 打了日志零位移, releaseJump 也
+    // 压不住 baritone 强制的 JUMP=true (bobbing 持续)。且 alto 全部逻辑跑在
+    // MinecraftClient.tick HEAD, baritone TickEvent.IN 在玩家 tick 前才写强制表,
+    // 同 tick 必被覆盖 → 唯一活路是持权让主任务让位、baritone 停止写表。
+    // 数值: 高于 Food 55 / 普通任务 50 / 睡眠路由 58, 低于死亡恢复 70 /
+    // 溺水逃生 95 / 战斗 95 (威胁场景仍可随时抢走我们)。
+    private static final float DIVE_CONTROL_PRIORITY = 60f;
+
     // 卡住检测窗口起点（游戏 tick + 起点位置）。
     private long _windowStartTick = -1;
     private Vec3d _windowStartPos = null;
@@ -91,6 +108,10 @@ public class SwimDiveChain extends TaskChain {
     private boolean _diving = false;
     private int _diveTicksLeft = 0;
     private long _lastDiveTick = Long.MIN_VALUE;
+    // 下潜起点位置 + 锁定朝向 (直游方向 = 触发瞬间的视线方向)。
+    private Vec3d _diveStartPos = null;
+    private float _diveYaw = 0f;
+    private float _divePitch = 0f;
 
     // 垫方块状态 (2026-09-12)：进行中标志 + 本轮窗口起点。
     // 注意 _standGraceUntilTick 故意【不】随 resetState 清零 —— 站稳宽限要
@@ -134,15 +155,17 @@ public class SwimDiveChain extends TaskChain {
             Debug.logWarning("SwimDive chain exception (ignored): " + t);
             t.printStackTrace();
             try {
-                mod.getInputControls().release(Input.MOVE_FORWARD);
-                mod.getInputControls().release(Input.SNEAK);
-                mod.getInputControls().release(Input.SPRINT);
-                mod.getInputControls().release(Input.JUMP);
+                releaseAllInjected(mod);
             } catch (Exception ignored) { }
             releaseDive(mod);
             resetState();
         }
-        // 恒定负无穷：永不抢占任何任务链。
+        // (2026-09-24 持权仲裁) dive/place 激活期临时接管：主任务让位 → baritone
+        // 寻路停写强制表 → 本链 setInputForceState 的输入才不会被同 tick 覆盖。
+        // 其余时刻恒负无穷，永不与任何链争权（原设计语义保留）。
+        if (_diving || _placing) {
+            return DIVE_CONTROL_PRIORITY;
+        }
         return Float.NEGATIVE_INFINITY;
     }
 
@@ -168,10 +191,20 @@ public class SwimDiveChain extends TaskChain {
 
         // 正在下潜：保持按住，数到下潜时长结束松开并重置窗口。
         if (_diving) {
-            // (2026-09-12 用户点破) 下潜期间必须每 tick 压住跳跃: baritone 会
-            // 重新 hold JUMP, 水里跳优先于潜 → "下潜"变成向上游 = 又一个 bob。
-            // 这正是此前 dive+sprint 10+ 次零进展的根因之一。
-            WaterStandHelper.releaseJump(mod);
+            // (2026-09-24 持权版) 每 tick 维持强制态 + 取消寻路：持权后主任务
+            // 不再 tick, 但 baritone 残留的 path 请求仍会在其 IN 段 dispatch
+            // 写输入, 每 tick forceCancel 压死, 我们的强制态才稳赢玩家 tick。
+            // 原 InputControls 版 (原版 KeyBinding) 被 PlayerMovementInput 完全
+            // 旁路 —— 这正是 dive 打日志零位移的根因。
+            try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
+            var h = mod.getClientBaritone().getInputOverrideHandler();
+            h.setInputForceState(Input.MOVE_FORWARD, true);
+            h.setInputForceState(Input.SNEAK, true);
+            h.setInputForceState(Input.JUMP, false);
+            // 锁定触发瞬间的朝向 (直游方向), 不让 baritone LookBehavior 残留目标
+            // 把准星甩走 (甩走=前进方向乱, 直游失效)。
+            mod.getClientBaritone().getLookBehavior().updateTarget(
+                    new baritone.api.utils.Rotation(_diveYaw, _divePitch), true);
             if (--_diveTicksLeft <= 0) {
                 releaseDive(mod);
                 resetWindow();
@@ -319,9 +352,14 @@ public class SwimDiveChain extends TaskChain {
         _placeStartTick = WorldHelper.getTicks();
         _placedCount = 0;
         _lastPlaceResult = "none";
+        // (2026-09-24 持权版) 清 baritone 残留强制态 (JUMP=true 是 bob 元凶):
+        // 清空后五移动键无强制 → inControl()=false → 玩家 input 换回原版
+        // KeyboardInput → releaseJump/riseTick 的原版层输入恢复有效。
+        try { mod.getClientBaritone().getInputOverrideHandler().clearAllKeys(); } catch (Throwable ignored) {}
         Vec3d pos = mod.getPlayer().getPos();
         Task main = mod.getUserTaskChain().getCurrentTask();
-        String m = "[SWIM-DIVE] stuck in water -> place block underfoot (stop bobbing). player=" + pos
+        String m = "[SWIM-DIVE] stuck in water -> place block underfoot (take control prio="
+                + (int) DIVE_CONTROL_PRIORITY + "). player=" + pos
                 + " task=" + (main == null ? "null" : main.toString())
                 + " stuckFor=" + stuckForTicks + " window=" + PLACE_WINDOW_TICKS;
         Debug.logMessage(m);
@@ -339,6 +377,10 @@ public class SwimDiveChain extends TaskChain {
             resetState();
             return;
         }
+        // (2026-09-24 持权版) 每 tick 压死 baritone 寻路: 残留 path 请求 dispatch
+        // 会重写 JUMP=true (bob 元凶) 且把玩家 input 切走, 原版层 releaseJump/
+        // riseTick 全失效。持权后主任务不再请求, forceCancel 保证彻底安静。
+        try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
         // 出水即收工 (柱子垫满后 bot 已站到水面之上)。
         // (2026-09-12 现场 100413) 必须要求 onGround —— bob 顶点那一瞬
         // inWater 也会闪 false, 旧判据 PLACE_OUT_OF_WATER placed=0 假出水
@@ -424,6 +466,9 @@ public class SwimDiveChain extends TaskChain {
         _placeStartTick = Long.MIN_VALUE;
         // riseTick 可能 hold 着跳跃键, 退出路径必须松开。
         WaterStandHelper.releaseJump(mod);
+        // (2026-09-24 持权版) 归还控制权前清本反应全部注入 (幂等, place 档
+        // 本就没设强制态, 防御 dive/place 交叠残留)。
+        releaseAllInjected(mod);
         resetWindow();
     }
 
@@ -431,33 +476,71 @@ public class SwimDiveChain extends TaskChain {
      * 触发下潜：面向当前前进方向，按住 FORWARD + SNEAK(下沉) + SPRINT(加速)
      * DIVE_HOLD_TICKS tick，向前下游，解除水面/岩壁原地划水。写 [SWIM-DIVE]
      * 日志：玩家 pos、当前主任务、卡住时长、下潜持续时长。
+     *
+     * (2026-09-24 持权版) 输入注入从原版 KeyBinding 层 (InputControls.hold,
+     * 被 baritone 寻路期的 PlayerMovementInput 完全旁路) 改为 baritone 强制表
+     * setInputForceState + 持权仲裁 (getPriority 返回 60 让主任务让位) +
+     * 每 tick forceCancel。原版层只留 SPRINT (PlayerMovementInput 不读 sprint,
+     * vanilla ClientPlayerEntity 仍读原版 sprintKey)。
      */
     private void triggerDive(AltoClef mod, long stuckForTicks) {
         Vec3d pos = mod.getPlayer().getPos();
-        // 保持当前朝向前进（yaw/pitch 不动，避免覆盖 baritone/其它链的视角控制），
-        // 只注入前向+潜行下沉+疾跑，让 bot 向前下游。
-        mod.getInputControls().hold(Input.MOVE_FORWARD);
-        mod.getInputControls().hold(Input.SNEAK);
+        // 锁定触发瞬间朝向 = 直游方向 (后续每 tick updateTarget 维持)。
+        _diveYaw = mod.getPlayer().getYaw();
+        _divePitch = mod.getPlayer().getPitch();
+        _diveStartPos = pos;
+        // 清掉 baritone 残留强制态 (含 JUMP=true —— bobbing 元凶), 再写我们的。
+        try {
+            mod.getClientBaritone().getPathingBehavior().forceCancel();
+            mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
+        } catch (Throwable ignored) {}
+        var h = mod.getClientBaritone().getInputOverrideHandler();
+        h.setInputForceState(Input.MOVE_FORWARD, true);
+        h.setInputForceState(Input.SNEAK, true);
+        h.setInputForceState(Input.JUMP, false);
+        // SPRINT 走原版层即可 (PlayerMovementInput 只管六个移动输入)。
         mod.getInputControls().hold(Input.SPRINT);
-        // (2026-09-12 用户点破) 起潜第一 tick 就压住跳跃: 水里跳>SNEAK 下沉,
-        // 不压住跳跃"下潜"根本沉不下去 (dive 曾 10+ 次零进展的根因之一)。
-        WaterStandHelper.releaseJump(mod);
         _diving = true;
         _diveTicksLeft = DIVE_HOLD_TICKS;
         _lastDiveTick = WorldHelper.getTicks();
 
         Task main = mod.getUserTaskChain().getCurrentTask();
-        String m = "[SWIM-DIVE] stuck in water -> dive+sprint forward. player=" + pos
+        String m = "[SWIM-DIVE] stuck in water -> dive+sprint forward (take control prio="
+                + (int) DIVE_CONTROL_PRIORITY + "). player=" + pos
                 + " task=" + (main == null ? "null" : main.toString())
                 + " stuckFor=" + stuckForTicks + " ticks dive=" + DIVE_HOLD_TICKS;
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
     }
 
-    private void releaseDive(AltoClef mod) {
-        mod.getInputControls().release(Input.MOVE_FORWARD);
-        mod.getInputControls().release(Input.SNEAK);
+    /**
+     * (2026-09-24) 统一清掉本反应注入的 baritone 强制态。FORWARD/SNEAK 归 false
+     * 后 inControl() 失效 → 玩家 input 换回原版 KeyboardInput → InputControls 层
+     * 恢复有效。残留 JUMP=false 对 inControl 无影响且会被后续写入覆盖, 也一并清。
+     */
+    private void releaseAllInjected(AltoClef mod) {
+        try {
+            var h = mod.getClientBaritone().getInputOverrideHandler();
+            h.setInputForceState(Input.MOVE_FORWARD, false);
+            h.setInputForceState(Input.SNEAK, false);
+            h.setInputForceState(Input.JUMP, false);
+        } catch (Throwable ignored) {
+        }
         mod.getInputControls().release(Input.SPRINT);
+    }
+
+    private void releaseDive(AltoClef mod) {
+        // (2026-09-24) 结束时报告本次直游位移 —— 下次日志可直接验证 dive 是否
+        // 真的在游 (旧版恒 ~0 位移, 正是输入被旁路的实锤)。
+        if (_diveStartPos != null && mod.getPlayer() != null) {
+            Vec3d now = mod.getPlayer().getPos();
+            double dx = now.x - _diveStartPos.x;
+            double dz = now.z - _diveStartPos.z;
+            double moved = Math.sqrt(dx * dx + dz * dz);
+            writeDiag(mod, String.format("DIVE_END moved=%.2f dx=%.2f dz=%.2f", moved, dx, dz));
+        }
+        _diveStartPos = null;
+        releaseAllInjected(mod);
         _diving = false;
         _diveTicksLeft = 0;
     }
@@ -505,7 +588,7 @@ public class SwimDiveChain extends TaskChain {
 
     @Override
     protected void onStop(AltoClef mod) {
-        // 保险：链停止时松开可能正按住的键。
+        // 保险：链停止时松开可能正按住的键 (含 baritone 强制态)。
         releaseDive(mod);
         WaterStandHelper.releaseJump(mod);
         resetState();
@@ -513,6 +596,8 @@ public class SwimDiveChain extends TaskChain {
 
     @Override
     public void onInterrupt(AltoClef mod, TaskChain other) {
+        // 让位 (含被战斗/溺水等更高优先级抢走): 必须清强制态, 否则我们写的
+        // FORWARD=true 会在 map 里残留, bot 落地后一直往前游。
         releaseDive(mod);
         WaterStandHelper.releaseJump(mod);
         resetState();
