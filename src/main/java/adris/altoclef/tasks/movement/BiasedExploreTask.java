@@ -119,6 +119,15 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // 步长下限: 目标只剩 9 格时不做 6 格的碎步, 至少走这么多。
     private static final double MIN_EXPLORE_STEP = 8;
 
+    // (2026-09-24 碎步打转修复) 食物群系池选点的最小偏置距离: 池内存在 ≥ 此距离
+    // 的点时绝不选脚边点。取 EXPLORE_STEP + ARRIVED_DISTANCE = 步长恰好不被截断
+    // 的临界值 —— ≥51 格的偏置目标让每一步都是完整 48 格长腿。现场
+    // 20260924-145932 实锤: bot 站在大平原里, 网格扫描池 476 个点, 最近点永远
+    // 在脚边 1~6 格 → 截断公式把每步压到下限 8 格, 每 2s REACHED 换点, 40s 只
+    // 在 ~30 格范围打转。碎步只保留为"全池都近"的兜底 (小平原口袋), 对应用户
+    // "走不动/没得选时小步走是对的, 走得动就要恢复 48 格"。
+    private static final double FOODBIOME_MIN_BIAS_TARGET_DIST = EXPLORE_STEP + ARRIVED_DISTANCE;
+
     // Attempts to pick a non-water, non-failed target before counting the step as failed.
     private static final int MAX_PICK_ATTEMPTS = 12;
     // (2026-09-22 淌水惩罚) 一步的直线路径上允许【连续涉水】的最大格数。"过河可以"
@@ -994,7 +1003,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         //   ④ 白桦系点 —— 动物密度偏低且无苹果, ③ 扫不到才去;
         //   ⑤ 深色橡木林点 —— 遮光无动物/白天刷怪/只有蘑菇, 最低档兜底。
         if (_foodExplore) {
-            Optional<BlockPos> plains = nearestEligible(_plainsTargets, pos);
+            Optional<BlockPos> plains = nearestEligible(_plainsTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (plains.isPresent()) return plains;
         }
 
@@ -1009,11 +1018,11 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         if (_foodExplore) {
-            Optional<BlockPos> rich = nearestEligible(_richForestTargets, pos);
+            Optional<BlockPos> rich = nearestEligible(_richForestTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (rich.isPresent()) return rich;
-            Optional<BlockPos> birch = nearestEligible(_birchTargets, pos);
+            Optional<BlockPos> birch = nearestEligible(_birchTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (birch.isPresent()) return birch;
-            return nearestEligible(_darkForestTargets, pos);
+            return nearestEligible(_darkForestTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
         }
         return Optional.empty();
     }
@@ -1021,22 +1030,39 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     /**
      * [FOOD-BIOME] 从候选点池里挑"最近且当前可用"的一个: 排除已访问、跨实例
      * 拉黑 TTL 内、超出 BIAS_MAX_DISTANCE 的点。池空/全不可用返回 empty。
+     * 不设最小距离 (动物记忆等"直接证据"目标, 在脚边就该去)。
      */
     private Optional<BlockPos> nearestEligible(List<BlockPos> pool, Vec3d pos) {
+        return nearestEligible(pool, pos, 0.0);
+    }
+
+    /**
+     * (2026-09-24 碎步打转修复) 同上, 但 {@code minDist > 0} 时先只挑
+     * ≥ minDist 的【远】点 —— 群系池是统计性的"该往哪边走"提示, 池里有远点
+     * 就该走 48 格长腿直奔, 绝不选脚边 1~6 格的点把步长截成 8 格碎步原地
+     * 打转 (20260924-145932 实锤)。全池都近 (小平原口袋) 才第二遍回退最近点
+     * 兜底 —— "走不动/没得选时小步走是对的"。
+     */
+    private Optional<BlockPos> nearestEligible(List<BlockPos> pool, Vec3d pos, double minDist) {
         BlockPos best = null;
         double bestDist = Double.POSITIVE_INFINITY;
-        for (BlockPos candidate : pool) {
-            if (candidate == null) continue;
-            // Already walked to this one — don't steer back to it forever.
-            if (_visitedBiasTargets.contains(candidate)) continue;
-            // (2026-09-17 P0 拉黑) 跨实例: 上一个实例判过"够不着"的目标, 本实例
-            // (父任务重建出来的) 也不该再选它。TTL 到期自动放行。
-            if (isUnreachable(candidate)) continue;
-            if (!candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) continue;
-            double d = candidate.getSquaredDistance(pos);
-            if (d < bestDist) {
-                bestDist = d;
-                best = candidate;
+        double minDistSq = minDist * minDist;
+        for (int pass = 0; pass < 2 && best == null; ++pass) {
+            for (BlockPos candidate : pool) {
+                if (candidate == null) continue;
+                // Already walked to this one — don't steer back to it forever.
+                if (_visitedBiasTargets.contains(candidate)) continue;
+                // (2026-09-17 P0 拉黑) 跨实例: 上一个实例判过"够不着"的目标, 本实例
+                // (父任务重建出来的) 也不该再选它。TTL 到期自动放行。
+                if (isUnreachable(candidate)) continue;
+                if (!candidate.isWithinDistance(pos, BIAS_MAX_DISTANCE)) continue;
+                double d = candidate.getSquaredDistance(pos);
+                // 第一遍只收远点; 远点一个没有才第二遍放开距离兜底。
+                if (pass == 0 && d < minDistSq) continue;
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = candidate;
+                }
             }
         }
         return Optional.ofNullable(best);
