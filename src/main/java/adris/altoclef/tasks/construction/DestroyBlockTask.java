@@ -4,6 +4,8 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.movement.GetToLandTask;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
+import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -155,6 +157,32 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private final AscentHandoffHelper _ascent =
             new AscentHandoffHelper("destroy", _pillarMaterials);
 
+    // ==================== (2026-09-24 缺镐先合成闸门 [ToolGate]) ====================
+    // 现场 20260924-172050 (用户): 放床清地遇到障碍铜矿, 背包没有石镐 (圆石等
+    // 材料充足) → 徒手硬挖铜矿 15s/块。根因: 本任务的手动挖掘路径不经过
+    // MineAndCollectTask, 全库唯一会"合成镐"的 SatisfyMiningRequirementTask 只挂
+    // 在死亡恢复/收黑曜石/竖井/捡掉落物/MineAndCollect 5 处, 本任务不在其中 →
+    // 工具只能靠 PlayerInteractionFixChain 从背包【现有】工具里挑, 挑不到就徒手。
+    // 修: 目标方块所需挖掘档位未被背包满足时, 粘滞派发 SatisfyMiningRequirementTask
+    // 先把镐做出来再挖。要点:
+    //  - 判据与该任务自己的 isFinished 同源 (miningRequirementMetInventory), 防
+    //    "我判不满足/它判完成" 口径打架空转;
+    //  - keep-alive 仿 MineAndCollectTask [SMR-CACHE] 写法, 任务结束时才释放;
+    //  - 90s 做不出 (材料遥不可及/链路死锁) → 降级回徒手硬挖旧行为, 本实例不再
+    //    重试 + 全局冷却 5min (TimeoutLog 打点), 不卡死上层;
+    //  - 仅主世界生效: 下界/末地无树木圆石, 合成链必死, 详见 toolRequirementMissing;
+    //  - 植被/泥土/木头等 HAND 档方块与"背包已有镐"场景零影响。
+    private SatisfyMiningRequirementTask _toolSatisfyTask = null;
+    private long _toolSatisfyStartMs = 0;
+    private boolean _toolSatisfyTimedOut = false;
+    private static final long TOOL_SATISFY_TIMEOUT_MS = 90_000;
+    private static final String TOOL_SATISFY_SRC = "destroy-block/tool-gate";
+    // (2026-09-24 静态冷却) 超时降级后全局冷却 5min: 清地/清障常是【一串】缺镐目标,
+    // 每格新实例若都各自白等 90s 就是成倍浪费 (项目铁律: 冷却加在触发条件层,
+    // 实例冷却会被任务重建绕过 —— 同 s_sleepGiveUpUntilMs 机制)。
+    private static volatile long s_toolGateCooldownUntilMs = 0;
+    private static final long TOOL_GATE_COOLDOWN_MS = 5 * 60_000;
+
     /**
      * (2026-09-17) 协调器本 tick 派出的补料子任务出口。
      *
@@ -197,6 +225,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         _farGiveUpSuppressed = false;
         _protectedRefusalLogged = false;
         _unbreakableRefusedLogged = false;
+        // (2026-09-24 [ToolGate]) 新目标重新评估工具需求 (残留会让新目标沿用上一个
+        // 目标的"已超时降级"态)。
+        _toolSatisfyTask = null;
+        _toolSatisfyStartMs = 0;
+        _toolSatisfyTimedOut = false;
         // (2026-09-17 统一) 爬升状态随实例归零: 新目标不允许沿用上一次的 GoalNear /
         // 采样基准 (残留会让新目标一上来就被送去爬上一次的位置)。协调器 stop 内部
         // 已含 onLostControl + 松键, 这里不用再重复那些动作。
@@ -271,6 +304,33 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         return true;
     }
 
+    /**
+     * (2026-09-24 [ToolGate]) 目标方块所需挖掘档位若未被背包满足则返回该档位
+     * (需要先合成工具), 否则 null。判据说明:
+     *  - 【仅主世界】: 下界/末地没有树木与圆石, satisfy 链(做木镐要原木)必然
+     *    找不到材料, 白等 90s 还打断既有"徒手/最优工具硬挖"的可行流程; 下界的
+     *    无镐场景已由 SatisfyMiningRequirementTask 内部的铁镐优先逻辑覆盖;
+     *  - 未加载区块读作"无需工具"不触发 (与 refuseIfUnbreakable 同款保守口径);
+     *  - HAND 档 (植被/泥土/木头等) 永不触发;
+     *  - 超时降级后的全局冷却期内不触发 (防一串缺料目标逐格白等 90s);
+     *  - 满足判定与 SatisfyMiningRequirementTask.isFinished 同一函数
+     *    (miningRequirementMetInventory): 背包真有该档及以上镐才算满足, 不含
+     *    "能合成出来"的宽口径 —— 否则会出现"我判已满足→不去合成, 实际手上没有→
+     *    徒手挖"的漏判 (本次事故正是宽口径语义下的盲区)。
+     */
+    private MiningRequirement toolRequirementMissing(AltoClef mod) {
+        if (_toolSatisfyTimedOut) return null;
+        if (WorldHelper.getCurrentDimension() != adris.altoclef.util.Dimension.OVERWORLD) return null;
+        if (System.currentTimeMillis() < s_toolGateCooldownUntilMs) return null;
+        if (!mod.getChunkTracker().isChunkLoaded(_pos)) return null;
+        BlockState st = mod.getWorld().getBlockState(_pos);
+        if (st.isAir()) return null;
+        MiningRequirement req = MiningRequirement.getMinimumRequirementForBlock(st.getBlock());
+        if (req == MiningRequirement.HAND) return null;
+        if (StorageHelper.miningRequirementMetInventory(mod, req)) return null;
+        return req;
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
 
@@ -318,6 +378,40 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             mod.getClientBaritone().getCustomGoalProcess().onLostControl();
             mod.getBlockTracker().requestBlockUnreachable(_pos);
             return null;
+        }
+
+        // (2026-09-24 [ToolGate]) 缺镐先合成: 目标方块所需挖掘档位未被背包满足 →
+        // 先派 SatisfyMiningRequirementTask 把镐做出来再挖 (字段区注释有完整现场链)。
+        MiningRequirement missingTool = toolRequirementMissing(mod);
+        if (missingTool != null) {
+            // keep-alive: 同一实例粘滞复用, 只有"它自己已完成 (镐到手后又被外因夺走)"
+            // 才重建 —— 与 MineAndCollectTask [SMR-CACHE] 同款写法。
+            if (_toolSatisfyTask == null || _toolSatisfyTask.isFinished(mod)) {
+                if (_toolSatisfyTask == null) {
+                    _toolSatisfyStartMs = System.currentTimeMillis();
+                    String m = "[ToolGate] target " + _pos.toShortString() + " ("
+                            + mod.getWorld().getBlockState(_pos).getBlock() + ") needs "
+                            + missingTool + "-tier tool, crafting first (player="
+                            + mod.getPlayer().getBlockPos().toShortString() + ")";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+                _toolSatisfyTask = new SatisfyMiningRequirementTask(missingTool, TOOL_SATISFY_SRC);
+            }
+            if (System.currentTimeMillis() - _toolSatisfyStartMs > TOOL_SATISFY_TIMEOUT_MS) {
+                // 做不出 (材料遥不可及/链路死锁): 降级回徒手硬挖旧行为, 本实例不再重试,
+                // 并全局冷却 5min (防一串缺料目标逐格白等)。
+                _toolSatisfyTimedOut = true;
+                _toolSatisfyTask = null;
+                s_toolGateCooldownUntilMs = System.currentTimeMillis() + TOOL_GATE_COOLDOWN_MS;
+                adris.altoclef.util.helpers.TimeoutLog.hit("DestroyBlockTask.toolGate",
+                        (TOOL_SATISFY_TIMEOUT_MS / 1000) + "s crafting " + missingTool
+                                + "-tier tool without success, degrade to hand-mining " + _pos.toShortString()
+                                + " + cooldown " + (TOOL_GATE_COOLDOWN_MS / 1000) + "s");
+            } else {
+                setDebugState("Crafting " + missingTool + "-tier tool before mining " + _pos.toShortString());
+                return _toolSatisfyTask;
+            }
         }
 
         // (2026-09-22 v3) 离水闩锁保活 —— 无条件持续返回同一个 GetToLandTask,
