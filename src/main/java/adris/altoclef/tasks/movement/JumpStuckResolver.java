@@ -370,7 +370,13 @@ public final class JumpStuckResolver {
             // (2026-09-23) 植物类障碍不再单点 InstantBreak: 实锤 (会话 20260923-081029)
             // 眼睛位于目标方块内 + 平滑转头未完成 → 出手打空、50ms 释放不重试。
             // 改为清场 2 格内所有植物 (含脚下), 逐块验证消失。
-            if (passable) {
+            // (2026-09-24) 收窄为"白名单植物才走清场": 非植物的部分碰撞块
+            // (pointed_dripstone 石钟乳尖端, 20260924-144821 卡死 80s 实锤) 不在
+            // ClearNearbyVegetationTask 白名单里, 掉进清场 = 扫不到任何目标 →
+            // 1 tick 即 done → veg sweep x2 空转后强制 wander 死局。这类块
+            // DestroyBlockTask 的手动手眼链路 (reach + 准星命中 + CLICK_LEFT)
+            // 不依赖 baritone builder 拒挖豁免, 可直接挖。
+            if (passable && JumpObstructionHelper.isClearableVegetation(mod, obstacle)) {
                 Debug.logToFile("altoclef_diag.log", "[JumpStuck] vegetation obstruction "
                         + obstacle + " player=" + mod.getPlayer().getBlockPos()
                         + " -> ClearNearbyVegetationTask");

@@ -10,6 +10,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -79,6 +80,11 @@ public final class JumpObstructionHelper {
         for (BlockPos cand : candidates(mod, feet)) {
             if (isDiggableObstruction(mod, feet, cand)) return cand;
         }
+        // (2026-09-24) 既有候选全盲时, 扫"贴身楔形块"—— 石钟乳尖端等部分碰撞
+        // 方块伸进玩家碰撞盒横跨列的 feet..feet+2 空间, 既有候选只查中心列/
+        // 路径 next/朝向列, 结构性看不到它 (详见 collectWedgingBlocks 注释)。
+        List<BlockPos> wedging = collectWedgingBlocks(mod, feet);
+        if (!wedging.isEmpty()) return wedging.get(0);
         return null;
     }
 
@@ -301,6 +307,72 @@ public final class JumpObstructionHelper {
             if (state.getHardness(mod.getWorld(), pos) < 0) return false;
             if (mod.getExtraBaritoneSettings().shouldAvoidBreaking(pos)) return false;
             return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    // ===== (2026-09-24) 贴身楔形块扫描: 石钟乳尖端等"部分碰撞方块" =====
+    //
+    // 现场实锤 (会话 20260924-144821, GoToSurface y=92 卡死 80s+ 到会话结束):
+    // bot 站在 dripstone_block 上 (-412.13,75.00,1388.30), [JumpStuck] 探针
+    // 6 格 (below=dripstone_block feet=air up1/2/3=air ahead=air aheadUp1/2=air)
+    // 全非实心 → findObstruction 恒 null → "no obstruction -> forceCancel"
+    // 同格 4 轮 + 强制 wander (wander 同样 netXZ=0.00) 死循环。
+    //
+    // 真凶 (用户目击"一格石钟乳卡住跳不起来"): 玩家碰撞盒横跨 x 两列
+    // (中心列 -413, 身体伸到 -412), 石钟乳尖端是【部分碰撞方块】, 尖端伸进
+    // 邻列 (-412) 的 feet..feet+2 空间 —— 站立时楔住身体 (netXZ=0.00, 任何
+    // 方向走不动), 起跳时头撞尖端 (yRange=0.20, 正常跳 1.25)。既有候选
+    // (中心列 up1/up2 / 路径 next / 朝向 ahead) 只查中心列与单格, 对"横跨列
+    // 里的部分碰撞尖刺"结构性全盲 —— 与 2026-09-17 P0-a 同族, 但那次缺的是
+    // 【格位】, 这次缺的是【体积】。baritone 把 pointed_dripstone 当可穿块
+    // 规划路径, 物理上却撞死, 挖掉即改世界 → 重算路径自然变。
+    //
+    // 扫描体: 玩家碰撞盒 xz 外扩 {@link #WEDGE_EXPAND_XZ} 的列, y 从 feet 到
+    // feet+{@link #WEDGE_UP_SCAN} (站立身体 + 跳跃扫掠顶点 ~1.25 格)。判定三闸:
+    //   ① 有碰撞形状 —— 无碰撞的装饰挡不了人 (草/雪片, 交给植物清场/既有候选);
+    //   ② 非全立方 —— 全立方不可能楔住玩家盒 (真重叠即被推出, 且已有候选覆盖
+    //      中心列/朝向列; 若放开会把"贴墙站立"的侧墙也挖了, 挖错方向);
+    //   ③ {@link #isDiggableObstruction} 全闸 (够得着/不在脚下/非重力/无
+    //      BlockEntity/硬度 ≥0/未禁挖)。
+    /** 玩家碰撞盒 xz 外扩量 (贴身压边: 被楔死时身体必然顶进尖刺所在列)。 */
+    public static final double WEDGE_EXPAND_XZ = 0.05;
+    /** 向上扫描层数: feet(身体占用) .. feet+2(跳跃扫掠, 起跳 ~1.25 格截断处)。 */
+    public static final int WEDGE_UP_SCAN = 2;
+
+    /**
+     * 收集"贴身楔形块": 玩家碰撞盒横跨列 (xz 外扩 {@link #WEDGE_EXPAND_XZ}) ×
+     * y=feet..feet+{@link #WEDGE_UP_SCAN} 里, 有碰撞、非全立方、可挖的方块。
+     * 返回顺序 = 扫描顺序 (y 低到高), 第一个即处理目标。
+     */
+    public static List<BlockPos> collectWedgingBlocks(AltoClef mod, BlockPos feet) {
+        List<BlockPos> result = new ArrayList<>();
+        try {
+            if (!mod.getChunkTracker().isChunkLoaded(feet)) return result;
+            Box box = mod.getPlayer().getBoundingBox();
+            // BlockPos(double,double,double) 内部即 floor, 不需要 MathHelper。
+            BlockPos min = new BlockPos(box.minX - WEDGE_EXPAND_XZ, feet.getY(),
+                    box.minZ - WEDGE_EXPAND_XZ);
+            BlockPos max = new BlockPos(box.maxX + WEDGE_EXPAND_XZ, feet.getY() + WEDGE_UP_SCAN,
+                    box.maxZ + WEDGE_EXPAND_XZ);
+            for (BlockPos pos : BlockPos.iterate(min, max)) {
+                if (isWedgingBlock(mod, feet, pos)) result.add(pos.toImmutable());
+            }
+        } catch (Throwable ignored) {
+            // 扫描失败返回空集, 上层走既有弱处置, 绝不让诊断/处置抛异常
+        }
+        return result;
+    }
+
+    /** 单格楔形判定: 有碰撞形状 + 非全立方 + 可挖全闸。 */
+    private static boolean isWedgingBlock(AltoClef mod, BlockPos feet, BlockPos pos) {
+        try {
+            BlockState state = mod.getWorld().getBlockState(pos);
+            if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+            if (state.isOpaqueFullCube(mod.getWorld(), pos)) return false;
+            if (state.getCollisionShape(mod.getWorld(), pos).isEmpty()) return false;
+            return isDiggableObstruction(mod, feet, pos);
         } catch (Throwable t) {
             return false;
         }
