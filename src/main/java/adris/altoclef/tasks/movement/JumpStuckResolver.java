@@ -401,7 +401,7 @@ public final class JumpStuckResolver {
                 return issue(mod, _wanderTask);
             }
             Debug.logToFile("altoclef_diag.log", "[JumpStuck] clearing obstruction " + obstacle
-                    + " passable=false solid=" + WorldHelper.isSolid(mod, obstacle)
+                    + " passable=" + passable + " solid=" + WorldHelper.isSolid(mod, obstacle)
                     + " player=" + mod.getPlayer().getBlockPos()
                     + " -> DestroyBlockTask");
             mod.getClientBaritone().getPathingBehavior().forceCancel();
