@@ -141,9 +141,19 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // 朝向到位容差(度): 只需拦住"朝向被劫持压向正下方"(pitch 差常 >30°),
     // 不必苛求精确到位 —— baritone 逼近会留几度残差, 收太紧会永远等 → 一直换侧。
     private static final double AIM_ALIGN_TOLERANCE_DEG = 20.0;
-    // 单次睡觉累计拆障方块数上限 (硬闸门): 判据再准也保底"绝不出现大规模挖掘"。
+    // (2026-09-13 硬闸门) 单次睡觉累计拆障方块数上限 (硬闸门): 判据再准也保底"绝不出现大规模挖掘"。
     private int _blockersClearedTotal = 0;
     private static final int SLEEP_MAX_BLOCKERS_CLEARED = 10;
+
+    // ==== (2026-09-24 站位导航超时, 用户: 放床完全僵住 45s+ 需人工干预) ====
+    // 现场 20260924-181522 18:18:26-18:19:57: 清地完成后去站位 (-635,74,1291),
+    // baritone 反复算不出路径 (anomaly: 60s 内 8 次), GetToBlockTask 本身无任何
+    // 超时机制 → bot 原地死等 45s+ 直到人工干预。修: 同一站位目标导航超过 10s
+    // 仍没到位 → 判"该区域站位不可达", 弃区重扫 (与 place 3s / foundation 8s
+    // 超时同款语义)。区域是 10 格内就近选的, 正常几秒内必到, 10s 足够宽松。
+    private BlockPos _standNavRegion;
+    private long _standNavStartMs;
+    private static final long STAND_NAV_TIMEOUT_MS = 10_000;
 
     // ==== (2026-09-08 睡床卡死三连修, 用户: 瞄准避开了村民却被普通方块挡住,
     // 挡路方块永远没被拆掉, 试了好多次最终卡住) ====
@@ -251,6 +261,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _humanSleepAttempts = 0;
         _sleepGaveUp = false;
         _blockersClearedTotal = 0;
+        // (2026-09-24 站位导航计时随实例归零)
+        _standNavRegion = null;
+        _standNavStartMs = 0;
 
         // Don't break our bed thing.
         mod.getBehaviour().push();
@@ -720,7 +733,10 @@ public class PlaceBedAndSetSpawnTask extends Task {
                             // _inBedTimer 1s 后 isFinished 干净收尾; 夜晚真睡进去走
                             // SleepingChatScreen 分支语义一致。
                             _spawnSet = true;
-                        } else if (WorldHelper.canBreak(mod, hitPos)) {
+                        } else if (WorldHelper.canBreak(mod, hitPos)
+                                && mod.getWorld().getBlockEntity(hitPos) == null) {
+                            // (2026-09-24 容器守卫) 瞄准射线上的容器方块 (熔炉/箱子) 不拆,
+                            // 走下方重取瞄点/换侧路径。见 isGoodAsBorder 同款守卫注释。
                             Task clearTask = startBlockerClear(hitPos);
                             if (_crosshairBlockedLogTimer.elapsed()) {
                                 _crosshairBlockedLogTimer.reset();
@@ -901,6 +917,10 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 for (int dy = 0; dy < BED_CLEAR_SIZE.getY(); ++dy) {
                     BlockPos toClear = _currentBedRegion.add(dx, dy, dz);
                     if (WorldHelper.isSolid(mod, toClear)) {
+                        // (2026-09-24 容器守卫) 运行期落进区域的容器方块 (如合成链放的
+                        // 合成台) 不拆 —— 跳过继续清别的格, 拆不动就靠下方 3s place
+                        // timeout 换区域。见 isGoodAsBorder 同款守卫注释 (现场铁律)。
+                        if (mod.getWorld().getBlockEntity(toClear) != null) continue;
                         _currentBreak = toClear;
                         break outer;
                     }
@@ -957,8 +977,30 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // Our bed region is READY TO BE PLACED
         if (!mod.getPlayer().getBlockPos().equals(toStand)) {
             _placeAttemptTimer = null;
+            // (2026-09-24 站位导航超时) 见字段区注释: baritone 算不出路径时
+            // GetToBlockTask 会永久死等, 10s 未到位 → 弃区重扫, 不再僵住。
+            if (!toStand.equals(_standNavRegion)) {
+                _standNavRegion = toStand;
+                _standNavStartMs = System.currentTimeMillis();
+            } else if (System.currentTimeMillis() - _standNavStartMs > STAND_NAV_TIMEOUT_MS) {
+                String m = "[Diag-bed] STAND NAV TIMEOUT after " + (STAND_NAV_TIMEOUT_MS / 1000)
+                        + "s reaching stand pos " + toStand.toShortString()
+                        + " (player=" + mod.getPlayer().getBlockPos().toShortString()
+                        + "), abandoning region and rescanning.";
+                adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.standNav",
+                        (STAND_NAV_TIMEOUT_MS / 1000) + "s navigating to bed stand pos, rescanning region");
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                _currentBedRegion = null;
+                _standNavRegion = null;
+                _regionScanTimer.reset();
+                _placeAttemptTimer = null;
+                _progressChecker.reset();
+                return null;
+            }
             return new GetToBlockTask(toStand);
         }
+        _standNavRegion = null;
 
 
         // (2026-09-01 人类化花草清理 H1/H3: 人已到 toStand 放床站位,
@@ -1470,6 +1512,12 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
     private boolean isGoodAsBorder(AltoClef mod, BlockPos pos) {
         if (WorldHelper.isSolid(mod, pos)) {
+            // (2026-09-24 容器守卫, 用户: 放床卡死+反复做铁镐) 带 BlockEntity 的方块
+            // (熔炉/合成台/箱子…) 不作清地目标 —— 现场 20260924-181522: 选区把自家的
+            // 熔炉 (-633,74,1290) 圈进清地区 → 为拆熔炉先做镐 (ToolGate) → 合成链
+            // 放置的合成台又落进清地区被拆 → 清地目标高频翻转 → satisfy 链每 ~3s 被
+            // 杀重来 (铁镐做 5 次才成 1 次)。区域含容器直接拒选, 让选区另寻他处。
+            if (mod.getWorld().getBlockEntity(pos) != null) return false;
             return WorldHelper.canBreak(mod, pos);
         }
         // (2026-08-25 草原上搭石头平台修复) 非实心: 空气或植被(草/花/藤等)不
