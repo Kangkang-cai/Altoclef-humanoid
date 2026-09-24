@@ -932,23 +932,35 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-23 [FOOD-BIOME] M2/M3, 独立审查加固) 该 xz 坐标【忽略树叶/蘑菇冠】
-     * 的地表站立高度: MOTION_BLOCKING_NO_LEAVES 高度图顶 = 地面 (草/泥/沙/水/
-     * 树干柱顶), 不含橡木/白桦/深色橡树叶与巨型蘑菇冠。
-     * <ul>
-     *   <li>M2: 森林步点与扫描目标统一用本口径, 步点不再落在树冠顶 → baritone
-     *       不再砍叶爬冠、可达的地面群系点不再被 6s 超时误判 unreachable 拉黑。</li>
-     *   <li>M3: 高度图是服务端随区块下发的 O(1) 查询, 取代 WorldHelper
-     *       .getGroundHeight 从 y=319 逐格下扫 (~190 次 getBlockState/列)。</li>
-     * </ul>
-     * 哨兵口径与 {@link #surfaceYAt} 一致: 世界为空/未加载返回 fallbackY。
+     * (2026-09-23 [FOOD-BIOME] M2/M3) 该 xz 坐标【忽略树叶/蘑菇冠】的地表站立
+     * 高度, 用于食物探索的扫描目标/步点/湿点重采样三处统一口径。
+     *
+     * <h3>(2026-09-24 HM-DIAG 实锤的关键坑)</h3>
+     * MOTION_BLOCKING_NO_LEAVES 是较新加的高度图, <b>旧版本生成、未重存的区块
+     * NBT 里没有它</b>; 客户端 WorldChunk 里它是个 storage 全 0 的空壳,
+     * World.getTopY 对它恒返回 bottomY(-64) —— 不是"区块未加载"(同列
+     * WORLD_SURFACE/MOTION_BLOCKING 都正常返回 125~133, HM-DIAG 探针实证)。
+     * 旧码哨兵判空后【回退玩家当前 y】: 高原前方台面真实站立点 y=127、玩家
+     * y=116, 11 格高差让全部候选砸进实体 → 选点预检 12 方向全灭 → 从不调用
+     * setGoalAndPath → baritone 无路线、任务 0.55s 自杀重建 (20260924-110340)。
+     *
+     * 三级取值: ① NO_LEAVES 有效(新区块, 忽略树冠, M2 目的) → 用它;
+     * ② 它是空壳/无效(旧区块) → 回退 MOTION_BLOCKING (实测始终有效; 有树冠时
+     * 给树冠顶, 退回 M2 前口径, 活着比爬冠重要); ③ 都无效才回退 fallbackY。
+     *
+     * <p>y 语义: World.getTopY = Chunk.sampleHeightmap+1 而 sampleHeightmap =
+     * Heightmap.get()-1, 抵消后返回的就是最高匹配方块【上方站立空气格】y
+     * (javap 坐实), 直接用, 不要再 +1/-1。
      */
     private int surfaceYNoLeavesAt(AltoClef mod, int x, int z, int fallbackY) {
         if (mod.getWorld() == null) return fallbackY;
         if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
-        int top = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
-        if (top <= mod.getWorld().getBottomY() + 1) return fallbackY;
-        return top;
+        int bottomPlus1 = mod.getWorld().getBottomY() + 1;
+        int noLeaves = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+        if (noLeaves > bottomPlus1) return noLeaves;                 // 新区块: 忽略树冠
+        int motionBlocking = mod.getWorld().getTopY(Heightmap.Type.MOTION_BLOCKING, x, z);
+        if (motionBlocking > bottomPlus1) return motionBlocking;     // 旧区块空壳兜底
+        return fallbackY;                                            // 真空列/异常才用玩家 y
     }
 
     private Optional<BlockPos> pickBiasedTarget(Vec3d pos) {
