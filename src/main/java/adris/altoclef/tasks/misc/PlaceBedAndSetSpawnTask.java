@@ -151,6 +151,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // 超时机制 → bot 原地死等 45s+ 直到人工干预。修: 同一站位目标导航超过 10s
     // 仍没到位 → 判"该区域站位不可达", 弃区重扫 (与 place 3s / foundation 8s
     // 超时同款语义)。区域是 10 格内就近选的, 正常几秒内必到, 10s 足够宽松。
+    // (审查补充) 刻意用墙钟而非 TimerGame: TimerGame 冻结期切墙钟推进 (2026-09-03
+    // 补丁语义相反), 换它解决不了"暂停也计数"; 暂停(Esc)恢复后最坏多一次无害
+    // 重扫, 可接受。
     private BlockPos _standNavRegion;
     private long _standNavStartMs;
     private static final long STAND_NAV_TIMEOUT_MS = 10_000;
@@ -758,7 +761,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                             Vec3d alt = findUnblockedBedAimPoint(mod, toSleepIn, _bedForSpawnPoint, aimPoint);
                             if (_crosshairBlockedLogTimer.elapsed()) {
                                 _crosshairBlockedLogTimer.reset();
-                                String m = "[Diag-bed] sleep right-click HELD: aim ray blocked by unbreakable block "
+                                String m = "[Diag-bed] sleep right-click HELD: aim ray blocked by container/unbreakable block "
                                         + mod.getWorld().getBlockState(hitPos).getBlock().getName().getString()
                                         + " at " + hitPos.toShortString()
                                         + (alt != null ? ", retargeting to " + alt : ", no clear bed point from this side")
@@ -953,6 +956,11 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     _currentStructure = null;
                     _structureTimer = null;
                     _currentBedRegion = null;
+                    // (2026-09-24 审查补充②) 弃区必须连带清残留: _currentBreak 指向
+                    // 旧区格子会在新区无可清格时被误执行 (回拆旧区一格);
+                    // _standNavRegion 残留会让新区站位导航继承已超时的旧表。
+                    _currentBreak = null;
+                    _standNavRegion = null;
                     _regionScanTimer.reset();
                     _placeAttemptTimer = null;
                     _progressChecker.reset();
@@ -993,6 +1001,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 Debug.logToFile("altoclef_diag.log", m);
                 _currentBedRegion = null;
                 _standNavRegion = null;
+                // (2026-09-24 审查补充②) 弃区连带清残留, 防回拆旧区格子。
+                _currentBreak = null;
                 _regionScanTimer.reset();
                 _placeAttemptTimer = null;
                 _progressChecker.reset();
@@ -1138,6 +1148,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 Debug.logToFile("altoclef_diag.log", m);
                 _currentBedRegion = null;
                 _justPlacedBed = null;
+                // (2026-09-24 审查补充②) 同 foundation-timeout: 弃区连带清残留。
+                _currentBreak = null;
+                _standNavRegion = null;
                 _regionScanTimer.reset();
                 _placeAttemptTimer = null;
                 _progressChecker.reset();
@@ -1322,6 +1335,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     // 被当"植被"清掉 (9831,18,-10697 foot 半块被拆 → nearest bed
                     // far(3766) → 重放 → 放/拆循环)。任何一半是床都不碰。
                     if (mod.getWorld().getBlockState(p).getBlock() instanceof BedBlock) continue;
+                    // (2026-09-24 审查补充③) 非满格容器 (篝火/漏斗等) 碰撞箱不满格,
+                    // 会绕过下方 isSolid 过滤被当"植被"拆掉 —— 与"不拆容器"铁律不一致。
+                    if (mod.getWorld().getBlockEntity(p) != null) continue;
                     BlockState bs = mod.getWorld().getBlockState(p);
                     if (WorldHelper.isAir(mod, p)) continue;
                     if (WorldHelper.isSolid(mod, p)) continue;
