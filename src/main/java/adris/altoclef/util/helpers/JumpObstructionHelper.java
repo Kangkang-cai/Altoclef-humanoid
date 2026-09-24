@@ -9,8 +9,11 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.LeavesBlock;
+import net.minecraft.util.function.BooleanBiFunction;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.util.shape.VoxelShapes;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -204,6 +207,12 @@ public final class JumpObstructionHelper {
 
     /** 够近 + 可挖 + 挖了有意义 (见类注释的闸门清单)。 */
     private static boolean isDiggableObstruction(AltoClef mod, BlockPos feet, BlockPos pos) {
+        return isDiggableObstruction(mod, feet, pos, MAX_REACH_MANHATTAN);
+    }
+
+    /** 同上, 可达半径由调用方指定 (楔形扫描放宽到 {@link #WEDGE_REACH_MANHATTAN})。 */
+    private static boolean isDiggableObstruction(AltoClef mod, BlockPos feet, BlockPos pos,
+                                                 int maxManhattan) {
         if (pos.equals(feet)) return false;
         // (2026-09-12 14:00:53 假死现场) 不挖比自己脚底更低的位置。
         // 本模块的语义是"跳不上去 / 顶不过去", 向下挖既解决不了, 还会踩中
@@ -213,7 +222,7 @@ public final class JumpObstructionHelper {
         // 假死)。现场: bot 在浅水给自己垫了一块方块站上去, baritone 路径的 next
         // 节点落到脚下那块垫块 (140,62,44) → 被判"障碍" → 要挖自己脚下的方块。
         if (pos.getY() < feet.getY()) return false;
-        if (manhattan(pos, feet) > MAX_REACH_MANHATTAN) return false;
+        if (manhattan(pos, feet) > maxManhattan) return false;
         try {
             if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
             // (2026-09-12 放宽) 空气/液体不是障碍; 其余非实心 (azalea/草/毯等
@@ -331,15 +340,21 @@ public final class JumpObstructionHelper {
     //
     // 扫描体: 玩家碰撞盒 xz 外扩 {@link #WEDGE_EXPAND_XZ} 的列, y 从 feet 到
     // feet+{@link #WEDGE_UP_SCAN} (站立身体 + 跳跃扫掠顶点 ~1.25 格)。判定三闸:
-    //   ① 有碰撞形状 —— 无碰撞的装饰挡不了人 (草/雪片, 交给植物清场/既有候选);
+    //   ① 碰撞形状与玩家【扫掠体】(站立体向上延伸 {@link #WEDGE_SWEEP_UP})真相交
+    //     —— 无碰撞的装饰挡不了人, 同列贴边但形状够不着身体的不挖;
     //   ② 非全立方 —— 全立方不可能楔住玩家盒 (真重叠即被推出, 且已有候选覆盖
     //      中心列/朝向列; 若放开会把"贴墙站立"的侧墙也挖了, 挖错方向);
-    //   ③ {@link #isDiggableObstruction} 全闸 (够得着/不在脚下/非重力/无
-    //      BlockEntity/硬度 ≥0/未禁挖)。
+    //   ③ {@link #isDiggableObstruction} 全闸 (不在脚下/非重力/无 BlockEntity/
+    //      硬度 ≥0/未禁挖), 可达半径放宽到 {@link #WEDGE_REACH_MANHATTAN}
+    //      (对角列 feet+2 的尖端 manhattan=4, 中心距 ~2.5 格远小于 reach 4.5)。
     /** 玩家碰撞盒 xz 外扩量 (贴身压边: 被楔死时身体必然顶进尖刺所在列)。 */
     public static final double WEDGE_EXPAND_XZ = 0.05;
     /** 向上扫描层数: feet(身体占用) .. feet+2(跳跃扫掠, 起跳 ~1.25 格截断处)。 */
     public static final int WEDGE_UP_SCAN = 2;
+    /** 站立体向上延伸量(扫掠体): 覆盖"起跳头撞尖端"的接触 (跳跃净升 ~1.25 格)。 */
+    public static final double WEDGE_SWEEP_UP = 1.3;
+    /** 楔形块可达半径: 比既有候选放宽 1 格 (对角列 feet+2 的尖端 manhattan=4)。 */
+    public static final int WEDGE_REACH_MANHATTAN = 4;
 
     /**
      * 收集"贴身楔形块": 玩家碰撞盒横跨列 (xz 外扩 {@link #WEDGE_EXPAND_XZ}) ×
@@ -365,14 +380,33 @@ public final class JumpObstructionHelper {
         return result;
     }
 
-    /** 单格楔形判定: 有碰撞形状 + 非全立方 + 可挖全闸。 */
+    /** 单格楔形判定: 碰撞形状与玩家扫掠体真相交 + 非全立方 + 可挖全闸。 */
     private static boolean isWedgingBlock(AltoClef mod, BlockPos feet, BlockPos pos) {
         try {
             BlockState state = mod.getWorld().getBlockState(pos);
             if (state.isAir() || !state.getFluidState().isEmpty()) return false;
             if (state.isOpaqueFullCube(mod.getWorld(), pos)) return false;
-            if (state.getCollisionShape(mod.getWorld(), pos).isEmpty()) return false;
-            return isDiggableObstruction(mod, feet, pos);
+            VoxelShape shape = state.getCollisionShape(mod.getWorld(), pos);
+            if (shape.isEmpty()) return false;
+            // (2026-09-24 审查 P1-1 精化) 不是"同列即挖": 碰撞形状必须与玩家
+            // 【扫掠体】真相交 —— 站立体(碰撞盒 xz 外扩 WEDGE_EXPAND_XZ)向上延伸
+            // WEDGE_SWEEP_UP(跳跃扫掠顶点), 同时覆盖"楔身"(站立接触)与"顶跳"
+            // (起跳头撞尖端)两种接触。同列贴边但形状够不着身体的不算, 避免卡死
+            // 裁决期误挖非肇因方块。注意: getCollisionShape 返回 0..1 块内局部
+            // 坐标, 与世界坐标扫掠体求交前必须先按 pos 平移扫掠体。
+            Box box = mod.getPlayer().getBoundingBox();
+            double sx1 = box.minX - WEDGE_EXPAND_XZ - pos.getX();
+            double sy1 = box.minY - WEDGE_EXPAND_XZ - pos.getY();
+            double sz1 = box.minZ - WEDGE_EXPAND_XZ - pos.getZ();
+            double sx2 = box.maxX + WEDGE_EXPAND_XZ - pos.getX();
+            double sy2 = box.maxY + WEDGE_SWEEP_UP - pos.getY();
+            double sz2 = box.maxZ + WEDGE_EXPAND_XZ - pos.getZ();
+            if (!VoxelShapes.matchesAnywhere(shape,
+                    VoxelShapes.cuboid(new Box(sx1, sy1, sz1, sx2, sy2, sz2)),
+                    BooleanBiFunction.AND)) {
+                return false;
+            }
+            return isDiggableObstruction(mod, feet, pos, WEDGE_REACH_MANHATTAN);
         } catch (Throwable t) {
             return false;
         }
