@@ -56,15 +56,23 @@ public final class SurfaceExitGuide {
     private static final int REQUIRED_ARRIVALS = 3;
     /** 安全落点距出洞位置 (洞口) 的最小水平距离 (用户拍板 24)。 */
     private static final double MIN_ANCHOR_DISTANCE = 24;
-    /** 距当前玩家的最小步长 (避免选回脚下), 最大扫描半径。 */
+    /** 距当前玩家的最小步长 (避免选回脚下), 基础扫描半径与连续空扫描后的扩环。 */
     private static final double MIN_PLAYER_DISTANCE = 16;
-    private static final int SCAN_MAX_RADIUS = 64;
+    private static final int SCAN_RADIUS = 64;
+    private static final int SCAN_RADIUS_STAGE2 = 96;  // 连续空扫描 2s 后
+    private static final int SCAN_RADIUS_STAGE3 = 128; // 再持续 4s 后: 推到已加载块边缘逼新区块
+    private static final int EMPTY_SCANS_STAGE2 = 40;  // ~2s (缓存使实际 ~8 轮)
+    private static final int EMPTY_SCANS_STAGE3 = 120; // ~6s
     /** 武装总时长: 超时找不到 3 个可达安全点则解除, 退回普通探索防新卡死。 */
     private static final long ARM_TIMEOUT_MS = 90_000;
     /** 到达判定: 距安全目标 XZ ≤ 此值算走到 (与远征 ARRIVE_XZ=5 相容)。 */
     private static final double ARRIVE_XZ = 6;
-    /** 找不到点时空扫描结果缓存 (调用方每 tick 重选, 119 列扫描不能每 tick 跑)。 */
+    /** 到达的 Y 容差: 脚高必须贴近落点站立 y, 防"岩台 XZ 到达但头顶埋 13 格"误计数。 */
+    private static final int ARRIVE_Y_TOLERANCE = 2;
+    /** 找不到点时空扫描结果缓存 (调用方每 tick 重选, 112 列扫描不能每 tick 跑)。 */
     private static final long NULL_CACHE_MS = 250;
+    /** 降级档四邻开阔判据: 邻柱地表站立 y 与本列差 ≤ 此值才算 (拒 1~2 格通天裂缝)。 */
+    private static final int NEIGHBOR_LEVEL_TOLERANCE = 3;
 
     /** 角度锥 (弧度, 0=偏好方向): 偏好角优先, 双向逐级放宽到 180°。 */
     private static final double[] ANGLE_OFFSETS = {
@@ -78,8 +86,10 @@ public final class SurfaceExitGuide {
             Math.toRadians(157.5), -Math.toRadians(157.5),
             Math.PI
     };
-    /** 距离环 (相对玩家, 格): 第一跳 24 起步逐档放远。 */
+    /** 距离环 (相对玩家, 格): 第一跳 24 起步逐档放远; 空扫描持续时扩到 96/128。 */
     private static final int[] DISTANCES = {24, 28, 32, 40, 48, 56, 64};
+    private static final int[] DISTANCES_STAGE2 = {72, 80, 88, 96};
+    private static final int[] DISTANCES_STAGE3 = {104, 112, 120, 128};
 
     // ===== 武装状态 (static: 跨探索任务实例存活, 与 SurfaceHelper 翻面同源) =====
     private static boolean _armed = false;
@@ -92,6 +102,8 @@ public final class SurfaceExitGuide {
     // 空扫描缓存 (玩家 2 格网格键 + 时间)
     private static BlockPos _nullCachePos = null;
     private static long _nullCacheAt = 0;
+    /** 连续空扫描计数 (命中落点即清零): 决定扩环档位 64→96→128。 */
+    private static int _emptyScans = 0;
 
     /** 消费方导航失败的安全点拉黑 (防确定性重选同一个不可达点), tick 时间戳 TTL。 */
     private static final java.util.Map<BlockPos, Integer> _rejected = new java.util.HashMap<>();
@@ -103,9 +115,12 @@ public final class SurfaceExitGuide {
         _armed = false;
         _arrivedCount = 0;
         _armedAtMs = 0;
+        _anchorX = 0;
+        _anchorZ = 0;
         _lastArrivedTarget = null;
         _nullCachePos = null;
         _nullCacheAt = 0;
+        _emptyScans = 0;
         _rejected.clear();
     }
 
@@ -113,7 +128,18 @@ public final class SurfaceExitGuide {
     public static void reject(BlockPos target) {
         if (target == null) return;
         pruneRejected();
-        if (_rejected.size() >= REJECT_MAX) return;
+        if (_rejected.size() >= REJECT_MAX) {
+            // 打满后淘汰最旧项而非静默丢弃 (与 BiasedExploreTask.pruneUnreachable 同范式)。
+            BlockPos oldest = null;
+            int oldestTick = Integer.MAX_VALUE;
+            for (java.util.Map.Entry<BlockPos, Integer> e : _rejected.entrySet()) {
+                if (e.getValue() < oldestTick) {
+                    oldestTick = e.getValue();
+                    oldest = e.getKey();
+                }
+            }
+            if (oldest != null) _rejected.remove(oldest);
+        }
         _rejected.put(target.toImmutable(), WorldHelper.getTicks());
         Debug.logMessage("[SURFACE-EXIT] safe landing unreachable, blacklisted "
                 + target.toShortString() + " (size=" + _rejected.size() + "/" + REJECT_MAX + ")");
@@ -149,7 +175,9 @@ public final class SurfaceExitGuide {
         _anchorZ = p.getZ();
         _lastArrivedTarget = null;
         _nullCachePos = null;
-        _rejected.clear();
+        _emptyScans = 0;
+        // 故意不清 _rejected (审查 Low-3): 5min TTL 内证实不可达的点在重新武装后
+        // 仍应跳过; 拉黑表只随世界边界复位。
         Debug.logMessage("[SURFACE-EXIT] armed at " + p + ": next "
                 + REQUIRED_ARRIVALS + " navigation(s) forced onto surface-signature landings");
     }
@@ -181,6 +209,7 @@ public final class SurfaceExitGuide {
         if (!_armed) return;
         _armed = false;
         _nullCachePos = null;
+        _emptyScans = 0;
         Debug.logMessage("[SURFACE-EXIT] disarmed (" + reason + ", arrivals="
                 + _arrivedCount + "/" + REQUIRED_ARRIVALS + ")");
     }
@@ -204,46 +233,65 @@ public final class SurfaceExitGuide {
             return null;
         }
 
+        // 连续空扫描扩环: 64 → 96 (~2s) → 128 (~6s)。用带真实站立 y 的 3D 目标
+        // 走到已加载边缘即逼服务端下发新区块 (审查 Medium-3), 绝不发纯 XZ 目标。
+        int maxRadius = _emptyScans >= EMPTY_SCANS_STAGE3 ? SCAN_RADIUS_STAGE3
+                : _emptyScans >= EMPTY_SCANS_STAGE2 ? SCAN_RADIUS_STAGE2 : SCAN_RADIUS;
+
         BlockPos degraded = null;
-        for (double off : ANGLE_OFFSETS) {
-            double angle = preferredAngleRad + off;
-            double cos = Math.cos(angle);
-            double sin = Math.sin(angle);
-            for (int d : DISTANCES) {
-                if (d > SCAN_MAX_RADIUS) break;
-                int x = (int) Math.floor(pos.x + cos * d);
-                int z = (int) Math.floor(pos.z + sin * d);
-                // 不许折回洞口方向: 距出洞锚点必须 ≥ MIN_ANCHOR_DISTANCE。
-                double anchorDist = Math.hypot((x + 0.5) - (_anchorX + 0.5),
-                        (z + 0.5) - (_anchorZ + 0.5));
-                if (anchorDist < MIN_ANCHOR_DISTANCE) continue;
-                double playerDist = Math.hypot((x + 0.5) - pos.x, (z + 0.5) - pos.z);
-                if (playerDist < MIN_PLAYER_DISTANCE) continue;
-                BlockPos landing = surfaceStanding(mod, x, z);
-                if (landing == null) continue; // 未加载/空壳/虚空: 不猜
-                if (isRejected(landing)) continue; // 消费方已证实不可达
-                if (!isDryStandable(mod, landing)) continue;
-                if (WorldHelper.isOcean(mod.getWorld().getBiome(landing))) continue;
-                boolean strong = SurfaceHelper.isStrongSurfaceSignature(
-                        mod.getWorld().getBlockState(landing.down()));
-                if (strong) {
-                    _nullCachePos = null;
-                    Debug.logMessage("[SURFACE-EXIT] safe landing " + (_arrivedCount + 1)
-                            + "/" + REQUIRED_ARRIVALS + " -> " + landing.toShortString()
-                            + " ground=" + mod.getWorld().getBlockState(landing.down()).getBlock()
-                            + " dAnchor=" + (int) anchorDist + " bearing="
-                            + String.format(java.util.Locale.ROOT, "%.0f", Math.toDegrees(angle))
-                            + "°");
-                    return landing;
+        outer:
+        for (int[] ringSet : new int[][]{DISTANCES,
+                _emptyScans >= EMPTY_SCANS_STAGE2 ? DISTANCES_STAGE2 : null,
+                _emptyScans >= EMPTY_SCANS_STAGE3 ? DISTANCES_STAGE3 : null}) {
+            if (ringSet == null) continue;
+            for (double off : ANGLE_OFFSETS) {
+                double angle = preferredAngleRad + off;
+                double cos = Math.cos(angle);
+                double sin = Math.sin(angle);
+                for (int d : ringSet) {
+                    if (d > maxRadius) continue;
+                    int x = (int) Math.floor(pos.x + cos * d);
+                    int z = (int) Math.floor(pos.z + sin * d);
+                    // 不许折回洞口方向: 距出洞锚点必须 ≥ MIN_ANCHOR_DISTANCE。
+                    double anchorDist = Math.hypot((x + 0.5) - (_anchorX + 0.5),
+                            (z + 0.5) - (_anchorZ + 0.5));
+                    if (anchorDist < MIN_ANCHOR_DISTANCE) continue;
+                    double playerDist = Math.hypot((x + 0.5) - pos.x, (z + 0.5) - pos.z);
+                    if (playerDist < MIN_PLAYER_DISTANCE) continue;
+                    BlockPos landing = surfaceStanding(mod, x, z);
+                    if (landing == null) continue; // 未加载/空壳/虚空: 不猜
+                    if (isRejected(landing)) continue; // 消费方已证实不可达
+                    if (!isDryStandable(mod, landing)) continue;
+                    if (WorldHelper.isOcean(mod.getWorld().getBiome(landing))) continue;
+                    boolean strong = SurfaceHelper.isStrongSurfaceSignature(
+                            mod.getWorld().getBlockState(landing.down()));
+                    // 降级档额外要求"四邻开阔" (审查 Medium-2): 邻柱地表 y 与本列
+                    // 近似, 排除通天 1~2 格裂缝/竖井/深沟底。强签名档不查 (草方块
+                    // 天然只在露天表层生成, 沟底有人工种草的极端代价可接受)。
+                    if (!strong && !neighborsLevel(mod, landing)) continue;
+                    if (strong) {
+                        _nullCachePos = null;
+                        _emptyScans = 0;
+                        Debug.logMessage("[SURFACE-EXIT] safe landing " + (_arrivedCount + 1)
+                                + "/" + REQUIRED_ARRIVALS + " -> " + landing.toShortString()
+                                + " ground=" + mod.getWorld().getBlockState(landing.down()).getBlock()
+                                + " dAnchor=" + (int) anchorDist + " bearing="
+                                + String.format(java.util.Locale.ROOT, "%.0f", Math.toDegrees(angle))
+                                + "°");
+                        return landing;
+                    }
+                    // 降级候选: 露天干地面但无强签名 (石头/泥土坡面)。树叶/原木冠层已在
+                    // isDryStandable 排除, 不会让 bot 爬树冠。
+                    if (degraded == null) degraded = landing;
                 }
-                // 降级候选: 露天干地面但无强签名 (石头/泥土坡面)。树叶/原木冠层已在
-                // isDryStandable 排除, 不会让 bot 爬树冠。
-                if (degraded == null) degraded = landing;
             }
+            // 基础环扫完仍有降级候选即可返回, 不必扩环; 强签名优先时也应先在近环拿。
+            if (degraded != null) break outer;
         }
 
         if (degraded != null) {
             _nullCachePos = null;
+            _emptyScans = 0;
             Debug.logMessage("[SURFACE-EXIT] no strong-signature column in scan, degraded to open-air "
                     + "dry ground " + degraded.toShortString()
                     + " ground=" + mod.getWorld().getBlockState(degraded.down()).getBlock());
@@ -252,23 +300,54 @@ public final class SurfaceExitGuide {
 
         _nullCachePos = cacheKey;
         _nullCacheAt = now;
-        Debug.logMessage("[SURFACE-EXIT] no safe landing around anchor=(" + _anchorX + "," + _anchorZ
-                + ") (r<=" + SCAN_MAX_RADIUS + "), keeping surface-exit forced this tick");
+        _emptyScans++;
+        // 写 diag 文件并每 ~20 轮 (5s) 才打一条聊天行, 防刷屏 (审查 Low-8)。
+        Debug.logToFile("altoclef_diag.log", "[SURFACE-EXIT] no safe landing around anchor=("
+                + _anchorX + "," + _anchorZ + ") (r<=" + maxRadius + ", emptyScans=" + _emptyScans
+                + "), keeping surface-exit forced this tick");
+        if (_emptyScans % 20 == 0) {
+            Debug.logMessage("[SURFACE-EXIT] no safe landing within " + maxRadius
+                    + " blocks for " + (_emptyScans * NULL_CACHE_MS / 1000) + "s, still armed");
+        }
         return null;
     }
 
     /**
-     * 消费方到达当前安全目标时调用。距目标 ≤ {@link #ARRIVE_XZ} 且当前确在
-     * 地表才计一次成功; 同一目标不重复计数。
+     * 降级档四邻开阔判据 (审查 Medium-2): 四个水平邻柱的地表站立 y 必须都已加载
+     * 且与本列差 ≤ {@link #NEIGHBOR_LEVEL_TOLERANCE}。1~2 格通天裂缝/竖井的邻柱
+     * 顶在远处地面 (高差大) → 否决; 开阔坡面/台地四邻同高 → 通过。
      */
-    public static void recordArrived(AltoClef mod, BlockPos safeTarget) {
-        if (!_armed || safeTarget == null || mod.getPlayer() == null) return;
-        if (safeTarget.equals(_lastArrivedTarget)) return;
+    private static boolean neighborsLevel(AltoClef mod, BlockPos landing) {
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] d : dirs) {
+            BlockPos n = surfaceStanding(mod, landing.getX() + d[0], landing.getZ() + d[1]);
+            if (n == null) return false;
+            if (Math.abs(n.getY() - landing.getY()) > NEIGHBOR_LEVEL_TOLERANCE) return false;
+        }
+        return true;
+    }
+
+    /**
+     * 消费方到达当前安全目标时调用。三个条件全部满足才计一次成功:
+     * XZ ≤ {@link #ARRIVE_XZ}、脚高与落点 y 差 ≤ {@link #ARRIVE_Y_TOLERANCE} (审查
+     * Medium-4: 防"大洞穴岩台 XZ 到达、头顶仍埋十几格"被误计数)、当前迟滞口径确在
+     * 地表。同一目标已计过返回 true (让消费方正常换下一点)。
+     *
+     * @return true=已计数或本目标此前已计数, 消费方可换下一点; false=未达成,
+     *         消费方应保持同一目标继续逼近。
+     */
+    public static boolean recordArrived(AltoClef mod, BlockPos safeTarget) {
+        if (!_armed || safeTarget == null || mod.getPlayer() == null) return false;
+        if (safeTarget.equals(_lastArrivedTarget)) return true;
         Vec3d p = mod.getPlayer().getPos();
         double xz = Math.hypot(p.x - (safeTarget.getX() + 0.5), p.z - (safeTarget.getZ() + 0.5));
-        if (xz > ARRIVE_XZ) return;
+        if (xz > ARRIVE_XZ) return false;
+        int feetY = mod.getPlayer().getBlockPos().getY();
+        if (Math.abs(feetY - safeTarget.getY()) > ARRIVE_Y_TOLERANCE) return false;
         // 走到了列点却仍在地下 (数据洞/落点误判) → 不计, 避免配额被穿洞路径消耗。
-        if (SurfaceHelper.isBelowSurfaceDebounced(mod)) return;
+        // 注 (审查 Low-4): 此调用理论上可在同一拍联动 below→surface 翻面回调
+        // (清配额) 后再 +1, 净效果=1, 无实际危害。
+        if (SurfaceHelper.isBelowSurfaceDebounced(mod)) return false;
         _lastArrivedTarget = safeTarget.toImmutable();
         _arrivedCount++;
         Debug.logMessage("[SURFACE-EXIT] reached safe landing " + _arrivedCount + "/"
@@ -276,6 +355,7 @@ public final class SurfaceExitGuide {
         if (_arrivedCount >= REQUIRED_ARRIVALS) {
             disarm("3 safe surface arrivals completed");
         }
+        return true;
     }
 
     /**
@@ -315,9 +395,13 @@ public final class SurfaceExitGuide {
         if (!ground.getFluidState().isEmpty()) return false;
         if (ground.isIn(BlockTags.LOGS)) return false;
         if (ground.isIn(BlockTags.LEAVES)) return false;
+        // 伤害性地面 (审查 Low-5): 岩浆块踩上去掉血, 不当安全落点地面。
+        if (ground.getBlock() == Blocks.MAGMA_BLOCK) return false;
         // 脚/头: 无碰撞 (空气/花草) 且干燥。
         if (feet.getMaterial().blocksMovement() || !feet.getFluidState().isEmpty()) return false;
         if (head.getMaterial().blocksMovement() || !head.getFluidState().isEmpty()) return false;
+        // 无碰撞但会造成伤害的"可穿入"植物 (审查 Low-5): 甜浆果丛/凋零玫瑰。
+        if (isDamagingPlant(feet.getBlock()) || isDamagingPlant(head.getBlock())) return false;
         // 与 BiasedExploreTask 落点闸门同口径 (2026-09-24 审查加固): blocksMovement=false
         // 但 baritone canWalkThrough 不拦、真走进去会受害的方块 —— 细雪(无皮靴下沉
         // 冻伤) 与各传送门 (废墟门柱停留 4s 被传走) 显式拒绝。
@@ -330,5 +414,9 @@ public final class SurfaceExitGuide {
                 || b == Blocks.NETHER_PORTAL
                 || b == Blocks.END_PORTAL
                 || b == Blocks.END_GATEWAY;
+    }
+
+    private static boolean isDamagingPlant(net.minecraft.block.Block b) {
+        return b == Blocks.SWEET_BERRY_BUSH || b == Blocks.WITHER_ROSE;
     }
 }

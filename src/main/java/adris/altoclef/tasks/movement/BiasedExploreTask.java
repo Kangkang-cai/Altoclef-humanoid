@@ -339,13 +339,15 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             updateFoodBiomeBias(mod);
         }
 
-        // (2026-09-24 出洞安全引导) 食物探索到达当前落点时报一次成功计数;
-        // guide 内部仅在武装期且当前确在地表时计数, 非武装/穿洞到达均为 no-op。
-        if (_foodExplore && _currentTarget != null && arrivedAtCurrentTarget(mod)) {
-            SurfaceExitGuide.recordArrived(mod, _currentTarget);
-        }
+        // (2026-09-24 出洞安全引导) 武装期 3D 到达但未被 guide 计数 (脚高与落点
+        // y 差 >2, 或 500ms 地表确认窗未满) 时, 保持同一落点继续逼近, 本拍不换点。
+        boolean surfaceExitHold = _foodExplore
+                && _currentTarget != null
+                && arrivedAtCurrentTarget(mod)
+                && SurfaceExitGuide.isArmed(mod)
+                && !SurfaceExitGuide.recordArrived(mod, _currentTarget);
 
-        if (_currentTarget == null || arrivedAtCurrentTarget(mod)) {
+        if (!surfaceExitHold && (_currentTarget == null || arrivedAtCurrentTarget(mod))) {
             // (2026-09-17 作废时机修正) 到的是 48 格外的【落脚点】, 不是目标点。
             // 原实现在这里无条件把 _currentBiasTarget 记为已访问 → 每个目标只贡献
             // 一次位移就永久作废 (78~250 格的记忆目标永远到不了), 且重选出的"最近
@@ -369,7 +371,14 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             }
             // Pick a new exploration step.
             _currentTarget = chooseNewTarget(mod, mod.getPlayer().getPos());
-            if (_currentTarget == null) return null;
+            if (_currentTarget == null) {
+                // (审查 Medium-1) 武装期无安全落点: 取消可能残留的旧 goal, 不让
+                // baritone 沿武装前的目标继续走进洞里。
+                if (_foodExplore && SurfaceExitGuide.isArmed(mod)) {
+                    mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+                }
+                return null;
+            }
             _progressChecker.reset();
             // [SlowTickDebug] setGoalAndPath kicks off a baritone path search. If the
             // goal is unreachable (e.g. inside a cave wall) baritone can re-path
@@ -476,11 +485,16 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // 草方块等强签名露天 3D 落点 (本任务 onTick 用 GoalNear 三维导航, 会逼
         // baritone 爬上地表而非穿洞)。找不到点的 tick 返回 null, onTick 不发任何
         // 导航, 绝不退回可能落进洞里的普通探索点。
-        if (_foodExplore && SurfaceExitGuide.isArmed(mod)) {
+        // (审查 Medium-5) 已在水里时不接管: 否则会绕过本任务的宽水闸门
+        // (RIVER_CROSS_MAX_BLOCKS), 改走下方既有的游泳/过河逻辑。
+        if (_foodExplore && SurfaceExitGuide.isArmed(mod) && !isPlayerInWater(mod)) {
             double angle = Double.isNaN(_heading) ? Math.random() * 2 * Math.PI : _heading;
             BlockPos safe = SurfaceExitGuide.findSafeLanding(mod, angle);
             if (safe != null) {
                 _lastWasBiased = false;
+                // (审查 Low-6) 显式清空 bias 逼近线程, 不依赖布尔组合防误访问/误标记。
+                _currentBiasTarget = null;
+                _biasHops = 0;
                 logBiasStep(mod, safe, -1, -1, "surface-exit forced landing");
             }
             return safe;

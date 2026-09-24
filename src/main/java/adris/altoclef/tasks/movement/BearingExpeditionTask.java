@@ -233,14 +233,27 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
      * 找不到点的 tick 不发任何导航 (绝不退回穿洞 XZ 目标)。
      */
     private Task tickSurfaceExit(AltoClef mod) {
+        // (审查 Medium-3) 远征普通分支不接 JumpStuckResolver, 武装期在洞口卡岩沿时
+        // 会干站到 90s 超时; 引导分支补接 (与 BiasedExploreTask 同款, 处置期重置进度)。
+        Task jumpFix = JumpStuckResolver.tick(mod);
+        if (jumpFix != null) {
+            _progress.reset();
+            return jumpFix;
+        }
+        // XZ 到达且 guide 确认计数 (脚高也对、确在地表) 才换下一点; 未计数 (岩台
+        // XZ 到达但还没爬上落点 y / 地表确认窗未满) 时保持同一目标继续逼近。
         if (_safeExitTarget != null
-                && xzDistance(mod.getPlayer().getBlockPos(), _safeExitTarget) <= ARRIVE_XZ) {
-            SurfaceExitGuide.recordArrived(mod, _safeExitTarget);
+                && xzDistance(mod.getPlayer().getBlockPos(), _safeExitTarget) <= ARRIVE_XZ
+                && SurfaceExitGuide.recordArrived(mod, _safeExitTarget)) {
             _safeExitTarget = null;
         }
         if (_safeExitTarget == null) {
             _safeExitTarget = SurfaceExitGuide.findSafeLanding(mod, currentBearing());
             if (_safeExitTarget == null) {
+                // (审查 Medium-1) 本拍没有安全落点: 必须取消 baritone 仍持有武装前的
+                // 旧 GoalXZWithin (任意高度达成, 正是穿洞目标), 不能让它在空档继续
+                // 把 bot 领回洞里。
+                mod.getClientBaritone().getCustomGoalProcess().onLostControl();
                 setDebugState(diagTag() + " surface-exit armed, no safe landing this tick");
                 return null;
             }
