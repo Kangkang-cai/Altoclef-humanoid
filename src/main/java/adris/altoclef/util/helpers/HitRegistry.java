@@ -53,6 +53,18 @@ public final class HitRegistry {
     private static double _zombifiedHordeX, _zombifiedHordeY, _zombifiedHordeZ;
     private static RegistryKey<World> _dimension = null;
 
+    // ===== (2026-09-24 must-kill 误锁根修) 通用"实际伤害过 bot"记忆 =====
+    // 事故 20260924-230344 实锤: bot 挖木头时 MUST-KILL 了一只【从未被看见、
+    // 从未开火】(health 20.0 零掉血) 的地下 9 格骷髅 —— 感知通道是听觉
+    // (vanilla 音效穿墙, SoundTracker 12 格内任意声音即算"听见"), 而
+    // MobDefenseChain.getActiveRangedAttacker 只判"hostile+已感知"就把任何
+    // 24 格内骷髅当"正在攻击 bot 的射手"优先级 95 击杀 = 无缘无故锁敌看不见
+    // 的敌人。修复: 记录"谁实际对 bot 造成过伤害"(服务端权威 attacker,
+    // 箭伤 attacker=骷髅本体), 必须有这条实锤才允许 must-kill/证据门外派发。
+    /** "实际伤害过 bot"记忆窗口。骷髅射速 ~1s/箭, 命中会持续刷新; 60s 无新命中视为停火。 */
+    private static final long RECENT_ATTACKER_MS = 60_000;
+    private static final Map<UUID, Long> _recentAttackerUntil = new HashMap<>();
+
     /**
      * 记录一次客户端攻击 (bot 或玩家手动)。只关心猪灵系目标, 其余直接忽略。
      * 注意: 攻击发起≠必然命中 (服务器有距离校验), 但对"是否激怒"的判断,
@@ -93,15 +105,24 @@ public final class HitRegistry {
      */
     public static void onPlayerDamagedBy(Entity attacker) {
         if (attacker == null || !attacker.isAlive()) return;
-        boolean isPiglin = attacker instanceof PiglinEntity;
-        boolean isZombified = attacker instanceof ZombifiedPiglinEntity;
-        if (!isPiglin && !isZombified) return;
 
         long now = System.currentTimeMillis();
         RegistryKey<World> dim = attacker.getWorld().getRegistryKey();
         if (!dim.equals(_dimension)) {
             reset();
             _dimension = dim;
+        }
+
+        // (2026-09-24) 通用记录先行: 任何实体实际伤害过 bot 都记入"已交战"实锤
+        // (must-kill / 派发证据门用), 不再只限猪灵系 —— 原先非猪灵系在进入
+        // 维度簿记之前就 return, 维度切换全靠猪灵系伤害触发, 属顺带修复。
+        _recentAttackerUntil.put(attacker.getUuid(), now + RECENT_ATTACKER_MS);
+
+        boolean isPiglin = attacker instanceof PiglinEntity;
+        boolean isZombified = attacker instanceof ZombifiedPiglinEntity;
+        if (!isPiglin && !isZombified) {
+            pruneExpired(now);
+            return;
         }
 
         if (isPiglin) {
@@ -114,6 +135,19 @@ public final class HitRegistry {
             _zombifiedHordeZ = attacker.getZ();
         }
         pruneExpired(now);
+    }
+
+    /**
+     * (2026-09-24 must-kill 误锁根修) 该实体近期是否【实际伤害过 bot】
+     * ({@link #RECENT_ATTACKER_MS} 窗口)。数据源是服务端权威的
+     * PlayerDamageMixin 伤害事件 (箭伤 attacker=射手本体), 与"感知"
+     * (看见/听见/20s 记忆) 正交 —— 听见墙后怪不算, 被它打到才算交战。
+     */
+    public static boolean hasRecentlyDamagedPlayer(Entity entity) {
+        if (entity == null) return false;
+        ensureDimension(entity.getWorld().getRegistryKey());
+        Long until = _recentAttackerUntil.get(entity.getUuid());
+        return until != null && System.currentTimeMillis() < until;
     }
 
     /** 记仇写入 (正向攻击/反向被打共用): 目标本体 + 16 格内同伴。 */
@@ -172,11 +206,13 @@ public final class HitRegistry {
         if (now >= _zombifiedHordeUntil) {
             _zombifiedHordeUntil = 0;
         }
+        _recentAttackerUntil.values().removeIf(until -> now >= until);
     }
 
     /** 换维度/换存档清空。 */
     public static void reset() {
         _piglinAngeredUntil.clear();
         _zombifiedHordeUntil = 0;
+        _recentAttackerUntil.clear();
     }
 }

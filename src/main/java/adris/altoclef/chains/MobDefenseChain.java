@@ -10,6 +10,7 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
+import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.PathReachabilityHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -202,7 +203,10 @@ public class MobDefenseChain extends SingleTaskChain {
     // (2026-09-19 用户) 击杀小白的触发距离缩小为"刚好触发小白"的距离:
     // 骷髅索敌就在 16 格 (开火射程 15), 旧值 18 会先手去招惹还没瞄准我们的
     // 骷髅, 在堡垒走廊里白白多拉一波仇恨。女巫维持 18 不变。
-    private static final int SKELETON_KILL_TRIGGER_RANGE = 16;
+    // (2026-09-24 用户"缩小派发击杀敌人的距离, 离很远没触发攻击就去杀") 再
+    // 收紧到 12: bot 不该主动跑 16 格去猎杀还没开火的骷髅; 真开火命中的走
+    // must-kill 实锤通道 (24 格), 未开火的只在近距离+它看见我们时才计时清场。
+    private static final int SKELETON_KILL_TRIGGER_RANGE = 12;
 
     public MobDefenseChain(TaskRunner runner) {
         super(runner);
@@ -642,6 +646,27 @@ public class MobDefenseChain extends SingleTaskChain {
         return near;
     }
 
+    /**
+     * (2026-09-24 派发证据门, 事故 20260924-230344) 主动猎杀类派发 (自信战斗/
+     * 近战直打) 只认有"交战证据"的怪: 【当前亲眼可见】或【实际伤害过 bot】
+     * (60s 窗口)。getNearbyHostiles 的感知口径含听觉与 20s 记忆 —— 墙后/
+     * 地下的怪只是"听见"就进批次会让 bot 主动跑去猎杀从未攻击过我们的敌人
+     * (= 透视观感)。仅用于派发门槛; 开战后的批次粘滞/追击不受影响
+     * (_fightTargets 持续到死/逃离), 中途吸收新目标走 stateFight 的
+     * seesPlayer 门, 口径不变。盾牌核弹/塔逃的【计数】消费方不经过本门
+     * (听见的怪计入数量只会更保守, 不会误开战)。
+     */
+    private static List<Entity> filterEngagementEvidence(AltoClef mod, List<Entity> candidates) {
+        List<Entity> evidenced = new ArrayList<>(candidates.size());
+        for (Entity e : candidates) {
+            if (e == null || !e.isAlive()) continue;
+            if (VisibilityHelper.isEntityVisible(mod, e) || HitRegistry.hasRecentlyDamagedPlayer(e)) {
+                evidenced.add(e);
+            }
+        }
+        return evidenced;
+    }
+
     /** (2026-09-21) 传送门 6 格内蠹虫豁免的判定半径 (用户指定 6 格)。 */
     private static final double SILVERFISH_PORTAL_IGNORE_RADIUS = 6.0;
 
@@ -707,7 +732,9 @@ public class MobDefenseChain extends SingleTaskChain {
      * 存活怪), 返回 true。调用方直接 return 65。
      */
     private boolean tryConfidentFight(AltoClef mod, long nowTick) {
-        List<Entity> near = getNearbyHostiles(mod);
+        // (2026-09-24 派发证据门) 只对"亲眼可见或实际打过我们"的怪开自信战斗,
+        // 听见墙后怪不猎杀 (见 filterEngagementEvidence 注释)。
+        List<Entity> near = filterEngagementEvidence(mod, getNearbyHostiles(mod));
         if (!isConfidentFight(mod, near)) return false;
         Debug.logMessage("Combat decision: CONFIDENT FIGHT (health=%.0f%%, shield+sword, enemies=%d)",
                 100.0 * mod.getPlayer().getHealth() / Math.max(1, mod.getPlayer().getMaxHealth()),
@@ -806,6 +833,8 @@ public class MobDefenseChain extends SingleTaskChain {
         // (2026-08-30 已开火骷髅必须杀, 用户) 有【已经开始攻击 bot 的骷髅】时,
         // 锁定击杀并提到最高优先: 逃跑不是选项 (骷髅边追边射, 尤其血量低时
         // 背对着跑=白吃箭等着死), 直接上。直到目标死/逃出范围才交还控制。
+        // (2026-09-24 根修) "已开始攻击"的判定从 hostile+感知 收紧为
+        // HitRegistry 实锤 (实际伤害过 bot, 60s 窗口) —— 见 getActiveRangedAttacker。
         Entity activeAttacker = getActiveRangedAttacker(mod);
         // (2026-08-30 没剑不硬杀, 用户) 刚死复活身上啥都没有时, must-kill 是
         // 自杀 —— 没武器(连剑都没有)却锁死"必须击杀"只会原地转圈找视线被活活
@@ -813,7 +842,9 @@ public class MobDefenseChain extends SingleTaskChain {
         // for line of sight")。有剑才值得拼杀; 没剑就交给下方正常威胁评估
         // (无胜算 → 逃跑/躲), 不进入加急锁定。
         if (activeAttacker != null && hasWeaponToFight(mod)) {
-            Debug.logMessage("Combat decision: MUST-KILL active skeleton shooter at "
+            // (2026-09-24) hit-confirmed 标记: 能走到这的骷髅必然实际伤害过 bot
+            // (HitRegistry 实锤), 与"听见/看见但未开火"严格区分。
+            Debug.logMessage("Combat decision: MUST-KILL active skeleton shooter (hit-confirmed) at "
                     + activeAttacker.getBlockPos().toShortString());
             _mustKillAttacker = true;
             _inCombat = true;
@@ -872,8 +903,10 @@ public class MobDefenseChain extends SingleTaskChain {
                 }
                 // (2026-09-01 用户) 纯近战少怪(1~2, 无远程/无苦力怕)直接打, 不逃。
                 // 保留有剑门槛: 手无寸铁硬顶也没用, 交给下方逃跑兜底。
-                List<Entity> nearMelee = getNearbyHostiles(mod);
-                if (hasWeaponToFight(mod) && !shouldRetreatMelee(mod, nearMelee)) {
+                // (2026-09-24 派发证据门) 只对"亲眼可见或实际打过我们"的怪近战直打,
+                // 听见墙后怪不猎杀; 全无证据 → 落到下方逃跑兜底 (危险时可先躲)。
+                List<Entity> nearMelee = filterEngagementEvidence(mod, getNearbyHostiles(mod));
+                if (!nearMelee.isEmpty() && hasWeaponToFight(mod) && !shouldRetreatMelee(mod, nearMelee)) {
                     return commitMeleeFight(mod, nowTick, nearMelee);
                 }
                 _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
@@ -1251,8 +1284,13 @@ public class MobDefenseChain extends SingleTaskChain {
 
     /**
      * (2026-08-30) 当前最近的【已被拖入攻击、且在范围内】的骷髅射手。
-     * 只认"正在攻击 bot"的骷髅 (angry at player), 是"已开火的必须杀"触发源;
-     * 未进攻的骷髅交给常规威胁评估即可。
+     * (2026-09-24 根修, 事故 20260924-230344) 旧实现只认 "hostile+已感知",
+     * 但骷髅对玩家恒 hostile, 感知又含【听觉】(vanilla 音效穿墙) —— 地下
+     * 9 格、从未被看见也从未开火的骷髅走两步就触发 MUST-KILL (prio 95),
+     * bot 直接钻洞猎杀 = "无缘无故锁敌看不见的敌人"。现必须持有
+     * {@link HitRegistry} 的"实际伤害过 bot"实锤 (箭伤 attacker=骷髅本体,
+     * 服务端权威) 才算 active shooter; 只是听见/看见但还没开火的交给常规
+     * 威胁评估 (近距离+它看见我们才计时)。
      */
     private Entity getActiveRangedAttacker(AltoClef mod) {
         Entity best = null;
@@ -1263,6 +1301,12 @@ public class MobDefenseChain extends SingleTaskChain {
                 if (e == null || !e.isAlive()) continue;
                 if (!(e instanceof AbstractSkeletonEntity)) continue;
                 if (!EntityHelper.isAngryAtPlayer(mod, e)) continue;
+                // (2026-09-24 根修) 必须实际打到过 bot (60s 窗口)。只是被听见/
+                // 看见但从未命中的骷髅不进 must-kill。
+                if (!HitRegistry.hasRecentlyDamagedPlayer(e)) {
+                    logUnprovenShooterDiag(mod, e);
+                    continue;
+                }
                 double d = e.squaredDistanceTo(mod.getPlayer());
                 if (d <= RANGE * RANGE && d < bestDist) {
                     bestDist = d;
@@ -1273,6 +1317,23 @@ public class MobDefenseChain extends SingleTaskChain {
         // [MOB-DIAG] #1 只读: 打印 active ranged attacker 判定结果 (0.5s 节流)。
         logRangedAttackerDiag(mod, best);
         return best;
+    }
+
+    // [MOB-DIAG] 有已感知的骷髅但缺"实际伤害过 bot"实锤 → 不算 active shooter。
+    // 只读诊断 (2s 节流, 只落盘不进聊天), 用于实机验证 must-kill 根修。
+    private static long _lastUnprovenShooterDiagMs = 0;
+
+    private static void logUnprovenShooterDiag(AltoClef mod, Entity skeleton) {
+        long now = System.currentTimeMillis();
+        if (now - _lastUnprovenShooterDiagMs < 2000) return;
+        _lastUnprovenShooterDiagMs = now;
+        try {
+            Debug.logToFile("altoclef_diag.log", String.format(
+                    "[MOB-DIAG] skeleton perceived but never damaged us -> NOT must-kill pos=%s dist=%.1f visible=%s",
+                    skeleton.getBlockPos().toShortString(),
+                    Math.sqrt(skeleton.squaredDistanceTo(mod.getPlayer())),
+                    VisibilityHelper.isEntityVisible(mod, skeleton)));
+        } catch (Exception ignored) { /* 诊断日志绝不影响主逻辑 */ }
     }
 
     private float stateRetreat(AltoClef mod) {
