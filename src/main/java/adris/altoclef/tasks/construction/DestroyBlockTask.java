@@ -327,6 +327,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         if (st.isAir()) return null;
         MiningRequirement req = MiningRequirement.getMinimumRequirementForBlock(st.getBlock());
         if (req == MiningRequirement.HAND) return null;
+        // (2026-09-24 审查改进①, 子agent独立审查边界②) 铲类 tool-required 方块
+        // (snow_block 等现场常客) 被枚举盲区映射为 DIAMOND 档 (computeMinimumRequirement
+        // 只认镐, 找不到适用镐就返回 DIAMOND) —— 闸门若放行就会"为挖雪合成钻石镐"。
+        // 首个适用工具是铲的方块不触发闸门: 挖雪徒手 0.2s/块, 本来就不需要镐。
+        if (Items.WOODEN_SHOVEL.isSuitableFor(st)) return null;
         if (StorageHelper.miningRequirementMetInventory(mod, req)) return null;
         return req;
     }
