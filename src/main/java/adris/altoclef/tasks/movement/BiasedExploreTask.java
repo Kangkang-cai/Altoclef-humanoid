@@ -577,6 +577,18 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 // 仍拒绝 (树冠拒入语义不变)。
                 boolean feetOk = !feet.getMaterial().blocksMovement();
                 boolean headOk = !head.getMaterial().blocksMovement();
+                // (2026-09-24 独立审查 Medium 加固, 字节码实证) blocksMovement=false
+                // 但 baritone canWalkThrough 也不拦、真走进去会受害的方块, 脚格显式
+                // 拒绝: ①细雪(无皮靴碰撞箱为空→下沉冻伤, baritone 1.18.2 零特判)
+                // ②传送门类(baritone 只硬拒 END_PORTAL, 不拒 NETHER_PORTAL →
+                // 废墟门柱可能停留 4s 被传下界)。火/浆果丛/蛛网/末地门 baritone
+                // 自身硬拒, 无需在此重复。
+                if (feet.getBlock() == Blocks.POWDER_SNOW
+                        || feet.getBlock() == Blocks.NETHER_PORTAL
+                        || feet.getBlock() == Blocks.END_PORTAL
+                        || feet.getBlock() == Blocks.END_GATEWAY) {
+                    feetOk = false;
+                }
                 if (!feetOk || !headOk) {
                     Debug.logToFile("altoclef_diag.log",
                             "[AIR-TARGET] reject solid landing " + candidate.toShortString()
