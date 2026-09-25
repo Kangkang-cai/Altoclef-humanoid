@@ -10,6 +10,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
@@ -101,7 +102,7 @@ public class PlaceObsidianBucketTask extends Task {
             }
         }
         if (_currentDestroyTarget != null) {
-            if (!WorldHelper.isSolid(mod, _currentDestroyTarget)) {
+            if (!needsClearing(mod, _currentDestroyTarget)) {
                 _currentDestroyTarget = null;
             } else {
                 return new DestroyBlockTask(_currentDestroyTarget);
@@ -124,19 +125,24 @@ public class PlaceObsidianBucketTask extends Task {
         // Cast frame built. Now, place lava.
         if (mod.getWorld().getBlockState(_pos).getBlock() != Blocks.LAVA) {
 
-            if (WorldHelper.isSolid(mod, _pos)) {
+            // (2026-09-25 树叶挡射线修复) 清场判定从 isSolid 扩为 needsClearing:
+            // 树叶 isSolidBlock=false 会漏检, 但有碰撞箱挡瞄准射线且不可被液体替换。
+            if (needsClearing(mod, _pos)) {
                 setDebugState("Clearing space around lava");
                 _currentDestroyTarget = _pos;
                 return null;
                 //return new DestroyBlockTask(framePos);
             }
             // Clear the upper two as well, to make placing more reliable.
-            if (WorldHelper.isSolid(mod, _pos.up())) {
+            // (2026-09-25) 这两格正是倒岩浆/倒水瞄准射线的必经路径 (bot 站
+            // _pos.add(-1,1,0) 眼高 y+2.62 斜射到 (x+1,y+0.5)/(x+1,y+1.5) 面心,
+            // 射线穿过 (x,y+1,z) 与 (x,y+2,z)), 树叶在此会永久挡射线 → 卡死。
+            if (needsClearing(mod, _pos.up())) {
                 setDebugState("Clearing space around lava");
                 _currentDestroyTarget = _pos.up();
                 return null;
             }
-            if (WorldHelper.isSolid(mod, _pos.up(2))) {
+            if (needsClearing(mod, _pos.up(2))) {
                 setDebugState("Clearing space around lava");
                 _currentDestroyTarget = _pos.up(2);
                 return null;
@@ -187,13 +193,16 @@ public class PlaceObsidianBucketTask extends Task {
         if (mod.getWorld().getBlockState(waterCheck).getBlock() != Blocks.WATER) {
             setDebugState("Placing water for cast");
 
-            if (WorldHelper.isSolid(mod, waterCheck)) {
+            // (2026-09-25 树叶挡射线修复) 用户实测: 水位上方一格是树叶时, 瞄准射线
+            // 穿过该格被判 CANT_REACH, 放不了水卡死, 用户手动打掉树叶才恢复。
+            // 树叶 isSolidBlock=false 漏检 → 改用 needsClearing 兜住。
+            if (needsClearing(mod, waterCheck)) {
                 _currentDestroyTarget = waterCheck;
                 return null;
                 //return new DestroyBlockTask(waterCheck);
 
             }
-            if (WorldHelper.isSolid(mod, waterCheck.up())) {
+            if (needsClearing(mod, waterCheck.up())) {
                 _currentDestroyTarget = waterCheck.up();
                 return null;
                 //return new DestroyBlockTask(waterCheck.up());
@@ -237,4 +246,39 @@ public class PlaceObsidianBucketTask extends Task {
     public BlockPos getPos() {
         return _pos;
     }
+
+    /**
+     * (2026-09-25 树叶挡射线修复) 倒岩浆/倒水前"该格是否必须清掉"的判定。
+     *
+     * 旧口径只有 {@link WorldHelper#isSolid} (= isSolidBlock, 实心整块), 而
+     * 树叶 Material.LEAVES allowsMovement/notSolid → isSolidBlock=false 漏检;
+     * 但树叶有完整碰撞箱 —— baritone/游戏瞄准射线 (ShapeType.COLLIDER) 会被它
+     * 挡住, 且树叶不可被液体替换 (水/岩浆浇不进去)。结果: 水位上方一格是树叶
+     * 时, 射线永远命中树叶 ≠ 目标面 → CANT_REACH 卡死, 流体桶又不许盲点强按
+     * (2026-09-04 误触教训), 用户手动打掉树叶才恢复 (20260925 实锤)。
+     *
+     * 判定 (严格为旧口径的超集, 不改实心块既有行为):
+     *   空气/流体 → 不清 (射线可穿, 液体格本就是浇铸目标);
+     *   可替换 (草/花/雪片) → 不清 (射线可穿, 倒水时被 MC 自动替换);
+     *   isSolidBlock → 清 (原口径);
+     *   其余有碰撞箱且可挖 (树叶/栅栏等) → 清 (本次修复的盲区)。
+     */
+    private boolean needsClearing(AltoClef mod, BlockPos pos) {
+        BlockState s = mod.getWorld().getBlockState(pos);
+        if (s.isAir() || !s.getFluidState().isEmpty()) return false;
+        if (s.getMaterial().isReplaceable()) return false;
+        if (WorldHelper.isSolid(mod, pos)) return true;
+        boolean collides = !s.getCollisionShape(mod.getWorld(), pos).isEmpty();
+        if (collides && WorldHelper.canBreak(mod, pos)) {
+            if (_clearDiagTimer.elapsed()) {
+                _clearDiagTimer.reset();
+                Debug.logInternal("[PourClear] clearing ray-blocking non-solid block "
+                        + s.getBlock() + " at " + pos.toShortString());
+            }
+            return true;
+        }
+        return false;
+    }
+    // [PourClear] 诊断日志节流 (2s), 防逐 tick 刷屏。
+    private final adris.altoclef.util.time.TimerGame _clearDiagTimer = new adris.altoclef.util.time.TimerGame(2);
 }
