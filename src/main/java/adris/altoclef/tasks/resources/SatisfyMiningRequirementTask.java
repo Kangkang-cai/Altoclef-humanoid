@@ -133,6 +133,10 @@ public class SatisfyMiningRequirementTask extends Task {
                 + " met_cache=" + metCache + " met_real=" + metReal
                 + " Pickaxes(real): wood=" + wooden + " stone=" + stone + " iron=" + iron
                 + " golden=" + golden + " diamond=" + diamond + " netherite=" + netherite;
+        // (2026-09-25 工具闸误判取证) 0925 15:50 溺死事故: 手持石镐却报全镐=0,
+        // 循环合成木镐直到淹死。全槽快照 (含光标/2x2/3x3/打开容器) 挂在触发沿,
+        // 下次复现直接定位镐子真实所在槽位。
+        m += " inv=[" + StorageHelper.describeInventoryRealSnapshot(mod) + "]";
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
     }

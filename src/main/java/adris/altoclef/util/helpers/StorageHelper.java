@@ -236,6 +236,57 @@ public class StorageHelper {
     }
 
     /**
+     * (2026-09-25 工具闸误判取证) 真实背包全槽快照, 一行紧凑文本。覆盖:
+     * 主背包 36 槽 (inv.main 顺序, 0-8 为热栏) + 护甲 + 副手 + 光标 +
+     * 2x2 合成格 + 打开容器的自有槽位 (工作台 3x3/熔炉等)。
+     *
+     * 背景: 20260925 15:50 溺死事故 —— bot 手持石镐挖矿, 工具闸却报
+     * hand=empty / 全镐=0, 死循环合成木镐直到淹死; 事后现场确认镐子就在
+     * 死点。现有 countItemInInventoryReal 直读 player.getInventory(),
+     * 若读 0 则镐子只可能在【计数口径外】的槽位 (光标/合成格/工作台容器)
+     * —— 本快照把这些槽全部列出, 下次复现即可定位镐子真实所在。
+     */
+    public static String describeInventoryRealSnapshot(AltoClef mod) {
+        StringBuilder sb = new StringBuilder(256);
+        try {
+            List<ItemStack> stacks = mod.getItemStorage().getItemStacksPlayerInventory(true);
+            for (int i = 0; i < stacks.size(); i++) {
+                ItemStack st = stacks.get(i);
+                if (st == null || st.isEmpty()) continue;
+                sb.append(sb.length() == 0 ? "" : ",")
+                        .append(i == 0 ? "cursor" : "s" + (i - 1))
+                        .append(':').append(st.getItem())
+                        .append('x').append(st.getCount());
+            }
+            // 2x2 合成格
+            ClientPlayerEntity player = MinecraftClient.getInstance().player;
+            if (player != null) {
+                for (PlayerSlot craftSlot : PlayerSlot.CRAFT_INPUT_SLOTS) {
+                    ItemStack st = getItemStackInSlot(craftSlot);
+                    if (st.isEmpty()) continue;
+                    sb.append(",2x2:").append(st.getItem()).append('x').append(st.getCount());
+                }
+                // 打开容器的自有槽位 (跳过玩家背包槽防双计)
+                net.minecraft.screen.ScreenHandler handler = player.currentScreenHandler;
+                if (handler != null && handler != player.playerScreenHandler) {
+                    int shown = 0;
+                    for (net.minecraft.screen.slot.Slot slot : handler.slots) {
+                        if (slot == null || slot.inventory instanceof PlayerInventory) continue;
+                        ItemStack st = slot.getStack();
+                        if (st == null || st.isEmpty()) continue;
+                        if (shown++ >= 9) { sb.append(",container:+more"); break; }
+                        sb.append(",c").append(slot.id).append(':')
+                                .append(st.getItem()).append('x').append(st.getCount());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            sb.append(",ERR:").append(t.getClass().getSimpleName());
+        }
+        return sb.length() == 0 ? "ALL_EMPTY" : sb.toString();
+    }
+
+    /**
      * (2026-09-10 横跳修复) 计数口径:【真实背包 + 护甲 + 副手 + 光标 + 当前打开
      * 容器的自有槽位(工作台 3x3/熔炉等)】。玩家自带界面时退化为旧口径
      * (含 2x2 合成格)。容器界面打开时【不可】叠用 includingCraftGrid 口径:

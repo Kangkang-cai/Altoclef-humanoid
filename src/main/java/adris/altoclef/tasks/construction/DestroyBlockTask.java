@@ -415,7 +415,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                     String m = "[ToolGate] target " + _pos.toShortString() + " ("
                             + mod.getWorld().getBlockState(_pos).getBlock() + ") needs "
                             + missingTool + "-tier tool, crafting first (player="
-                            + mod.getPlayer().getBlockPos().toShortString() + ")";
+                            + mod.getPlayer().getBlockPos().toShortString() + ")"
+                            // (2026-09-25 工具闸误判取证) 0925 溺死事故: 手持石镐却判缺镐。
+                            + " hand=" + (mod.getPlayer().getMainHandStack().isEmpty()
+                                    ? "empty" : mod.getPlayer().getMainHandStack().getItem())
+                            + " inv=[" + StorageHelper.describeInventoryRealSnapshot(mod) + "]";
                     Debug.logMessage(m);
                     Debug.logToFile("altoclef_diag.log", m);
                 }
