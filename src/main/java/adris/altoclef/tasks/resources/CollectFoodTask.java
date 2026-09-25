@@ -429,6 +429,21 @@ public class CollectFoodTask extends Task {
                     || _currentResourceTask.isFinished(mod)) {
                 _currentResourceTask = null;
                 _wanderSinceTick = -1;
+            } else if (_currentResourceTask instanceof KillAndLootTask huntTask
+                    && !mod.getEntityTracker().entityFound(huntTask.getToKillClass())) {
+                // (2026-09-25 找兔子饿死评分循环) 猎物目标已离开感知表 = KillAndLootTask
+                // 正在 "Searching for mob" 流浪探索且其探索兜底无超时 (非
+                // TimeoutWanderTask, wander 宽限永远不触发) → 下方粘性持有分支会每 tick
+                // 原样返回它, 评分循环 (584 行) 整体饿死: 感知表里的牛羊永远轮不到评分,
+                // bot 在成年牛羊贴身路过时仍死磕找兔子 (0925 16:34~16:36 实锤, 录制
+                // perception 通道 getAllPerceivedEntities 全程含 cow)。此处强制重选,
+                // 评分循环自然会把感知表里评分更高的动物排上来。
+                // 正在接近的可见猎物不受影响 (entityFound=true 不会走这条)。
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-FIX]\t[huntLost]\ttarget " + huntTask.getToKillClass().getSimpleName()
+                                + " not perceived anymore, re-picking (was " + huntTask + ")");
+                _currentResourceTask = null;
+                _wanderSinceTick = -1;
             } else {
                 Debug.logToFile("altoclef_diag.log",
                         "[FoodPick] 10s re-eval: keep running sub task " + _currentResourceTask);

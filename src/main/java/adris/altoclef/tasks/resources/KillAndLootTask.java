@@ -33,6 +33,10 @@ public class KillAndLootTask extends ResourceTask {
         _killTask = new KillEntitiesTask(_toKill);
     }
 
+    public Class<?> getToKillClass() {
+        return _toKill;
+    }
+
     @Override
     protected boolean shouldAvoidPickingUp(AltoClef mod) {
         return false;
