@@ -347,6 +347,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private final int _targetYMin;
     private final int _targetYMax;
     private int _targetY;
+    // (2026-09-25 水域撤离) 爬升机器的现行目标高度。常态恒等于 _targetY (语义与
+    // 旧行为完全一致); 仅水域撤离阶段 1 被临时改写为本轮挖掘起点高度 (见
+    // beginWaterEvacuation), 撤离收尾恢复。爬升机器 (baritone/楼梯/看门狗/
+    // reachedBottom) 全部读它, 不再直读 _targetY。
+    private int _ascendGoalY;
 
     // (2026-09-15 实例重建继承 targetY, 104100 场次实锤) 探索实例因 handoff/
     // AIRBORNE 频繁重建, 每次重建 onStart 重掷带内随机 targetY → 爬升线
@@ -429,18 +434,16 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-14 不可破坏拦截) 跳过的基岩类方块数, 用于日志节流。
     private int _unbreakableSkipped = 0;
 
-    // ==== (2026-09-10 遇水改道) 挖掘路径真的出现水 → 不再涉水直穿 ====
-    // 13:15/13:52 场次实证: 涉水直穿 → bot 在水下方块前卡死 → 下潜 → 溺水
-    // 连锁。改为: 路径真实水块累计达标 (挖开才见, 反透视合规) → 有界改道
-    // (RunAwayFromPositionTask 远离水体, 不严格避水, 任意方向) → 超时/完成后
-    // retreatAndRedig 换向回到正常挖通道。
-    private static final int WATER_DETOUR_TRIGGER_SKIPS = 2;
-    private static final double WATER_DETOUR_RUN_DISTANCE = 10.0;
-    private static final double WATER_DETOUR_TIMEOUT = 20.0;
-    private boolean _inWaterDetour = false;
-    private final TimerGame _waterDetourTimer = new TimerGame(WATER_DETOUR_TIMEOUT);
+    // ==== (2026-09-25 一遇水即换通道, 用户拍板) 挖掘路径真的出现水 → 立即换通道 ====
+    // 0925 15:48-50 溺死事故实锤 (latest.log): 旧口径 "RunAwayFromPositionTask
+    // 远离水体 10 格再换向" 的 baritone 逃逸路径本身穿水 (8.5 格烂路径 cost>3
+    // 警告), 三次 detour 全把 bot 送进水里, 最后坑底被淹死。用户定案: 一遇到水
+    // 马上换通道 (清队列+背离水源选最干方向), 不再有 RunAway 中间态; 连续 3 次
+    // 换通道都撞水 = 这片就是水域, 触发撤离: 上爬一段距离 → 水平离开几十格 →
+    // 再下挖 (见 WATER_EVAC_* 字段区)。
+    private static final int WATER_DETOUR_TRIGGER_SKIPS = 1;
     private int _lastDetourWaterMark = 0;
-    // (2026-09-22 方向选水) 最近一次在挖掘路径上撞到的水 (改道/换向时背离它用)。
+    // (2026-09-22 方向选水) 最近一次在挖掘路径上撞到的水 (换向/撤离时背离它用)。
     private BlockPos _lastWaterPos = null;
     /** 选向时沿走行线向前看这么多格统计水块 (方向选水评分)。 */
     private static final int DIR_WATER_LOOKAHEAD = 8;
@@ -449,6 +452,30 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-22 沾水粘滞) 水面浮沉让 isTouchingWater 逐 tick 翻面; 沾水后 3s 内
     // 一律按"水中"处置 (见 isWatery), 防止水中场景在 baritone 爬升/楼梯之间抖动。
     private final TimerGame _waterRecent = new TimerGame(3);
+    // 连续"换通道后仍撞水"计数 (撤离触发器, 通道切换成功不重置 —— 按用户口径
+    // 换通道失败次数累计到 3 才撤离)。
+    private static final int WATER_CHANNEL_SWITCH_LIMIT = 3;
+    private int _waterChannelSwitches = 0;
+    // 换向宽限 (原 WATER_FLOOD_GRACE_MS 语义): 换向瞬间 bot 可能仍站在湿通道里,
+    // 立刻重判会秒触发第二轮; 2s 后仍撞水才是真撞水。
+    private static final long WATER_FLOOD_GRACE_MS = 2000;
+    private long _waterFloodGraceUntilMs = 0;
+
+    // ==== (2026-09-25 水域撤离: 换通道 3 连败 → 上爬 → 水平离开几十格 → 再下挖) ====
+    // 阶段 1 上爬: 爬回本轮挖掘起点高度 (digStartY, 即当时的地表/进入面), 复用
+    //   既有爬升机器 (baritone-first + 看门狗 + 楼梯回退), 目标经 _ascendGoalY
+    //   临时改写 —— 水域在浅层时爬回 _targetY (深部矿带) 反而是往深处爬。
+    // 阶段 2 水平撤离: 背离水源方向走 40~64 格 (地表行走 baritone 自然避水),
+    //   120s 看门狗兜底 (到不了就原地重开)。
+    // 收尾: 换通道计数清零, 从当前位置重开楼梯下挖, 本任务继续存活。
+    private static final int WATER_EVAC_ASCEND_MIN_GAIN = 12;
+    private static final int WATER_EVAC_TRAVEL_MIN = 40;
+    private static final int WATER_EVAC_TRAVEL_MAX = 64;
+    private static final double WATER_EVAC_TRAVEL_TIMEOUT = 120.0;
+    /** 0=无撤离, 1=上爬中, 2=水平撤离中。 */
+    private int _waterEvacPhase = 0;
+    private Task _waterEvacTask = null;
+    private final TimerGame _waterEvacTravelTimer = new TimerGame(WATER_EVAC_TRAVEL_TIMEOUT);
 
     // ==== (2026-09-23 通道灌水感知) 流动水灌入【已挖开的干通道】= 1 次即后撤换向 ====
     // skipAirAndWater 的水判据只扫【挖掘队列队首】(几何路径上即将挖的格): 挖开方块
@@ -470,12 +497,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     };
     private static final long NEAR_FLOOD_SCAN_INTERVAL_MS = 100;
     private long _lastNearFloodScanMs = 0;
-    // 撤完换向的宽限 (同 LAVA_SIGHT_GRACE_MS 同构): RunAway 结束瞬间 bot 可能还站在
-    // 湿通道里 (10 格没跑够/超时), 或新方向第一格旁还有残水, 立刻重判会秒触发第二
-    // 轮 detour。宽限 2s 让 retreatAndRedig 换向/几何重置先跑; 2s 后仍被淹再触发是
-    // 正确的 (说明真没撤出去)。
-    private static final long WATER_FLOOD_GRACE_MS = 2000;
-    private long _waterFloodGraceUntilMs = 0;
+    // (撤完换向的宽限已并入上方 2026-09-25 字段区的 WATER_FLOOD_GRACE_MS)
 
     // ==== (2026-09-14 遇岩浆弃道) 岩浆不能按水处置, 见一次立刻换通道 ====
     // 背景 (代码考古): 本类此前完全没有 lava 概念, skipAirAndWater 里的 isWater()
@@ -663,6 +685,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _targetY = _targetYMin + (int) (Math.random() * (_targetYMax - _targetYMin + 1));
         }
         _lastRolledTargetY = _targetY;
+        // (2026-09-25 水域撤离) 爬升目标常态 = _targetY, 语义与旧直读一致。
+        _ascendGoalY = _targetY;
+        _waterChannelSwitches = 0;
+        _waterEvacPhase = 0;
+        _waterEvacTask = null;
         _digStart = mod.getPlayer().getBlockPos().down();
         _step = 0;
         _realDigs = 0;
@@ -852,13 +879,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _subTask = null;
         _miningTarget = null;
         _digQueue.clear();
-        _baritoneAscentTask = new GetToYTask(_targetY);
+        _baritoneAscentTask = new GetToYTask(_ascendGoalY);
         _baritoneAscentBestY = mod.getPlayer().getBlockPos().getY();
         _baritoneAscentStall.reset();
-        Debug.logMessage("[MineDown] " + reason + ": climbing back to y=" + _targetY
+        Debug.logMessage("[MineDown] " + reason + ": climbing back to y=" + _ascendGoalY
                 + " via baritone first (staircase = watchdog fallback).");
         Debug.logToFile("altoclef_diag.log", "[MineDown-BaritoneAscent] engage (" + reason + ") at "
-                + mod.getPlayer().getBlockPos().toShortString() + " targetY=" + _targetY + ".");
+                + mod.getPlayer().getBlockPos().toShortString() + " targetY=" + _ascendGoalY + ".");
     }
 
     /**
@@ -872,6 +899,13 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      *   false, 父层不再重建。
      */
     private void resumeTunnelAfterAscent(AltoClef mod) {
+        // (2026-09-25 水域撤离) 撤离阶段 1 的爬升到此收口 → 转水平撤离, 不续挖隧道。
+        if (_waterEvacPhase == 1) {
+            _baritoneAscent = false;
+            _baritoneAscentTask = null;
+            enterWaterTravelPhase(mod);
+            return;
+        }
         _baritoneAscent = false;
         _baritoneAscentTask = null;
         _ascendMode = false;
@@ -902,7 +936,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _skipStreak = 0;
         _digQueue.clear();
         enqueueNextStep();
-        String m = "[MineDown-AscentResume] 爬回到 y=" + _targetY
+        String m = "[MineDown-AscentResume] 爬回到 y=" + _ascendGoalY
                 + ", 原地切回隧道续挖 (realDigs=" + _realDigs + ", dir=(" + _dirX + "," + _dirZ
                 + ")) at " + _digStart.toShortString() + ".";
         Debug.logMessage(m);
@@ -912,11 +946,31 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected Task onTick(AltoClef mod) {
 
+        // (2026-09-25 水域撤离两阶段) 放在最顶上: 撤离期间其他守卫/几何推进全部让路。
+        // 阶段 1 上爬: 到线 + 落地 + 出水 → 转阶段 2 (baritone 爬升路径由
+        //   resumeTunnelAfterAscent 收口, 楼梯路径由本检查收口 —— 两路都到这)。
+        // 阶段 2 水平撤离: 交 GetToBlockTask 行走, 完成或看门狗超时 → 收尾重开下挖。
+        if (_waterEvacPhase == 1 && mod.getPlayer().getBlockPos().getY() >= _ascendGoalY
+                && isPlayerGrounded(mod) && !isWatery(mod)) {
+            enterWaterTravelPhase(mod);
+        }
+        if (_waterEvacPhase == 2) {
+            if (_waterEvacTask != null && !_waterEvacTask.isFinished(mod)
+                    && !_waterEvacTravelTimer.elapsed()) {
+                setDebugState("Water evacuation: traveling away from flooded area (watchdog "
+                        + (int) WATER_EVAC_TRAVEL_TIMEOUT + "s)");
+                return _waterEvacTask;
+            }
+            finishWaterEvacuation(mod);
+            return null;
+        }
+
         // (2026-09-05 下界基岩层逃生, 用户"挖下界金矿一路往下挖被基岩挡在 y≈5") 任务
         // 进行中若玩家已压到基岩层附近 (下界基岩顶面 y=4), 立即切上行模式: 清空当前
         // 向下队列, 换随机水平方向, 45° 楼梯向上挖回目标高度, 然后任务自然结束,
         // 由父任务以隧道平挖模式继续在目标高度探索。
-        if (_nether && !_ascendMode && !_baritoneAscent
+        // (2026-09-25) 撤离阶段让路: 撤离爬升用自己的目标 (_ascendGoalY), 不吃这里的重置。
+        if (_nether && !_ascendMode && !_baritoneAscent && _waterEvacPhase == 0
                 && mod.getPlayer().getBlockPos().getY() <= NETHER_ESCAPE_Y) {
             _tunnelMode = false;
             _inCave = false;
@@ -970,6 +1024,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // ascendTriggerY(): 开局判定需要缓冲防抖动, 这里是已经跑偏的事实纠正, 不必
         // 再等 2 格 —— 玩家在 TUNNEL_MIN_Y 以下就该马上开始爬。
         if (!_nether && !_ascendMode && !_baritoneAscent && _ceilingStepUp == null
+                && _waterEvacPhase == 0
                 && mod.getPlayer().getBlockPos().getY() < tunnelFloorY()) {
             _tunnelMode = false;
             _inCave = false;
@@ -1017,7 +1072,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             // (2026-09-17 落地判据) 半空 y==targetY 不算到顶: 2 格高隧道里 bot 只能
             // 靠跳瞬时够线, 空中 resume 曾把续挖隧道重锚到 floor−1 再触门控 (死循环
             // 链第 2 环)。空中只等落地, 不 resume、不积累看门狗。
-            if (y < _targetY || !grounded) {
+            if (y < _ascendGoalY || !grounded) {
                 if (grounded) {
                     if (y > _baritoneAscentBestY) {
                         if (y - _baritoneAscentBestY >= BARITONE_ASCENT_STALL_MIN_GAIN) {
@@ -1048,7 +1103,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             // 水中不再重挂 baritone, 立即走与看门狗超时同款的楼梯回退。
                             if (isWatery(mod)) {
                                 String m = "[MineDown-AscentFallback] baritone 爬升自认完成但落回水中 (y="
-                                        + y + ", target " + _targetY + ") at "
+                                        + y + ", target " + _ascendGoalY + ") at "
                                         + mod.getPlayer().getBlockPos().toShortString()
                                         + " -> 回退自写 45° 楼梯 (水中 baritone 重挂即 thrash)";
                                 Debug.logMessage(m);
@@ -1059,14 +1114,14 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                                 retreatAndRedig(mod);
                                 return null;
                             }
-                            _baritoneAscentTask = new GetToYTask(_targetY);
+                            _baritoneAscentTask = new GetToYTask(_ascendGoalY);
                         }
-                        setDebugState("Climbing back to y=" + _targetY + " via baritone (stall watchdog "
+                        setDebugState("Climbing back to y=" + _ascendGoalY + " via baritone (stall watchdog "
                                 + BARITONE_ASCENT_STALL_SECONDS + "s)");
                         return _baritoneAscentTask;
                     }
                 } else {
-                    setDebugState("Climbing to y=" + _targetY + " (airborne, waiting to land)");
+                    setDebugState("Climbing to y=" + _ascendGoalY + " (airborne, waiting to land)");
                     if (_baritoneAscentTask != null && !_baritoneAscentTask.isFinished(mod)) {
                         return _baritoneAscentTask;
                     }
@@ -1170,53 +1225,33 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         }
 
         // (2026-09-23 通道灌水感知) 水灌进【已挖开的干通道】(贴身/头行/走行线前探,
-        // 且该格在自挖记忆里) → 1 次即后撤换向, 不再等队首累计 2 次 —— 灌入的水占据
+        // 且该格在自挖记忆里) → 1 次即换通道, 不再等队首累计 —— 灌入的水占据
         // 的是已出队格子, skipAirAndWater 永远扫不到 (见字段区注释)。
-        // 门控与岩浆守卫同口径, 外加 !_inWaterDetour: 探索态洞内涉水是常态(baritone
-        // 自行导航); 上行模式本就是"从水里爬回去"(isWatery engage ascend), 贴身水
-        // 预期内, 触发后撤会与爬升互打; 下行楼梯/平挖隧道为保护场景。岩浆命中当 tick
+        // 门控与岩浆守卫同口径: 探索态洞内涉水是常态(baritone 自行导航);
+        // 上行模式本就是"从水里爬回去"(isWatery engage ascend), 贴身水
+        // 预期内, 触发换向会与爬升互打; 下行楼梯/平挖隧道为保护场景。岩浆命中当 tick
         // 已置 _inLavaDetour, 本块自动让路 (isFloodWater 也另显式排除岩浆)。
-        if (!_inCave && !_inLavaDetour && !_inWaterDetour && !_lavaGiveUp
-                && !_ascendMode && !_baritoneAscent) {
+        if (!_inCave && !_inLavaDetour && !_lavaGiveUp
+                && !_ascendMode && !_baritoneAscent && _waterEvacPhase == 0) {
             BlockPos flooded = findFloodedTunnelWater(mod);
             if (flooded != null) {
-                // (2026-09-22 方向选水) 记下水点, 撤完 retreatAndRedig 背离它 + 选干方向。
-                _lastWaterPos = flooded.toImmutable();
-                startWaterDetour(mod, flooded, "tunnel-flooded");
                 String m = "[MineDown-WaterFlood] 自挖通道被水灌入 at " + flooded.toShortString()
-                        + " -> 立即后撤换向 (player="
+                        + " -> 立即换通道 (player="
                         + mod.getPlayer().getBlockPos().toShortString()
                         + ", mode=" + (_tunnelMode ? "tunnel" : "staircase") + ")";
+                startWaterChannelSwitch(mod, flooded, "tunnel-flooded");
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
-                // 同 tick 即接管移动: 不让后续几何推进/DestroyBlockTask 派发再往淹水区迈一步。
+                // 同 tick 即接管: startWaterChannelSwitch 已清队列换向/或触发撤离,
+                // 不让后续几何推进/DestroyBlockTask 派发再往淹水区迈一步。
                 return _subTask;
             }
         }
 
-        // (2026-09-10 遇水改道) 有界改道探索: 远离水体一轮, 结束后换向重挖。
-        // 放在洞穴探索之前——水是当前挖掘路径的直接危险源, 优先于洞穴分心。
-        if (_inWaterDetour) {
-            if (_subTask != null && !_subTask.isFinished(mod) && !_waterDetourTimer.elapsed()) {
-                setDebugState("Water detour: moving away from flooded dig path");
-                return _subTask;
-            }
-            Debug.logMessage("[MineDown-WaterDetour] detour "
-                    + (_waterDetourTimer.elapsed() ? "timed out" : "finished")
-                    + ", retreating to a fresh direction.");
-            Debug.logToFile("altoclef_diag.log", "[MineDown-WaterDetour] detour done at "
-                    + mod.getPlayer().getBlockPos().toShortString() + ", retreatAndRedig.");
-            _inWaterDetour = false;
-            _subTask = null;
-            // (2026-09-23 通道灌水感知) 撤完换向后给灌水检测一个宽限: 收尾瞬间 bot
-            // 可能仍站在湿通道里 (RunAway 没跑够/超时), 立刻重判会秒触发第二轮改道。
-            _waterFloodGraceUntilMs = System.currentTimeMillis() + WATER_FLOOD_GRACE_MS;
-            // (2026-09-22 方向选水) 带上水源位置: 换向不仅排除原方向/逆方向,
-            // 还排除朝向水源的方向 + 按"走行线水块数"选最干方向。旧行为只保证
-            // "换个随机方向" —— 三面环水时新方向大概率还是扎进水里, 挖 2 格
-            // 又触发改道, 循环烧时间。
-            retreatAndRedig(mod, _lastWaterPos);
-        }
+        // (2026-09-10 遇水改道 → 2026-09-25 重做) 原"RunAway 远离水体一轮再换向"
+        // 已删: 0925 15:49 实锤 baritone 逃逸路径本身穿水, 三次 detour 全把 bot
+        // 送进水里。现在两种水感知 (队首累计 1 次 / 通道灌水 1 次) 都直接进
+        // startWaterChannelSwitch —— 立即换通道, 3 连败触发撤离 (见字段区)。
 
         if (_inCave) {
             // We found a cave while digging: prefer exploring inside it.
@@ -2010,30 +2045,153 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         }
-        // (2026-09-10 遇水改道) 路径真实水块累计达标 → 有界改道一轮。
+        // (2026-09-25 一遇水即换通道) 路径真实水块第 1 次出现 → 立即换通道。
         if (_waterSkipped - _lastDetourWaterMark >= WATER_DETOUR_TRIGGER_SKIPS) {
-            startWaterDetour(mod, pos, "queue-head");
+            startWaterChannelSwitch(mod, pos, "queue-head");
         }
     }
 
     /**
-     * (2026-09-23 通道灌水感知) 两条触发口径共用同一个改道动作:
-     *   queue-head     = 队首待挖格是水, 累计 2 次 (09-10 原有, logWaterEncounter);
+     * (2026-09-25 一遇水即换通道, 用户拍板) 两条触发口径共用同一个换通道动作:
+     *   queue-head     = 队首待挖格是水, 第 1 次即触发 (原累计 2 次 + RunAway, 已废);
      *   tunnel-flooded = 水灌进【已挖开的自挖通道】, 1 次即触发 (09-23 新增,
      *                    findFloodedTunnelWater)。
-     * 幂等: 已在改道中不重置计时器/撤离目标 (同 abandonTunnelForLava 口径)。
+     *
+     * 动作 (原 RunAwayFromPositionTask 已删): 不再派逃逸移动 —— 0925 15:49 实锤
+     * baritone 逃逸路径本身穿水 (8.5 格 cost>3 烂路径), 三次 detour 全把 bot 送进
+     * 水里。现在直接清队列 + 背离水源选最干方向 (retreatAndRedig), bot 站在原地
+     * 换个方向重新下挖, 一步都不往水里迈。
+     *
+     * 撤离触发: 连续 WATER_CHANNEL_SWITCH_LIMIT(3) 次换通道都撞水 = 这片就是水域
+     * → beginWaterEvacuation (上爬一段 → 水平离开几十格 → 再下挖)。
      */
-    private void startWaterDetour(AltoClef mod, BlockPos pos, String cause) {
-        if (_inWaterDetour) return;
+    private void startWaterChannelSwitch(AltoClef mod, BlockPos pos, String cause) {
+        // (撤离中不计数不换向) 阶段 1 楼梯上爬本身可能经过湿通道, 队首水感知照常
+        // 打点 (_waterSkipped) 但不能再触发换向/撤离 —— 否则撤离被自己重启。
+        if (_waterEvacPhase != 0) return;
+        _lastWaterPos = pos.toImmutable();
         _lastDetourWaterMark = _waterSkipped;
-        _inWaterDetour = true;
-        _waterDetourTimer.reset();
-        _subTask = new RunAwayFromPositionTask(WATER_DETOUR_RUN_DISTANCE, pos.toImmutable());
-        String m = "[MineDown-WaterDetour] (" + cause + ") -> detour away from "
-                + pos.toShortString() + " (water skipped total " + _waterSkipped
-                + ", run " + (int) WATER_DETOUR_RUN_DISTANCE + " blocks, max "
-                + (int) WATER_DETOUR_TIMEOUT + "s)"
-                + " player=" + mod.getPlayer().getBlockPos().toShortString();
+        _waterChannelSwitches++;
+        // 换向宽限: bot 可能仍站在湿通道里, 立刻重判会秒触发第二轮。
+        _waterFloodGraceUntilMs = System.currentTimeMillis() + WATER_FLOOD_GRACE_MS;
+        String base = "[MineDown-WaterSwitch] (" + cause + ") water at "
+                + pos.toShortString() + " (water skipped total " + _waterSkipped + ")"
+                + " player=" + mod.getPlayer().getBlockPos().toShortString()
+                + " switch=" + _waterChannelSwitches + "/" + WATER_CHANNEL_SWITCH_LIMIT;
+        if (_waterChannelSwitches >= WATER_CHANNEL_SWITCH_LIMIT) {
+            Debug.logMessage(base + " -> 换通道 3 连败, 触发水域撤离 (上爬+水平远离+再下挖)");
+            Debug.logToFile("altoclef_diag.log", base + " -> evacuate");
+            beginWaterEvacuation(mod);
+            return;
+        }
+        Debug.logMessage(base + " -> 立即换通道 (背离水源选最干方向)");
+        Debug.logToFile("altoclef_diag.log", base + " -> retreatAndRedig");
+        _inCave = false;
+        _subTask = null;
+        retreatAndRedig(mod, _lastWaterPos);
+    }
+
+    // ==================== (2026-09-25 水域撤离两阶段) ====================
+
+    /**
+     * 撤离阶段 0→1: 换通道 3 连败, 弃水域。清空挖掘状态, 爬回本轮挖掘起点高度
+     * (_digStartY, 当时进入挖掘的地表/入口面 —— 水域在浅层时爬回 _targetY 矿带
+     * 反而是往深处爬)。爬升复用既有机器: 干处 baritone-first (看门狗 20s 兜底
+     * 楼梯), 水中直接 45° 楼梯 (水中 baritone 垂直爬升无解, 见 09-15 实锤)。
+     */
+    private void beginWaterEvacuation(AltoClef mod) {
+        _digQueue.clear();
+        _step = 0;
+        _skipStreak = 0;
+        _miningTarget = null;
+        _subTask = null;
+        _inCave = false;
+        _tunnelMode = false;
+        _caveExploreCooldownSteps = 0;
+        _waterEvacPhase = 1;
+        _waterEvacTask = null;
+        _waterEvacTravelTimer.reset();
+        // 上爬目标: 本轮挖掘起点高度; 已在起点之上就至少再爬 MIN_GAIN 格 (防原地)。
+        _ascendGoalY = Math.max(_digStart.getY(),
+                mod.getPlayer().getBlockPos().getY() + WATER_EVAC_ASCEND_MIN_GAIN);
+        if (isWatery(mod)) {
+            _ascendMode = true;
+            retreatAndRedig(mod);
+            Debug.logMessage("[MineDown-WaterEvac] 水中撤离上爬: 直接 45° 楼梯爬到 y="
+                    + _ascendGoalY + " (水中 baritone 垂直爬升无解)");
+        } else {
+            enterBaritoneAscent(mod, "water evacuation ascend (after "
+                    + WATER_CHANNEL_SWITCH_LIMIT + " failed channel switches)");
+        }
+        Debug.logToFile("altoclef_diag.log", "[MineDown-WaterEvac] phase=1 ascend to y="
+                + _ascendGoalY + " at " + mod.getPlayer().getBlockPos().toShortString());
+    }
+
+    /**
+     * 撤离阶段 1→2: 爬升到位 (baritone 路径在 resumeTunnelAfterAscent 收口,
+     * 楼梯路径由 onTick 阶段检查收口) → 选背离水源的水平目标 40~64 格, 交
+     * baritone 地表行走 (自然避水)。120s 看门狗兜底。
+     */
+    private void enterWaterTravelPhase(AltoClef mod) {
+        _waterEvacPhase = 2;
+        _waterEvacTravelTimer.reset();
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        // 方向: 背离最近水源; 4 个 cardinal 里选, 全朝向水源就随机兜底。
+        int[] dir = null;
+        for (int[] cand : TUNNEL_DIRS) {
+            if (!pointsToward(feet, cand, _lastWaterPos)) {
+                dir = cand;
+                break;
+            }
+        }
+        if (dir == null) {
+            dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        }
+        int dist = WATER_EVAC_TRAVEL_MIN
+                + (int) (Math.random() * (WATER_EVAC_TRAVEL_MAX - WATER_EVAC_TRAVEL_MIN + 1));
+        BlockPos target = feet.add(dir[0] * dist, 0, dir[1] * dist);
+        _waterEvacTask = new GetToBlockTask(target);
+        String m = "[MineDown-WaterEvac] phase=2 水平撤离 " + dist + " 格 -> "
+                + target.toShortString() + " (水源=" + (_lastWaterPos != null
+                ? _lastWaterPos.toShortString() : "?") + ", watchdog "
+                + (int) WATER_EVAC_TRAVEL_TIMEOUT + "s)";
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * 撤离阶段 2→收尾: 到达水平目标 (或看门狗超时/任务不可用) → 计数清零,
+     * 从当前位置重开楼梯下挖, 本任务继续存活。
+     */
+    private void finishWaterEvacuation(AltoClef mod) {
+        boolean timedOut = _waterEvacTravelTimer.elapsed();
+        _waterEvacPhase = 0;
+        _waterEvacTask = null;
+        _waterChannelSwitches = 0;
+        _ascendGoalY = _targetY;
+        _ascendMode = false;
+        _baritoneAscent = false;
+        _baritoneAscentTask = null;
+        _inCave = false;
+        _tunnelMode = false;
+        _subTask = null;
+        _miningTarget = null;
+        _step = 0;
+        _skipStreak = 0;
+        _digQueue.clear();
+        _digStart = mod.getPlayer().getBlockPos();
+        int[] dir = pickDriestDir(mod, _digStart,
+                new int[]{_dirX, _dirZ}, new int[]{-_dirX, -_dirZ}, _lastWaterPos);
+        if (dir == null) {
+            dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
+        }
+        _dirX = dir[0];
+        _dirZ = dir[1];
+        rememberTunnelDir(_dirX, _dirZ);
+        enqueueNextStep();
+        String m = "[MineDown-WaterEvac] 撤离" + (timedOut ? "超时收尾" : "完成")
+                + " at " + _digStart.toShortString()
+                + ", 换通道计数清零, 重开楼梯下挖 dir=(" + _dirX + "," + _dirZ + ")";
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
     }
@@ -2153,9 +2311,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-17 落地判据, 20260917-183338 实锤) 半空瞬时到线曾被判"到顶" →
         // isFinished TRUE → 父层重建/resume 空中重锚 → floor 门控再 engage 死循环。
         // 到线必须落地才算 (与 ITaskRequiresGrounded 同口径)。
-        if (_baritoneAscent) return mod.getPlayer().getBlockPos().getY() >= _targetY && isPlayerGrounded(mod);
+        if (_baritoneAscent) return mod.getPlayer().getBlockPos().getY() >= _ascendGoalY && isPlayerGrounded(mod);
         // (2026-09-05 下界基岩层逃生) 上行模式: 爬回目标高度即完成 (同上, 落地才算)。
-        if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _targetY && isPlayerGrounded(mod);
+        if (_ascendMode) return mod.getPlayer().getBlockPos().getY() >= _ascendGoalY && isPlayerGrounded(mod);
         // FIX (task ping-pong): use the player's ACTUAL Y, not the old
         // `_digStart.getY() - _step` formula. The step counter increments even
         // when the step's blocks were ALREADY air (re-entering a previously dug
@@ -2279,13 +2437,20 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static BlockPos _lastFireAnchor;
     public boolean isExploringCave() { return _inCave; }
     /**
-     * (2026-09-13 遇水改道交接) 交接闸门用 —— "正在遇水改道" 与 "正在探洞" 一样
-     * 是必须被保护的中途状态。旧闸门只看 isExploringCave()，而改道期间 _inCave=false
+     * (2026-09-13 遇水改道交接) 交接闸门用 —— "正在遇水反应" 与 "正在探洞" 一样
+     * 是必须被保护的中途状态。旧闸门只看 isExploringCave()，而换通道期间 _inCave=false
      * → 闸门判"上一个探索已结束" → 丢弃实例重建 → onStart 把方向强制回常量
      * STAIR_DIR_X(1)/STAIR_DIR_Z(0)、水计数归零 → 沿原轨迹重挖撞同一片水。
      * 09-13 16:38 实锤: 4 轮改道全锁在 x=71~91 / y=54~64 / z=-470~-480 这 20 格内。
+     *
+     * (2026-09-25 口径更新, RunAway 改道已删) 现在的"水中途状态" = 换通道宽限期内
+     * (刚换向, 方向/几何刚重置, 重建会丢) 或水域撤离两阶段进行中 (上爬/水平远离,
+     * 重建会把 bot 扔回水域)。
      */
-    public boolean isInWaterDetour() { return _inWaterDetour; }
+    public boolean isInWaterDetour() {
+        return _waterEvacPhase != 0
+                || System.currentTimeMillis() < _waterFloodGraceUntilMs;
+    }
     public boolean isNetherTask() { return _nether; }
     public static BlockPos getLastFireAnchor() { return _lastFireAnchor; }
 
@@ -2926,6 +3091,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (2026-09-25 水域撤离) 撤离期间本任务对父层"未完成": 楼梯爬升到位瞬间
+        // reachedBottom 会翻 true, 若不拦截父层会重建实例丢掉撤离计划 (水平
+        // 远离几十格永不发生)。撤离收尾由 onTick 阶段机自理, 与父层无关。
+        if (_waterEvacPhase != 0) return false;
         // FIX (stuck bug): once we've hit the bottom the shaft's job is done.
         // Requiring an empty queue here could deadlock the task (and the bot)
         // forever when leftover blocks remained from an interrupted final step.
