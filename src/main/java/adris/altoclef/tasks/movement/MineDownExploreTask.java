@@ -445,10 +445,18 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _lastDetourWaterMark = 0;
     // (2026-09-22 方向选水) 最近一次在挖掘路径上撞到的水 (换向/撤离时背离它用)。
     private BlockPos _lastWaterPos = null;
-    /** 选向时沿走行线向前看这么多格统计水块 (方向选水评分)。 */
-    private static final int DIR_WATER_LOOKAHEAD = 8;
-    /** 记忆方向走行线水块数超过该值 → "方向被水封死", 放弃粘滞改选最干方向。 */
-    private static final int DIR_WATER_STICKY_MAX = 2;
+    /**
+     * 选向时沿走行线向前看这么多格统计水块 (方向选水评分)。
+     * (2026-09-25 二修) 8→12: 配合走廊扫描 (±2 宽 × 脚下 2 层), 湖泊片状水域
+     * 要在换向前就看见, 8 格走行线本体在湖边全是假阴性。
+     */
+    private static final int DIR_WATER_LOOKAHEAD = 12;
+    /**
+     * 记忆方向走廊水块数超过该值 → "方向被水封死", 放弃粘滞改选最干方向。
+     * (2026-09-25 二修) 旧 2/8 格 (25%) 是一维走行线口径; 走廊扫描 = 12 步 ×
+     * 5 宽 × 2 层 = 120 格, 同比例 25% ≈ 30, 口径对齐。
+     */
+    private static final int DIR_WATER_STICKY_MAX = 30;
     // (2026-09-22 沾水粘滞) 水面浮沉让 isTouchingWater 逐 tick 翻面; 沾水后 3s 内
     // 一律按"水中"处置 (见 isWatery), 防止水中场景在 baritone 爬升/楼梯之间抖动。
     private final TimerGame _waterRecent = new TimerGame(3);
@@ -673,7 +681,20 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 仍走完整重置, 保留死亡/传送后的自愈能力。
         boolean dimChanged = _startedOnce
                 && _nether != (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER);
-        if (_startedOnce && _inCave && !dimChanged) {
+        // (2026-09-25 二修: 撤离状态幸存) _inCave 之外, 水域撤离 (_waterEvacPhase!=0)
+        // 也必须原样续跑。0925 20:01 实锤链路: 撤离 phase=2 水平撤离刚起步 (20:01:22,
+        // 目标 -176,72,175) → 20:01:24 MLG Water Bucket Fall Chain 抢权打断
+        // ("Chain Interrupted: User Tasks by MLG...", 落水瞬间正常防护) → 20:01:25
+        // 归还控制权时 SingleTaskChain.onTick 对 _mainTask.reset() → onStart 二次
+        // 进入 → 全量重置把 _waterEvacPhase 打回 0、换通道计数清零 → 51 格水平撤离
+        // 一步没走就被丢掉, 原地重开 1/3→3/3 再撤离, 死循环。链中断本身只 interrupt
+        // 不销毁实例 (SingleTaskChain.onInterrupt 注释), 实例字段都还在 —— 守卫
+        // 放行即可续跑。防死亡/传送残留: 只在玩家仍距 _digStart 128 格内时才续,
+        // 瞬移到远处则走完整重置自愈。
+        if (_startedOnce && !dimChanged
+                && (_inCave
+                    || (_waterEvacPhase != 0
+                        && mod.getPlayer().getBlockPos().isWithinDistance(_digStart, 128)))) {
             return;
         }
         _startedOnce = true;
@@ -786,15 +807,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             int[] dir;
             if (hasLastTunnelDir()) {
                 dir = new int[]{_lastTunnelDirX, _lastTunnelDirZ};
-                // (2026-09-22 方向选水) 记忆方向走行线被水封死 (前看 8 格水块 > 2)
-                // → 放弃粘滞, 在其余方向 (排除回头) 里选最干的。三面环水时新实例
-                // 不再一头续挖进水里, 挖 2 格又触发改道。
+                // (2026-09-22 方向选水) 记忆方向走廊被水封死 → 放弃粘滞, 在其余方向
+                // (排除回头) 里选最干的。三面环水时新实例不再一头续挖进水里。
+                // (2026-09-25 二修) 评扫描口径: 走廊 12×5×2=120 格, 阈值同比例放大。
                 int w = countWaterAhead(mod, mod.getPlayer().getBlockPos(), dir);
                 if (w > DIR_WATER_STICKY_MAX) {
                     int[] drier = pickDriestDir(mod, mod.getPlayer().getBlockPos(), null,
                             new int[]{-dir[0], -dir[1]}, null);
                     String m = "[MineDown-DirWater] 记忆方向 (" + dir[0] + "," + dir[1]
-                            + ") 走行线水块 " + w + "/" + DIR_WATER_LOOKAHEAD
+                            + ") 走廊水块 " + w + "/" + (DIR_WATER_LOOKAHEAD * 10)
                             + " > " + DIR_WATER_STICKY_MAX + " -> 弃粘滞换最干方向 ("
                             + (drier == null ? "无合法方向, 保底随机" : drier[0] + "," + drier[1]) + ")";
                     Debug.logMessage(m);
@@ -1611,10 +1632,15 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     }
 
     /**
-     * (2026-09-22 方向选水) 统计 dir 方向前 DIR_WATER_LOOKAHEAD 格走行线上的水块数。
-     * 走行线取 from 沿 dir 的水平推进 (与隧道 ground 同源: ground.y = from.y;
-     * 上行楼梯用脚 y 评也够 —— 满区水时低层水就是洪泛区的一致代理)。
-     * 区块未加载视为干 (无法预知, 与 isUnbreakable 同口径)。
+     * (2026-09-22 方向选水) 统计 dir 方向前 DIR_WATER_LOOKAHEAD 格的水块数。
+     *
+     * (2026-09-25 二修: 一维走行线 → 二维走廊) 0925 20:00 湖边实锤: 换通道 5 格
+     * 又贴水 —— 旧版只数走行线本体上 8 格的水, 而湖泊是【片状】水域, 走行线
+     * 本体可以是干的、旁边 3 格就是湖, 挖两步通道灌水。改为走廊扫描: 每步检查
+     * 走行线格 + 两侧垂直 ±2 格, 各查本层与脚下一层 (地表场景水在脚层; 地下场景
+     * 灌进通道的水在行事线层)。成本: 4 方向 × 12 步 × 5 宽 × 2 层 = 480 次
+     * getBlockState —— 直接内存读, 不碰 baritone/trackBlock (性能红线不涉及),
+     * 且只在换通道/撤离选向的离散事件里跑, 不在每 tick 路径上。
      */
     private int countWaterAhead(AltoClef mod, BlockPos from, int[] dir) {
         int water = 0;
@@ -1622,7 +1648,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         for (int i = 0; i < DIR_WATER_LOOKAHEAD; i++) {
             p = p.add(dir[0], 0, dir[1]);
             if (!mod.getChunkTracker().isChunkLoaded(p)) break;
-            if (isWater(mod, p)) water++;
+            // (dir[1], -dir[0]) 是 dir 的垂直向量; s=0 即走行线本体。
+            for (int s = -2; s <= 2; s++) {
+                BlockPos q = p.add(dir[1] * s, 0, -dir[0] * s);
+                if (isWater(mod, q) || isWater(mod, q.down())) water++;
+            }
         }
         return water;
     }
@@ -2114,6 +2144,19 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 上爬目标: 本轮挖掘起点高度; 已在起点之上就至少再爬 MIN_GAIN 格 (防原地)。
         _ascendGoalY = Math.max(_digStart.getY(),
                 mod.getPlayer().getBlockPos().getY() + WATER_EVAC_ASCEND_MIN_GAIN);
+        // (2026-09-25 二修: 地表撤离跳过爬高) 玩家已在本轮挖掘起点高度或之上 =
+        // 本来就在地表 (0925 20:01 实锤: 湖边 y≈62 触发撤离, _digStart 也在地表)。
+        // 此时"+12 格爬升"的目标是半空 —— 平地上没有东西可爬, baritone 硬爬的结果
+        // 就是"爬向空气"→ 摔落 → MLG 抢权 → 撤离被打断 (三连后果全在这场日志里)。
+        // 地表撤离的正确动作只有一个: 直接水平离开。爬高只服务"地下被淹往回爬"
+        // (玩家低于 _digStart, 如 15:50 溺死那种竖井), 那条路保留不动。
+        if (mod.getPlayer().getBlockPos().getY() >= _digStart.getY()) {
+            Debug.logMessage("[MineDown-WaterEvac] 已在挖掘起点高度 (player y="
+                    + mod.getPlayer().getBlockPos().getY() + " >= digStart y=" + _digStart.getY()
+                    + "), 地表撤离跳过爬高, 直接水平离开");
+            enterWaterTravelPhase(mod);
+            return;
+        }
         if (isWatery(mod)) {
             _ascendMode = true;
             retreatAndRedig(mod);
