@@ -321,10 +321,16 @@ public class Settings implements IFailableConfigFile {
      * 实测 (2026-09-07 11:47-11:48 latest.log): 深板岩铁富集区 8 格内永远有生铁,
      * 贪婪批次目标=1 挖完一处即释放, 8s 通用冷却挡不住 "每 ~8s 整链拆一次去下界
      * 任务"的乒乓 (61s 内互抢 14 次), 燧石链每次重开重选砂砾, 净进度≈0。
-     * 此阶段把冷却放大 (默认 45) = 保留低频顺手挖矿, 给燧石链连续挖掘窗口。
-     * 普通阶段 (铁套/钻石收集等) 仍用 8s, 不受本项影响。
+     * 此阶段把冷却放大 = 保留低频顺手挖矿, 给燧石链连续挖掘窗口。
+     * 普通阶段 (铁套/钻石收集等) 仍用 3s, 不受本项影响。
+     * <p>
+     * (2026-09-25 用户拍板 45→10) 实例 20260925-112204: preNether 阶段 45s 一查,
+     * 8 格暴露矿感知窗口频繁整段错过 (diag: [GreedyOre] check 全是 vis=0->skip,
+     * 唯一 11:54:58 vis=2 即 TRIGGER 挖到 +7)。当年乒乓根因是"批次目标=1 挖完
+     * 2-4s 即释放", 现 CollectVisibleOresTask 已有 engaged 锁死+掉落宽限保护,
+     * 10s 乒乓风险可控。
      */
-    private int preNetherGreedyCooldownSeconds = 45;
+    private int preNetherGreedyCooldownSeconds = 10;
 
     /**
      * (2026-09-07 击杀超时兜底, 用户"蜘蛛躲在暗处 bot 傻傻对准, 必须绕路才能
