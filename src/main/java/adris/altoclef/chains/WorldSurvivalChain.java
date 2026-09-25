@@ -10,13 +10,16 @@ import adris.altoclef.tasks.construction.PutOutFireTask;
 import adris.altoclef.tasks.misc.DrinkFireResPotionTask;
 import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.tasks.resources.TradeWithPiglinsTask;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
@@ -150,6 +153,28 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 没跑, 卡死 "Waiting for recipe book click" → 半成品: 4 木板留 2x2 格 +
     // 合成台留输出格, 整场未清。铁律: "返回任务"≠"任务会跑完", 侧线任务必须续租。
     private Task _shieldCraftTask = null;
+
+    // ==== 镐子维持看门狗 (2026-09-25, 实例20260925-111302实锤) ====
+    // 现场链: 就近搜刮透视 (问题一, KnowledgeMemory Y 约束另案修) → baritone
+    // 垂直下挖奔箱子 → 木镐挖穿途中爆耐久 (diag 11:14:41 hand=wooden_pickaxe →
+    // 11:14:43 hand=empty) → baritone 导航挖块不经过 DestroyBlockTask.ToolGate /
+    // MineAndCollectTask 的反应式派发点, 造镐链 (SatisfyMiningRequirementTask)
+    // 永远无人派发 → 空手挖石 7 倍慢, 寻路连环失败 "Failed, blacklisting and
+    // wandering" ×3, 用户手动停任务。
+    // 修: 维持语义 "永远随身有镐" (同 SatisfyMiningRequirementTask 09-11
+    // needsAnyPickaxeFallback 注释, 拟人原则)。背包无任何镐 + 有棒料 → 派
+    // SatisfyMiningRequirementTask(WOOD) (内部自带钻石/铁优先逻辑)。轮询 10s,
+    // prio 55 (同盾牌: 抢常规 50, 让位战斗/死亡恢复/岩浆火溺水)。
+    // 续租至完成; 90s 无果 = 链路死锁 (做不出工作台等) → 释放 + 5min 冷却,
+    // 不焊死优先级 (与 DestroyBlockTask.ToolGate 超时降级同款参数)。
+    private static final double PICKAXE_WATCHDOG_INTERVAL = 10;
+    private static final float PICKAXE_WATCHDOG_PRIORITY = 55;
+    private static final long PICKAXE_WATCHDOG_TIMEOUT_MS = 90_000;
+    private static final long PICKAXE_WATCHDOG_COOLDOWN_MS = 5 * 60_000;
+    private final TimerGame _pickaxeWatchdogTimer = new TimerGame(PICKAXE_WATCHDOG_INTERVAL);
+    private static long _pickaxeWatchdogCooldownUntilMs = 0;
+    private Task _pickaxeCraftTask = null;
+    private long _pickaxeCraftSinceMs = 0;
 
     // ==== 通用进洞边沿 (2026-09-23, 用户 09:54 死于矿洞骷髅射杀复盘) ====
     // 贪心挖矿经 MineAndCollectTask→baritone 直接追矿石进天然洞, 不经过
@@ -359,8 +384,12 @@ public class WorldSurvivalChain extends SingleTaskChain {
                     && plankPotential >= SHIELD_PLANKS_REQUIRED) {
                 // (2026-09-14 交易让位, 232015 场次) 交易进行中插队会开背包屏打断
                 // 丢金锭节奏 → 跳过本轮, 交易结束 (金锭耗尽/任务停 3s) 后下轮再合成。
+                // (2026-09-25) 镐维持任务进行中也让位 (防同 tick setTask 互顶拆半成品)。
                 if (TradeWithPiglinsTask.isTradeInProgress()) {
                     Debug.logMessage("[Shield-Watchdog] no shield + materials present, but piglin trading in progress — deferring to next check.");
+                } else if (_pickaxeCraftTask != null && _mainTask == _pickaxeCraftTask
+                        && !_pickaxeCraftTask.isFinished(mod)) {
+                    // 镐子合成链在跑, 下轮 30s 再看
                 } else {
                     Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present ("
                             + ingotCount + " ingots/" + rawIronCount + " raw iron = " + ironPotential
@@ -402,6 +431,53 @@ public class WorldSurvivalChain extends SingleTaskChain {
             // 被更高优先级紧急任务顶掉或已完成 → 放开; 材料条件仍真时下一轮
             // 看门狗 (30s 内) 会重新派发。
             _shieldCraftTask = null;
+        }
+
+        // ==== 镐子维持看门狗 (2026-09-25) 派发 ====
+        // 放在盾牌续租之后: 盾牌任务活跃时上面已 return, 不会同 tick 抢 setTask。
+        boolean pickaxeCraftRunning = _pickaxeCraftTask != null
+                && _mainTask == _pickaxeCraftTask && !_pickaxeCraftTask.isFinished(mod);
+        if (_pickaxeWatchdogTimer.elapsed()) {
+            _pickaxeWatchdogTimer.reset();
+            if (!pickaxeCraftRunning
+                    && System.currentTimeMillis() >= _pickaxeWatchdogCooldownUntilMs
+                    // 链已在跑 (如 DestroyBlockTask.ToolGate 自己派的造镐链) 不重复派
+                    && !SatisfyMiningRequirementTask.isToolChainActive()
+                    // "无任何镐" 判据与 ToolGate/SatisfyMiningRequirementTask.isFinished
+                    // 同一函数 (miningRequirementMetInventory), 口径一致
+                    && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.WOOD)
+                    // 材料不够派了也白派 (下界没木料场景天然跳过)
+                    && SatisfyMiningRequirementTask.hasStickMaterial(mod)) {
+                String m = "[Pickaxe-Watchdog] no pickaxe in inventory + stick material present -> dispatching SatisfyMiningRequirementTask(WOOD) (player="
+                        + mod.getPlayer().getBlockPos().toShortString() + ")";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                _pickaxeCraftTask = new SatisfyMiningRequirementTask(MiningRequirement.WOOD, "pickaxe-watchdog");
+                _pickaxeCraftSinceMs = System.currentTimeMillis();
+                setTask(_pickaxeCraftTask);
+                return PICKAXE_WATCHDOG_PRIORITY;
+            }
+        }
+
+        // (2026-09-25) 镐维持任务续租 + 超时降级: 未完成前持续持有 prio 55 保证
+        // 拿得到 tick; 90s 无果释放 + 5min 冷却 (防"做不出还每 10s 重派"焊死)。
+        if (_pickaxeCraftTask != null) {
+            if (_mainTask == _pickaxeCraftTask && !_pickaxeCraftTask.isFinished(mod)) {
+                if (System.currentTimeMillis() - _pickaxeCraftSinceMs > PICKAXE_WATCHDOG_TIMEOUT_MS) {
+                    String m = "[Pickaxe-Watchdog] pickaxe crafting exceeded 90s without success -> release + 5min cooldown";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                    adris.altoclef.util.helpers.TimeoutLog.hit("WorldSurvivalChain.pickaxeWatchdog",
+                            "90s crafting pickaxe without success, release + cooldown 300s");
+                    _pickaxeCraftTask = null;
+                    _pickaxeWatchdogCooldownUntilMs = System.currentTimeMillis() + PICKAXE_WATCHDOG_COOLDOWN_MS;
+                } else {
+                    return PICKAXE_WATCHDOG_PRIORITY;
+                }
+            } else {
+                // 已完成或被更高优先级顶掉 → 放开; 条件仍真时下一轮 (10s) 重派
+                _pickaxeCraftTask = null;
+            }
         }
 
         return Float.NEGATIVE_INFINITY;

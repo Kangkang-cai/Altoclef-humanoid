@@ -266,8 +266,12 @@ public class SatisfyMiningRequirementTask extends Task {
         return diamonds >= 3 && hasStickMaterial(mod);
     }
 
-    /** 棒料: 木棍 ≥2, 或 木板 ≥2, 或 任一原木 ≥1 (均可合成出 2 根棒子)。 */
-    private boolean hasStickMaterial(AltoClef mod) {
+    /**
+     * 棒料: 木棍 ≥2, 或 木板 ≥2, 或 任一原木 ≥1 (均可合成出 2 根棒子)。
+     * (2026-09-25 static 公开) 镐子维持看门狗 (WorldSurvivalChain) 复用同一
+     * 口径判定"现在派造镐链做不做得出来", 避免两处各写一份漂移。
+     */
+    public static boolean hasStickMaterial(AltoClef mod) {
         if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.STICK) >= 2) return true;
         if (StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, ItemHelper.PLANKS) >= 2) return true;
         for (Item log : ItemHelper.LOG) {

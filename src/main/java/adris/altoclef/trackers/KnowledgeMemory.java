@@ -351,10 +351,25 @@ public final class KnowledgeMemory {
      * dungeons/mineshafts are never remembered here, so their buried
      * containers stay invisible until the bot walks in and sees them.
      */
+    /**
+     * (2026-09-25 透视地牢箱子修复, 实例20260925-111302) 推理可见的 Y 邻近约束。
+     * 结构中心记的是【地表地标】(村庄小路/耕地/原木、废弃传送门黑曜石), "容器在
+     * 结构里"的人类推断只在结构本体的高度带成立 (房屋/地下室 ±数格)。现网实锤:
+     * 村庄中心 (33,71,209) 记忆后 2ms, 同 tick 就近搜刮把 27.7 格外 y=45 的地牢
+     * 箱子 (刷怪笼旁) 判为可感知 (32 格 3D 球把 dy=26 的地下容器也包住) → 派
+     * LootContainerTask → baritone 垂直下挖 20 格。|dy|≤8 后地牢箱子不再被村庄
+     * 推断, bot 真正走到地牢口有视线时才感知 (届时 nearbySpawnerBlocked 照常
+     * 抑制开箱)。注意: 该方法当前唯一消费方是 VisibilityHelper 容器推理可见
+     * (仅主世界), NETHER_FORTRESS 虽在 INFERENCE_TYPES 但从不进入本判定。
+     */
+    private static final double STRUCTURE_INFERENCE_MAX_Y_DELTA = 8;
+
     public boolean isNearRememberedStructure(BlockPos pos, double radius) {
         // (2026-09-18) 只按 INFERENCE_TYPES 推理 —— 单点刷怪笼不在此列, 见该字段注释。
         for (StructureType type : INFERENCE_TYPES) {
             for (BlockPos center : _knownStructures.getOrDefault(type, Collections.emptySet())) {
+                // (2026-09-25) Y 邻近约束: 地下 20+ 格的容器不算"结构里的箱子"。
+                if (Math.abs(center.getY() - pos.getY()) > STRUCTURE_INFERENCE_MAX_Y_DELTA) continue;
                 if (center.isWithinDistance(pos, radius)) return true;
             }
         }
