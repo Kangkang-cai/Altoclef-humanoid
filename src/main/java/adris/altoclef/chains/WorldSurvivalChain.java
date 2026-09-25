@@ -391,6 +391,16 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 } else if (_pickaxeCraftTask != null && _mainTask == _pickaxeCraftTask
                         && !_pickaxeCraftTask.isFinished(mod)) {
                     // 镐子合成链在跑, 下轮 30s 再看
+                } else if (_shieldCraftTask != null && _mainTask == _shieldCraftTask
+                        && !_shieldCraftTask.isFinished(mod)) {
+                    // (2026-09-25 续租断链修复, 215310 会话 22:01:54 实锤) 上一派发的
+                    // 盾牌链还在跑 (典型: 熔炉烧铁中+守卫驻留): 绝不重新派发。
+                    // newDetachedItemTask 产出的新实例与在跑实例 isEqual 相同 →
+                    // setTask 判 equals 空转 (_mainTask 仍指旧实例), 但 _shieldCraftTask
+                    // 引用已被换成新实例 → 续租判据 (_mainTask == _shieldCraftTask)
+                    // 永假 → 下一 tick 链掉回 prio 50 被 User Tasks 抢走, 烧到一半的
+                    // 熔炉被抛弃, BeatMinecraft2 重启转去挖矿探洞。跳过重派, 下方
+                    // 续租块照常 return 55 保住控制权直至跑完。
                 } else {
                     Debug.logMessage("[Shield-Watchdog] no shield in inventory/offhand + materials present ("
                             + ingotCount + " ingots/" + rawIronCount + " raw iron = " + ironPotential

@@ -239,6 +239,13 @@ public class FurnaceSmeltGuardTask extends Task {
      * 最近的可派杀威胁: 感知到的敌对生物且 ≤16 格, 且不在击杀超时冷却中
      * (CombatMemory)。
      * (EntityTracker 的感知即"看过/听过", 符合拟人感知原则, 不用透视。)
+     *
+     * <p>(2026-09-25 派发证据门, 同 833f251e MobDefenseChain 口径) 感知含【听觉】
+     * (vanilla 音效穿墙) —— 20260925-215310 会话 22:01:30 实锤: 墙后洞穴蜘蛛只是
+     * 被听见就派杀, 击杀超时 (KillTimeout cooldown 25s) 后又对另一只墙后蜘蛛再派,
+     * 守卫全程空转 54s。与 MobDefenseChain 的 filterEngagementEvidence 收编同口径:
+     * 只对【亲眼可见】或【实际伤害过 bot】(HitRegistry 60s 窗口) 的怪派杀,
+     * 听见墙后怪不猎杀。
      */
     private Optional<Entity> findNearestThreat(AltoClef mod) {
         Entity best = null;
@@ -247,12 +254,34 @@ public class FurnaceSmeltGuardTask extends Task {
             if (hostile == null || !hostile.isAlive()) continue;
             if (CombatMemory.isUnreachable(hostile.getUuid())) continue;
             double distSq = hostile.squaredDistanceTo(mod.getPlayer());
-            if (distSq <= bestDistSq) {
-                bestDistSq = distSq;
-                best = hostile;
+            if (distSq > bestDistSq) continue;
+            // (2026-09-25 派发证据门) 亲眼可见或挨过它的打, 才值得离炉去杀。
+            if (!adris.altoclef.util.helpers.VisibilityHelper.isEntityVisible(mod, hostile)
+                    && !adris.altoclef.util.helpers.HitRegistry.hasRecentlyDamagedPlayer(hostile)) {
+                logHeardOnlyDiag(mod, hostile);
+                continue;
             }
+            bestDistSq = distSq;
+            best = hostile;
         }
         return Optional.ofNullable(best);
+    }
+
+    // [GUARD-DIAG] 有感知敌对生物但因缺交战证据 (未见+未打过) 不派杀。
+    // 只读诊断 (2s 节流, 只落盘不进聊天), 用于实机验证证据门生效。
+    private static long _lastHeardOnlyDiagMs = 0;
+
+    private static void logHeardOnlyDiag(AltoClef mod, Entity hostile) {
+        long now = System.currentTimeMillis();
+        if (now - _lastHeardOnlyDiagMs < 2000) return;
+        _lastHeardOnlyDiagMs = now;
+        try {
+            Debug.logToFile("altoclef_diag.log", String.format(
+                    "[GUARD-DIAG] hostile perceived but no engagement evidence -> NOT dispatching kill %s pos=%s dist=%.1f",
+                    hostile.getType().getTranslationKey(),
+                    hostile.getBlockPos().toShortString(),
+                    Math.sqrt(hostile.squaredDistanceTo(mod.getPlayer()))));
+        } catch (Exception ignored) { /* 诊断日志绝不影响主逻辑 */ }
     }
 
     /**

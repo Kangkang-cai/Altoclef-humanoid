@@ -230,8 +230,36 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 // 11s 掉到 0.45 血。近战子类声明贴脸时绕位让位, 交战分支接管。
                 if (isPointBlankCombat(mod, entity)) {
                     _visibleAimPoint = computeVisibleAimPoint(mod, entity);
+                    // (2026-09-25 贴脸墙挡清障, 用户"瞄准怪物后要清干净挡着的障碍,
+                    // 障碍可能有两格") 瞄准点全部被挡 = 真有墙隔着 (不是相机擦沿
+                    // 误报) —— 旧实现无条件把 _losBlockedSinceTick 清零, 遮挡持久
+                    // 判据永远凑不满, bot 站桩干瞄准到 kill timeout (215310 会话
+                    // 22:01:35~22:02:24 对墙后蜘蛛干瞄准 49s 实锤)。现: 被挡持续
+                    // 计时器继续累积, 满 2s (OBSTRUCTION_PERSIST_SECONDS) 交
+                    // onObstructionPersistent 挖除 —— 挖掉一格后射线落到下一格,
+                    // 计时器早已超限, 下一格【立即】继续挖, 不再等第二个 2s
+                    // ("两格障碍"整条清通)。持续窗口内仍照常交战 (0922 贴脸让位
+                    // 行为不变, 交战分支优先, 不与绕位互抢)。
+                    if (_visibleAimPoint == null) {
+                        long blankNow = WorldHelper.getTicks();
+                        if (_losBlockedSinceTick == Long.MIN_VALUE) {
+                            _losBlockedSinceTick = blankNow;
+                        } else if (blankNow - _losBlockedSinceTick
+                                > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
+                            BlockPos blankObstruction = findObstructingBlock(mod, entity);
+                            if (blankObstruction != null) {
+                                Task clearTask = onObstructionPersistent(mod, entity, blankObstruction);
+                                if (clearTask != null) {
+                                    _progress.reset();
+                                    return clearTask;
+                                }
+                            }
+                        }
+                    } else {
+                        // 真能看到目标 (探头/露头) → 恢复 0922 原语义: 清零计时, 直接交战。
+                        _losBlockedSinceTick = Long.MIN_VALUE;
+                    }
                     _progress.reset();
-                    _losBlockedSinceTick = Long.MIN_VALUE;
                     setDebugState("Target in face, fighting instead of repositioning");
                     return onEntityInteract(mod, entity);
                 }
