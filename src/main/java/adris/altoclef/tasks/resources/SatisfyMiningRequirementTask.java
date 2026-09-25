@@ -22,6 +22,24 @@ public class SatisfyMiningRequirementTask extends Task {
     /** 谁派发了本任务 (诊断用, 见 onStart 注释)。 */
     private final String _src;
 
+    // ==================== (2026-09-25 造镐链活跃标志, 挂死修复) ====================
+    // 现场 20260925-103444 (实例冻结在 10:48:49.008, 无 crash report): 挖隧道遇
+    // 红石矿挡路 → DestroyBlockTask [ToolGate] 派本任务(IRON) → 铁镐链 → iron_ingot
+    // → raw_iron MineAndCollectTask → 附近感知不到铁矿 → 退回挖隧道 → 又遇红石 →
+    // [ToolGate] 再派本任务 → 【跨资源逻辑环】。diag 实锤 cycle-guard fresh
+    // iron_ingot/raw_iron (instance on tick stack) = 环已在 tick 栈上, 同毫秒任务
+    // 风暴后渲染线程死在无深度保护的链遍历 (同 19:15:20 教训: 保险丝防崩不防挂死)。
+    // 修: 本任务存活期间(镐链正在造) DestroyBlockTask.ToolGate 全局抑制 —— 第一层
+    // ToolGate 正常触发造镐, 链内一切挖块不再展开新工具链, 环断; 链内遇高档块退回
+    // 旧行为(现有工具硬挖/绕行), 镐到手 isFinished 链结束 → 计数归零 → ToolGate
+    // 自然恢复。消费方: DestroyBlockTask.toolRequirementMissing 顶部。
+    private static int _activeToolChains = 0;
+
+    /** 当前是否有镐合成链在跑 (含其材料子链)。 */
+    public static boolean isToolChainActive() {
+        return _activeToolChains > 0;
+    }
+
     // (2026-09-15 承诺锁) 一旦本任务选中上档镐(钻石/铁), 存活期间锁定该选择,
     // 不再每 tick 重估档位 — 修 21:30 场次: 选铁镐 → 生铁塞进熔炉+关炉门 →
     // shouldPreferIronPickaxe 的"可达口径"计数骤降(<3) → 下一 tick 翻回石镐
@@ -56,6 +74,9 @@ public class SatisfyMiningRequirementTask extends Task {
 
     @Override
     protected void onStart(AltoClef mod) {
+        // (2026-09-25 挂死修复) 链活跃标志: onStart/onStop 由框架保证配对
+        // (tickInternal _first 时 onStart, stop/interrupt 均调 onStop), 钳制防漏减。
+        _activeToolChains++;
         // (2026-08-23 诊断) 需要镐却触发本任务 → 记录当前背包镐状态, 排查
         // "背包有铁/钻石镐却还要重做镐" (用户反馈: 它似乎把背包里的东西跳过)。
         //
@@ -271,6 +292,10 @@ public class SatisfyMiningRequirementTask extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-25 挂死修复) 链活跃标志解除 (防御性钳制, 不允许负数)。
+        if (_activeToolChains > 0) {
+            _activeToolChains--;
+        }
         // 承诺锁随任务实例终结 (拿到镐=isFinished 自然结束, 或被更高优先级打断;
         // 重启后按当时材料重新评估, 不跨任务实例继承旧选择)。
         _committedPickaxe = null;

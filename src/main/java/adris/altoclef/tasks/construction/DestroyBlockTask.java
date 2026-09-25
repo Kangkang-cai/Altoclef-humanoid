@@ -182,6 +182,8 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // 实例冷却会被任务重建绕过 —— 同 s_sleepGiveUpUntilMs 机制)。
     private static volatile long s_toolGateCooldownUntilMs = 0;
     private static final long TOOL_GATE_COOLDOWN_MS = 5 * 60_000;
+    // (2026-09-25 挂死修复) 链内抑制诊断节流。
+    private static long s_toolGateSuppressLogMs = 0;
 
     /**
      * (2026-09-17) 协调器本 tick 派出的补料子任务出口。
@@ -320,6 +322,22 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
      */
     private MiningRequirement toolRequirementMissing(AltoClef mod) {
         if (_toolSatisfyTimedOut) return null;
+        // (2026-09-25 挂死修复, 铁律级) 镐合成链活跃期间【全局抑制】ToolGate。
+        // 现场 20260925-103444: 隧道遇红石 → ToolGate 造铁镐 → 铁镐链内挖铁又走
+        // 隧道又遇红石 → ToolGate 再触发 = 跨资源逻辑环, cycle-guard 每圈 fresh
+        // 新实例仍环环相扣, 渲染线程死在无深度保护的链遍历 (无 OVERFLOW 无 crash)。
+        // 链内抑制后: 遇高档块退回旧行为 (现有工具硬挖/绕行), 镐到手链结束本门
+        // 自动恢复。20260924-172050 (放床清地遇铜矿) 场景无进行中造镐链, 不受影响。
+        if (SatisfyMiningRequirementTask.isToolChainActive()) {
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - s_toolGateSuppressLogMs > 2000) {
+                s_toolGateSuppressLogMs = nowMs;
+                String m = "[ToolGate] suppressed while a tool-satisfy chain is active (recursion guard), target="
+                        + _pos.toShortString();
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+            return null;
+        }
         if (WorldHelper.getCurrentDimension() != adris.altoclef.util.Dimension.OVERWORLD) return null;
         if (System.currentTimeMillis() < s_toolGateCooldownUntilMs) return null;
         if (!mod.getChunkTracker().isChunkLoaded(_pos)) return null;
