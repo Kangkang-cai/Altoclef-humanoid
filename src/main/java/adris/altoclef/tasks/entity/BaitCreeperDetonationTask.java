@@ -197,6 +197,11 @@ public class BaitCreeperDetonationTask extends Task {
         _goalKind = null;
     }
 
+    /** 防御链持有判据用: 当前诱爆目标 (含熄引信期 —— 持有口径不再锚"点燃中")。 */
+    public CreeperEntity getTarget() {
+        return _creeper;
+    }
+
     @Override
     public boolean isFinished(AltoClef mod) {
         return _gaveUp || _creeper == null || !_creeper.isAlive();

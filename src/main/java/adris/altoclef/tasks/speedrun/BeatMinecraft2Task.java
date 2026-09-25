@@ -657,6 +657,10 @@ public class BeatMinecraft2Task extends Task {
     // 上述"跳过地表收食物"状态的边沿闩锁 (长驻状态分支必须边沿触发): 进出各打一条
     // [NIGHT-MINE] 诊断, 状态翻转才落盘, 不逐 tick 刷屏。
     private boolean _nightNoBedFoodSkipActive = false;
+    // (2026-09-25 1931 用户拍板) 夜间地表不烧生肉的边沿闩锁: 晚上(canSleep) 无床
+    // 且食物分>20 且在地表 → 不开新炉烧生肉直接挖矿; 转地下后照常烧
+    // ("夜间时在地表不烧, 检测到在底下时就可以烧")。状态翻转打点, 不逐 tick 刷屏。
+    private boolean _nightSurfaceSkipSmeltActive = false;
     private final TimerGame _notSleepableTimer = new TimerGame(30);
     private boolean _wasSleepableOnce = false;
     // rawCanSleep 持续时长计时 (2026-08-22): 须连续 5 秒为真才武装 30s 宽限,
@@ -2466,7 +2470,29 @@ public class BeatMinecraft2Task extends Task {
                             }
                         }
                     }
+                    // (2026-09-25 1931 用户拍板) 夜间地表不烧: 晚上(canSleep) 无床
+                    // 且食物分>20 且在地表(非地下) → 不开新炉烧生肉, 直接落到下方
+                    // 夜间门/铁装/挖矿分支 (挖矿自然带入地下, 转地下后本闸失效照常烧)。
+                    // 口径与 [NIGHT-MINE] 门一致: 食物≤20 不豁免 (夜里断粮饿死比逗留
+                    // 更糟); 已在烧的缓存任务 (上方 keep-alive) 不打断 —— 烧肉中不离开
+                    // (6ef9f602 原则), 烧完本炉后因本闸不再开新炉。
+                    // 注: 本闸在食物门/夜间挖矿门之前, 191451 会话实锤生牛肉烧炼
+                    // 把 [NIGHT-MINE] 门整个饿死 (门从未执行)。
+                    boolean nightSurfaceSkipSmelt = WorldHelper.canSleep()
+                            && !hasBedRegard(mod)
+                            && !isUndergroundDebounced(mod)
+                            && StorageHelper.calculateInventoryFoodScore(mod) > NIGHT_NO_BED_SKIP_FOOD_MIN_UNITS;
+                    if (nightSurfaceSkipSmelt != _nightSurfaceSkipSmeltActive) {
+                        _nightSurfaceSkipSmeltActive = nightSurfaceSkipSmelt;
+                        Debug.logToFile("altoclef_diag.log", "[NIGHT-MINE]\t"
+                                + (nightSurfaceSkipSmelt ? "enter" : "exit") + " skip-surface-smelt"
+                                + " canSleep=" + WorldHelper.canSleep()
+                                + " hasBedRegard=" + hasBedRegard(mod)
+                                + " underground=" + isUndergroundDebounced(mod)
+                                + " food=" + StorageHelper.calculateInventoryFoodScore(mod));
+                    }
                     for (Item raw : ItemHelper.RAW_FOODS) {
+                        if (nightSurfaceSkipSmelt) break;
                         if (mod.getItemStorage().hasItem(raw)) {
                             Optional<Item> cooked = ItemHelper.getCookedFood(raw);
                             if (cooked.isPresent()) {
