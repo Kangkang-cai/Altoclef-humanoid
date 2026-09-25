@@ -342,6 +342,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
         return _doTask.describeFurnaceCache();
     }
 
+    /**
+     * (2026-09-25 父任务刷新, 183242 实锤) 本任务当前锁定/记忆的炉位, 供
+     * 上层保活块判断"炉子是否已被带离超距" → 丢弃缓存按现况重建。
+     * 任务未开跑 (_doTask 未锁定容器) 时返回 null。
+     */
+    public BlockPos getCachedFurnacePos() {
+        return _doTask.getCachedContainerPosition();
+    }
+
     @Override
     protected boolean isEqualResource(ResourceTask other) {
         if (other instanceof SmeltInFurnaceTask task) {

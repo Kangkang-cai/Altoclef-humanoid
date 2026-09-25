@@ -43,6 +43,15 @@ public abstract class DoStuffInContainerTask extends Task {
     // If we just placed something, stop placing and try going to the nearest container.
     private final TimerGame _justPlacedTimer = new TimerGame(3);
     private BlockPos _cachedContainerPosition = null;
+
+    /**
+     * (2026-09-25 父任务刷新, 183242 实锤) 暴露当前锁定/记忆的容器位置, 供
+     * 上层 (SmeltInFurnaceTask → BeatMinecraft2Task 保活块) 判断"缓存任务
+     * 的炉子是否已被外因 (夜间找床/撤退) 带离超距" → 丢弃缓存按现况重建。
+     */
+    public BlockPos getCachedContainerPosition() {
+        return _cachedContainerPosition;
+    }
     private Task _openTableTask;
 
     // (2026-09-14 腾位闸门实例缓存) 两处"满包腾位"闸门此前每 tick new

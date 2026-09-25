@@ -592,6 +592,14 @@ public class BeatMinecraft2Task extends Task {
     // 1 tick 后就被换肉任务抢切, 疑似 isFurnaceDrained 单 tick 误判, 待诊断日志实锤)。
     private int _smeltDiscardStreak = 0;
     private static final int SMELT_DISCARD_STREAK_TICKS = 20;
+
+    // (2026-09-25 父任务刷新, 183242 实锤) 缓存熔炼任务的炉位超过该距离(平方)
+    // → 视为炉子已被外因 (夜间找床/防御撤退) 带离抛弃, 丢弃缓存按当前背包
+    // 现况重建, 不再把持旧目标。48 = DoStuffInContainerTask maxWalk(40) + 余量。
+    private static final double SMELT_FURNACE_ABANDON_DIST_SQ = 48 * 48;
+
+    // (2026-09-25 [SmeltHoldNight]) 烧肉让位夜间睡/床路由的边沿打点标志。
+    private boolean _smeltHoldNightLogged = false;
     // "生肉没了但炉未排空"状态翻转记录 (诊断用, 只记翻转不刷屏)
     private boolean _lastSmeltGoneNotDrained = false;
     // (2026-08-22 工作台即收) findNearbyCraftingTable 的兜底暴力扫描
@@ -2400,6 +2408,23 @@ public class BeatMinecraft2Task extends Task {
                     // 炉里还有料时保活让任务自己收完产物。中途被更高优先级抢切的
                     // 任务同样留在缓存里, 恢复后继续跑 (stop-loss 在 onStop 已兜底)。
                     if (_cachedSmeltTask != null) {
+                        // (2026-09-25 父任务刷新, 用户"真的离开就抛弃, 别把持旧目标")
+                        // 缓存任务的炉子被外因带离超距时, 旧目标 (如"14 熟牛排")
+                        // 不再把持: 丢弃缓存, 下方按当前背包现况重建 (旧炉内产物
+                        // 一并抛弃, 用户拍板)。
+                        BlockPos cachedFurnace = _cachedSmeltTask.getCachedFurnacePos();
+                        if (cachedFurnace != null && mod.getPlayer() != null
+                                && cachedFurnace.getSquaredDistance(mod.getPlayer().getBlockPos())
+                                        > SMELT_FURNACE_ABANDON_DIST_SQ) {
+                            Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\tabandon-far: furnace@"
+                                    + cachedFurnace.toShortString() + " dist="
+                                    + (int) Math.sqrt(cachedFurnace.getSquaredDistance(mod.getPlayer().getBlockPos()))
+                                    + " cache=" + _cachedSmeltTask.describeFurnaceCache());
+                            _cachedSmeltTask = null;
+                            _smeltDiscardStreak = 0;
+                        }
+                    }
+                    if (_cachedSmeltTask != null) {
                         if (_cachedSmeltTask.isFinished(mod)) {
                             Debug.logToFile("altoclef_diag.log", "[SmeltKeepAlive]\tdiscard: isFinished raw="
                                     + ItemHelper.stripItemName(_cachedSmeltTask.getTargets()[0].getMaterial().getMatches()[0])
@@ -3873,6 +3898,21 @@ public class BeatMinecraft2Task extends Task {
         }
         boolean effectiveCanSleep = rawCanSleep || (_wasSleepableOnce && !_notSleepableTimer.elapsed());
 
+        // (2026-09-25 183242 实锤, 用户"烧肉中原则上尽量不离开") 食物熔炼任务
+        // 活跃时, 夜间睡/床路由整体让位: 曾把烧肉中的 bot 带出 80+ 格, 旧炉被
+        // DoStuffInContainerTask 的 40 格距离闸判"无可用容器" → 就地造新炉
+        // 抛弃旧炉 (炉内 14 熟牛排一并丢失)。烧完再弄床; 夜间推进 (铁装/钻石
+        // 挖矿, 见地表食物门"夜间无床不囤食") 由下方主链自然接管。边沿打点。
+        if (_cachedSmeltTask != null && !_cachedSmeltTask.isFinished(mod)) {
+            if (!_smeltHoldNightLogged) {
+                _smeltHoldNightLogged = true;
+                Debug.logToFile("altoclef_diag.log", "[SmeltHoldNight] night sleep/bed route deferred while smelting"
+                        + " cache=" + _cachedSmeltTask.describeFurnaceCache());
+            }
+            return null;
+        }
+        _smeltHoldNightLogged = false;
+
         // (2026-09-25 收口为方法) hasBedRegard 三口径 (背包床 / 6 格内已放床 /
         // BlockTracker 已感知床) 同时被睡眠路由 (本方法) 与地表食物门
         // "夜间无床不囤食" 使用, 判据只留这一份 (判据一致性铁律)。
@@ -3996,6 +4036,10 @@ public class BeatMinecraft2Task extends Task {
         boolean effectivelyDeep = WorldHelper.isDeepUnderground(mod);
         boolean belowSeaLevel = updateBelowSeaLevelDebounce(mod);
         if (effectivelyDeep || belowSeaLevel) return false;
+        // (2026-09-25 同步口径, 见 getNightSleepRouting [SmeltHoldNight]) 烧肉
+        // 进行中夜间睡/床路由已让位, 侧线任务也不必再为"夜间优先"让位 —
+        // 两处口径必须一致, 否则侧线让位而床路由又推迟 → 互等空转。
+        if (_cachedSmeltTask != null && !_cachedSmeltTask.isFinished(mod)) return false;
         return WorldHelper.canSleep();
     }
 
