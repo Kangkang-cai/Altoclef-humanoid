@@ -324,13 +324,13 @@ public class Settings implements IFailableConfigFile {
      * 此阶段把冷却放大 = 保留低频顺手挖矿, 给燧石链连续挖掘窗口。
      * 普通阶段 (铁套/钻石收集等) 仍用 3s, 不受本项影响。
      * <p>
-     * (2026-09-25 用户拍板 45→10) 实例 20260925-112204: preNether 阶段 45s 一查,
+     * (2026-09-25 用户拍板 45→5) 实例 20260925-112204: preNether 阶段 45s 一查,
      * 8 格暴露矿感知窗口频繁整段错过 (diag: [GreedyOre] check 全是 vis=0->skip,
      * 唯一 11:54:58 vis=2 即 TRIGGER 挖到 +7)。当年乒乓根因是"批次目标=1 挖完
      * 2-4s 即释放", 现 CollectVisibleOresTask 已有 engaged 锁死+掉落宽限保护,
      * 10s 乒乓风险可控。
      */
-    private int preNetherGreedyCooldownSeconds = 10;
+    private int preNetherGreedyCooldownSeconds = 5;
 
     /**
      * (2026-09-07 击杀超时兜底, 用户"蜘蛛躲在暗处 bot 傻傻对准, 必须绕路才能
