@@ -96,7 +96,7 @@ public class BaitCreeperDetonationTask extends Task {
         _overallTimer.reset();
         _gaveUp = false;
         _goalKind = null;
-        CreeperBaitSignal.set(_creeperId);
+        CreeperBaitSignal.set(_creeperId, _keepClearPos != null);
         double dist = _creeper != null ? Math.sqrt(_creeper.squaredDistanceTo(mod.getPlayer())) : -1;
         Debug.logMessage("[BAIT] start creeper dist=" + String.format("%.1f", dist)
                 + " keepClear=" + (_keepClearPos == null ? "none" : _keepClearPos.toShortString()));
@@ -124,7 +124,7 @@ public class BaitCreeperDetonationTask extends Task {
 
         // 信号每 tick 续 (KillAura/防御链豁免依据) + 认领防御链目标槽
         // (applyForceField 跳过 _targetEntity, 与 AbstractDoToEntityTask 同口径)。
-        CreeperBaitSignal.set(_creeperId);
+        CreeperBaitSignal.set(_creeperId, _keepClearPos != null);
         mod.getMobDefenseChain().setTargetEntity(_creeper);
 
         float fuse = _creeper.getClientFuseTime(1);

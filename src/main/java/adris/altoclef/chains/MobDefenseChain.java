@@ -20,6 +20,8 @@ import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.baritone.CachedProjectile;
 import adris.altoclef.util.time.TimerGame;
+
+import java.util.UUID;
 import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ProjectileHelper;
@@ -111,11 +113,9 @@ public class MobDefenseChain extends SingleTaskChain {
     // (2026-09-25 183242 实锤) 诱爆任务引用: 防御链自己派发并跨 tick 持有,
     // 没有它, 点燃分支每 tick 都在 核弹→战斗→逃跑 里打转, 诱爆永远不启动。
     private BaitCreeperDetonationTask _baitTask;
-    // (2026-09-25 191451 实锤) 派发/持有半径: 未点燃但 ≤8 格逼近即派发 (原口径点燃
-    // 才派, dist=2.9 时 1.5s 引信往外撤太贴边); 持有半径 10 格 —— 覆盖"KITE 撤离
-    // 成功→引信熄灭"窗口, 熄火期不交还批次 (原口径引信一熄即掉持 → 死循环)。
-    private static final double BAIT_DISPATCH_RANGE_SQ = 8.0 * 8.0;
-    private static final double BAIT_HOLD_RANGE_SQ = 10.0 * 10.0;
+    // (2026-09-25 224856 实锤) 派发/持有半径常量移入 CreeperBaitSignal (DISPATCH_
+    // RANGE_SQ=8²/HOLD_RANGE_SQ=10²) —— AbstractKillEntityTask 重定向端也要用,
+    // 单一事实源防两边口径漂移。
 
     private float _cachedLastPriority;
 
@@ -793,20 +793,35 @@ public class MobDefenseChain extends SingleTaskChain {
         // 从不创建指向苦力怕的 kill task → AbstractKillEntityTask 的诱爆重定向
         // 永不触发, [BAIT] 一条没打 (18:46:48 现场走了 FIGHT→RETREAT 横跳)。
         // 改为: 没盾时在本分支直接派发/持有诱爆任务 (用户拍板: 苦力怕一律诱爆不近战)。
-        // (2026-09-25 191451 实锤) 持有先行且口径扩宽: 诱爆任务活着 + 目标存活
-        // + 在持有半径内 → 直接持有, 不看是否点燃 (覆盖"撤离成功→引信熄灭"窗口;
-        // 有盾仍让位核弹)。蜘蛛等其它怪照常由 KillAura 顺手打 —— 豁免的只有
-        // 诱爆目标这一个, 批次任务不再把 bot 整个拽走。
-        if (!canShieldNuke(mod) && _baitTask != null && !_baitTask.isFinished(mod)
-                && isBaitTargetInHoldRange(mod)) {
-            _doingFunkyStuff = true;
-            setTask(_baitTask);
-            _defenseState = DefenseState.EVALUATE;
-            return 55;
+        // (2026-09-25 191451/224856 两次实跑) 持有先行, 单一事实源 = CreeperBaitSignal:
+        // 批次内 AbstractKillEntityTask 重定向创建的诱爆实例不经过链级 _baitTask
+        // 字段, 旧持有判据看不见它 → 批次重派 → 重定向再新建, 每 0.5s Task
+        // STOP/START + [BAIT] start ×17 (22:50 实锤)。信号目标存活且在持有半径内:
+        // ① 链级实例还活着 → 继续持有; ② 非守卫持有 → 收编为链级持有 (一次替换,
+        // 之后稳定); ③ 守卫持有 (keepClear 语义) → 不抢。有盾仍让位核弹。
+        if (!canShieldNuke(mod) && isBaitSignalTargetInHoldRange(mod)) {
+            CreeperEntity sigTarget = getBaitSignalTarget(mod);
+            if (sigTarget != null) {
+                if (_baitTask != null && !_baitTask.isFinished(mod)) {
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    _defenseState = DefenseState.EVALUATE;
+                    return 55;
+                }
+                if (!CreeperBaitSignal.isGuarded()) {
+                    _baitTask = new BaitCreeperDetonationTask(sigTarget, null);
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    _defenseState = DefenseState.EVALUATE;
+                    return 55;
+                }
+            }
         }
-        // 派发提前: 未点燃但 ≤8 格逼近的苦力怕也派发 (LURE 相提前占位控距)。
+        // 派发提前: 未点燃但 ≤8 格逼近的苦力怕也派发 (LURE 相提前占位控距);
+        // 单槽信号: 已有诱爆在跑 (守卫) 时不另派第二只, 照旧走逃跑兜底。
         CreeperEntity baitCandidate = (blowingUp != null) ? blowingUp : getNearestBaitableCreeper(mod);
-        if (baitCandidate != null && !canShieldNuke(mod)) {
+        if (baitCandidate != null && !canShieldNuke(mod)
+                && (!CreeperBaitSignal.isActive() || CreeperBaitSignal.isBaiting(baitCandidate))) {
             if (CreeperBaitSignal.isBaiting(baitCandidate)) {
                 if (_baitTask == null || _baitTask.isFinished(mod)) {
                     // 诱爆由其他链 (熔炉守卫) 持有 → 不抢, 保持原豁免口径不干预
@@ -1132,17 +1147,28 @@ public class MobDefenseChain extends SingleTaskChain {
         // (2026-09-25 183242 实锤缺口) 同 stateEvaluate: 战斗中苦力怕点燃时
         // 原先只做 核弹→逃跑, 从不派发诱爆。没盾时改为派发/持有诱爆,
         // 爆炸后无缝回到本批次战斗; 有盾仍走核弹接管。
-        // (2026-09-25 191451 实锤) 持有先行 + 派发提前, 口径同 stateEvaluate。
-        if (!canShieldNuke(mod) && _baitTask != null && !_baitTask.isFinished(mod)
-                && isBaitTargetInHoldRange(mod)) {
-            _doingFunkyStuff = true;
-            setTask(_baitTask);
-            CreeperEntity held = _baitTask.getTarget();
-            float fuse = held != null ? held.getClientFuseTime(1) : 0f;
-            return 60 + fuse * 50;
+        // (2026-09-25 191451/224856) 同 stateEvaluate: 持有先行 (信号单一事实源,
+        // 覆盖熄火期), 非守卫持有的诱爆收编为链级持有, 守卫持有不抢, 有盾让位核弹。
+        if (!canShieldNuke(mod) && isBaitSignalTargetInHoldRange(mod)) {
+            CreeperEntity sigTarget = getBaitSignalTarget(mod);
+            if (sigTarget != null) {
+                if (_baitTask != null && !_baitTask.isFinished(mod)) {
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    float fuse = sigTarget.getClientFuseTime(1);
+                    return 60 + fuse * 50;
+                }
+                if (!CreeperBaitSignal.isGuarded()) {
+                    _baitTask = new BaitCreeperDetonationTask(sigTarget, null);
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    return 60 + sigTarget.getClientFuseTime(1) * 50;
+                }
+            }
         }
         CreeperEntity baitCandidate = (blowingUp != null) ? blowingUp : getNearestBaitableCreeper(mod);
-        if (baitCandidate != null && !canShieldNuke(mod)) {
+        if (baitCandidate != null && !canShieldNuke(mod)
+                && (!CreeperBaitSignal.isActive() || CreeperBaitSignal.isBaiting(baitCandidate))) {
             if (CreeperBaitSignal.isBaiting(baitCandidate)) {
                 if (_baitTask == null || _baitTask.isFinished(mod)) {
                     // 诱爆由其他链 (熔炉守卫) 持有 → 不抢
@@ -2098,8 +2124,12 @@ public class MobDefenseChain extends SingleTaskChain {
         try {
             for (CreeperEntity creeper : mod.getEntityTracker().getTrackedEntities(CreeperEntity.class)) {
                 if (creeper == null || !creeper.isAlive()) continue;
+                // (2026-09-25 224856 用户"这是透视") 与其他击杀派发同口径的证据门:
+                // 墙后实体同样出现在客户端实体登记表 (服务器发包范围内), 不设
+                // 可见性门就是透视派发 (熔炉守卫 833f251e 同款 VisibilityHelper)。
+                if (!VisibilityHelper.isEntityVisible(mod, creeper)) continue;
                 double d = creeper.squaredDistanceTo(mod.getPlayer());
-                if (d <= BAIT_DISPATCH_RANGE_SQ && d < best) {
+                if (d <= CreeperBaitSignal.DISPATCH_RANGE_SQ && d < best) {
                     best = d;
                     target = creeper;
                 }
@@ -2112,17 +2142,36 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
-     * (2026-09-25 191451 持有口径扩宽) 诱爆目标是否仍在持有半径内: 目标存活且
-     * 距 bot ≤10 格。覆盖"KITE 撤离成功→引信熄灭"窗口 —— 原持有判据锚"正在点燃",
-     * 引信一熄 getClosestFusingCreeper 即返回 null → 诱爆被战斗批次顶掉 → bot
-     * 走回苦力怕 → 再点燃 → 再逃, 死循环 (19:20:09 RETREAT(70) 逃了 49s 实锤)。
-     * 目标跑出持有半径 → 释放控制权, 任务自身有 24 格跑丢+25s 超时兜底。
+     * (2026-09-25 224856 持有判据单一事实源) 按 CreeperBaitSignal 目标 UUID 从
+     * 实体登记表解析当前诱爆目标。原先只认链级 _baitTask 字段 —— 批次内
+     * AbstractKillEntityTask 重定向创建的诱爆实例不经过该字段 → 持有判据失效
+     * → 批次每 tick 重派 → 重定向再新建 (22:50 一分钟 [BAIT] start ×17 实锤)。
      */
-    private boolean isBaitTargetInHoldRange(AltoClef mod) {
-        if (_baitTask == null) return false;
-        CreeperEntity target = _baitTask.getTarget();
-        if (target == null || !target.isAlive()) return false;
-        return target.squaredDistanceTo(mod.getPlayer()) <= BAIT_HOLD_RANGE_SQ;
+    private CreeperEntity getBaitSignalTarget(AltoClef mod) {
+        UUID id = CreeperBaitSignal.getTargetId();
+        if (id == null) return null;
+        try {
+            for (CreeperEntity creeper : mod.getEntityTracker().getTrackedEntities(CreeperEntity.class)) {
+                if (creeper != null && id.equals(creeper.getUuid())) return creeper;
+            }
+        } catch (ConcurrentModificationException | ArrayIndexOutOfBoundsException | NullPointerException e) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * (2026-09-25 191451 持有口径扩宽, 224856 改信号源) 诱爆信号目标是否仍在
+     * 持有半径内: 目标存活且距 bot ≤10 格。覆盖"KITE 撤离成功→引信熄灭"窗口
+     * —— 原持有判据锚"正在点燃", 引信一熄 getClosestFusingCreeper 即返回 null
+     * → 诱爆被战斗批次顶掉 → bot 走回苦力怕 → 再点燃 → 再逃, 死循环 (19:20:09
+     * RETREAT(70) 逃了 49s 实锤)。目标跑出持有半径 → 释放控制权, 任务自身有
+     * 24 格跑丢+25s 超时兜底。
+     */
+    private boolean isBaitSignalTargetInHoldRange(AltoClef mod) {
+        CreeperEntity target = getBaitSignalTarget(mod);
+        return target != null && target.isAlive()
+                && target.squaredDistanceTo(mod.getPlayer()) <= CreeperBaitSignal.HOLD_RANGE_SQ;
     }
 
     private CreeperEntity getClosestFusingCreeper(AltoClef mod) {

@@ -290,7 +290,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 172433 会话被炸掉熔炉的复现路径)。有盾时盾牌核弹 (防御链) 优先级
         // 更高会打断本任务, 属预期。keepClearPos=null 的通用派发无保护目标。
         Optional<Entity> baitTarget = getEntityTarget(mod);
-        if (baitTarget.isPresent() && baitTarget.get() instanceof CreeperEntity baitCreeper && baitCreeper.isAlive()) {
+        // (2026-09-25 224856 两道门, 用户"和其他怪物一样的条件") ①可见性证据门:
+        // 客户端实体登记表含墙后实体 (服务器发包范围), 不设门就是透视派发 —— 与
+        // 熔炉守卫 833f251e 同款 VisibilityHelper; ②距离门 ≤ 持有半径 (10 格):
+        // 派在 11 格而持有只到 10 格会留下"重定向新建→持有失效→批次重派→再新建"
+        // 的夹缝横跳 (22:50 一分钟 [BAIT] start ×17 实锤)。墙后/远处的苦力怕走
+        // 正常击杀接近路径, 靠近可见后自然落进诱爆口径。
+        if (baitTarget.isPresent() && baitTarget.get() instanceof CreeperEntity baitCreeper && baitCreeper.isAlive()
+                && adris.altoclef.util.helpers.VisibilityHelper.isEntityVisible(mod, baitCreeper)
+                && baitCreeper.squaredDistanceTo(mod.getPlayer()) <= adris.altoclef.util.helpers.CreeperBaitSignal.HOLD_RANGE_SQ) {
             return new BaitCreeperDetonationTask(baitCreeper, null);
         }
         int giveUpSeconds = mod.getModSettings().getKillGiveUpSeconds();
