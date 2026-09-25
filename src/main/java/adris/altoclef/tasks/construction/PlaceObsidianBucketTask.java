@@ -272,7 +272,8 @@ public class PlaceObsidianBucketTask extends Task {
         if (collides && WorldHelper.canBreak(mod, pos)) {
             if (_clearDiagTimer.elapsed()) {
                 _clearDiagTimer.reset();
-                Debug.logInternal("[PourClear] clearing ray-blocking non-solid block "
+                // (审查 Low-2) logInternal 只进 stdout 不落盘, 验证点必须可从日志文件核对。
+                Debug.logToFile("altoclef_diag.log", "[PourClear]\tclearing ray-blocking non-solid block "
                         + s.getBlock() + " at " + pos.toShortString());
             }
             return true;
