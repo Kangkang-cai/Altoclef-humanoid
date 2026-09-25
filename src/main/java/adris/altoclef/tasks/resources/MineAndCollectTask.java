@@ -10,6 +10,7 @@ import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.NetherExpeditionTask;
+import adris.altoclef.tasks.movement.NetherGoldExpeditionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.slot.EnsureFreeInventorySlotTask;
 import adris.altoclef.tasksystem.Task;
@@ -63,6 +64,18 @@ public class MineAndCollectTask extends ResourceTask {
     // 每 tick new 会无限拆树; static 跨链重建存活, isFinished(出谷) 后由下一轮
     // createNextExplorationTask 新建 (正常挖矿探索)。
     private static NetherExpeditionTask _soulSandExpedition;
+
+    // (2026-09-25 挖金无进展远征, 用户"bot找金子长时间没进展我也希望触发远征模式")
+    // 缓存的远征实例 (与 _soulSandExpedition 同款: isEqual 是 identity, static 跨
+    // 链重建存活, isFinished 后由下次评估新建) + 金粒进展基线。基线只在闸门评估
+    // 时采样 (感知不到矿才会走到闸门; 挖矿/捡取期间不评估, 不会误判):
+    // 金粒数较上次评估有变化 (上涨=挖到金, 下降=被合成消耗) → 有进展, 计时重置;
+    // 超过 GOLD_NO_PROGRESS_MILLIS 无变化 → 派 NetherGoldExpeditionTask 定向远征。
+    private static NetherGoldExpeditionTask _goldNoProgressExpedition;
+    private static int _goldNuggetBaseline = -1;
+    private static long _lastGoldProgressMs = 0L;
+    /** 背包金粒数多久无增长算"长时间没进展"。 */
+    private static final long GOLD_NO_PROGRESS_MILLIS = 180_000L;
 
     private final MiningRequirement _requirement;
 
@@ -2699,6 +2712,38 @@ public class MineAndCollectTask extends ResourceTask {
                 }
                 return _soulSandExpedition;
             }
+            // (2026-09-25 挖金无进展远征, 用户"bot找金子长时间没进展我也希望触发
+            // 远征模式") 与灵魂沙谷远征 (按群系) 互补: 按【产出无进展】触发 —— 只在
+            // 已感知不到矿、即将开新隧道时评估 (挖矿/捡取/探洞进行中都不打断)。
+            // 进展度量 = 背包金粒数在两次评估间有无变化 (上涨=挖到金, 下降=被合成
+            // 消耗, 都算"有产出")。无变化超 3 分钟 → 换地方, 别在贫矿区原地挖隧道。
+            // 仅金任务 (下界金矿目标) 触发; 石英/镶金黑石暂不纳入, 需要时再扩。
+            if (WorldHelper.getCurrentDimension() == adris.altoclef.util.Dimension.NETHER
+                    && targetsNetherGoldOre()) {
+                int nuggets = NetherGoldExpeditionTask.countGoldNuggets(mod);
+                long nowMs = System.currentTimeMillis();
+                if (_goldNuggetBaseline < 0) {
+                    // 首次评估: 建基线, 给足宽限。
+                    _goldNuggetBaseline = nuggets;
+                    _lastGoldProgressMs = nowMs;
+                } else if (nuggets != _goldNuggetBaseline) {
+                    _goldNuggetBaseline = nuggets;
+                    _lastGoldProgressMs = nowMs;
+                    _goldNoProgressExpedition = null;
+                } else if (nowMs - _lastGoldProgressMs >= GOLD_NO_PROGRESS_MILLIS) {
+                    if (_goldNoProgressExpedition == null || _goldNoProgressExpedition.isFinished(mod)) {
+                        _goldNoProgressExpedition = new NetherGoldExpeditionTask();
+                        Debug.logMessage(String.format(java.util.Locale.ROOT,
+                                "[GOLD-EXPEDITION] no gold progress for %.0fs while mining nether"
+                                        + " gold (nuggets=%d, ore not perceivable) -> expedition.",
+                                (nowMs - _lastGoldProgressMs) / 1000.0, nuggets));
+                        Debug.logToFile("altoclef_diag.log",
+                                "[GOLD-EXPEDITION]\tno progress " + ((nowMs - _lastGoldProgressMs) / 1000.0)
+                                        + "s, nuggets=" + nuggets + " -> expedition");
+                    }
+                    return _goldNoProgressExpedition;
+                }
+            }
             int[] band = targetShaftBand();
             // (2026-09-07 探索断点交接) 链重建后认领仍在探索中的上一个探索任务:
             // 同维度且玩家仍在最近 FIRE 锚点 64 格内 → 原样复用(MineDownExploreTask
@@ -2751,6 +2796,17 @@ public class MineAndCollectTask extends ResourceTask {
             }
             _lastCaveExploration = exploration;
             return exploration;
+        }
+
+        /**
+         * (2026-09-25 挖金无进展远征) 目标是否含下界金矿: 仅挖金任务触发无进展
+         * 远征 (石英/镶金黑石不纳入, 需要时再扩)。
+         */
+        private boolean targetsNetherGoldOre() {
+            for (Block block : _blocks) {
+                if (block == Blocks.NETHER_GOLD_ORE) return true;
+            }
+            return false;
         }
 
         /**
