@@ -121,6 +121,14 @@ public class KillAura {
     }
     private void attack(AltoClef mod, Entity entity, boolean equipSword) {
         if (entity == null) return;
+        // (2026-09-25 苦力怕诱爆) 诱爆风筝中的苦力怕绝不挥刀: 击退会把它打出
+        // 5~7 格引信环带 (引信熄灭 → 重新逼近 → 横跳不收敛), 且贴脸输出违背
+        // "保持距离使其引爆"的用户定案。172433 会话徒手站桩打苦力怕 6s+ 被
+        // 炸掉熔炉的事故路径在此关死。
+        if (entity instanceof net.minecraft.entity.mob.CreeperEntity
+                && adris.altoclef.util.helpers.CreeperBaitSignal.isBaiting(entity)) {
+            return;
+        }
         if (Double.isInfinite(_forceFieldRange) || entity.squaredDistanceTo(mod.getPlayer()) < _forceFieldRange * _forceFieldRange) {
             boolean canAttack;
             if (equipSword) {

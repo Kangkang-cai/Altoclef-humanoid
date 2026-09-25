@@ -2,6 +2,7 @@ package adris.altoclef.tasks.container;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.entity.BaitCreeperDetonationTask;
 import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasksystem.Task;
@@ -14,6 +15,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 
@@ -120,6 +122,12 @@ public class FurnaceSmeltGuardTask extends Task {
         if (_committedKill != null) {
             _dwellTimer.reset();
             setDebugState("Killing committed threat: " + _committedKill.getType().getTranslationKey());
+            // (2026-09-25 苦力怕诱爆) 承诺目标换成诱爆风筝: 保持 5~7 格环带
+            // 等它自爆, 引爆点被拉到熔炉 10 格外 (keepClearPos), 不再贴脸
+            // 徒手输出 (172433 会话被炸掉熔炉的根因路径)。
+            if (_committedKill instanceof CreeperEntity baitCreeper) {
+                return new BaitCreeperDetonationTask(baitCreeper, _furnacePos);
+            }
             return new KillEntityTask(_committedKill);
         }
 
@@ -132,6 +140,10 @@ public class FurnaceSmeltGuardTask extends Task {
             _committedLastSeenTick = now;
             _dwellTimer.reset();
             setDebugState("Dispatching kill: " + threat.get().getType().getTranslationKey());
+            // (2026-09-25 苦力怕诱爆) 同承诺分支: 苦力怕派诱爆而非击杀。
+            if (threat.get() instanceof CreeperEntity baitCreeper) {
+                return new BaitCreeperDetonationTask(baitCreeper, _furnacePos);
+            }
             return new KillEntityTask(threat.get());
         }
 

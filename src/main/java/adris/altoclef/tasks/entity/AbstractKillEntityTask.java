@@ -284,6 +284,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
      */
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-25 苦力怕诱爆, 用户定案) 任何击杀苦力怕的派发一律改为
+        // 诱爆风筝: 保持 5~7 格环带让引信烧满自爆, 不近战 (徒手/持剑都不挥
+        // —— 挥击击退会把苦力怕打出引信环带, 且站桩贴脸输出在无盾时就是
+        // 172433 会话被炸掉熔炉的复现路径)。有盾时盾牌核弹 (防御链) 优先级
+        // 更高会打断本任务, 属预期。keepClearPos=null 的通用派发无保护目标。
+        Optional<Entity> baitTarget = getEntityTarget(mod);
+        if (baitTarget.isPresent() && baitTarget.get() instanceof CreeperEntity baitCreeper && baitCreeper.isAlive()) {
+            return new BaitCreeperDetonationTask(baitCreeper, null);
+        }
         int giveUpSeconds = mod.getModSettings().getKillGiveUpSeconds();
         Optional<Entity> target = getEntityTarget(mod);
         if (target.isPresent() && giveUpSeconds > 0) {

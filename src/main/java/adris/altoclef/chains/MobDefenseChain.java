@@ -11,6 +11,7 @@ import adris.altoclef.trackers.EntityTracker;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
+import adris.altoclef.util.helpers.CreeperBaitSignal;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.PathReachabilityHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
@@ -529,6 +530,9 @@ public class MobDefenseChain extends SingleTaskChain {
         int endermanCount = 0;
         for (Entity h : hostiles) {
             if (h == null || !h.isAlive()) continue;
+            // (2026-09-25 苦力怕诱爆) 诱爆目标不算威胁: 它正被拉到安全环带
+            // 等自爆, "存在苦力怕→必逃"判据会抢在诱爆前面触发逃跑。
+            if (CreeperBaitSignal.isBaiting(h)) continue;
             if (h instanceof EndermanEntity) { endermanCount++; continue; }
             if (h instanceof CreeperEntity) { anyCreeper = true; continue; }
             if (isRangedThreat(h)) { anyRanged = true; continue; }
@@ -776,6 +780,13 @@ public class MobDefenseChain extends SingleTaskChain {
         _doingFunkyStuff = false;
         // Run away from creepers (or shield-block the explosion when safe).
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
+        // (2026-09-25 苦力怕诱爆) 正在诱爆的苦力怕不触发逃跑 —— 诱爆任务就是
+        // 故意留在 5~7 格引信环带里等它自爆, 逃跑只会把它带出环带熄引信,
+        // 然后苦力怕重新逼近 → 再逃 (172433 会话 Killing↔RunAway 横跳根源)。
+        // 有盾时盾牌核弹优先级更高, 保持原判 (不豁免) 让核弹接管。
+        if (blowingUp != null && CreeperBaitSignal.isBaiting(blowingUp) && !canShieldNuke(mod)) {
+            blowingUp = null;
+        }
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
             // (2026-09-16) [Diag-creeper] 原每 tick 都 Debug.logMessage 刷聊天, 苦力怕引信期间
@@ -1060,8 +1071,16 @@ public class MobDefenseChain extends SingleTaskChain {
 
         // By default if we aren't "immediately" in danger but were running away, keep running away until we're good.
         if (_runAwayTask != null && !_runAwayTask.isFinished(mod)) {
-            setTask(_runAwayTask);
-            return _cachedLastPriority;
+            // (2026-09-25 苦力怕诱爆) 诱爆进行中, 苦力怕逃跑任务失效:
+            // 旧 RunAwayFromCreepersTask 的 "≥10 格才算完成" 会把 bot 从诱爆
+            // 环带 (5~7 格) 反复拽走 → 熄引信 → 苦力怕重新逼近 → 再逃, 死循环
+            // (172433 会话横跳根源之一)。清掉让位给诱爆任务。
+            if (CreeperBaitSignal.isActive() && _runAwayTask instanceof RunAwayFromCreepersTask) {
+                _runAwayTask = null;
+            } else {
+                setTask(_runAwayTask);
+                return _cachedLastPriority;
+            }
         }
 
         return 0;
@@ -1076,6 +1095,11 @@ public class MobDefenseChain extends SingleTaskChain {
         // A fusing creeper is the one thing that interrupts a committed fight —
         // it can one-shot us, no amount of "focus fire" fixes that.
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
+        // (2026-09-25 苦力怕诱爆) 同 stateEvaluate: 诱爆目标不触发逃跑,
+        // 有盾仍走核弹接管 (不豁免)。
+        if (blowingUp != null && CreeperBaitSignal.isBaiting(blowingUp) && !canShieldNuke(mod)) {
+            blowingUp = null;
+        }
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
             // (2026-09-02 苦力怕修复根因) 去掉 fuse>=0.45 门槛: 苦力怕点燃是从
