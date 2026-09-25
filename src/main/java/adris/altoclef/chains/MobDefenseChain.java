@@ -2,6 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.entity.BaitCreeperDetonationTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
@@ -107,6 +108,9 @@ public class MobDefenseChain extends SingleTaskChain {
     private boolean _doingFunkyStuff = false;
     private boolean _wasPuttingOutFire = false;
     private CustomBaritoneGoalTask _runAwayTask;
+    // (2026-09-25 183242 实锤) 诱爆任务引用: 防御链自己派发并跨 tick 持有,
+    // 没有它, 点燃分支每 tick 都在 核弹→战斗→逃跑 里打转, 诱爆永远不启动。
+    private BaitCreeperDetonationTask _baitTask;
 
     private float _cachedLastPriority;
 
@@ -780,12 +784,29 @@ public class MobDefenseChain extends SingleTaskChain {
         _doingFunkyStuff = false;
         // Run away from creepers (or shield-block the explosion when safe).
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
-        // (2026-09-25 苦力怕诱爆) 正在诱爆的苦力怕不触发逃跑 —— 诱爆任务就是
-        // 故意留在 5~7 格引信环带里等它自爆, 逃跑只会把它带出环带熄引信,
-        // 然后苦力怕重新逼近 → 再逃 (172433 会话 Killing↔RunAway 横跳根源)。
-        // 有盾时盾牌核弹优先级更高, 保持原判 (不豁免) 让核弹接管。
-        if (blowingUp != null && CreeperBaitSignal.isBaiting(blowingUp) && !canShieldNuke(mod)) {
-            blowingUp = null;
+        // (2026-09-25 183242 实锤缺口) 原先本分支只做 核弹→自信战斗→逃跑 三选一,
+        // 从不创建指向苦力怕的 kill task → AbstractKillEntityTask 的诱爆重定向
+        // 永不触发, [BAIT] 一条没打 (18:46:48 现场走了 FIGHT→RETREAT 横跳)。
+        // 改为: 没盾时在本分支直接派发/持有诱爆任务 (用户拍板: 苦力怕一律诱爆不近战)。
+        if (blowingUp != null && !canShieldNuke(mod)) {
+            if (CreeperBaitSignal.isBaiting(blowingUp)) {
+                if (_baitTask != null && !_baitTask.isFinished(mod)) {
+                    // 自己派发的诱爆还在跑 → 继续持有, 不落回战斗/逃跑横跳
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    _defenseState = DefenseState.EVALUATE;
+                    return 55;
+                }
+                // 诱爆由其他链 (熔炉守卫) 持有 → 不抢, 保持原豁免口径不干预
+                blowingUp = null;
+            } else {
+                // 新点燃且无盾 → 派发诱爆, 优先于自信战斗与逃跑
+                _baitTask = new BaitCreeperDetonationTask(blowingUp, null);
+                _doingFunkyStuff = true;
+                setTask(_baitTask);
+                _defenseState = DefenseState.EVALUATE;
+                return 55;
+            }
         }
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
@@ -1095,10 +1116,25 @@ public class MobDefenseChain extends SingleTaskChain {
         // A fusing creeper is the one thing that interrupts a committed fight —
         // it can one-shot us, no amount of "focus fire" fixes that.
         CreeperEntity blowingUp = getClosestFusingCreeper(mod);
-        // (2026-09-25 苦力怕诱爆) 同 stateEvaluate: 诱爆目标不触发逃跑,
-        // 有盾仍走核弹接管 (不豁免)。
-        if (blowingUp != null && CreeperBaitSignal.isBaiting(blowingUp) && !canShieldNuke(mod)) {
-            blowingUp = null;
+        // (2026-09-25 183242 实锤缺口) 同 stateEvaluate: 战斗中苦力怕点燃时
+        // 原先只做 核弹→逃跑, 从不派发诱爆。没盾时改为派发/持有诱爆,
+        // 爆炸后无缝回到本批次战斗; 有盾仍走核弹接管。
+        if (blowingUp != null && !canShieldNuke(mod)) {
+            if (CreeperBaitSignal.isBaiting(blowingUp)) {
+                if (_baitTask != null && !_baitTask.isFinished(mod)) {
+                    // 自己派发的诱爆还在跑 → 继续持有
+                    _doingFunkyStuff = true;
+                    setTask(_baitTask);
+                    return 60 + blowingUp.getClientFuseTime(1) * 50;
+                }
+                // 诱爆由其他链 (熔炉守卫) 持有 → 不抢
+                blowingUp = null;
+            } else {
+                _baitTask = new BaitCreeperDetonationTask(blowingUp, null);
+                _doingFunkyStuff = true;
+                setTask(_baitTask);
+                return 60 + blowingUp.getClientFuseTime(1) * 50;
+            }
         }
         if (blowingUp != null) {
             float fuse = blowingUp.getClientFuseTime(1);
