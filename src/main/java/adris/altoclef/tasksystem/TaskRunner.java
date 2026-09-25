@@ -177,6 +177,11 @@ public class TaskRunner {
         }
 
         Debug.logMessage("Stopped");
+
+        // (2026-09-25 停止任务即落盘) 用户 @stop / Alt+U 后立即 flush 并释放全部
+        // 会话日志 writer —— Windows 在句柄释放瞬间提交大小/mtime 元数据, 用户马上
+        // 打开日志不再看到"0 字节"假象。下次 logToFile 惰性重开, 无副作用。
+        Debug.closeAllWriters();
     }
 
     public TaskChain getCurrentTaskChain() {

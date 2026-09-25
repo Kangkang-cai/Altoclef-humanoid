@@ -163,6 +163,29 @@ public class Debug {
         }
     }
 
+    /**
+     * (2026-09-25 停止任务即落盘) 关闭全部会话日志 writer: flush 残余缓冲 + 释放
+     * 文件句柄。用户 @stop / Alt+U 停 bot 后立刻打开日志, 不再看到"0 字节/大小
+     * 滞后"的假象 —— 平时每行 println 虽有 autoflush, 但游戏进程持有句柄时
+     * Windows 目录元数据 (大小/mtime) 提交滞后, 资源管理器/Get-ChildItem 显示旧值
+     * (12:45 场次实锤: 会话进行中目录列表恒 0 字节, 内容实际已在盘上)。句柄一释放
+     * 元数据立即落定。下一个 logToFile 会惰性重建 writer (_sessionHeaderWritten
+     * 去重, 不会重复写 SESSION START 头)。
+     */
+    public static void closeAllWriters() {
+        synchronized (_fileLogMutex) {
+            for (PrintWriter writer : _writers.values()) {
+                try {
+                    writer.flush();
+                    writer.close();
+                } catch (Exception ignored) {
+                    // 关闭失败不阻塞停止流程
+                }
+            }
+            _writers.clear();
+        }
+    }
+
     // [TRACE] (2026-09-01) 制作/收集石头/木头三链的专用追踪日志。写
     // altoclef_trace.log (位于 .minecraft)。同一 tag 1 秒内只写一次 (节流),
     // 避免刷屏的同时保证"百分百追逐过程"——状态跳到新值时立即记录, 反复抖动
