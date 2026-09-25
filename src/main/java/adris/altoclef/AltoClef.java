@@ -21,6 +21,7 @@ import adris.altoclef.ui.CommandStatusOverlay;
 import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
+import adris.altoclef.util.RenderThreadWatchdog;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
 import adris.altoclef.util.helpers.OffhandHygiene;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
@@ -129,6 +130,10 @@ public class AltoClef implements ModInitializer {
         // However, some things (like resources) may still be uninitialized.
         // As such, nothing will be loaded here but basic initialization.
         EventBus.subscribe(TitleScreenEntryEvent.class, evt -> onInitializeLoad());
+        // (2026-09-25 渲染线程冻结取证看门狗) 守护线程监控 client tick 心跳,
+        // 主线程冻结 >5s 时转储全线程栈 + 任务链到 watchdog.log。172433 会话
+        // 渲染完全卡住零取证的事故对策。与加载状态无关, 游戏起来即监控。
+        RenderThreadWatchdog.start(this);
     }
 
     public void onInitializeLoad() {
@@ -269,6 +274,10 @@ public class AltoClef implements ModInitializer {
 
     // Client tick
     private void onClientTick() {
+        // (2026-09-25 看门狗心跳) 本方法跑在 Render thread 上, 每 tick 一次
+        // volatile 写。主线程在 tick 前/tick 中/帧渲染任一处冻结, 心跳即停,
+        // 守护线程 5s 后转储现场 (RenderThreadWatchdog 类注释)。
+        RenderThreadWatchdog.heartbeat();
         runEnqueuedPostInits();
 
         // (2026-08-30 没镐别挖石头墙) 客户线程刷新"当前采矿等级"缓存, 供寻路
