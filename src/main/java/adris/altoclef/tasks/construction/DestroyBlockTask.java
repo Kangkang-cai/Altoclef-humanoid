@@ -481,7 +481,25 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 不劳 moveChecker 在这里插一脚。
         if (!_ascent.isActive() && !_moveChecker.check(mod) && _tryToMineTimer.elapsed()) {
             _moveChecker.reset();
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            // (2026-09-25 岩浆边缘冻结立即拉黑) 现场 20260925-124512: 下界金矿
+            // (-134,52,114) 贴岩浆湖, bot 每轮爬到 y=51 岩浆边 → reach 射线穿岩浆
+            // 拿不到 → 冻结 6s → 这里 Try N/4 + Wander 回走摔回隧道 → 再导航回来,
+            // 11 轮爬升 5 轮拉黑计数 2 分钟零推进 (failures > allowed 语义下 Try
+            // 4/4 不生效, 5/4 才 ban)。修: 卡死时若目标/身边小半径内有岩浆且 bot
+            // 已在目标 6 格内 ("到位但够不着"而非途中路过) → allowed=0 首次失败
+            // 即 ban, 不再等 5 轮。工具升级 RESET 仍可解禁 (toolUpgraded 路径)。
+            boolean closeToTarget = _pos.isWithinDistance(mod.getPlayer().getPos(), GIVE_UP_JUDGE_RANGE);
+            if (closeToTarget
+                    && (isLavaNearby(mod, _pos) || isLavaNearby(mod, mod.getPlayer().getBlockPos()))) {
+                String m = "[LavaEdge] target " + _pos.toShortString() + " frozen >6s without reach next to"
+                        + " lava (player=" + mod.getPlayer().getBlockPos().toShortString()
+                        + ") -> blacklist immediately, no 5-round flip-flop";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                mod.getBlockTracker().requestBlockUnreachable(_pos, 0);
+            } else {
+                mod.getBlockTracker().requestBlockUnreachable(_pos);
+            }
             _wanderTask.resetWander();
             return _wanderTask;
         }
@@ -1069,6 +1087,21 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         BlockState st = mod.getWorld().getBlockState(pos);
         if (st.isAir()) return true;
         return st.getHardness(mod.getWorld(), pos) >= 0;
+    }
+
+    /**
+     * (2026-09-25 岩浆边缘冻结立即拉黑) pos 周围小半径 (水平±2, 垂直±1, 共 75 格)
+     * 内是否有岩浆 (含流动)。只在 moveChecker 失败事件当拍调用一次, 不在每 tick
+     * 热路径; 中心区块未加载时不判有 (读不到 ≠ 有岩浆)。
+     */
+    private static boolean isLavaNearby(AltoClef mod, BlockPos center) {
+        if (!mod.getChunkTracker().isChunkLoaded(center)) return false;
+        for (BlockPos p : BlockPos.iterate(center.add(-2, -1, -2), center.add(2, 1, 2))) {
+            if (mod.getWorld().getBlockState(p).getBlock() == Blocks.LAVA) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
