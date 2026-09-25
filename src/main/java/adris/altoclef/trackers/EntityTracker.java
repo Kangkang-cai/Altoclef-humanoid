@@ -19,6 +19,7 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.*;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.projectile.FishingBobberEntity;
+import net.minecraft.entity.projectile.FireballEntity;
 import net.minecraft.entity.projectile.PersistentProjectileEntity;
 import net.minecraft.entity.projectile.ProjectileEntity;
 import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
@@ -52,6 +53,13 @@ public class EntityTracker extends Tracker {
     // How many game ticks an entity stays "perceived" after we last saw/heard it.
     // 20 seconds at 20 ticks/second.
     private static final long PERCEIVE_MEMORY_TICKS = 20 * 20;
+
+    // (2026-09-25 恶魂火弹"听到就回头", 用户拍板) 火弹豁免人类感知模型 (FOV/角尺寸):
+    // 搭路时视线朝下, 火弹侧后方来袭要进 6 格 FOV 豁免圈才"被看见", 而火弹速度
+    // ~1.6 格/tick, 剩 ~4 tick 必死 (20260925 岩浆湖搭路被火弹炸落事故)。真实玩家
+    // 听到火弹呼啸会立刻回头 —— 16 格内的火弹视同"听见", 直接进入感知。
+    /** 火弹听觉感知半径: 16 格 (超出则按普通感知模型处理)。 */
+    public static final double FIREBALL_AWARE_RANGE = 16.0;
 
     // Last game tick we perceived each entity (seen or heard).
     private final HashMap<Entity, Long> _lastPerceivedTick = new HashMap<>();
@@ -476,7 +484,12 @@ public class EntityTracker extends Tracker {
                     // 同床/传送门的"无限制感知"。
                     boolean isEnderEye = entity instanceof EyeOfEnderEntity
                             || (entity instanceof ItemEntity ie && ie.getStack().getItem() == Items.ENDER_EYE);
-                    if (!isEnderEye) {
+                    // (2026-09-25 火弹"听到就回头", 用户拍板) 16 格内火弹豁免人类感知模型。
+                    boolean isFireballThreat = entity instanceof FireballEntity
+                            && _mod.getPlayer() != null
+                            && entity.squaredDistanceTo(_mod.getPlayer())
+                                    <= FIREBALL_AWARE_RANGE * FIREBALL_AWARE_RANGE;
+                    if (!isEnderEye && !isFireballThreat) {
                         long nowTick = WorldHelper.getTicks();
                         boolean directlyPerceived = VisibilityHelper.isEntityVisible(_mod, entity) || _mod.getSoundTracker().isEntityAudible(entity.getPos());
                         boolean perceived = directlyPerceived;

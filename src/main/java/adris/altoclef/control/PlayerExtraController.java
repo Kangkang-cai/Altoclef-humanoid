@@ -8,6 +8,7 @@ import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.projectile.FireballEntity;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
@@ -102,6 +103,14 @@ public class PlayerExtraController {
                 _lastSwingTargetId = entity.getUuid();
                 return;
             }
+            requestCombatAim(entity);
+            return;
+        }
+        // (2026-09-25 火弹提前转头) reach 外的火弹也登记攻击瞄准诉求:
+        // 火弹速度 ~1.6 格/tick, 穿过 3.2 格 reach 圈只剩 ~2 tick, "进圈才转头
+        // 再出刀"根本来不及 (20260925 岩浆湖搭路被火弹炸落事故)。reach 外先
+        // 把准心转过去, 进圈即可出刀。仅火弹豁免, 其他实体出 reach 不转头。
+        if (entity instanceof FireballEntity) {
             requestCombatAim(entity);
         }
     }

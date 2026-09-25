@@ -7,6 +7,7 @@ import adris.altoclef.tasks.movement.*;
 import adris.altoclef.tasks.resources.CollectBlazeRodsTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.trackers.EntityTracker;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
@@ -1771,6 +1772,23 @@ public class MobDefenseChain extends SingleTaskChain {
         } catch (Exception e) {
             Debug.logWarning("Weird exception caught and ignored while doing force field.");
             e.printStackTrace();
+        }
+
+        // (2026-09-25 火弹宽半径接管, 20260925 岩浆湖搭路被火弹炸落事故)
+        // getCloseEntities 只收 reach (3.2 格) 内实体, 火弹速度 ~1.6 格/tick,
+        // 穿越该圈只剩 ~2 tick, "看到再打"必死。改为从实体登记表 (感知侧已在
+        // 16 格内豁免 FOV, "听到就回头", 用户拍板) 取火弹提前喂给 KillAura。
+        // 只接管冲着 bot 飞来的火弹 (速度朝向点积 ≥0.6), 飞偏的不理会 ——
+        // 减少搭路/寻路时无谓的回头干扰 (0919 搭路让位规矩只禁举盾/躲避,
+        // KillAura 挥拳在搭路期间本来就是放行的, 不违背该规矩)。
+        for (FireballEntity fireball : mod.getEntityTracker().getTrackedEntities(FireballEntity.class)) {
+            if (fireball.squaredDistanceTo(mod.getPlayer())
+                    > EntityTracker.FIREBALL_AWARE_RANGE * EntityTracker.FIREBALL_AWARE_RANGE) continue;
+            Vec3d vel = fireball.getVelocity();
+            if (vel.lengthSquared() < 1e-4) continue;
+            Vec3d toBot = mod.getPlayer().getPos().subtract(fireball.getPos()).normalize();
+            if (vel.normalize().dotProduct(toBot) < 0.6) continue;
+            applyForceField(mod, fireball);
         }
 
         // (2026-09-01 用户"苦力怕近身被迫左键击打, 与举盾矛盾导致举盾失效")

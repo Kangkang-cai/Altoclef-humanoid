@@ -43,15 +43,18 @@ public class KillAura {
                 performFastestAttack(mod);
                 break;
             case SMART:
-
+                // (2026-09-25 火弹 forceHit 提到分支外) 旧实现只有 _targets.size() > 2
+                // 才检查 _forceHit; 场上只有恶魂+火弹 (≤2 目标) 时走 performDelayedAttack,
+                // 火弹按普通威胁值排序参与竞争, "Always hit ghast balls" 形同虚设
+                // (20260925 岩浆湖搭路被火弹炸落事故现场实锤: 只有恶魂和火弹)。
+                if (_forceHit != null) {
+                    attack(mod, _forceHit);
+                    break;
+                }
                 if (_targets.size() <= 2 || _targets.stream().allMatch(entity -> entity instanceof SkeletonEntity) ) {
                     performDelayedAttack(mod);
                 } else {
                     // Attack force mobs ALWAYS.
-                    if (_forceHit != null) {
-                        attack(mod, _forceHit);
-                        break;
-                    }
                     if (_hitDelay.elapsed()) {
                         _hitDelay.reset();
 
