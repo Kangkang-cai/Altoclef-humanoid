@@ -162,14 +162,15 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 永远无人派发 → 空手挖石 7 倍慢, 寻路连环失败 "Failed, blacklisting and
     // wandering" ×3, 用户手动停任务。
     // 修: 维持语义 "永远随身有镐" (同 SatisfyMiningRequirementTask 09-11
-    // needsAnyPickaxeFallback 注释, 拟人原则)。背包无任何镐 + 有棒料 → 派
+    // needsAnyPickaxeFallback 注释, 拟人原则)。背包无任何镐 → 派
     // SatisfyMiningRequirementTask(WOOD) (内部自带钻石/铁优先逻辑)。轮询 10s,
     // prio 55 (同盾牌: 抢常规 50, 让位战斗/死亡恢复/岩浆火溺水)。
-    // 续租至完成; 90s 无果 = 链路死锁 (做不出工作台等) → 释放 + 5min 冷却,
-    // 不焊死优先级 (与 DestroyBlockTask.ToolGate 超时降级同款参数)。
+    // 续租至完成; 150s 无果 = 链路死锁 (做不出工作台等) → 释放 + 5min 冷却,
+    // 不焊死优先级。150s = 覆盖 SatisfyMiningRequirementTask 内部 120s 承诺锁
+    // 逃生窗 (铁/钻石镐链合法工期可达 120s, 90s 会掐断健康链, 09-25 审查 M1)。
     private static final double PICKAXE_WATCHDOG_INTERVAL = 10;
     private static final float PICKAXE_WATCHDOG_PRIORITY = 55;
-    private static final long PICKAXE_WATCHDOG_TIMEOUT_MS = 90_000;
+    private static final long PICKAXE_WATCHDOG_TIMEOUT_MS = 150_000;
     private static final long PICKAXE_WATCHDOG_COOLDOWN_MS = 5 * 60_000;
     private final TimerGame _pickaxeWatchdogTimer = new TimerGame(PICKAXE_WATCHDOG_INTERVAL);
     private static long _pickaxeWatchdogCooldownUntilMs = 0;
@@ -446,9 +447,14 @@ public class WorldSurvivalChain extends SingleTaskChain {
                     // "无任何镐" 判据与 ToolGate/SatisfyMiningRequirementTask.isFinished
                     // 同一函数 (miningRequirementMetInventory), 口径一致
                     && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.WOOD)
-                    // 材料不够派了也白派 (下界没木料场景天然跳过)
-                    && SatisfyMiningRequirementTask.hasStickMaterial(mod)) {
-                String m = "[Pickaxe-Watchdog] no pickaxe in inventory + stick material present -> dispatching SatisfyMiningRequirementTask(WOOD) (player="
+                    // (09-25 审查 M2) 棒料门只对非主世界生效 (下界/末地没树, 派了
+                    // 也做不出来)。主世界【不设材料门】: 最典型断镐场景是"上一把
+                    // 木镐合成耗尽木板/木棍", 镐坏瞬间棒料=0, 若设门则永远不触发;
+                    // 主世界造镐链自身会去砍树收集 (getItemTask 链路), 派发非白派。
+                    && (WorldHelper.getCurrentDimension() != adris.altoclef.util.Dimension.OVERWORLD
+                        || SatisfyMiningRequirementTask.hasStickMaterial(mod))) {
+                String m = "[Pickaxe-Watchdog] no pickaxe in inventory -> dispatching SatisfyMiningRequirementTask(WOOD) (dim="
+                        + WorldHelper.getCurrentDimension() + " player="
                         + mod.getPlayer().getBlockPos().toShortString() + ")";
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
@@ -460,15 +466,15 @@ public class WorldSurvivalChain extends SingleTaskChain {
         }
 
         // (2026-09-25) 镐维持任务续租 + 超时降级: 未完成前持续持有 prio 55 保证
-        // 拿得到 tick; 90s 无果释放 + 5min 冷却 (防"做不出还每 10s 重派"焊死)。
+        // 拿得到 tick; 150s 无果释放 + 5min 冷却 (防"做不出还每 10s 重派"焊死)。
         if (_pickaxeCraftTask != null) {
             if (_mainTask == _pickaxeCraftTask && !_pickaxeCraftTask.isFinished(mod)) {
                 if (System.currentTimeMillis() - _pickaxeCraftSinceMs > PICKAXE_WATCHDOG_TIMEOUT_MS) {
-                    String m = "[Pickaxe-Watchdog] pickaxe crafting exceeded 90s without success -> release + 5min cooldown";
+                    String m = "[Pickaxe-Watchdog] pickaxe crafting exceeded 150s without success -> release + 5min cooldown";
                     Debug.logMessage(m);
                     Debug.logToFile("altoclef_diag.log", m);
                     adris.altoclef.util.helpers.TimeoutLog.hit("WorldSurvivalChain.pickaxeWatchdog",
-                            "90s crafting pickaxe without success, release + cooldown 300s");
+                            "150s crafting pickaxe without success, release + cooldown 300s");
                     _pickaxeCraftTask = null;
                     _pickaxeWatchdogCooldownUntilMs = System.currentTimeMillis() + PICKAXE_WATCHDOG_COOLDOWN_MS;
                 } else {

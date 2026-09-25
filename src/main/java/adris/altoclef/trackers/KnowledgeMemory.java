@@ -343,15 +343,6 @@ public final class KnowledgeMemory {
     }
 
     /**
-     * Whether {@code pos} is within {@code radius} of a structure center we
-     * have actually SEEN (village / ruined portal / fortress). Used by
-     * VisibilityHelper for inference-based perception: a chest inside a
-     * village house is "known" once the village itself has been seen, even
-     * though a wall blocks the direct sightline (2026-08-21). Underground
-     * dungeons/mineshafts are never remembered here, so their buried
-     * containers stay invisible until the bot walks in and sees them.
-     */
-    /**
      * (2026-09-25 透视地牢箱子修复, 实例20260925-111302) 推理可见的 Y 邻近约束。
      * 结构中心记的是【地表地标】(村庄小路/耕地/原木、废弃传送门黑曜石), "容器在
      * 结构里"的人类推断只在结构本体的高度带成立 (房屋/地下室 ±数格)。现网实锤:
@@ -364,6 +355,16 @@ public final class KnowledgeMemory {
      */
     private static final double STRUCTURE_INFERENCE_MAX_Y_DELTA = 8;
 
+    /**
+     * Whether {@code pos} is within {@code radius} of a structure center we
+     * have actually SEEN (village / ruined portal / fortress). Used by
+     * VisibilityHelper for inference-based perception: a chest inside a
+     * village house is "known" once the village itself has been seen, even
+     * though a wall blocks the direct sightline (2026-08-21). Underground
+     * dungeons/mineshafts are never remembered here, so their buried
+     * containers stay invisible until the bot walks in and sees them.
+     * (2026-09-25) 另加 {@link #STRUCTURE_INFERENCE_MAX_Y_DELTA} 的 Y 邻近约束。
+     */
     public boolean isNearRememberedStructure(BlockPos pos, double radius) {
         // (2026-09-18) 只按 INFERENCE_TYPES 推理 —— 单点刷怪笼不在此列, 见该字段注释。
         for (StructureType type : INFERENCE_TYPES) {
