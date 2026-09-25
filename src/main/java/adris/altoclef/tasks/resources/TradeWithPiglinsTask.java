@@ -176,7 +176,22 @@ public class TradeWithPiglinsTask extends ResourceTask {
         // 去合成 1 锭 → 打开工作台 → 卡死, 用户实测 12:21 日志)。
         int goldIngots = StorageHelper.countItemInInventoryReal(mod, Items.GOLD_INGOT);
         if (goldIngots == 0 || (!_startedTrading && goldIngots < _goldBuffer)) {
-            if (_goldTask == null || !_goldTask.isActive()) {
+            // (2026-09-25 预算闸僵尸实例死锁修复, 20260925-112204 会话 12:09:11 实锤)
+            // TaskCatalogue 活实例合并"count 不同也复用": 金靴链先建了
+            // CollectGoldIngotTask(4) 占住 gold_ingot 合并槽, 本任务请求 32 时
+            // 拿回同一个 count=4 实例 ([CAT-CACHE] reuse parked gold_ingot)。
+            // 该实例合成满自己的 4 锭后 onResourceTick 返回 null ("真·金锭已够"),
+            // 而真实背包 4 < 32 → 原判据 (_goldTask==null || !isActive) 恒不成立,
+            // 本分支每 tick 原样返回这个"已满足却仍 active"的僵尸 → 父不换子、
+            // 子不干活, 原地停滞 2 分钟直到人工叫停 (日志零 Task START/STOP)。
+            // 修复: 缓存实例自身目标已达成 (isFinished) 但缺口检查仍不满足时,
+            // 强制走 getItemTask —— _liveInstance 槽对 finished 实例按新 count
+            // 重建 (TaskCatalogue.getResource 校验顺序), 正是"调用方自己的缺口
+            // 检查驱动后续"的契约 (TaskCatalogue.java:972)。
+            if (_goldTask == null || !_goldTask.isActive() || _goldTask.isFinished(mod)) {
+                Debug.logToFile("altoclef_diag.log",
+                        "[PiglinTrade]\tgold task stale (finished/Inactive) but budget unmet ("
+                                + goldIngots + "/" + _goldBuffer + "), rebuilding collector");
                 _goldTask = TaskCatalogue.getItemTask(Items.GOLD_INGOT, _goldBuffer);
             }
             setDebugState("Collecting gold (budget " + _goldBuffer + ")");
