@@ -642,6 +642,13 @@ public class BeatMinecraft2Task extends Task {
     private boolean _bedWoolHoldLogged = false;
     private long _skipNightBedUntilMs = 0;
     private static final long SKIP_NIGHT_BED_FOR_MS = 45_000;
+    // (2026-09-25 夜间无床不囤食, 用户"食物超过20units就直接派挖矿, 不在地表逗留")
+    // 地表食物门跳过阈值: 夜晚(canSleep) + 无床(hasBedRegard=false) + 食物分
+    // 严格大于该值 → 不派 CollectFoodTask, 落到铁装/钻石挖矿分支下矿熬夜。
+    private static final int NIGHT_NO_BED_SKIP_FOOD_MIN_UNITS = 20;
+    // 上述"跳过地表收食物"状态的边沿闩锁 (长驻状态分支必须边沿触发): 进出各打一条
+    // [NIGHT-MINE] 诊断, 状态翻转才落盘, 不逐 tick 刷屏。
+    private boolean _nightNoBedFoodSkipActive = false;
     private final TimerGame _notSleepableTimer = new TimerGame(30);
     private boolean _wasSleepableOnce = false;
     // rawCanSleep 持续时长计时 (2026-08-22): 须连续 5 秒为真才武装 30s 宽限,
@@ -2501,20 +2508,48 @@ public class BeatMinecraft2Task extends Task {
                         }
                         // 食物尚可(>minFoodUnits): 跳过食物门, 继续下矿/熔炼等后续分支。
                     } else {
-                        // 地表: 贪婪收集到达峰 (锁存后真断粮也冲峰值重建库存)。
-                        // (2026-09-15 觅食远征) 远征锁存期间目标用降低值。
-                        _foodTask = new CollectFoodTask(collectTargetUnits);
-                        diagIronPhase(mod, "collect food (greedy peak gate)",
-                                "foodScore=" + foodScore
-                                        + " targetUnits=" + collectTargetUnits
-                                        + " expedition=" + FoodChain.s_foodExpeditionActive
-                                        + " peakLatched=" + FoodChain.s_foodPeakReached
-                                        + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
-                        Debug.logToFile("altoclef_diag.log",
-                                "[MAIN-FIX]\t[FoodGate]\tgreedy-peak food=" + foodScore
-                                        + "/" + foodPeakUnits + " latched=" + FoodChain.s_foodPeakReached
-                                        + " -> CollectFoodTask before mining/smelting");
-                        return _foodTask;
+                        // (2026-09-25 夜间无床不囤食, 用户"食物超过20units就直接派挖矿,
+                        // 不在地表逗留") 夜晚(canSleep, 与睡路由 rawCanSleep 同口径) 且
+                        // 无床(hasBedRegard=false: 背包床/6格已放床/已感知床均无) 且
+                        // 食物分 > 20 → 跳过地表贪婪收食物, 直接落到下方铁装/钻石挖矿
+                        // 分支下矿熬夜 (挖矿自然把 bot 带入地下, 避开夜间地表怪)。
+                        // ① 食物 ≤ 20 仍照旧收食 —— 夜里断粮饿死比逗留更糟;
+                        // ② 有床时不动: 睡路由在最顶部已优先派睡觉/找床, 走不到这里
+                        //    (能走到这里且有床 = 睡觉放弃冷却中, 收食物是合理兜底);
+                        // ③ 白天 canSleep=false → 条件不成立, 贪婪收集行为零变化;
+                        // ④ 下矿后转地下, 走上方地下分支 (食物 > minFoodUnits 不回地表),
+                        //    与本闸无交互, 无横跳面。
+                        boolean nightNoBedSkipFood = WorldHelper.canSleep()
+                                && !hasBedRegard(mod)
+                                && foodScore > NIGHT_NO_BED_SKIP_FOOD_MIN_UNITS;
+                        if (nightNoBedSkipFood != _nightNoBedFoodSkipActive) {
+                            _nightNoBedFoodSkipActive = nightNoBedSkipFood;
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[NIGHT-MINE]\t" + (nightNoBedSkipFood ? "enter" : "exit")
+                                            + " skip-surface-food: food=" + foodScore
+                                            + "/" + collectTargetUnits
+                                            + " canSleep=" + WorldHelper.canSleep()
+                                            + " hasBedRegard=" + hasBedRegard(mod));
+                        }
+                        if (!nightNoBedSkipFood) {
+                            // 地表: 贪婪收集到达峰 (锁存后真断粮也冲峰值重建库存)。
+                            // (2026-09-15 觅食远征) 远征锁存期间目标用降低值。
+                            _foodTask = new CollectFoodTask(collectTargetUnits);
+                            diagIronPhase(mod, "collect food (greedy peak gate)",
+                                    "foodScore=" + foodScore
+                                            + " targetUnits=" + collectTargetUnits
+                                            + " expedition=" + FoodChain.s_foodExpeditionActive
+                                            + " peakLatched=" + FoodChain.s_foodPeakReached
+                                            + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[MAIN-FIX]\t[FoodGate]\tgreedy-peak food=" + foodScore
+                                            + "/" + foodPeakUnits + " latched=" + FoodChain.s_foodPeakReached
+                                            + " -> CollectFoodTask before mining/smelting");
+                            return _foodTask;
+                        }
+                        // nightNoBedSkipFood=true: 不派收食物, 继续往下走挖矿分支
+                        // (debug 状态由挖矿分支自己设置, 这里不设, 遵循"返回/落穿分支
+                        // 不抢设状态"的既有约定)。
                     }
                 }
 
@@ -3838,9 +3873,10 @@ public class BeatMinecraft2Task extends Task {
         }
         boolean effectiveCanSleep = rawCanSleep || (_wasSleepableOnce && !_notSleepableTimer.elapsed());
 
-        boolean hasBedRegard = mod.getItemStorage().hasItem(ItemHelper.BED)
-                || isPlacedBedNearby(mod)
-                || isBedPerceived(mod);
+        // (2026-09-25 收口为方法) hasBedRegard 三口径 (背包床 / 6 格内已放床 /
+        // BlockTracker 已感知床) 同时被睡眠路由 (本方法) 与地表食物门
+        // "夜间无床不囤食" 使用, 判据只留这一份 (判据一致性铁律)。
+        boolean hasBedRegard = hasBedRegard(mod);
 
         if (effectiveCanSleep) {
             // 路2: 地表夜间 → 优先睡觉
@@ -4101,6 +4137,18 @@ public class BeatMinecraft2Task extends Task {
      */
     private boolean isBedPerceived(AltoClef mod) {
         return mod.getBlockTracker().anyFound(ItemHelper.itemsToBlocks(ItemHelper.BED));
+    }
+
+    /**
+     * (2026-09-25 抽方法收口) "算有床"统一口径: 背包有床 / 6 格内放着自己(或
+     * 任意)的床 / BlockTracker 已感知到床, 任一成立即算有。睡眠路由
+     * (getNightSleepRouting 路2) 与地表食物门"夜间无床不囤食"共用,
+     * 禁止再写第四份床判据。
+     */
+    private boolean hasBedRegard(AltoClef mod) {
+        return mod.getItemStorage().hasItem(ItemHelper.BED)
+                || isPlacedBedNearby(mod)
+                || isBedPerceived(mod);
     }
 
     /**
