@@ -29,6 +29,8 @@ public class EatItemTask extends Task {
 
     private final TimerGame _timeout;
     private boolean _eating = false;
+    // (2026-09-26 乒乓活锁修复) 开吃前"准星连续干净"确认计数。
+    private int _clearViewTicks = 0;
     private long _lastShieldStuckLogMs = 0;
     private long _lastEquipFailLogMs = 0;
     // (2026-09-06 开局即超时修复) SingleTaskChain.onTick 在任务【首次 tick 之前】
@@ -48,6 +50,7 @@ public class EatItemTask extends Task {
     protected void onStart(AltoClef mod) {
         _timeout.reset();
         _eating = false;
+        _clearViewTicks = 0;
         _started = true;
         // (2026-09-14 空中禁食配套, 用户"跳跃中途吃东西减速掉下去") 设计意图是
         // "站定吃完", 但被抢占的导航任务若不是 CustomBaritoneGoalTask 系, baritone
@@ -89,6 +92,8 @@ public class EatItemTask extends Task {
             // 俯仰角 90 = 垂直向下; 保持当前 yaw, 避免无谓的水平甩头
             adris.altoclef.util.helpers.LookHelper.lookAt(mod,
                     new baritone.api.utils.Rotation(mod.getPlayer().getYaw(), 90f));
+            // (2026-09-26) 准星命中容器 = 视角不稳定, 确认计数清零。
+            _clearViewTicks = 0;
             setDebugState("Facing interactable, looking down before eating");
             return null;
         }
@@ -160,6 +165,19 @@ public class EatItemTask extends Task {
                 }
                 // fallthrough 到下方开吃, 吃副手。
             }
+        }
+
+        // (2026-09-26 乒乓活锁修复, 现场 1726 会话 17:56:01~24) 被中断导航的 look
+        // 残留让相机仍在朝容器平滑转动: 当拍 crosshairTarget 还没指到炉子 → 本任务
+        // 当拍 hold 右键 → 右键实际应用时准星已转进炉子 → 误开熔炉界面 → FoodChain
+        // 容器闸门让位 (prio62→50) → 炉卫 "Closing furnace screen to guard" 关界面
+        // → Food 再抢 → 每 tick 互换 344 次、23 秒吃不成一口。修法: 开吃要求准星
+        // 连续 2 拍干净; 相机若正转向容器, 第 2 拍必进上方低头分支 —— 结构上永不
+        // 误开界面。代价: 正常进食晚 1 tick。
+        if (_clearViewTicks < 1) {
+            _clearViewTicks++;
+            setDebugState("Waiting for stable view before eating");
+            return null;
         }
 
         mod.getInputControls().hold(Input.CLICK_RIGHT);
