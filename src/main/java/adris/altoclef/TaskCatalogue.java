@@ -969,12 +969,17 @@ public class TaskCatalogue {
         // ⚠ (2026-09-17 根治) 上一版的"未 stopped"判据本身是第二条产线: stopped 不是终态,
         // 4 秒的瞬时让位被判成死亡 → 又连建两个实例 (A 复活真干活 / B 冷等), 症状照旧复发。
         // 现判据见下方 PARKED_REBUILD_GRACE_MS 与 getResource 内注释。
-        // 注意 count 不同时也复用 (合并正是目的): 缓存实例按 count=4 建立后, 另一处
-        // 请求 count=25 必须返回仍活跃的同一实例; 调用方自己的 isFinished / 缺口检查
-        // 会驱动后续; 只有当缓存实例 isFinished 后, 下一次调用才按新 count 重建。
-        // (该合并天然覆盖 SmeltInFurnaceTask / CraftInTableTask / MineAndCollectTask
-        // 家族, 此处为通用机制, 不写任何类型特判。)
+        // (2026-09-26 count 一致性) count 不同时不再复用, 直接按新 count 重建。
+        // 旧设计有意跨 count 复用 ("count=25 必须拿回 count=4 的活跃实例"),
+        // 但只论证了更大请求方向; 更小请求复用大实例 = 调用方拿到目标写死的
+        // 大任务。20260926-115959 场次实锤: bucket×2 建的 iron×6 炉实例在桶
+        // 合成后未死, flint&steel 的 iron×1 请求复用到它 → 反复讨生铁、上爬
+        // 被拉回熔炉横跳。重建后旧炉内物理进度不丢 (新实例经 SmeltDebt 在途
+        // 账/开炉观察接手)。0917 守炉死循环修复场景 = 同 count 复用, 走下方
+        // 停泊宽限判据, 不受本条影响。
         private ResourceTask _liveInstance = null;
+        // (2026-09-26) _liveInstance 登记时的请求 count, 用于复用前一致性校验。
+        private int _liveInstanceCount = -1;
         // (2026-09-16 验证日志) [CAT-CACHE] rebuild 打点节流时间戳。
         private long _lastCacheLogMs = 0;
         // (2026-09-17 根治验证日志) [CAT-CACHE] reuse parked 打点节流时间戳。
@@ -1025,6 +1030,7 @@ public class TaskCatalogue {
             // 复用面因此变大 = 正是本槽存在的目的 (被 tick 的与被轮询的是同一实例)。
             long parkedMs = (_liveInstance == null) ? -1 : _liveInstance.parkedMillis();
             if (_liveInstance != null && mod != null
+                    && _liveInstanceCount == count
                     && !Task.isInTickStack(_liveInstance)
                     && !_liveInstance.isFinished(mod)
                     && parkedMs < PARKED_REBUILD_GRACE_MS) {
@@ -1088,6 +1094,7 @@ public class TaskCatalogue {
                 result = result.forceDimension(_targetDimension);
             }
             _liveInstance = result;
+            _liveInstanceCount = count;
             return _liveInstance;
         }
 

@@ -294,8 +294,17 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // (2026-09-10 活锁看门狗) 放弃语义: 看门狗触发后视为完成放行, 炉内
         // 遗留现状 (日志 [SmeltGiveUp] 已记快照), 由上层自行改道 (挖矿/换炉)。
         if (_gaveUp) return true;
-        // 一次烧满原则：只有数量达标 且 熔炉已排空（材料烧完、产物取出）
-        // 才算结束——否则塞进去的材料就浪费在炉子里了。
+        // 一次烧满原则(燃料侧保留)：塞炉的材料量必须被燃料覆盖 (L634-638),
+        // 防"燃料烧尽、生铁滞留材料槽"的真浪费。
+        // (2026-09-26 完成语义修正, 用户拍板"有 6 锭就该死") drained 不再是
+        // 完成硬门槛。旧语义 (targetsMet && drained) 在"目标提前达成但炉里
+        // 还有遗留"时两头恒堵: 20260926-115959 场次实锤——背包 6 锭被桶合成
+        // 吃掉后 targetsMet 翻 false, 炉里 1 个前序遗留锭没人收 drained 恒
+        // false → 实例永生 → 被 TaskCatalogue 缓存复用给 flint&steel 的
+        // iron×1 请求, 目标写死 6 锭 → 反复讨生铁、上爬被拉回熔炉横跳。
+        // 现语义: 数量达标即完成。炉内遗留由下一次同炉任务的开炉收尾流程
+        // 自然收走 (containerSubTask "output slot has something → receive it"),
+        // 换炉场景的遗留已走 ORPHAN_FURNACES 孤儿账。
         // (2026-08-22 收铁卡死修复) super.isFinished (ResourceTask) 用
         // itemTargetsMetInventoryNoCursor 判定——熔炉输出槽收铁时铁锭
         // 先进光标再落袋，若按 NoCursor 算则收铁后仍"未达标"，任务永不
@@ -310,7 +319,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
         boolean targetsMet = StorageHelper.itemTargetsMetInventory(mod, _itemTargets);
         boolean subFinished = _doTask.isFinished(mod);
         boolean drained = _doTask.isFurnaceDrained();
-        if (!(targetsMet || subFinished) || !drained) {
+        if (!(targetsMet || subFinished)) {
             long now = System.currentTimeMillis();
             if (now - _lastGateLogMs > 2000) {
                 _lastGateLogMs = now;
@@ -320,7 +329,7 @@ public class SmeltInFurnaceTask extends ResourceTask {
                         + " " + _doTask.describeFurnaceCache());
             }
         }
-        return (targetsMet || subFinished) && drained;
+        return targetsMet || subFinished;
     }
 
     // (2026-09-16 守炉死循环诊断) [SmeltGate] 节流戳。
