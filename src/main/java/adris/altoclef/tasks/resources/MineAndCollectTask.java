@@ -693,12 +693,42 @@ public class MineAndCollectTask extends ResourceTask {
     private static final long MAINLINE_ENGAGED_TTL_MS = 1500;
 
     // (2026-09-26 配额期让位口径收紧) "active" = 主线【此刻】真正在推进矿脉, 与上面
-    // engaged(挖到过一颗即一次性锁存)分开登记: 心跳条件 = tracker 仍持有目标矿已知
-    // 位置 (正在挖/正走向眼前矿脉) 或目标掉落物落地待捡; 矿脉挖空+捡完即过期。
+    // engaged(挖到过一颗即一次性锁存)分开登记: 心跳条件 = 贴身有已知目标矿 (见下方
+    // 半径) 或目标掉落物落地待捡; 走离矿脉/掉落捡完即过期。
     // 供 BeatMinecraft2Task 配额期区分"挖矿脉中"(让位) 与"正在找"(金/铁放行)。
     private static final Set<Block> _MAINLINE_ACTIVE_BLOCKS =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private static long _mainlineActiveMs = 0;
+
+    // (2026-09-26 二次收紧, 145441 场 14:57:03~17 实锤) 只判"known 非空"不够:
+    // BlockTracker 对"见过未挖"的钻石位置是持久记忆, 找矿/探洞途中恒非空 →
+    // active 恒真 → 路过金矿连续 4 拍 TRIGGER 仍全被让位 (等价于换壳的一次性
+    // 锁存)。收紧为"贴身": 已知目标矿在该半径内才算"正在挖完这个矿脉"。半径
+    // 取 8 = 矿脉作业区 (贴身挖 + 绕脉走位) 覆盖; 赶路/探洞中的远记忆 (通常
+    // >12 格) 不算, 金/铁贪婪放行, bot 走回矿脉 8 格内时 active 自然恢复。
+    private static final int MAINLINE_ACTIVE_NEAR_RADIUS_SQ = 8 * 8;
+
+    /** "正在推进矿脉"心跳: 口径见 _MAINLINE_ACTIVE_BLOCKS 注释与 {@link #mainlineMiningActiveOn}。 */
+    private void heartbeatMainlineActive(AltoClef mod) {
+        if (_greedy) return;
+        if (!nearKnownTarget(mod)
+                && !mod.getEntityTracker().itemDropped(_itemTargets)) return;
+        _mainlineActiveMs = System.currentTimeMillis();
+        _MAINLINE_ACTIVE_BLOCKS.clear();
+        for (Block b : _blocksToMine) _MAINLINE_ACTIVE_BLOCKS.add(b);
+    }
+
+    /** 已知目标矿是否有任意一块在 {@link #MAINLINE_ACTIVE_NEAR_RADIUS_SQ} 贴身半径内。 */
+    private boolean nearKnownTarget(AltoClef mod) {
+        BlockPos player = mod.getPlayer().getBlockPos();
+        for (BlockPos known : mod.getBlockTracker().getKnownLocations(_blocksToMine)) {
+            int dx = known.getX() - player.getX();
+            int dy = known.getY() - player.getY();
+            int dz = known.getZ() - player.getZ();
+            if (dx * dx + dy * dy + dz * dz <= MAINLINE_ACTIVE_NEAR_RADIUS_SQ) return true;
+        }
+        return false;
+    }
 
     /**
      * (2026-09-12 跨批次对撞闸门) 供 BeatMinecraft2Task 调用: 主线挖矿是否正在推进
@@ -731,25 +761,16 @@ public class MineAndCollectTask extends ResourceTask {
         for (Block b : _blocksToMine) _MAINLINE_ENGAGED_BLOCKS.add(b);
     }
 
-    /** "正在推进矿脉"心跳: 口径见 _MAINLINE_ACTIVE_BLOCKS 注释与 {@link #mainlineMiningActiveOn}。 */
-    private void heartbeatMainlineActive(AltoClef mod) {
-        if (_greedy) return;
-        if (mod.getBlockTracker().getKnownLocations(_blocksToMine).isEmpty()
-                && !mod.getEntityTracker().itemDropped(_itemTargets)) return;
-        _mainlineActiveMs = System.currentTimeMillis();
-        _MAINLINE_ACTIVE_BLOCKS.clear();
-        for (Block b : _blocksToMine) _MAINLINE_ACTIVE_BLOCKS.add(b);
-    }
-
     /**
      * (2026-09-26 配额期让位口径收紧, 用户定案"正在挖完这个矿脉才让位; 没发现钻石/
-     * 正在找时看见金铁就贪") 主线是否【此刻】在推进某矿种 —— tracker 仍持有该矿种
-     * 已知位置, 或其掉落物落地待捡 (TTL 1500ms 内有心跳)。
+     * 正在找时看见金铁就贪") 主线是否【此刻】在推进某矿种 —— 该矿种已知位置落在
+     * {@link #MAINLINE_ACTIVE_NEAR_RADIUS_SQ} 贴身半径内, 或其掉落物落地待捡
+     * (TTL 1500ms 内有心跳)。
      *
      * <p>与 {@link #mainlineMiningEngagedOn} 的区别: engaged 是"接触过"一次性锁存
-     * (挖到过一颗就整段成立), active 随矿脉挖空+掉落捡完自动过期。
-     * 20260926-142310 场实锤: engaged 口径下配额期路过金/铁 3 次 TRIGGER 全被
-     * 让位拦掉, 一次批次都没建。
+     * (挖到过一颗就整段成立), active 随走离矿脉+掉落捡完自动过期。
+     * 142310 场实锤: engaged 口径下配额期路过金/铁 3 次 TRIGGER 全被拦、零批次;
+     * 145441 场二次实锤: 退一步只判"known 非空"仍不够 (持久记忆恒非空), 必须贴身。
      */
     public static boolean mainlineMiningActiveOn(Block[] blocks) {
         if (System.currentTimeMillis() - _mainlineActiveMs > MAINLINE_ENGAGED_TTL_MS) return false;
