@@ -193,6 +193,62 @@ public final class NavStuckWatchdog {
                 baritoneInputs = "bIn[err]";
             }
 
+            // (2026-09-26 "有路径但零输入"深挖) 现场 20260926-160606 16:13:32 / 16:14:58
+            // 两段实锤: baritone[customGoal=true pathing=true] path[present=true segLen=45]
+            // 而 bIn 全 false, 净位移 0, 平地无阻挡; JumpStuck 9.9s 后 forceCancel+清草
+            // 才脱困。字节码取证 (baritone-unoptimized-fabric-1.18.2 patched):
+            // tickPath 若未走 pause 分支则必然执行 executor.onTick → PathExecutor.onTick
+            // 只在三处 clearKeys-and-return: ①"destination at edge of loaded chunks"
+            // ②shouldPause()=true("current best path is a backtrack") ③Movement.update
+            // → MovementTraverse.updateState 的非 RUNNING 早退分支 (walkWhileBreaking/
+            // PREPPING/avoidWalkThroughForce patch 门)。本段只读反射采样区分:
+            //   calc[inProgress=true] + 长冻结     → A* 重算进行中 (②的必要条件);
+            //   exec[status=PREPPING] 持续          → movement.prepared() 永假 (③ gate);
+            //   exec[status=WAITING/RUNNING] 零输入 → MovementTraverse 早退分支本体。
+            String calcInfo = "calc[?]";
+            String execInfo = "exec[?]";
+            String wwbInfo = "";
+            try {
+                baritone.api.behavior.IPathingBehavior bh = mod.getClientBaritone().getPathingBehavior();
+                try {
+                    Object inProg = bh.getClass().getMethod("getInProgress").invoke(bh);
+                    boolean present = inProg != null
+                            && (Boolean) inProg.getClass().getMethod("isPresent").invoke(inProg);
+                    calcInfo = "calc[inProgress=" + present + "]";
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Object exec = bh.getClass().getMethod("getCurrent").invoke(bh);
+                    if (exec == null) {
+                        execInfo = "exec[null]";
+                    } else {
+                        int pos = (Integer) exec.getClass().getMethod("getPosition").invoke(exec);
+                        Object pathObj = exec.getClass().getMethod("getPath").invoke(exec);
+                        java.util.List<?> mvs = (java.util.List<?>) pathObj.getClass()
+                                .getMethod("movements").invoke(pathObj);
+                        StringBuilder sb = new StringBuilder("exec[pos=").append(pos)
+                                .append("/").append(mvs == null ? "?" : mvs.size()).append("]");
+                        if (mvs != null && !mvs.isEmpty()) {
+                            Object mv = mvs.get(Math.min(Math.max(pos, 0), mvs.size() - 1));
+                            sb.append(" mv=").append(mv.getClass().getSimpleName())
+                                    .append(" src=").append(safeInvoke(mv, "getSrc"))
+                                    .append(" dest=").append(safeInvoke(mv, "getDest"));
+                            Object state = getField(mv, "currentState");
+                            if (state != null) {
+                                sb.append(" status=").append(safeInvoke(state, "getStatus"));
+                            }
+                        }
+                        execInfo = sb.toString();
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    wwbInfo = " wwb=" + baritone.api.BaritoneAPI.getSettings().walkWhileBreaking.value;
+                } catch (Throwable ignored) {
+                }
+            } catch (Throwable ignored) {
+            }
+
             Vec3d vel = p.getVelocity();
             double hSpeed = Math.hypot(vel.x, vel.z);
             ItemStack main = p.getMainHandStack();
@@ -222,6 +278,9 @@ public final class NavStuckWatchdog {
                     + " baritone[customGoal=" + customGoal + " pathing=" + pathing + " builder=" + builder + "]"
                     + " " + baritoneInputs
                     + " " + pathInfo
+                    + " " + calcInfo
+                    + " " + execInfo
+                    + wwbInfo
                     + " inputs[fwd=" + mod.getInputControls().isHeldDown(Input.MOVE_FORWARD)
                     + " jump=" + mod.getInputControls().isHeldDown(Input.JUMP)
                     + " sprint=" + mod.getInputControls().isHeldDown(Input.SPRINT)
@@ -244,5 +303,31 @@ public final class NavStuckWatchdog {
 
     private static String fmt(double v) {
         return String.format("%.2f", v);
+    }
+
+    /** 反射安全调用: 失败返回 "err"。 */
+    private static String safeInvoke(Object obj, String method) {
+        try {
+            return String.valueOf(obj.getClass().getMethod(method).invoke(obj));
+        } catch (Throwable t) {
+            return "err";
+        }
+    }
+
+    /** 反射读字段: 沿继承链向上找 (Movement.currentState 声明在基类), 失败返回 null。 */
+    private static Object getField(Object obj, String name) {
+        Class<?> c = obj.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(obj);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+        return null;
     }
 }
