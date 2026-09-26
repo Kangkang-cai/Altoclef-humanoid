@@ -132,7 +132,7 @@ public class Settings implements IFailableConfigFile {
      * 不回头、不下海), 且收集目标降为 foodExpeditionReducedUnits。
      * <=0 时禁用远征逻辑。
      */
-    private double foodSearchExpeditionTimeoutSeconds = 300;
+    private double foodSearchExpeditionTimeoutSeconds = 40;
 
     /**
      * (2026-09-15 觅食远征, 用户"食物要求量现在有点高, 若超时间应该降低")
