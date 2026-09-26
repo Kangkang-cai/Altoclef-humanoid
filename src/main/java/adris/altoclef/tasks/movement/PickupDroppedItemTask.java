@@ -74,6 +74,19 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     // 导航目标更新阈值 (平方距离): 物品移动超过该距离才重建导航任务。
     private static final double PICKUP_NAV_UPDATE_DIST_SQ = 9;
 
+    // (2026-09-26 水面漂浮物卡死·问题一, 用户拍板"4s 就拉黑") 停滞拉黑看门狗:
+    // 追踪当前掉落物期间, 玩家净位移 <1 格持续 4s → 判定"导航不到/够不着" →
+    // 拉黑 (任务级 _blacklist + tracker requestEntityUnreachable)。
+    // 现场实锤 20260926-101726: 洞穴水塘漂浮粗铁 (9,7,224), 玩家 2 格外
+    // baritone 穷举 8.9M movements 算不出路径, "At goal vicinity holding" +
+    // FakePath 4s 重寻路死循环 105s+; Try 4/3、5/3 永不生效 —— 扫世界兜底
+    // (findClosestDropByScan) 把被 tracker 拉黑的实体又捞回来 (本类同步修)。
+    private static final double PICKUP_STALL_DISTANCE_SQ = 1 * 1;
+    private Vec3d _stallAnchorPos = null;
+    private final TimerGame _stallTimer = new TimerGame(4);
+    // 封闭水体贴近直抓的诊断节流。
+    private long _lastDiveDiagMs = 0;
+
     // (2026-08-22) 做镐子切换的被困前置: 用户原则"感知目标 = 承诺目标,
     // 不论多远不设时限; 超时/上限仅限探索"。捡不到掉落物的常见原因是
     // 游泳慢/绕路/腾背包, 不是没镐子; 原逻辑一次 progress 失败(3x6s 静止)
@@ -94,6 +107,40 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             return false;
         }
         return now - _stuckAnchorMs > STUCK_WINDOW_MS;
+    }
+
+    /**
+     * (2026-09-26 问题一) 停滞拉黑看门狗: 玩家 4s 净位移 &lt;1 格 → 拉黑当前
+     * 掉落物。合法静止场景不计时: 等待下落物落地 / 物品已贴身 (腾背包/等
+     * 自动拾取) / 正在挖方块开路。
+     */
+    private void tickStallWatchdog(AltoClef mod) {
+        if (_currentDrop == null || !_currentDrop.isAlive() || _blacklist.contains(_currentDrop)) {
+            _stallAnchorPos = null;
+            return;
+        }
+        boolean waitingForLand = !_pickupItemSeenInWater
+                && !_currentDrop.isOnGround() && !_currentDrop.isTouchingWater();
+        boolean colliding = mod.getEntityTracker().isCollidingWithPlayer(_currentDrop);
+        if (waitingForLand || colliding || mod.getControllerExtras().isBreakingBlock()) {
+            _stallAnchorPos = null;
+            return;
+        }
+        Vec3d pos = mod.getPlayer().getPos();
+        if (_stallAnchorPos == null || pos.squaredDistanceTo(_stallAnchorPos) > PICKUP_STALL_DISTANCE_SQ) {
+            _stallAnchorPos = pos;
+            _stallTimer.reset();
+            return;
+        }
+        if (_stallTimer.elapsed()) {
+            _stallAnchorPos = null;
+            Debug.logMessage("[PickupStall] 追踪掉落物停滞 4s 无位移 (导航不到/够不着), 拉黑: "
+                    + _currentDrop.getStack().getItem().getTranslationKey() + " at "
+                    + _currentDrop.getBlockPos().toShortString());
+            _blacklist.add(_currentDrop);
+            mod.getEntityTracker().requestEntityUnreachable(_currentDrop);
+            _progressChecker.reset();
+        }
     }
 
     public PickupDroppedItemTask(ItemTarget[] itemTargets, boolean freeInventoryIfFull) {
@@ -200,9 +247,18 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             _collectingPickaxeForThisResource = false;
         }
 
+        // (2026-09-26 问题一) 停滞拉黑看门狗, 见字段注释。放在兜底分支之前,
+        // 父类每 tick 都会回到本 onTick, 无论当前子任务是导航还是直抓都覆盖。
+        tickStallWatchdog(mod);
+
         if (!_progressChecker.check(mod)) {
             _progressChecker.reset();
             if (_currentDrop != null && !_currentDrop.getStack().isEmpty()) {
+                // (2026-09-26) 掉落物已贴身(碰撞范围) ≠ 够不着: 正在腾背包/等
+                // 自动拾取, 此时拉黑 = 主动丢弃脚下物品, 不计失败。
+                if (mod.getEntityTracker().isCollidingWithPlayer(_currentDrop)) {
+                    return super.onTick(mod);
+                }
                 // (2026-08-22) 感知目标无时限原则: 掉落物是感知目标,
                 // 游泳慢/绕路/腾背包一律继续追(不切任务不拉黑)。
                 // 只有真被困(15 秒位移 < 2 格)才允许降级处理;
@@ -422,6 +478,10 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         for (Entity e : mod.getWorld().getEntities()) {
             if (!(e instanceof ItemEntity ie) || !ie.isAlive()) continue;
             if (_blacklist.contains(ie)) continue;
+            // (2026-09-26 问题一) tracker 已判 unreachable 的实体不再被扫世界
+            // 兜底捞回 —— 旧行为是 "Try 4/3 之后又被本方法复活 → 永不生效"
+            // 的直接根因 (20260926-101726 实锤 105s+ 死循环)。
+            if (!mod.getEntityTracker().isEntityReachable(ie)) continue;
             if (!matchesAnyTarget(ie)) continue;
             // (2026-09-19) 追距上限: 超距的陈旧掉落直接跳过。
             if (!inPursuitRange(ie, pos)) continue;
@@ -558,12 +618,30 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         // (2026-08-26 用户实测: 导航会搭路到物品正上方, bot 站在自己搭的方块上
         // 不算入水 → 这里不要求 isTouchingWater, 交给 DiveToGrabItemTask 判断
         // "搭在水上的平台则打掉脚下块掉进水里再潜"。)
-        boolean itemInWater = itemEntity.isTouchingWater() && isOpenWaterColumn(_mod, itemEntity);
+        // (2026-09-26 问题二: 水上掉落物不再受 baritone"到不了水方块"限制)
+        // 触水且贴近(h<=8)一律直接抓取。原分支要求敞开水体 (isOpenWaterColumn)
+        // 才走直抓 —— 那只决定"能否下潜到深水", 不该决定"能否贴近": 20260926
+        // 实锤洞穴水塘漂浮粗铁 openWater=false(水柱上方 12 格内有实心) → 落到
+        // GetToBlockTask(水方块) → baritone 穷举 8.9M movements 算不出路径 →
+        // "At goal vicinity holding" 死循环。漂浮水面的物品走 DiveToGrab 平游
+        // 分支 = 直接走/游过去 (含从岸边踏入浅水); 真沉底的深水物品有潜行下沉
+        // + 打掉脚下块兜底。远距离大水面开船逻辑不变 (grabItemPos 只在敞开
+        // 水体传入, 船驶过吸不到深水物品的旧行为保留)。
+        boolean itemInWater = itemEntity.isTouchingWater();
+        boolean itemInOpenWater = itemInWater && isOpenWaterColumn(_mod, itemEntity);
         if (itemInWater && !riding) {
             double h = Math.sqrt(
                     (targetPos.x - _mod.getPlayer().getX()) * (targetPos.x - _mod.getPlayer().getX())
                             + (targetPos.z - _mod.getPlayer().getZ()) * (targetPos.z - _mod.getPlayer().getZ()));
             if (h <= 8) {
+                if (!itemInOpenWater) {
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - _lastDiveDiagMs > 5000) {
+                        _lastDiveDiagMs = nowMs;
+                        Debug.logMessage("[PickupDive] 封闭水体(openWater=false)贴近直抓, 绕过 baritone 水域寻路: item="
+                                + target.toShortString() + " h=" + String.format("%.1f", h));
+                    }
+                }
                 setDebugState("Diving to grab dropped item.");
                 return new DiveToGrabItemTask(itemEntity);
             }
@@ -572,7 +650,7 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             return new BoatCrossingTask(
                     new BlockPos(target.getX(), 0, target.getZ()),
                     false,
-                    itemInWater ? targetPos : null);
+                    itemInOpenWater ? targetPos : null);
         }
         return new GetToBlockTask(target);
     }
