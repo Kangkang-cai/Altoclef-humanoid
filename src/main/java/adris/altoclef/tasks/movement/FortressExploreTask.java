@@ -122,7 +122,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // ① 转正判据 = 距锚点半径破纪录, 但绕崖走是绕锚点的圆弧, 半径不变 → 永远
     //   无法转正; ② 换边乒乓 (+60 → -75 → +90 → -90), 大障碍前左右横跳;
     // ③ 试探步长 48 格, 沿崖根走不够绕过。修订:
-    //   触发 = 停滞 STALL_TICKS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_TICKS
+    //   触发 = 停滞 STALL_MS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_MS
     //   且失败 ≥1); 升级 = 同侧加档 +60 → +75 → +90, 同侧到顶才换边; 试探方向
     //   步长 ×2 (沿崖要走长步); 转正 = 半径破纪录 或 距试探起点净位移 > EXPLORE_STEP
     //   (绕崖横向走出一个整步程 = 真的绕出去了)。
@@ -133,7 +133,18 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // (大转弯, 允许接近侧向), 同侧加档步距 15° → 25° (60/85/110/135/150 共
     // 五档, 一侧约 1 分钟见分晓再换边)。
     private static final int PROBE_AFTER_FAILS = 2;
-    private static final long STALL_TICKS = 100; // 5s 无新最远点 = 停滞 (21:53 用户"15s 观感不好太长")
+    /**
+     * (2026-09-26 试探解冻) 停滞判据由「实例内 tick 计数」改为【墙钟毫秒】。
+     *
+     * <p>旧值 {@code STALL_TICKS=100} 与实例字段 {@code _tickId} 配对使用, 而
+     * {@code _tickId} 是不归零的实例计数器、停滞基线却是 static 跨实例存活 ——
+     * 上层 (TradeWithPiglinsTask / CollectBlazeRodsTask) 每 4~12 分钟重建本任务
+     * 一次时, 新实例 {@code _tickId} 从 0 起而基线是旧实例的大值 →
+     * {@code stalledTicks = 小 - 大 = 负数}, 恒 {@code < 100} → 遇障 (寻路失败)
+     * 时试探升级全程零触发。毫秒基准跨实例天然连续, 与食物远征基类
+     * {@code BearingExpeditionTask} 同一修法。
+     */
+    private static final long STALL_MS = 5000; // 5s 无新最远点 = 停滞
     private static final double PROBE_STEP_DEG = 60;
     private static final double PROBE_INCREMENT_DEG = 25;
     private static final double MAX_PROBE_DEG = 150;
@@ -202,7 +213,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-13 P2.1) 试探起点位置: 转正判据之二 —— 距起点净位移 > EXPLORE_STEP
     // (绕崖是圆弧, 半径不变但位移实打实, 旧判据 radius 永远量不到这种进展)。
     private static final java.util.Map<String, BlockPos> _probeStartPosByKey = new java.util.HashMap<>();
-    private static final java.util.Map<String, Long> _lastProgressTickByKey = new java.util.HashMap<>();
+    // (2026-09-26 试探解冻) 停滞基线改存【墙钟毫秒】—— 旧版存实例内 _tickId,
+    // 跨实例比对必然为负 (见 STALL_MS 注释)。毫秒基准跨实例连续。
+    private static final java.util.Map<String, Long> _lastProgressMsByKey = new java.util.HashMap<>();
 
     // (2026-09-16 记忆中心直航) "亲眼看见过的要塞中心"直接导航的最大距离。
     // 下界 8:1, 1024 下界格 ≈ 8192 主世界格, 覆盖一次远征的合理范围 ——
@@ -321,6 +334,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-13 远征) 实例重建后恢复朝向/锚点 —— 新实例不重新随机方向,
         // 接着上一段的方向继续走。key 全程可用 (猪灵模式也走外围)。
         _persistKey = fortressVisitedKey(mod);
+        // (2026-09-26 试探解冻) 停滞基线若已过期 (被上层 4~12 分钟的重建期 / 战斗
+        // 长时打断), 从恢复时刻重新起算 —— 打断期间不该算成"无新最远点"; 未过期
+        // 则保留, 让停滞判据跨实例连续累计 (旧版基线存 tickId 正是试探失效的根因)。
+        long stallNowMs = System.currentTimeMillis();
+        Long stallLastMs = _lastProgressMsByKey.get(_persistKey);
+        if (stallLastMs == null || stallNowMs - stallLastMs > STALL_MS) {
+            _lastProgressMsByKey.put(_persistKey, stallNowMs);
+        }
         Double keptHeading = _headingByKey.get(_persistKey);
         if (keptHeading != null) {
             _heading = keptHeading;
@@ -575,7 +596,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _probeOffsetByKey.clear();
         _probeStartMaxByKey.clear();
         _probeStartPosByKey.clear();
-        _lastProgressTickByKey.clear();
+        _lastProgressMsByKey.clear();
         _checkedMemoryByKey.clear();
     }
 
@@ -1127,13 +1148,14 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         String key = expeditionKey();
         BlockPos anchor = _anchorByKey.get(key);
         if (anchor == null || mod.getPlayer() == null) return;
-        long lastProgress = _lastProgressTickByKey.getOrDefault(key, _tickId);
-        long stalledTicks = _tickId - lastProgress;
-        if (stalledTicks < STALL_TICKS) return; // 停滞不够久, 可能只是普通寻路失败
+        long stallNowMs = System.currentTimeMillis();
+        long stallLastMs = _lastProgressMsByKey.getOrDefault(key, stallNowMs);
+        long stalledMs = stallNowMs - stallLastMs;
+        if (stalledMs < STALL_MS) return; // 停滞不够久, 可能只是普通寻路失败
         // (P2.1) 触发提速: 失败够 2 次即升级; 或 10s 停滞 + 至少 1 次失败 ——
         // 进度检查器超时慢 (日志实锤 fails 10s 只涨到 1), 苦等第二次太迟钝。
         boolean enoughFails = _failCounter >= PROBE_AFTER_FAILS;
-        boolean longStall = _failCounter >= 1 && stalledTicks >= STALL_TICKS * 2;
+        boolean longStall = _failCounter >= 1 && stalledMs >= STALL_MS * 2;
         if (!enoughFails && !longStall) return;
         double cur = _probeOffsetByKey.getOrDefault(key, 0.0);
         double next;
@@ -1153,7 +1175,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _failCounter = 0; // 给试探方向重新计失败
         Debug.logMessage(String.format(java.util.Locale.ROOT,
                 "[Expedition] stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°, long step x2)",
-                stalledTicks / 20, Math.toDegrees(next), MAX_PROBE_DEG));
+                stalledMs / 1000, Math.toDegrees(next), MAX_PROBE_DEG));
     }
 
     // ------------------------------------------------------------------ //
@@ -1223,7 +1245,7 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-13 P2 遇障换向) 有真实进展 (刷新最远半径): 记进度时刻 +
         // 失败归零 —— 只有"长时间无进展的失败"才升级换向。
         if (radius > prevMax + 0.5) {
-            _lastProgressTickByKey.put(key, _tickId);
+            _lastProgressMsByKey.put(key, System.currentTimeMillis());
             _failCounter = 0;
         }
         // 试探成功 → 转正为新锁定基向。两条判据 (P2.1):
