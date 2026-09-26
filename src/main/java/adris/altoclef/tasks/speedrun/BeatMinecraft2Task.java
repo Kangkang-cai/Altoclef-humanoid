@@ -2359,9 +2359,10 @@ public class BeatMinecraft2Task extends Task {
                         //    工作从此全部由原子批次承担 (批次在跑时本检查块整体短路,
                         //    金/铁/任何贪婪侧机制都拆不了它), 根除"主线挖钻石被贪婪金/铁
                         //    整链拆掉重建" (20260926-104317 场 10:51:05/10:52:30 两次实锤)。
-                        // ② 钻石不可见 → 金/铁贪婪照旧开放 (用户拍板), 但主线正在挖钻石
-                        //    时非钻石贪婪让位 —— 保护主线已锁定的钻石矿点不被金/铁批次
-                        //    拆掉 (走到这里说明钻石接管未触发, 闸门语义不变)。
+                        // ② 钻石不可见 → 金/铁贪婪照旧开放, 但主线"正在推进钻石矿脉"
+                        //    (在挖钻石/在捡钻石掉落) 时让位 —— 挖完这条矿脉再贪别的;
+                        //    主线进入"找钻石"状态 (无已知位置、无掉落) 时金/铁照常放行
+                        //    (2026-09-26 口径收紧, 用户定案; 见下方 yield 处注释)。
                         boolean diamondQuotaPhase = _gearTaskIsDiamond && !_diamondCollectGivenUp;
                         if (diamondQuotaPhase
                                 && CollectVisibleOresTask.hasVisibleOreWork(mod, Items.DIAMOND, DIAMOND_QUOTA_GREEDY_CAP)) {
@@ -2378,16 +2379,22 @@ public class BeatMinecraft2Task extends Task {
                             // (2026-09-12 跨批次对撞闸门) 主线链里已有"已接触矿石 +
                             // 同矿种"的挖矿在推进 → 贪心让位, 不拆主线已选定的矿点。
                             // 见 mainlineMiningEngagedOn 注释 (21:51:29 实锤)。
-                            // (2026-09-26 配额期) 主线正挖钻石时非钻石贪婪也让位
-                            //   (钻石接管已在上方提前 return, 走到这里说明钻石不可见)。
-                            boolean yield = MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.bestVisibleOreBlocks(mod))
-                                    || (diamondQuotaPhase
-                                        && MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.oreBlocksFor(Items.DIAMOND)));
-                            if (yield) {
+                            // (2026-09-26 配额期口径收紧, 用户定案"正在挖完这个矿脉才
+                            // 让位; 没发现钻石/正在找时看见金铁就贪") 配额期让位判定从
+                            // mainlineMiningEngagedOn (hasEngagedOre 挖到过一颗即一次性
+                            // 锁存; 20260926-142310 场实锤配额期路过金/铁 3 次 TRIGGER
+                            // 全被拦、零批次) 收紧为 mainlineMiningActiveOn: 主线此刻
+                            // 真正在推进钻石矿脉 (tracker 已知位置/掉落待捡) 才让位,
+                            // 矿脉挖空捡完进入"找"状态后金/铁贪婪恢复放行。
+                            boolean yield = MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.bestVisibleOreBlocks(mod));
+                            boolean yieldQuotaVein = !yield && diamondQuotaPhase
+                                    && MineAndCollectTask.mainlineMiningActiveOn(CollectVisibleOresTask.oreBlocksFor(Items.DIAMOND));
+                            if (yield || yieldQuotaVein) {
                                 if (_greedyYieldLogTimer.elapsed()) {
                                     _greedyYieldLogTimer.reset();
-                                    Debug.logToFile("altoclef_diag.log",
-                                            "[GreedyOre] yield — mainline mining already engaged on the same ore");
+                                    Debug.logToFile("altoclef_diag.log", yield
+                                            ? "[GreedyOre] yield — mainline mining already engaged on the same ore"
+                                            : "[GreedyOre] yield — diamond vein in progress, finishing vein before greedy gold/iron");
                                 }
                                 _greedyOreCheckCooldown.reset();
                             } else {

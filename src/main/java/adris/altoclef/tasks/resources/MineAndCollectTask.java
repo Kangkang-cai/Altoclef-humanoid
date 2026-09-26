@@ -316,6 +316,8 @@ public class MineAndCollectTask extends ResourceTask {
         // (2026-09-12 跨批次对撞闸门) 心跳登记"主线挖矿已接触矿石 + 当前矿种",
         // 供 BeatMinecraft2Task 的贪心检查让位 (祖先查不到后代, 只能后代主动登记)。
         heartbeatMainlineEngaged(mod);
+        // (2026-09-26 配额期) "正在推进矿脉"心跳, 口径见 heartbeatMainlineActive 注释。
+        heartbeatMainlineActive(mod);
 
         return _subtask;
     }
@@ -690,6 +692,14 @@ public class MineAndCollectTask extends ResourceTask {
     // 即视为"主线没在推进挖矿"(切去合成/走路/被抢占), 贪心恢复正常触发。
     private static final long MAINLINE_ENGAGED_TTL_MS = 1500;
 
+    // (2026-09-26 配额期让位口径收紧) "active" = 主线【此刻】真正在推进矿脉, 与上面
+    // engaged(挖到过一颗即一次性锁存)分开登记: 心跳条件 = tracker 仍持有目标矿已知
+    // 位置 (正在挖/正走向眼前矿脉) 或目标掉落物落地待捡; 矿脉挖空+捡完即过期。
+    // 供 BeatMinecraft2Task 配额期区分"挖矿脉中"(让位) 与"正在找"(金/铁放行)。
+    private static final Set<Block> _MAINLINE_ACTIVE_BLOCKS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private static long _mainlineActiveMs = 0;
+
     /**
      * (2026-09-12 跨批次对撞闸门) 供 BeatMinecraft2Task 调用: 主线挖矿是否正在推进
      * 【给定矿种之一】。成立时贪心让位 —— 主线已锁定这处矿并在挖/拾, 贪心插进来只会
@@ -719,6 +729,34 @@ public class MineAndCollectTask extends ResourceTask {
         _mainlineEngagedMs = System.currentTimeMillis();
         _MAINLINE_ENGAGED_BLOCKS.clear();
         for (Block b : _blocksToMine) _MAINLINE_ENGAGED_BLOCKS.add(b);
+    }
+
+    /** "正在推进矿脉"心跳: 口径见 _MAINLINE_ACTIVE_BLOCKS 注释与 {@link #mainlineMiningActiveOn}。 */
+    private void heartbeatMainlineActive(AltoClef mod) {
+        if (_greedy) return;
+        if (mod.getBlockTracker().getKnownLocations(_blocksToMine).isEmpty()
+                && !mod.getEntityTracker().itemDropped(_itemTargets)) return;
+        _mainlineActiveMs = System.currentTimeMillis();
+        _MAINLINE_ACTIVE_BLOCKS.clear();
+        for (Block b : _blocksToMine) _MAINLINE_ACTIVE_BLOCKS.add(b);
+    }
+
+    /**
+     * (2026-09-26 配额期让位口径收紧, 用户定案"正在挖完这个矿脉才让位; 没发现钻石/
+     * 正在找时看见金铁就贪") 主线是否【此刻】在推进某矿种 —— tracker 仍持有该矿种
+     * 已知位置, 或其掉落物落地待捡 (TTL 1500ms 内有心跳)。
+     *
+     * <p>与 {@link #mainlineMiningEngagedOn} 的区别: engaged 是"接触过"一次性锁存
+     * (挖到过一颗就整段成立), active 随矿脉挖空+掉落捡完自动过期。
+     * 20260926-142310 场实锤: engaged 口径下配额期路过金/铁 3 次 TRIGGER 全被
+     * 让位拦掉, 一次批次都没建。
+     */
+    public static boolean mainlineMiningActiveOn(Block[] blocks) {
+        if (System.currentTimeMillis() - _mainlineActiveMs > MAINLINE_ENGAGED_TTL_MS) return false;
+        for (Block b : blocks) {
+            if (_MAINLINE_ACTIVE_BLOCKS.contains(b)) return true;
+        }
+        return false;
     }
 
     private static final double MINE_EVERYTHING_RANGE = 16;
