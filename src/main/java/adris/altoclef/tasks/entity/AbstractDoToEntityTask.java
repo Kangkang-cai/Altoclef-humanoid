@@ -195,6 +195,28 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         double enterSq = interactEnter * interactEnter;
         double exitSq = interactExit * interactExit;
         if (sqDist < enterSq || (_withinInteract && sqDist < exitSq)) {
+            // (2026-09-26 交战接管清残留路径, 用户定案"嫌疑1") 从接近切进交战的边沿,
+            // 接近阶段留下的 baritone 旧路径还挂在 PathingBehavior 上 —— 任务切换的
+            // CustomGoalProcess.onLostControl 不清它 (20260926-115959 实锤: 蜘蛛从上方
+            // 掉进坑底, 接近期算的爬升路径 dest=(191,-39,265) 在贴脸交战期间冻结
+            // pathing=true 整整 36s)。目标已贴脸 in-goal 时 baritone 既不重算也不取消
+            // 旧路径, 其 movement look 每 tick 覆盖战斗 lookAt —— 准心被钉在坑沿
+            // deepslate 上, [MELEE-Crosshair] swing DECLINED 每秒一条, 一刀未出站桩
+            // 挨打。交战接管时 cancelEverything 清场: 交战分支的贴身 follow 下一 tick
+            // 按实时目标重新表态 (in-goal = 完全静默), 战斗朝向独占相机。
+            // 只在边沿触发 (_withinInteract false→true), 交战期内不反复清 —— 蜘蛛
+            // 出了 4.0 圈再回来的合法重寻路不受影响。非战斗交互 (猪灵交易/剪羊毛)
+            // 共用本入口, 清场同样无害 (follow 会按需重算)。
+            if (!_withinInteract) {
+                try {
+                    if (mod.getClientBaritone().getPathingBehavior().isPathing()) {
+                        mod.getClientBaritone().getPathingBehavior().cancelEverything();
+                        Debug.logToFile("altoclef_diag.log",
+                                "[COMBAT-FIX]\t[CombatTakeover]\tcanceled stale baritone path on entering interact branch");
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
             _withinInteract = true;
             // (2026-08-23 被方块挡修复) 已够近 (射程内) 但射线到实体不是 ENTITY
             // (被墙/地形挡住, result 是 BLOCK) → bot 原地打不到, 却一直
