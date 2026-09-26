@@ -125,6 +125,12 @@ public interface LookHelper {
         return cleanLineOfSight(MinecraftClient.getInstance().player, end, maxRange);
     }
 
+    // (2026-09-26) ②6面/③8角 采样点向块内收缩量: ±0.5 恰在方块表面分界上,
+    // 掠射角下射线止于表面不进入体素 → DDA 结算 MISS → 误判遮挡 (详见
+    // cleanLineOfSight 内 ② 处注释)。±0.45 保证采样点在目标体素内部,
+    // 射线必先进入体素才到达 → 结算确定命中; 遮挡/反透视语义不变。
+    double SURFACE_SAMPLE_INSET = 0.45;
+
     static boolean cleanLineOfSight(Entity entity, BlockPos block, double maxRange) {
         Vec3d center = WorldHelper.toVec3d(block);
         // (2026-08-23 流体 LOS 修复) 目标方块是流体 (水/岩浆) 时, 若仍用
@@ -154,11 +160,25 @@ public interface LookHelper {
 
         // ② 6 个面判定 (2026-08-23): 中心被其他方块挡住 (BLOCK hit ≠ 目标) 时,
         // 任一可见面即可见 — 解决平坦岩浆湖/扁平方块侧面可见但中心被挡的问题。
+        //
+        // (2026-09-26 齐平表面采样点修复) 面/角采样偏移从 ±0.5 收缩到 ±0.45
+        // (向块内 0.05 格)。±0.5 恰好落在方块表面分界上: vanilla DDA 射线必须
+        // 【进入目标体素】才登记命中, 而掠射角下止点停在表面的射线最后访问的
+        // 是表面前方的空气格 → MISS → 本判定要求显式命中目标 → 全灭。
+        // 20260926-130029 实锤: 钻石 180,-54,188 顶面与地面齐平 (同在 y=-53
+        // 平面, 存档邻域取证), bot 10m 外 16.9° 俯角, 通向顶面的射线在唇沿上方
+        // 0.13 格掠过 (几何可见), 但中心射线被前方齐平地板块 (180,-54,189) 先
+        // 命中、6面+8角全部止于表面 MISS → occluded → [DiamondQuota] 永不触发,
+        // bot 路过不挖。a7f98775 (0922) 对"侧面边角露出"有效是因为射线先穿过
+        // 暴露侧面进入体素; 顶面齐平+俯视掠射只在止点"碰"到表面, 从不进入。
+        // 收缩后射线必须真正进入目标体素才到达采样点 → 必定登记命中;
+        // 0.05 格不改变任何遮挡关系, 反透视边界不动; 0921 门框 / 0922 角露矿
+        // 两类已验证场景射线本来就进入体素, 纯加强。
         for (Direction dir : Direction.values()) {
             Vec3d faceCenter = center.add(
-                    dir.getOffsetX() * 0.5,
-                    dir.getOffsetY() * 0.5,
-                    dir.getOffsetZ() * 0.5);
+                    dir.getOffsetX() * SURFACE_SAMPLE_INSET,
+                    dir.getOffsetY() * SURFACE_SAMPLE_INSET,
+                    dir.getOffsetZ() * SURFACE_SAMPLE_INSET);
             BlockHitResult faceHit = raycastSkippingWebs(entity, start, faceCenter, maxRange, handling);
             if (faceHit != null && faceHit.getType() == HitResult.Type.BLOCK && faceHit.getBlockPos().equals(block)) {
                 return true;
@@ -176,9 +196,9 @@ public interface LookHelper {
         // 射线全被挡 → perceivable=0 → bot 弃矿挖隧道。判据一致性原则: 同一
         // 几何事实(角点在方块体积内、命中须为目标方块本身)不应按方块种类
         // 分裂成两套口径 — 09-21 那次只放开门框是打补丁, 这次收编为统一判定。)
-        for (double sx : new double[]{-0.5, 0.5}) {
-            for (double sy : new double[]{-0.5, 0.5}) {
-                for (double sz : new double[]{-0.5, 0.5}) {
+        for (double sx : new double[]{-SURFACE_SAMPLE_INSET, SURFACE_SAMPLE_INSET}) {
+            for (double sy : new double[]{-SURFACE_SAMPLE_INSET, SURFACE_SAMPLE_INSET}) {
+                for (double sz : new double[]{-SURFACE_SAMPLE_INSET, SURFACE_SAMPLE_INSET}) {
                     Vec3d corner = center.add(sx, sy, sz);
                     BlockHitResult cornerHit = raycastSkippingWebs(entity, start, corner, maxRange, handling);
                     if (cornerHit != null && cornerHit.getType() == HitResult.Type.BLOCK
