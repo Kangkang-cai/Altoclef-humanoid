@@ -566,6 +566,12 @@ public class BeatMinecraft2Task extends Task {
     // 触发") 检查节拍即触发延迟上界。8s 是 2026-09-07 防频繁换任务定的; 进下界前
     // 阶段已有 45s 保护窗(preNetherGreedyCooldownSeconds), 普通阶段 3s 乒乓风险可控。
     private static final double GREEDY_ORE_CHECK_COOLDOWN_NORMAL = 3;
+    // (2026-09-26 钻石配额期贪婪化, 用户"挖钻石跟挖铁一样完全贪心, 主线只管'没挖到
+    // 25 个钻石就别停下'") 配额期钻石贪婪的上限覆盖: 钻石量产上限从 8 提到 gear 链
+    // 钻石清单量 (实测日志 <Mine And Collect: [[diamond] x 25]>)。实际清单因已有成品
+    // 件可能更小 —— 贪婪多挖的部分无害 (钻石不嫌多), 清单做完 eyeGearSatisfied 翻真,
+    // 配额期自然结束, 不会过挖。
+    private static final int DIAMOND_QUOTA_GREEDY_CAP = 25;
     private final TimerGame _greedyOreCheckCooldown = new TimerGame(GREEDY_ORE_CHECK_COOLDOWN_NORMAL);
     // (2026-09-23 战后补扫, 20260923-155135 场实锤) beat 被高优链 (Mob Defense/
     // Food 等) 抢占期间整棵任务树挂起, onTick 不执行 → 贪心探针不跑。该场逃命
@@ -2346,13 +2352,38 @@ public class BeatMinecraft2Task extends Task {
                         // (2026-09-23 战后补扫) 探针实际执行, 一次性闩立即清除;
                         // 容器界面开着时本次进不来, 闩保留到下一个可执行 tick。
                         _greedyProbeLatch = false;
+                        // (2026-09-26 钻石配额期贪婪化, 用户"挖钻石跟挖铁一样完全贪心,
+                        // 主线只管'没挖到25个钻石就别停下'") 配额期(钻石收集进行中且未
+                        // 放弃)行为重排:
+                        // ① 钻石可见 → 钻石专属贪婪批次【无视对撞闸门直接接管】。挖掘
+                        //    工作从此全部由原子批次承担 (批次在跑时本检查块整体短路,
+                        //    金/铁/任何贪婪侧机制都拆不了它), 根除"主线挖钻石被贪婪金/铁
+                        //    整链拆掉重建" (20260926-104317 场 10:51:05/10:52:30 两次实锤)。
+                        // ② 钻石不可见 → 金/铁贪婪照旧开放 (用户拍板), 但主线正在挖钻石
+                        //    时非钻石贪婪让位 —— 保护主线已锁定的钻石矿点不被金/铁批次
+                        //    拆掉 (走到这里说明钻石接管未触发, 闸门语义不变)。
+                        boolean diamondQuotaPhase = _gearTaskIsDiamond && !_diamondCollectGivenUp;
+                        if (diamondQuotaPhase
+                                && CollectVisibleOresTask.hasVisibleOreWork(mod, Items.DIAMOND, DIAMOND_QUOTA_GREEDY_CAP)) {
+                            _greedyOreTask = new CollectVisibleOresTask(Items.DIAMOND, DIAMOND_QUOTA_GREEDY_CAP);
+                            setDebugState("Greedy mining visible ores");
+                            _greedyOreCheckCooldown.reset();
+                            Debug.logToFile("altoclef_diag.log",
+                                    "[DiamondQuota] greedy diamond takeover (cap=" + DIAMOND_QUOTA_GREEDY_CAP + ")");
+                            return _greedyOreTask;
+                        }
                         // 纯函数静态版 hasAnyVisibleOreWork (不实例化探针,
                         // 避免 onStart trackBlock 引用计数泄漏)。
                         if (CollectVisibleOresTask.hasAnyVisibleOreWork(mod)) {
                             // (2026-09-12 跨批次对撞闸门) 主线链里已有"已接触矿石 +
                             // 同矿种"的挖矿在推进 → 贪心让位, 不拆主线已选定的矿点。
                             // 见 mainlineMiningEngagedOn 注释 (21:51:29 实锤)。
-                            if (MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.bestVisibleOreBlocks(mod))) {
+                            // (2026-09-26 配额期) 主线正挖钻石时非钻石贪婪也让位
+                            //   (钻石接管已在上方提前 return, 走到这里说明钻石不可见)。
+                            boolean yield = MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.bestVisibleOreBlocks(mod))
+                                    || (diamondQuotaPhase
+                                        && MineAndCollectTask.mainlineMiningEngagedOn(CollectVisibleOresTask.oreBlocksFor(Items.DIAMOND)));
+                            if (yield) {
                                 if (_greedyYieldLogTimer.elapsed()) {
                                     _greedyYieldLogTimer.reset();
                                     Debug.logToFile("altoclef_diag.log",

@@ -101,6 +101,35 @@ public class CollectVisibleOresTask extends Task {
     // (2026-09-12 批次原子性) "本批已锁死"诊断日志每批只打一条, 避免 1s 节流下刷屏。
     private boolean _engagedLockLogged = false;
 
+    // (2026-09-26 钻石配额期贪婪化, 用户"挖钻石跟挖铁一样完全贪心, 主线只管'没挖到
+    // 25 个钻石就别停下'") _onlyItem 非 null 时本实例只挖该矿种 (选种/刷新/触发判定
+    // 全过滤); _capOverride > 0 时将该矿种的上限提升到覆盖值 (钻石 8→配额 25, 否则
+    // 攒到 8 颗贪婪就停工, 凑不齐配额)。null/0 = 旧行为 (全部矿种)。
+    private final Item _onlyItem;
+    private final int _capOverride;
+
+    public CollectVisibleOresTask() {
+        this(null, 0);
+    }
+
+    public CollectVisibleOresTask(Item onlyItem, int capOverride) {
+        _onlyItem = onlyItem;
+        _capOverride = capOverride;
+    }
+
+    /** 本实例是否允许挖该矿种 (配额期锁矿种过滤)。 */
+    private boolean planAllowed(OrePlan plan) {
+        return _onlyItem == null || plan.item() == _onlyItem;
+    }
+
+    /** 该矿种在本实例下的有效上限 (配额期钻石 8→25, 其余矿种/普通实例不受影响)。 */
+    private int effectiveCap(OrePlan plan) {
+        if (_onlyItem != null && plan.item() == _onlyItem && _capOverride > plan.cap()) {
+            return _capOverride;
+        }
+        return plan.cap();
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
         if (_active != null && _activePlan != null) {
@@ -111,7 +140,7 @@ public class CollectVisibleOresTask extends Task {
             // 会因掉落物 tracker 1~2 tick 回册抖动瞬时翻真; 挖掉块后的掉落宽限
             // 挂住期 (holdingForGreedyDrop) 不得释放批次, 否则宽限语义被父层
             // 整个绕掉 → 每 tick 拆批重建, 挖矿退化成碎片式捡漏。
-            boolean capHit = countedItems(mod, _activePlan) >= _activePlan.cap();
+            boolean capHit = countedItems(mod, _activePlan) >= effectiveCap(_activePlan);
             boolean fin = _active.isFinished(mod);
             boolean holding = fin && _active.holdingForGreedyDrop(mod);
             if (capHit || (fin && !holding)) {
@@ -197,7 +226,8 @@ public class CollectVisibleOresTask extends Task {
         OrePlan best = null;
         int bestCount = 0;
         for (OrePlan plan : PLANS) {
-            if (planExecutable(mod, plan) <= 0) continue;
+            if (!planAllowed(plan)) continue;
+            if (planExecutable(mod, plan, effectiveCap(plan)) <= 0) continue;
             OreStat st = counts.get(plan);
             int visible = st == null ? 0 : st.count;
             if (visible > bestCount) {
@@ -281,6 +311,40 @@ public class CollectVisibleOresTask extends Task {
     }
 
     /**
+     * (2026-09-26 钻石配额期贪婪化) 带矿种过滤 + 上限覆盖的"有活可干"判定。
+     *
+     * <p>onlyItem=null 时等价于 {@link #hasAnyVisibleOreWork} 的纯判定 (无诊断日志,
+     * 不写 _lastHasWork); onlyItem 非 null 时只判该矿种, 且其上限取
+     * max(plan.cap, capOverride) —— 配额期钻石 8→25, 否则攒到 8 颗贪婪就停工。
+     *
+     * <p>不写 _lastHasWork/_lastCounts 之外的共享状态, 与 hasAnyVisibleOreWork
+     * 共用 countAllVisible 的 1s 扫描缓存, 无额外世界扫描开销。
+     */
+    public static boolean hasVisibleOreWork(AltoClef mod, Item onlyItem, int capOverride) {
+        Map<OrePlan, OreStat> counts = countAllVisible(mod);
+        for (OrePlan plan : PLANS) {
+            if (onlyItem != null && plan.item() != onlyItem) continue;
+            int cap = (onlyItem != null && capOverride > plan.cap()) ? capOverride : plan.cap();
+            int remain = planExecutable(mod, plan, cap);
+            OreStat st = counts.get(plan);
+            int visible = st == null ? 0 : st.count;
+            if (remain > 0 && visible > 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-26 钻石配额期) 指定矿种的方块数组 (供 BeatMinecraft2Task 配额期
+     * 查询"主线是否正在挖钻石"做非钻石贪婪让位判定)。未知矿种返回空数组。
+     */
+    public static Block[] oreBlocksFor(Item item) {
+        for (OrePlan plan : PLANS) {
+            if (plan.item() == item) return plan.blocks();
+        }
+        return new Block[0];
+    }
+
+    /**
      * (2026-09-12 跨批次对撞闸门) 当前【贪心会选的矿种】的方块集 — 可见块数最多且
      * 可执行 (镐够 / 未达上限)。无可见活时返回空数组。
      *
@@ -319,12 +383,17 @@ public class CollectVisibleOresTask extends Task {
 
     /** 剩余可收数量 (cap - 已计入, 含烧制产物), 镐不满足返回 0。 */
     private static int planExecutable(AltoClef mod, OrePlan plan) {
+        return planExecutable(mod, plan, plan.cap());
+    }
+
+    /** 同上, 但上限用调用方给的覆盖值 (2026-09-26 配额期钻石 8→25)。 */
+    private static int planExecutable(AltoClef mod, OrePlan plan, int cap) {
         // (2026-08-23 金矿让位) 铁装备(铁剑+盾牌)未完成时金矿不参与贪心 —
         // 铁装备制作/穿上优先于挖金 (用户原则), 否则贪心挖金抢占 gear
         // 任务, 铁装备迟迟不齐。铁阶段完成后金矿恢复参与 (阈值 64, 2026-09-11 用户改)。
         if (plan.item() == Items.RAW_GOLD && !BeatMinecraft2Task.isIronGearPhaseDone(mod)) return 0;
         if (!StorageHelper.miningRequirementMet(mod, plan.req())) return 0;
-        return Math.max(0, plan.cap() - countedItems(mod, plan));
+        return Math.max(0, cap - countedItems(mod, plan));
     }
 
     /**
@@ -411,11 +480,16 @@ public class CollectVisibleOresTask extends Task {
 
     @Override
     protected boolean isEqual(Task other) {
-        return other instanceof CollectVisibleOresTask;
+        // (2026-09-26) 区分配额期钻石专属实例与普通实例 — 钻石专属批次与普通批次
+        // 互换时视为不同任务, 让任务框架正常走打断/重建而非误判相等。
+        return other instanceof CollectVisibleOresTask
+                && ((CollectVisibleOresTask) other)._onlyItem == _onlyItem;
     }
 
     @Override
     protected String toDebugString() {
-        return "Collect visible ores";
+        // (2026-09-26) 配额期钻石专属批次带标题标识, 用户在画面上可直接认出模式。
+        return _onlyItem == null ? "Collect visible ores"
+                : "Collect visible ores [quota:" + _onlyItem.toString() + "]";
     }
 }
