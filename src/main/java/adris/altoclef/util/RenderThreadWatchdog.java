@@ -42,7 +42,10 @@ public final class RenderThreadWatchdog {
     private static final long DUMP_INTERVAL_MS = 5000;
     private static final long CHECK_INTERVAL_MS = 500;
 
-    private static volatile long _lastHeartbeatNano = 0;
+    // (2026-09-26 修时间基准) 心跳与比对必须同一时钟: 原实现存 nanoTime 却拿
+    // System.currentTimeMillis 比对, 两种时基相减恒为天文数字 => 永远判冻结,
+    // 从会话开始每 5s 空转一帧 dump (20260926-153219 会话 2MB 实锤)。
+    private static volatile long _lastHeartbeatMs = 0;
     private static volatile boolean _frozen = false;
     private static boolean _started = false;
 
@@ -60,7 +63,7 @@ public final class RenderThreadWatchdog {
 
     /** Render thread 每 tick 调用 (onClientTick 顶部), 纯 volatile 写。 */
     public static void heartbeat() {
-        _lastHeartbeatNano = System.nanoTime();
+        _lastHeartbeatMs = System.currentTimeMillis();
     }
 
     /** 启动守护监控线程; 幂等 (AltoClef.onInitializeLoad 调用)。 */
@@ -82,16 +85,15 @@ public final class RenderThreadWatchdog {
             } catch (InterruptedException ignored) {
                 return;
             }
-            long lastNano = _lastHeartbeatNano;
-            if (lastNano == 0) continue; // 首次心跳未到
+            long lastMs = _lastHeartbeatMs;
+            if (lastMs == 0) continue; // 首次心跳未到
             long nowWall = System.currentTimeMillis();
-            long lastHeartbeatWall = lastNano / 1_000_000L;
-            long gapMs = nowWall - lastHeartbeatWall;
+            long gapMs = nowWall - lastMs;
             if (gapMs > FREEZE_THRESHOLD_MS) {
                 if (!_frozen) {
                     _frozen = true;
                     // 冻结起点以"最后一次心跳"计, 比发现时刻更贴近真实冻结点。
-                    _freezeStartWallMs = lastHeartbeatWall;
+                    _freezeStartWallMs = lastMs;
                     _lastDumpWallMs = 0;
                     _dumpCount = 0;
                 }
