@@ -693,8 +693,8 @@ public class MineAndCollectTask extends ResourceTask {
     private static final long MAINLINE_ENGAGED_TTL_MS = 1500;
 
     // (2026-09-26 配额期让位口径收紧) "active" = 主线【此刻】真正在推进矿脉, 与上面
-    // engaged(挖到过一颗即一次性锁存)分开登记: 心跳条件 = 贴身有已知目标矿 (见下方
-    // 半径) 或目标掉落物落地待捡; 走离矿脉/掉落捡完即过期。
+    // engaged(挖到过一颗即一次性锁存)分开登记: 心跳条件 = 贴身有【当前真感知】的
+    // 目标矿 (8 格内 + LOS, 防透视) 或目标掉落物落地待捡; 走离矿脉/掉落捡完即过期。
     // 供 BeatMinecraft2Task 配额期区分"挖矿脉中"(让位) 与"正在找"(金/铁放行)。
     private static final Set<Block> _MAINLINE_ACTIVE_BLOCKS =
             Collections.newSetFromMap(new IdentityHashMap<>());
@@ -718,14 +718,19 @@ public class MineAndCollectTask extends ResourceTask {
         for (Block b : _blocksToMine) _MAINLINE_ACTIVE_BLOCKS.add(b);
     }
 
-    /** 已知目标矿是否有任意一块在 {@link #MAINLINE_ACTIVE_NEAR_RADIUS_SQ} 贴身半径内。 */
+    /** 已知目标矿是否有任意一块在 {@link #MAINLINE_ACTIVE_NEAR_RADIUS_SQ} 贴身半径内。
+     *  (2026-09-26 防透视, 用户"心跳的是完全看不见的钻石也是透视") known 位置来自
+     *  chunk 扫描(未看见也登记), 让位判定必须只认【当前真感知】的矿 —— 看不见的
+     *  不算"正在挖矿脉", 否则路过得让位也是透视决策。 */
     private boolean nearKnownTarget(AltoClef mod) {
         BlockPos player = mod.getPlayer().getBlockPos();
         for (BlockPos known : mod.getBlockTracker().getKnownLocations(_blocksToMine)) {
             int dx = known.getX() - player.getX();
             int dy = known.getY() - player.getY();
             int dz = known.getZ() - player.getZ();
-            if (dx * dx + dy * dy + dz * dz <= MAINLINE_ACTIVE_NEAR_RADIUS_SQ) return true;
+            if (dx * dx + dy * dy + dz * dz > MAINLINE_ACTIVE_NEAR_RADIUS_SQ) continue;
+            if (!VisibilityHelper.isBlockPerceivable(mod, known)) continue;
+            return true;
         }
         return false;
     }
@@ -1777,40 +1782,10 @@ public class MineAndCollectTask extends ResourceTask {
                     return Optional.of(gBest);
                 }
             }
-
-            // (2026-09-26 第三层: BlockTracker 缓存兜底, 145441 场 14:57 实锤) 前两层只记
-            // 【真看见过】的矿, 但 BlockTracker 缓存(chunk 扫描登记、选择期过 LOS 才可挖)
-            // 里还有一批"扫描时登记、因 LOS/视角未进记忆"的已知钻石位置 —— 145441 场
-            // 14:57:03~17 这批位置让配额期让位心跳恒真, 记忆导航两层却全空, bot 宁可
-            // 瞎 wander 探洞也不去挖。本层把它们当导航目标: 仅导航不改挖掘防透视
-            // (到点仍需真感知才开挖), 实时校验方块仍在防扑空位, 黑名单/液体/猪灵闸
-            // 与上层选择器同口径。
-            {
-                BlockPos tBest = null;
-                double tBestSq = Double.POSITIVE_INFINITY;
-                for (BlockPos p : mod.getBlockTracker().getKnownLocations(_blocks)) {
-                    if (_blacklist.contains(p)) continue;
-                    if (!WorldHelper.canBreak(mod, p)) continue;
-                    if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
-                    if (piglinDensityGated(mod, p)) continue;
-                    if (mod.getChunkTracker().isChunkLoaded(p)) {
-                        Block actual = mod.getWorld().getBlockState(p).getBlock();
-                        boolean matches = false;
-                        for (Block target : _blocks) {
-                            if (actual == target) { matches = true; break; }
-                        }
-                        if (!matches) continue;
-                    }
-                    double sq = p.getSquaredDistance(fromPos);
-                    if (sq >= maxSq) continue;
-                    if (sq < tBestSq) { tBestSq = sq; tBest = p; }
-                }
-                if (tBest != null) {
-                    Debug.logMessage("[MineMem-Track] instance+global memory empty -> navigating to tracked-known ore "
-                            + tBest.toShortString() + " (dist=" + (int) Math.sqrt(tBestSq) + ")");
-                    return Optional.of(tBest);
-                }
-            }
+            // (2026-09-26 15:26 用户否决第三层 BlockTracker 缓存导航) 曾把 chunk 扫描
+            // 登记的已知矿位当导航目标 —— 但那些位置 bot 从未看见过, 导航=用透视信息
+            // 做决策, 违反防透视原则, 已撤销。记忆导航只认【真看见过】的两层
+            // (_seenOreTick / WorldMemory); 重启后记忆为空就诚实 wander, 看见什么记什么。
             return Optional.empty();
         }
 
