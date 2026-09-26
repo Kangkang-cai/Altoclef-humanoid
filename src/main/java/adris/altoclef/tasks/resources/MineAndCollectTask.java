@@ -1001,11 +1001,14 @@ public class MineAndCollectTask extends ResourceTask {
         // 感知(LOS)过的矿"记录, 供眼前无矿时的记忆兜底导航。与 _recentlySeen(5s, 供
         // 近场链挖)分开——战斗可能打断挖掘数十秒, 5s 太短, 这里给更长的回溯窗口,
         // 让 bot 杀完怪后能回到它【真看过】的矿继续挖, 而不是扭头去挖隧道/空转。
-        // 判据: 必须是 LOS 真感知(不透视), 且在本窗口内(40s)、直线距离 ≤48 格; 只要
-        // 眼前有任何可感知矿, 仍优先眼前(既有"舍近求远不可取"原则不受影响)。
+        // 判据: 必须是 LOS 真感知(不透视), 且在本窗口内(40s)、直线距离 ≤64 格(0926
+        // 用户拍板, 原 48); 只要眼前有任何可感知矿, 仍优先眼前(既有"舍近求远不可取"
+        // 原则不受影响)。
         private final java.util.Map<BlockPos, Long> _seenOreTick = new java.util.HashMap<>();
         private static final long MEMORY_NAV_LIFETIME_TICKS = 800; // 40s 记忆回溯窗口
-        private static final double MEMORY_NAV_RANGE = 48; // 记忆兜底导航距离上限
+        // (2026-09-26 48→64, 用户拍板"16 格太短改 64") 记忆兜底导航距离上限。
+        // 仅在眼前无任何可感知矿时兜底使用, 不与近目标竞争, 提半径不破"舍近求远"。
+        private static final double MEMORY_NAV_RANGE = 64;
         // (2026-09-01 贪心触发放宽后修复, 用户"贪心挖目标矿的3x3x3") 贪心触发能看见
         // GREEDY 范围内的可见矿(CollectVisibleOresTask 8格), 但本任务原先只认玩家
         // 贴身 3x3x3 → 远处可见矿无起始目标 → "Waiting for calculations" 空转卡住。
@@ -1772,6 +1775,40 @@ public class MineAndCollectTask extends ResourceTask {
                     Debug.logMessage("[MineMem-Global] instance memory empty -> navigating to globally-seen ore "
                             + gBest.toShortString() + " (dist=" + (int) Math.sqrt(gBestSq) + ")");
                     return Optional.of(gBest);
+                }
+            }
+
+            // (2026-09-26 第三层: BlockTracker 缓存兜底, 145441 场 14:57 实锤) 前两层只记
+            // 【真看见过】的矿, 但 BlockTracker 缓存(chunk 扫描登记、选择期过 LOS 才可挖)
+            // 里还有一批"扫描时登记、因 LOS/视角未进记忆"的已知钻石位置 —— 145441 场
+            // 14:57:03~17 这批位置让配额期让位心跳恒真, 记忆导航两层却全空, bot 宁可
+            // 瞎 wander 探洞也不去挖。本层把它们当导航目标: 仅导航不改挖掘防透视
+            // (到点仍需真感知才开挖), 实时校验方块仍在防扑空位, 黑名单/液体/猪灵闸
+            // 与上层选择器同口径。
+            {
+                BlockPos tBest = null;
+                double tBestSq = Double.POSITIVE_INFINITY;
+                for (BlockPos p : mod.getBlockTracker().getKnownLocations(_blocks)) {
+                    if (_blacklist.contains(p)) continue;
+                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    if (WorldHelper.isAdjacentToLiquid(mod, p)) continue;
+                    if (piglinDensityGated(mod, p)) continue;
+                    if (mod.getChunkTracker().isChunkLoaded(p)) {
+                        Block actual = mod.getWorld().getBlockState(p).getBlock();
+                        boolean matches = false;
+                        for (Block target : _blocks) {
+                            if (actual == target) { matches = true; break; }
+                        }
+                        if (!matches) continue;
+                    }
+                    double sq = p.getSquaredDistance(fromPos);
+                    if (sq >= maxSq) continue;
+                    if (sq < tBestSq) { tBestSq = sq; tBest = p; }
+                }
+                if (tBest != null) {
+                    Debug.logMessage("[MineMem-Track] instance+global memory empty -> navigating to tracked-known ore "
+                            + tBest.toShortString() + " (dist=" + (int) Math.sqrt(tBestSq) + ")");
+                    return Optional.of(tBest);
                 }
             }
             return Optional.empty();
