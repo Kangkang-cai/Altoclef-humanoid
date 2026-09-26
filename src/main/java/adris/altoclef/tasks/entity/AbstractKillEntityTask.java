@@ -200,6 +200,25 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     /** (2026-09-19 23:29 用户) 烈焰人接近距离: 命中优先 (reach 3.2 留 0.7 余量) 但不贴脸。 */
     private static final double BLAZE_APPROACH_DISTANCE = 2.5;
 
+    // (2026-09-26 完全靠近兜底, 用户"距离问题或藤蔓树叶遮挡导致几秒一刀不出 →
+    // 2s 超时就触发一次完全靠近, 即导航到离目标只有一格") 无盾近战交战中,
+    // 距上次对本目标真实出刀 (准心落上并挥击, getLastSwingTickFor 口径) 已满
+    // MELEE_SWING_DROUGHT_TICKS → 贴近距离临时换成 FULLY_CLOSE_DISTANCE (1 格),
+    // 出一刀后自动恢复 approachDistance。覆盖两类现有钩子接不住的缝:
+    //   · 距离问题: approachDistance (3.0/4.0) 停靠点在 reach (3.2) 边界外,
+    //     目标不主动靠近就永远 inReach=false 干站 (距离不净缩短, 只能等 15s kill
+    //     timeout);  · 软植物遮挡: 藤蔓 COLLIDER 穿透 → 父类"被挡"分支不触发,
+    //     准心被吃 → swing DECLINED 循环 (清草只管 hardness 0 的草, 藤蔓
+    //     hardness 0 但清草 20t 上限/40t 冷却外就漏)。贴近 1 格后准心俯角变陡,
+    //     大概率自然落到目标身上; 仍不行则既有清障/kill timeout 兜底不变。
+    private static final double FULLY_CLOSE_DISTANCE = 1.0;
+    private static final int MELEE_SWING_DROUGHT_TICKS = 40; // 2s @20tps
+    // 目标 UUID → 交战锚点 (末次"接近途中"刷新 或 末次出刀)。必须 static:
+    // MobDefenseChain 每秒重建 <Killing entity.X> 实例洗掉实例字段 (项目铁律:
+    // 计时放触发条件层, 不放实例), 接近分支经 onEntityApproach 持续刷新。
+    private static final java.util.Map<java.util.UUID, Long> _meleeEngageAnchor = new java.util.HashMap<>();
+    private static long _lastFullyCloseLogMs = 0;
+
     private static final Item[] WEAPON_ITEMS = new Item[]{
             Items.DIAMOND_SWORD,
             Items.IRON_SWORD,
@@ -344,6 +363,28 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         if (entity instanceof EndermanEntity) {
             LookHelper.lookAt(mod, aimPoint(entity));
         }
+        // (2026-09-26 完全靠近兜底) 接近途中持续刷新交战锚点 —— 交战分支的
+        // "2s 没出刀"从进入交战那一刻起算, 而非从目标首次被感知起算; 重新
+        // 接战 (掉出迟滞圈再回来) 也必然先路过这里, 锚点自然对齐。
+        _meleeEngageAnchor.put(entity.getUuid(), (long) WorldHelper.getTicks());
+    }
+
+    /**
+     * (2026-09-26 完全靠近兜底) 交战中已 2s 没对本目标真实出过一刀 → 判干旱。
+     * 参考点 = max(交战锚点, 对本目标末次出刀); 从未出过刀时只看锚点。
+     * 表过大时顺手清 60s 无刷新的旧条目 (换目标/换场次不留垃圾)。
+     */
+    private boolean isMeleeSwingDrought(AltoClef mod, Entity entity) {
+        long now = WorldHelper.getTicks();
+        java.util.UUID id = entity.getUuid();
+        if (_meleeEngageAnchor.size() > 16) {
+            _meleeEngageAnchor.entrySet().removeIf(e -> now - e.getValue() > 1200);
+        }
+        Long anchorBoxed = _meleeEngageAnchor.get(id);
+        long anchor = anchorBoxed != null ? anchorBoxed : now;
+        long lastSwing = mod.getControllerExtras().getLastSwingTickFor(id);
+        long reference = Math.max(anchor, lastSwing);
+        return now - reference > MELEE_SWING_DROUGHT_TICKS;
     }
 
     /**
@@ -483,7 +524,30 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // (用户实测杀小白/羊/牛无盾时交替停顿)。到射程内才抬手, 避免空挥。
         // (2026-09-09 凋零骷髅) 接近距离按目标类型区分: 凋零骷髅=射程即停,
         // 其余维持 MELEE_HUG_DISTANCE 贴身。
+        // (2026-09-20 挥剑扫溅守卫) 目标末影人旁边贴着另一只 → 本 tick 不出刀,
+        // 挥剑的扫溅伤害会波及相邻末影人, 凭空多激怒一只。保持贴近与瞄准
+        // (上方 lookAt 已做), 蹲守的锁定与失联节奏不受影响。
+        // (2026-09-26 提前到贴近距离计算之前) 完全靠近兜底要豁免扫溅蹲守 ——
+        // 蹲守期本来就不许出刀, 不能因为"没出刀"就往两只末影人中间凑。
+        boolean sweepGuarded = entity instanceof EndermanEntity && hasAdjacentEnderman(mod, entity);
+
         Task move = new GetToEntityTask(entity, approachDistance(mod, entity));
+        // (2026-09-26 完全靠近兜底, 用户) 交战中 2s 没对本目标出过一刀 (距离
+        // 停靠点在 reach 外干站 / 藤蔓吃准心 swing DECLINED) → 贴近距离临时
+        // 换成 1 格, 逼到贴脸让准心落回目标身上; 出一刀后 isMeleeSwingDrought
+        // 自动翻 false, 恢复正常 approachDistance。仅无盾近战分支: 盾战分支的
+        // 格挡节奏 (波内只格挡最多 4s) 本来就合法不出刀, 不适用。
+        if (!sweepGuarded && isMeleeSwingDrought(mod, entity)) {
+            move = new GetToEntityTask(entity, FULLY_CLOSE_DISTANCE);
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastFullyCloseLogMs > 3000) {
+                _lastFullyCloseLogMs = nowMs;
+                Debug.logToFile("altoclef_diag.log", "[MELEE-FIX]\t[FULLY-CLOSE]\tno swing for "
+                        + (MELEE_SWING_DROUGHT_TICKS / 20) + "s on "
+                        + entity.getType().getTranslationKey() + ", closing to "
+                        + FULLY_CLOSE_DISTANCE + " block");
+            }
+        }
         double reach = mod.getModSettings().getEntityReachRange();
         boolean inReach = entity.squaredDistanceTo(mod.getPlayer()) <= reach * reach;
         // Equip weapon
@@ -495,10 +559,6 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             return move;
         }
         float hitProg = mod.getPlayer().getAttackCooldownProgress(0);
-        // (2026-09-20 挥剑扫溅守卫) 目标末影人旁边贴着另一只 → 本 tick 不出刀,
-        // 挥剑的扫溅伤害会波及相邻末影人, 凭空多激怒一只。保持贴近与瞄准
-        // (上方 lookAt 已做), 蹲守的锁定与失联节奏不受影响。
-        boolean sweepGuarded = entity instanceof EndermanEntity && hasAdjacentEnderman(mod, entity);
         if (sweepGuarded) logSweepGuard(mod, entity);
         if (inReach && hitProg >= 0.75f && !sweepGuarded) {
             // (2026-09-13 被拦刀诊断) 出刀前先记录准心是否真在目标身上: attack()
