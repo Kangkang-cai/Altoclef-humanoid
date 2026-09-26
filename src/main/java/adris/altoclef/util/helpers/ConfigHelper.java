@@ -49,7 +49,11 @@ public class ConfigHelper {
         T result = getDefault.get();
         File loadFrom = getConfigFile(path);
         if (!loadFrom.exists()) {
-            saveConfig(path, result);
+            // (2026-09-26) 首建也走省略式保存: 全默认 → 落盘空 JSON。旧机制把
+            // 当时的编译默认值整份写进文件, 源码日后调默认值时旧值残留继续覆盖
+            // (beat_minecraft.json targetEyes=14 压 16、settings expedition=300
+            // 压 40, 同根因两起)。
+            saveConfigPruned(path, result, getDefault.get());
             return result;
         }
 
@@ -85,7 +89,12 @@ public class ConfigHelper {
             // 用户"为什么还是只收 7 根棒"排查半天, 全程无任何日志痕迹。
             // 纯播报、零行为: 不改写文件、不改判据, 只把差异打出来。
             logOverriddenFields(path, getDefault.get(), result, classToLoad);
-            saveConfig(path, result);
+            // (2026-09-26 根治残留覆盖) 回写时省略"值==源码默认"的字段: JSON
+            // 只存用户真正改过的值, 缺失字段自然跟源码默认走。旧机制把编译默认
+            // 值也整份落盘, 源码日后调默认值时旧值残留继续覆盖 (targetEyes=14
+            // 压 16、expedition=300 压 40)。值==默认 ⇒ 写不写加载结果一致, 省
+            // 略无损。
+            saveConfigPruned(path, result, getDefault.get());
         }
 
         return result;
@@ -151,6 +160,55 @@ public class ConfigHelper {
             mapper.writer(prettyPrinter).writeValue(toSave, config);
         } catch (IOException e) {
             e.printStackTrace();
+        }
+    }
+
+    /**
+     * (2026-09-26 省略式保存, 根治"残留默认值覆盖源码新默认") 序列化 loaded 后
+     * 逐字段与【当前源码默认】对比, 值相等的字段直接从 JSON 中剔除再落盘。
+     * 语义保证: 字段值==默认 ⇒ 写不写加载结果一致, 省略无损; 源码日后调默认值,
+     * 文件不再残留旧默认压着 (0926 expedition=300 压 40 事故同根因)。
+     * 失败兜底: 任何异常退回整份保存 (老行为), 不丢配置。
+     */
+    private static <T> void saveConfigPruned(String path, T loaded, T defaults) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            SimpleModule module = new SimpleModule();
+            module.addSerializer(Vec3d.class, new Vec3dSerializer());
+            module.addSerializer(BlockPos.class, new BlockPosSerializer());
+            module.addSerializer(ChunkPos.class, new ChunkPosSerializer());
+            mapper.registerModule(module);
+            com.fasterxml.jackson.databind.JsonNode loadedTree = mapper.valueToTree(loaded);
+            com.fasterxml.jackson.databind.JsonNode defaultTree = mapper.valueToTree(defaults);
+            if (loadedTree instanceof com.fasterxml.jackson.databind.node.ObjectNode obj
+                    && defaultTree instanceof com.fasterxml.jackson.databind.node.ObjectNode defObj) {
+                java.util.Iterator<String> names = obj.fieldNames();
+                java.util.List<String> toRemove = new java.util.ArrayList<>();
+                while (names.hasNext()) {
+                    String name = names.next();
+                    com.fasterxml.jackson.databind.JsonNode dv = defObj.get(name);
+                    // 默认树里没有的键保留 (新增字段, 老文件兼容), 相等的剔除。
+                    if (dv != null && dv.equals(obj.get(name))) {
+                        toRemove.add(name);
+                    }
+                }
+                toRemove.forEach(obj::remove);
+                File toSave = getConfigFile(path);
+                if (!toSave.getParentFile().exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    toSave.getParentFile().mkdirs();
+                }
+                mapper.enable(SerializationFeature.INDENT_OUTPUT);
+                DefaultPrettyPrinter prettyPrinter = new DefaultPrettyPrinter();
+                prettyPrinter.indentArraysWith(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE);
+                mapper.writer(prettyPrinter).writeValue(toSave, obj);
+                return;
+            }
+            saveConfig(path, loaded);
+        } catch (Exception e) {
+            // 任何意外退回整份保存, 宁可残留也不丢用户配置。
+            e.printStackTrace();
+            saveConfig(path, loaded);
         }
     }
 
