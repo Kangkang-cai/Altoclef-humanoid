@@ -602,6 +602,36 @@ public interface WorldHelper {
     }
 
     /**
+     * (2026-09-26 食物远征第 5 档兜底, 用户"应对四周都是沙漠的情况")
+     * 【真荒芜】群系判定 —— 这类地形没有常规被动动物与作物产出, 作为远征目标
+     * 毫无意义, 与 {@link #isOcean} 一起构成"不该去"的完整黑名单:
+     *
+     * <ul>
+     *   <li>四档偏好池 (平原/橡木森林/白桦/深色橡木林) = 最优目标, 走
+     *       {@link #isPlains} / {@link #isRichFoodForest} / {@link #isBirchForest}
+     *       / {@link #isDarkForest};</li>
+     *   <li><b>第 5 档兜底</b> = 既不在偏好池、也不是本判定的群系 (针叶林/热带
+     *       草原/丛林/沼泽/雪原/山地…) —— 产出低于偏好池但远好过沙漠;</li>
+     *   <li>本判定 true (沙漠/恶地/石岸/蘑菇岛/海洋) → 连兜底都不收, 只剩
+     *       "沿锁定方位穿过去"一条路。</li>
+     * </ul>
+     *
+     * <p>为什么必须分开: 旧口径把"不在四档偏好池"一律当荒芜, 于是"前方是针叶林"
+     * 也被判成荒芜而触发折返 —— 而针叶林其实能出食物, 应该直接走过去。口径与
+     * isOcean 同款 (matchesKey 读 biome 地形数据, 不涉及实体感知/透视)。
+     */
+    static boolean isBarrenBiome(RegistryEntry<Biome> b){
+        return isOcean(b)
+        || b.matchesKey(BiomeKeys.DESERT)
+        || b.matchesKey(BiomeKeys.BADLANDS)
+        || b.matchesKey(BiomeKeys.ERODED_BADLANDS)
+        || b.matchesKey(BiomeKeys.WOODED_BADLANDS)
+        || b.matchesKey(BiomeKeys.STONY_SHORE)
+        || b.matchesKey(BiomeKeys.MUSHROOM_FIELDS)
+        || b.matchesKey(BiomeKeys.THE_VOID);
+    }
+
+    /**
      * (2026-08-31 [FOOD-BIOME]) 平原系 biome 判定 (含向日葵平原) —— 食物富集
      * 群系【第一档】: 找食物/找动物时 bot 最优先导航到草原, 动物/作物收获概率最高。
      * 模仿 isOcean 用 matchesKey 判 biome, 无需实际地形检查。

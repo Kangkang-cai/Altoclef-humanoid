@@ -2,6 +2,7 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -9,7 +10,9 @@ import net.minecraft.util.registry.RegistryEntry;
 import net.minecraft.world.biome.Biome;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * (2026-09-15 地表觅食远征, 用户"连续长时间没找到食物就远走, 尽量不要回头,
@@ -56,8 +59,28 @@ import java.util.List;
  * 步方位没刷新、锥心还在旧方向, 身后偏好点会再次把它拉回去 —— 那就是边界上的
  * 反复折返。粘滞目标被水闸拒 / 超时 / 走丢时立即释放, 不跨不过去的水死磕。
  *
- * 四档全荒芜 (周围 160 格内无任何偏好群系) 时不折返: 无处可去的折返等于原地
- * 打转, 维持锁定方位行军由上层 40s 远征超时兜底。
+ * <h2>(2026-09-26 第 5 档兜底地形 + 180s 战略再平衡, 用户"应对四周都是沙漠")</h2>
+ *
+ * <ol start="4">
+ *   <li><b>第 5 档兜底</b>: 四档偏好池全空时, 允许转向"非偏好池但能出食物"的
+ *       干落点 (针叶林/热带草原/丛林/沼泽/雪原/山地…, 即
+ *       {@link WorldHelper#isBarrenBiome} 的补集)。仍然走方向门; 沙漠/恶地/
+ *       石岸/蘑菇岛/海洋连兜底都不收。判据 3 的折返目标也来自这五档, 于是
+ *       "折返有目标可用"这件事不再只依赖偏好池。</li>
+ *   <li><b>180s 战略再平衡</b>: 远征连续 180s 背包食物分数无增长 → 换向
+ *       (优先转向 360° 内最近可用点, 全荒芜则随机重投方位角), 但<b>不退出
+ *       远征模式</b> (s_foodExpeditionActive 保持, 达标线仍 120)。用户
+ *       2026-09-26 拍板"只换向不退出"。</li>
+ * </ol>
+ *
+ * <p>四周 160 格真是纯沙漠 (四档 + 兜底全空) 时<b>不折返</b>: 折返目标同样是
+ * 沙漠, 等于原地打转。维持锁定方位穿过去 (沙漠有边界), 且边走边重扫 ——
+ * 出口交给 180s 再平衡与后续重扫接管。日志指纹 {@code terrain-barren-all}。
+ *
+ * <p><b>口径更正</b>: 早期注释写"由上层 40s 远征超时兜底"是错的 ——
+ * {@code Settings.foodSearchExpeditionTimeoutSeconds=40} 是<b>进入远征模式的
+ * 触发阈值</b> (连续 40s 食物潜力无增长就切远征), 不是远征自身的收队超时。
+ * 本类构造传 {@code super(-1)} = 无硬超时, 唯一收队路径是食物攒够降低后的 120。
  */
 public class OverworldExpeditionTask extends BearingExpeditionTask {
 
@@ -111,8 +134,19 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
     private static final long REVERSAL_COOLDOWN_MS = 8000;
     /** 折返目标粘滞上限: 提交后一直走到它, 期间不再改主意。 */
     private static final long REVERSAL_STICKY_MS = 25000;
+    /** 档位总数: 0 平原 / 1 橡木·花森林 / 2 白桦 / 3 深色橡木林 / 4 兜底(非荒芜)。 */
+    private static final int TIER_COUNT = 5;
     /** 档位名 (索引 = 扫描时判定的 tier)。 */
-    private static final String[] TIER_NAMES = {"plains", "richForest", "birch", "darkForest"};
+    private static final String[] TIER_NAMES = {"plains", "richForest", "birch", "darkForest", "fallback"};
+    /**
+     * (2026-09-26 战略再平衡) 连续多久"背包食物分数无增长"就换向 (用户拍板
+     * 180s, 且只换向不退出远征模式)。取 180s 的理由: 正常走一步 24 格、约
+     * 2~4s, 180s ≈ 45~90 步 ≈ 1000~2000 格, 足够跨越一个中型沙漠/海洋而仍
+     * 到不了食物的概率极低; 比这更久说明方向选错了。
+     */
+    private static final long RETARGET_MS = 180000;
+    /** 再平衡判据的检查节流 (库存分数要遍历背包, 不必每 tick 算)。 */
+    private static final long RETARGET_CHECK_MS = 2500;
 
     private long _lastBiomeScanMs = 0;
     /** 各档扫到的干落点池 (扫描期整体刷新; 空 = 该档荒芜)。 */
@@ -120,6 +154,19 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
     private final List<BlockPos> _richPts = new ArrayList<>();
     private final List<BlockPos> _birchPts = new ArrayList<>();
     private final List<BlockPos> _darkPts = new ArrayList<>();
+    /** 第 5 档兜底: 非偏好池、但也不是 {@link WorldHelper#isBarrenBiome} 的干落点。 */
+    private final List<BlockPos> _fallbackPts = new ArrayList<>();
+
+    /** 再平衡判据节流 (实例内即可: 重建后晚 2.5s 再检查, 无副作用)。 */
+    private long _lastBalanceCheckMs = 0;
+    /**
+     * (2026-09-26 战略再平衡) static 跨实例的"上次换向时刻 / 当时食物分数"。
+     * 与试探停滞钟同理: 链被 eating/combat 打断后实例重建, 计时必须跨实例存活,
+     * 否则"连续 180s 无产出"永远攒不满。key 含存档:维度身份, 跨世界不串键;
+     * 同名存档重进时最坏后果是多换一次方向 (换向本身无害)。
+     */
+    private static final Map<String, Long> _lastRetargetMsByKey = new HashMap<>();
+    private static final Map<String, Integer> _foodAtLastRetargetByKey = new HashMap<>();
 
     /** 折返方案 (§类注释 3): 提交后粘滞走向它, 直到到达/走丢/被水闸拒。 */
     private BlockPos _reversalTarget = null;
@@ -173,6 +220,7 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
         _richPts.clear();
         _birchPts.clear();
         _darkPts.clear();
+        _fallbackPts.clear();
 
         BlockPos player = mod.getPlayer().getBlockPos();
         for (int dx = -BIOME_SCAN_RADIUS; dx <= BIOME_SCAN_RADIUS; dx += BIOME_SCAN_STEP) {
@@ -185,7 +233,12 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
                 else if (WorldHelper.isRichFoodForest(biome)) tierPool = _richPts;
                 else if (WorldHelper.isBirchForest(biome)) tierPool = _birchPts;
                 else if (WorldHelper.isDarkForest(biome)) tierPool = _darkPts;
-                else continue; // 排斥地形 (沙漠/恶地/雪原…): 不进偏好池
+                // (2026-09-26 第 5 档兜底) 非偏好池、但能出食物的地形 (针叶林/
+                // 热带草原/丛林/沼泽/雪原/山地…) —— 产出低于偏好池, 可四档全空
+                // 时远比"判定无处可去、只能硬走"强。真荒芜 (沙漠/恶地/石岸/
+                // 蘑菇岛/海洋) 连兜底都不进, 那是"穿过去"的目标而非"走向"的目标。
+                else if (!WorldHelper.isBarrenBiome(biome)) tierPool = _fallbackPts;
+                else continue;
                 int sy = BiasedExploreTask.surfaceYNoLeavesAt(mod, check.getX(), check.getZ(), check.getY());
                 BlockPos landing = new BlockPos(check.getX(), sy, check.getZ());
                 if (!BiasedExploreTask.isDryLanding(mod, landing)) continue;
@@ -200,7 +253,8 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
             case 0: return _plainsPts;
             case 1: return _richPts;
             case 2: return _birchPts;
-            default: return _darkPts;
+            case 3: return _darkPts;
+            default: return _fallbackPts;
         }
     }
 
@@ -212,7 +266,7 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
      * @return 该档最近的"未到达"(dist ≥ PREFER_MIN_DIST) 可用点; 全档无 → null。
      */
     private Steer pickTiered(Vec3d from, double bearing, boolean requireCone) {
-        for (int tier = 0; tier < 4; ++tier) {
+        for (int tier = 0; tier < TIER_COUNT; ++tier) {
             BlockPos best = null;
             double bestDist = Double.POSITIVE_INFINITY;
             for (BlockPos c : poolOf(tier)) {
@@ -260,15 +314,31 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
 
         rescanPreferred(mod);
 
+        // 判据 4: 战略再平衡 (180s 无食物产出 → 换向, 不退出远征模式)。
+        // 放在方向门之前: 换向后立刻用新方位选点, 不必等下一轮。
+        if (maybeStrategicRetarget(mod, from)) {
+            if (_reversalTarget != null) return _reversalTarget;
+            bearing = effectiveBearing();
+        }
+
         // 判据 1: 方向门。
         Steer gated = pickTiered(from, bearing, true);
         if (gated != null) return gated.point;
 
-        // 判据 3: 完全折返豁免 —— 只在"前方确实是非偏好地形"时才放开 360°。
+        // 判据 3: 完全折返豁免 —— 只在"前方确实是真荒芜 (沙漠/海洋/…)"时才放开 360°。
         if (now - _lastReversalMs < REVERSAL_COOLDOWN_MS) return null;
         if (!aheadIsBarren(mod, from, bearing, step)) return null;
         Steer any = pickTiered(from, bearing, false);
-        if (any == null) return null; // 四档全荒芜: 折返等于原地打转, 维持锁定方位
+        if (any == null) {
+            // 五档全空: 160 格内连"可生存地形"都没有 —— 真·纯沙漠/纯海洋区。
+            // 折返目标同样是沙漠, 等于原地打转; 维持锁定方位穿过去 (用户
+            // 2026-09-26 拍板"继续沿锁定方位穿沙"), 边走边重扫, 出口交给
+            // 180s 再平衡与后续重扫接管。
+            logTerrain("barren-all", Math.toDegrees(bearing),
+                    "all " + TIER_COUNT + " tiers empty within " + BIOME_SCAN_RADIUS
+                            + " -> keep bearing through desert");
+            return null;
+        }
 
         double steer = Math.atan2(any.point.getZ() + 0.5 - from.z, any.point.getX() + 0.5 - from.x);
         _reversalTarget = any.point;
@@ -283,9 +353,13 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
     }
 
     /**
-     * (判据 3) 正前方一步落点的群系是否【不在偏好池】—— 沙漠/恶地/雪原/沼泽/
-     * 针叶林等无食物地形。未加载区块返回 false (不在知情范围内不豁免, 与
-     * isDryLanding/isTargetInWater 的"未知不拦"口径一致)。
+     * (判据 3) 正前方一步落点的群系是否是【真荒芜】—— 沙漠/恶地系/石岸/蘑菇岛/
+     * 海洋 (见 {@link WorldHelper#isBarrenBiome})。未加载区块返回 false (不在
+     * 知情范围内不豁免, 与 isDryLanding/isTargetInWater 的"未知不拦"口径一致)。
+     *
+     * <p>(2026-09-26 第 5 档引入后语义收紧) 旧版口径是"不在四档偏好池即算荒芜",
+     * 于是"前方是针叶林/热带草原"也被判成荒芜而触发折返 —— 而它们能出食物,
+     * 且已被兜底档接手。现在只有真荒芜才放开 360°。
      */
     private boolean aheadIsBarren(AltoClef mod, Vec3d from, double bearing, double step) {
         if (mod.getWorld() == null) return false;
@@ -294,9 +368,87 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
                 (int) Math.floor(from.y),
                 (int) Math.floor(from.z + Math.sin(bearing) * step));
         if (!mod.getChunkTracker().isChunkLoaded(ahead)) return false;
-        RegistryEntry<Biome> b = mod.getWorld().getBiome(ahead);
-        return !WorldHelper.isPlains(b) && !WorldHelper.isRichFoodForest(b)
-                && !WorldHelper.isBirchForest(b) && !WorldHelper.isDarkForest(b);
+        return WorldHelper.isBarrenBiome(mod.getWorld().getBiome(ahead));
+    }
+
+    /**
+     * (判据 4 / 用户 2026-09-26 "加, 但只换向不退出") 战略再平衡: 远征连续
+     * {@link #RETARGET_MS} 秒背包食物分数无增长 → 换向, 但保留远征模式
+     * (不改 {@code FoodChain.s_foodExpeditionActive}, 达标线仍是 120)。
+     *
+     * <p>为什么需要: 远征是全项目唯一"只进不出"的探索 —— 构造传 {@code super(-1)}
+     * 无硬超时, 唯一结束路径是食物攒够 120。若锁定方位指向大沙漠/大海洋, 旧版
+     * 会一直走到世界边界。这条判据给"方向选错了"一个自愈出口。
+     *
+     * <p>换向目标优先取 360° 内最近的可用点 (五档任意一档, 于是"回头有个针叶林"
+     * 会直接过去); 连兜底都空 (真·纯沙漠) 时才随机重投方位角。两个动作都走
+     * {@link #commitBearing} → 真换向 + rebase (锚点/最远半径/停滞钟重算), 并让
+     * 目标带 25s 粘滞, 不会被身后的偏好点立刻拉回来。
+     *
+     * <p>计时用 static 跨实例 + "分数是否超过换向时基线"双判据: 有产出就重新
+     * 计时 (方向没错, 不该换), 无产出且到期才换。
+     *
+     * @return true = 本次调用触发了换向
+     */
+    private boolean maybeStrategicRetarget(AltoClef mod, Vec3d from) {
+        long now = System.currentTimeMillis();
+        if (now - _lastBalanceCheckMs < RETARGET_CHECK_MS) return false;
+        _lastBalanceCheckMs = now;
+        if (_persistKey == null) return false;
+
+        int score = StorageHelper.calculateInventoryFoodScore(mod);
+        Long lastRetargetMs = _lastRetargetMsByKey.get(_persistKey);
+        Integer foodAtLast = _foodAtLastRetargetByKey.get(_persistKey);
+        if (lastRetargetMs == null || foodAtLast == null) {
+            // 首次进入远征: 只记基线, 不换向。
+            _lastRetargetMsByKey.put(_persistKey, now);
+            _foodAtLastRetargetByKey.put(_persistKey, score);
+            return false;
+        }
+        if (score > foodAtLast) {
+            // 这期间真有食物入包 → 方向没错, 重新计时。
+            _lastRetargetMsByKey.put(_persistKey, now);
+            _foodAtLastRetargetByKey.put(_persistKey, score);
+            return false;
+        }
+        if (now - lastRetargetMs < RETARGET_MS) return false;
+
+        // 到期且无产出: 换向。
+        double bearing = effectiveBearing();
+        Steer any = pickTiered(from, bearing, false);
+        double newBearing;
+        String how;
+        if (any != null) {
+            newBearing = Math.atan2(any.point.getZ() + 0.5 - from.z, any.point.getX() + 0.5 - from.x);
+            _reversalTarget = any.point;
+            _reversalSinceMs = now;
+            _lastReversalMs = now;
+            how = "-> " + any.tier + " " + any.point.toShortString() + " dist=" + (int) any.dist;
+        } else {
+            newBearing = Math.random() * 2 * Math.PI;
+            _reversalTarget = null;
+            how = "random re-roll (all " + TIER_COUNT + " tiers empty)";
+        }
+        commitBearing(mod, newBearing, "no food gain for " + (RETARGET_MS / 1000) + "s -> retarget");
+        _lastRetargetMsByKey.put(_persistKey, now);
+        _foodAtLastRetargetByKey.put(_persistKey, score);
+        Debug.logToFile("altoclef_diag.log",
+                "[FOOD-EXPEDITION]\texpedition-retarget " + how
+                        + " bearing=" + (int) Math.toDegrees(newBearing) + "deg was="
+                        + (int) Math.toDegrees(bearing) + "deg (no food gain for "
+                        + (RETARGET_MS / 1000) + "s, score=" + score + ", expedition mode kept)");
+        return true;
+    }
+
+    /**
+     * (基类探试豁免钩子) 折返/再平衡目标仍在粘滞期时不升级试探 —— 否则 25s
+     * 粘滞 &gt; 5s 停滞阈值, 试探会在粘滞中途叠加 ±60° 偏置, 与"走到目标之前
+     * 不再改主意"对拉。
+     */
+    @Override
+    protected boolean probeSuppressed(AltoClef mod) {
+        return _reversalTarget != null
+                && System.currentTimeMillis() - _reversalSinceMs <= REVERSAL_STICKY_MS;
     }
 
     /** 角度归一到 (-180, 180], 供方向门的相对角判定。 */
@@ -384,6 +536,7 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
         if (_richPts.contains(p)) return TIER_NAMES[1];
         if (_birchPts.contains(p)) return TIER_NAMES[2];
         if (_darkPts.contains(p)) return TIER_NAMES[3];
+        if (_fallbackPts.contains(p)) return TIER_NAMES[4];
         return "prefer";
     }
 
