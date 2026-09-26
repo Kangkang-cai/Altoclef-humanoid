@@ -275,7 +275,7 @@ public class OverworldExpeditionTask extends BearingExpeditionTask {
         _reversalSinceMs = now;
         _lastReversalMs = now;
         // 关键: 真换向, 不是一步例外 (用户 2026-09-26 硬约束)。
-        commitBearing(steer, "barren ahead -> reverse to " + any.tier);
+        commitBearing(mod, steer, "barren ahead -> reverse to " + any.tier);
         logTerrain("gate-reverse", Math.toDegrees(steer),
                 any.tier + " " + any.point.toShortString()
                         + " (was " + (int) Math.toDegrees(bearing) + "deg, dist=" + (int) any.dist + ")");

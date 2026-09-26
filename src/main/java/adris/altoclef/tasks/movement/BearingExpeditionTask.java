@@ -54,7 +54,18 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
 
     // ---- 遇障试探 (仿 FortressExploreTask P2/P2.1/大转弯修订) ----
     protected static final int PROBE_AFTER_FAILS = 2;
-    protected static final long STALL_TICKS = 100; // 5s 无新最远点 = 停滞
+    /**
+     * (2026-09-26 试探解冻) 停滞判据由「实例内 tick 计数」改为【墙钟毫秒】。
+     *
+     * <p>旧值 STALL_TICKS=100 与 {@code _tickId} 配对使用, 而 {@code onStart} 会把
+     * {@code _tickId} 归零、static 的停滞基线却跨实例保留旧的大值 →
+     * {@code stalledTicks = 小 - 大 = 负数} 恒 {@code < 100} → 真遇障时试探也
+     * 全程零触发 (0926 实锤 {@code probe=+0 fails=0})。
+     *
+     * <p>毫秒基准跨实例天然连续, 与食物搜索计时同一哲学:「连续 5s 没有新最远点」
+     * 才叫停滞, 不管中间被战斗/进食打断过几次。
+     */
+    protected static final long STALL_MS = 5000;
     protected static final double PROBE_STEP_DEG = 60;
     protected static final double PROBE_INCREMENT_DEG = 25;
     protected static final double MAX_PROBE_DEG = 150;
@@ -69,7 +80,7 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
     private static final Map<String, Double> _probeOffsetByKey = new HashMap<>();
     private static final Map<String, Double> _probeStartMaxByKey = new HashMap<>();
     private static final Map<String, BlockPos> _probeStartPosByKey = new HashMap<>();
-    private static final Map<String, Long> _lastProgressTickByKey = new HashMap<>();
+    private static final Map<String, Long> _lastProgressMsByKey = new HashMap<>();
 
     private final MovementProgressChecker _progress = new MovementProgressChecker();
     // 硬超时 (秒); <0 = 无超时 (主世界觅食远征由上层判定收队)。
@@ -148,6 +159,18 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         return "";
     }
 
+    /**
+     * (2026-09-26 折返粘滞豁免) 子类在"已提交的换向目标仍处粘滞期"时返回 true,
+     * 该期内不升级试探。默认 false (其他远征不受影响)。
+     *
+     * <p>为什么需要: 折返粘滞 25s > 停滞阈值 5s。若不在粘滞期豁免, 试探会在
+     * 折返途中叠加 ±60° 偏置, 与"走到折返目标之前不再改主意"的机制对拉。
+     * 折返提交时已做 rebase (停滞钟重启), 这里是第二道保险。
+     */
+    protected boolean probeSuppressed(AltoClef mod) {
+        return false;
+    }
+
     // ------------------------------------------------------------------ //
     // 生命周期
     // ------------------------------------------------------------------ //
@@ -163,6 +186,14 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         _lastLoggedRadius = 0;
         _escaped = false;
         _persistKey = expeditionKey(mod);
+        // (2026-09-26 试探解冻) 停滞基线若已过期 (被战斗/进食长时打断), 从恢复
+        // 时刻重新起算 —— 打断期间不该算成"无新最远点"; 未过期则保留, 让停滞
+        // 判据跨实例连续累计 (旧版归零 tickId 正是试探失效的根因)。
+        long nowMs = System.currentTimeMillis();
+        Long lastProgressMs = _lastProgressMsByKey.get(_persistKey);
+        if (lastProgressMs == null || nowMs - lastProgressMs > STALL_MS) {
+            _lastProgressMsByKey.put(_persistKey, nowMs);
+        }
         if (mod.getPlayer() != null) {
             _lastSwitchState = diagSwitchState(mod);
             _anchorByKey.computeIfAbsent(_persistKey, k -> mod.getPlayer().getBlockPos());
@@ -321,19 +352,37 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
      * 偏好点会立刻再次把 bot 拉回来, 在平原/沙漠边界上反复打摆 (用户
      * 2026-09-26 硬约束)。写回后门随新方位转, 旧方向自然失效。
      *
-     * <p>顺带清试探偏置与试探起点 (新旧方位叠加会算错), 并把停滞钟重启 ——
-     * 主动换向是"有进展"的一种, 不该被无新最远点判成停滞。
+     * <p>顺带清试探偏置与试探起点 (新旧方位叠加会算错), 并把整段远征 rebase 到
+     * 当前位置 (锚点/最远半径/停滞钟一起重算, 见 {@link #rebaseExpedition}) ——
+     * 主动换向是"有进展"的一种, 不该被"无新最远点"判成停滞。
      *
      * @param bearingRad 新方位角 (rad); @param reason 诊断原因
      */
-    protected final void commitBearing(double bearingRad, String reason) {
+    protected final void commitBearing(AltoClef mod, double bearingRad, String reason) {
         if (_persistKey == null) return;
         _headingByKey.put(_persistKey, bearingRad);
         _probeOffsetByKey.put(_persistKey, 0.0);
         _probeStartMaxByKey.remove(_persistKey);
         _probeStartPosByKey.remove(_persistKey);
-        _lastProgressTickByKey.put(_persistKey, _tickId);
+        rebaseExpedition(mod);
         Debug.logMessage(diagTag() + " bearing re-committed to " + fmtDeg(bearingRad) + "° (" + reason + ")");
+    }
+
+    /**
+     * (2026-09-26 换向 rebase) 把远征基准重置到当前位置: 锚点 = 玩家所在格,
+     * 最远半径归零, 停滞钟重启, 失败计数清零。
+     *
+     * <p>为什么必须归零: 换向后新方向往往先在半径上"往回走", 若不重置 max,
+     * {@code radius > prevMax + 0.5} 这个"有进展"判据长期不成立 → 停滞钟一路涨
+     * 满 → 试探机制在粘滞期中途叠加 ±60° 偏置, 与"折返目标走到之前不再改主意"
+     * 对拉。
+     */
+    protected final void rebaseExpedition(AltoClef mod) {
+        if (_persistKey == null || mod.getPlayer() == null) return;
+        _anchorByKey.put(_persistKey, mod.getPlayer().getBlockPos());
+        _maxRadiusByKey.put(_persistKey, 0.0);
+        _lastProgressMsByKey.put(_persistKey, System.currentTimeMillis());
+        _failCounter = 0;
     }
 
     // ------------------------------------------------------------------ //
@@ -403,14 +452,19 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
 
     /** 停滞够久 (无新最远点) 且失败够多 → 同侧加档试探 (+60 → ... → ±150, 顶格换边)。 */
     private void maybeEscalateProbe(AltoClef mod) {
+        if (probeSuppressed(mod)) {
+            _failCounter = 0;
+            return;
+        }
         String key = _persistKey;
         BlockPos anchor = _anchorByKey.get(key);
         if (anchor == null || mod.getPlayer() == null) return;
-        long lastProgress = _lastProgressTickByKey.getOrDefault(key, _tickId);
-        long stalledTicks = _tickId - lastProgress;
-        if (stalledTicks < STALL_TICKS) return;
+        long nowMs = System.currentTimeMillis();
+        long lastProgressMs = _lastProgressMsByKey.getOrDefault(key, nowMs);
+        long stalledMs = nowMs - lastProgressMs;
+        if (stalledMs < STALL_MS) return;
         boolean enoughFails = _failCounter >= PROBE_AFTER_FAILS;
-        boolean longStall = _failCounter >= 1 && stalledTicks >= STALL_TICKS * 2;
+        boolean longStall = _failCounter >= 1 && stalledMs >= STALL_MS * 2;
         if (!enoughFails && !longStall) return;
         double cur = _probeOffsetByKey.getOrDefault(key, 0.0);
         double next;
@@ -428,7 +482,7 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         _failCounter = 0;
         Debug.logMessage(String.format(java.util.Locale.ROOT,
                 "%s stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°, long step x2)",
-                diagTag(), stalledTicks / 20, Math.toDegrees(next), MAX_PROBE_DEG));
+                diagTag(), stalledMs / 1000, Math.toDegrees(next), MAX_PROBE_DEG));
     }
 
     // ------------------------------------------------------------------ //
@@ -446,7 +500,7 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         double maxRadius = Math.max(prevMax, radius);
         _maxRadiusByKey.put(key, maxRadius);
         if (radius > prevMax + 0.5) {
-            _lastProgressTickByKey.put(key, _tickId);
+            _lastProgressMsByKey.put(key, System.currentTimeMillis());
             _failCounter = 0;
         }
         // 试探成功 → 转正为新锁定方向: 半径破纪录 或 距试探起点净位移 > 整步程。
@@ -552,7 +606,7 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         _probeOffsetByKey.clear();
         _probeStartMaxByKey.clear();
         _probeStartPosByKey.clear();
-        _lastProgressTickByKey.clear();
+        _lastProgressMsByKey.clear();
     }
 
     protected static String fmtDeg(double rad) {
