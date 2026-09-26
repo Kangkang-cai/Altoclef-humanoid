@@ -233,14 +233,32 @@ public final class NavStuckWatchdog {
                             sb.append(" mv=").append(mv.getClass().getSimpleName())
                                     .append(" src=").append(safeInvoke(mv, "getSrc"))
                                     .append(" dest=").append(safeInvoke(mv, "getDest"));
+                            // 执行器视角"这段要挖的方块" (PathExecutor.toBreak() 公共方法) —
+                            // prepared() 持续 false (PREPPING 循环) 时这就是要瞄/要挖的目标。
+                            try {
+                                Object tbSet = exec.getClass().getMethod("toBreak").invoke(exec);
+                                sb.append(" tb=").append(tbSet);
+                            } catch (Throwable ignored) {
+                            }
                             Object state = getField(mv, "currentState");
                             if (state != null) {
                                 sb.append(" status=").append(safeInvoke(state, "getStatus"));
+                                // baritone 想看的朝向 (MovementTarget.rotation) — 与玩家实际
+                                // 朝向 pRot 对不上且持续 = "转向权被抢, isLookingAt 永假" 实锤。
+                                Object target = safeInvokeObj(state, "getTarget");
+                                if (target != null) {
+                                    Object rotOpt = safeInvokeObj(target, "getRotation");
+                                    if (rotOpt instanceof java.util.Optional
+                                            && ((java.util.Optional<?>) rotOpt).isPresent()) {
+                                        sb.append(" bRot=").append(((java.util.Optional<?>) rotOpt).get());
+                                    }
+                                }
                             }
                         }
                         execInfo = sb.toString();
                     }
-                } catch (Throwable ignored) {
+                } catch (Throwable t) {
+                    execInfo = "exec[err:" + t + "]";
                 }
                 try {
                     wwbInfo = " wwb=" + baritone.api.BaritoneAPI.getSettings().walkWhileBreaking.value;
@@ -252,6 +270,31 @@ public final class NavStuckWatchdog {
             Vec3d vel = p.getVelocity();
             double hSpeed = Math.hypot(vel.x, vel.z);
             ItemStack main = p.getMainHandStack();
+
+            // (2026-09-26 freeze-1 新指纹) 18:03:26 冻结里 vel 恒定 (0.11,-0.08,0.11)
+            // 而 netXZ=0 —— "行走力在施加但位置被钳住"。加只读物理探针:
+            // 碰撞标志 / 入墙 / 2 格内最近实体 (实体推挤/卡体)。
+            String physInfo;
+            try {
+                boolean hCol = p.horizontalCollision;
+                boolean vCol = p.verticalCollision;
+                boolean inWall = p.isInsideWall();
+                String ent = "none";
+                java.util.List<net.minecraft.entity.Entity> others = p.getEntityWorld()
+                        .getOtherEntities(p, p.getBoundingBox().expand(2.0));
+                double bestD = Double.MAX_VALUE;
+                for (net.minecraft.entity.Entity e : others) {
+                    double d = e.squaredDistanceTo(p);
+                    if (d < bestD) {
+                        bestD = d;
+                        ent = e.getType().toString() + "@" + String.format("%.1f", Math.sqrt(d));
+                    }
+                }
+                physInfo = " phys[hCol=" + hCol + " vCol=" + vCol + " inWall=" + inWall
+                        + " ent=" + ent + "]";
+            } catch (Throwable t) {
+                physInfo = " phys[err]";
+            }
 
             // 任务链: 链名 + 最内层任务 (toString 含 toDebugString + debugState)
             String taskStr;
@@ -281,6 +324,8 @@ public final class NavStuckWatchdog {
                     + " " + calcInfo
                     + " " + execInfo
                     + wwbInfo
+                    + physInfo
+                    + " pRot=(" + String.format("%.1f", p.getYaw()) + "," + String.format("%.1f", p.getPitch()) + ")"
                     + " inputs[fwd=" + mod.getInputControls().isHeldDown(Input.MOVE_FORWARD)
                     + " jump=" + mod.getInputControls().isHeldDown(Input.JUMP)
                     + " sprint=" + mod.getInputControls().isHeldDown(Input.SPRINT)
@@ -311,6 +356,15 @@ public final class NavStuckWatchdog {
             return String.valueOf(obj.getClass().getMethod(method).invoke(obj));
         } catch (Throwable t) {
             return "err";
+        }
+    }
+
+    /** 反射安全调用: 失败返回 null。 */
+    private static Object safeInvokeObj(Object obj, String method) {
+        try {
+            return obj.getClass().getMethod(method).invoke(obj);
+        } catch (Throwable t) {
+            return null;
         }
     }
 
