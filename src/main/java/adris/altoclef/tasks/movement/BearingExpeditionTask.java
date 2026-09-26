@@ -133,14 +133,14 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
     }
 
     /**
-     * (2026-09-26) 沿本步直线的【恶劣地形】拒绝钩子 (默认不启用, 下界/诡异森林
-     * 远征不受影响)。返回 true 时这一步换向重采 —— 注意这只是"拒绝候选步",
-     * 方向的最终变更仍由既有遇障试探机制完成: 连续拒绝累计 _failCounter →
-     * maybeEscalateProbe 同侧加档试探 (+60°…±150°) → 试探走出整步程转正为新
-     * 锁定方位角。已落水 (swimming) 时不调用: 游出去优先, 不做地形挑剔。
+     * (2026-09-26 选步地形闸, 用户"极端地形的判断参考偏置探索中对地形的偏好")
+     * 默认原样放行。返回 null = 拒绝该候选步 (换向重采, 连续全灭由既有试探
+     * 机制升级换方向); 返回非 null = 用返回值替代候选落点 (如湿落点沿同方位
+     * 重采样出的干落点)。子类实现应复用 {@link BiasedExploreTask} 的地形判据
+     * (单源, 不另写拷贝)。已落水 (swimming) 时不调用: 游出去优先, 不挑剔地形。
      */
-    protected boolean rejectTerrainAlong(AltoClef mod, Vec3d from, double angle, double step) {
-        return false;
+    protected BlockPos terrainAdjust(AltoClef mod, Vec3d from, double angle, double step, BlockPos candidate) {
+        return candidate;
     }
 
     /** 超时放弃时的补充说明 (可选)。 */
@@ -336,10 +336,15 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
             if (rejectTarget(mod, candidate)) {
                 continue;
             }
-            // (2026-09-26 恶劣地形拒绝) 岸上时沿本步直线判地形, 极端恶劣 (主世界
-            // = 宽水) 换向重采; 连续全灭由试探机制升级换方向。
-            if (!swimming && rejectTerrainAlong(mod, pos, angle, step)) {
-                continue;
+            // (2026-09-26 选步地形闸) 岸上时按子类地形偏好调整/拒绝 (主世界 =
+            // 偏置探索食物链完整口径: 干落点重采样 + 宽水拦截); 连续全灭由试探
+            // 机制升级换方向。
+            if (!swimming) {
+                BlockPos adjusted = terrainAdjust(mod, pos, angle, step, candidate);
+                if (adjusted == null) {
+                    continue;
+                }
+                candidate = adjusted;
             }
             return candidate;
         }

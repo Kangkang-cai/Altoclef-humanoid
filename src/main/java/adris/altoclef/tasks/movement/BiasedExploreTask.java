@@ -142,7 +142,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // 找食物探索 (foodExplore) 的落点必须是【干燥陆地】。落点在水面时沿同一方向按
     // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。
     // 全部落水才判该方向不可用, 换角度重试。
-    private static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
+    // (2026-09-26) 包内可见: 远征 (OverworldExpeditionTask) 干落点重采样共用
+    // 同一张距离表, 不另抄一份。
+    static final double[] DRY_LANDING_DISTANCES = {64, 32, 80, 24, 96, 16};
 
     // [FOOD-BIOME] 找食物/找动物专用的食物富集群系偏置 (foodExplore=true 时才启用)。
     // 五级 (2026-09-23 用户两次拍板"平原优先, 森林兜底"+"森林也是有差别的"):
@@ -833,9 +835,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      * (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上") 落点 (地表上方一格的
      * 站立点) 是否干燥 —— 站立处与脚下方块都不含水。与水面的区别: 过河时【路径】经过
      * 水没关系, 但【终点】不能是水面。区块未加载时无法判定, 沿用 isTargetInWater 的
-     * "未知即放行"口径返回 true。
+     * "未知即放行"口径返回 true。(2026-09-26 static+包内可见, 远征共用, 无实例状态)
      */
-    private boolean isDryLanding(AltoClef mod, BlockPos landing) {
+    static boolean isDryLanding(AltoClef mod, BlockPos landing) {
         if (mod.getWorld() == null) return true;
         BlockPos ground = landing.down();
         if (!mod.getChunkTracker().isChunkLoaded(landing)
@@ -843,8 +845,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         return !isWaterAt(mod, landing) && !isWaterAt(mod, ground);
     }
 
-    /** 该位置是否是水 (含流动水/含水方块, 如海草、睡莲下的水)。 */
-    private boolean isWaterAt(AltoClef mod, BlockPos pos) {
+    /** 该位置是否是水 (含流动水/含水方块, 如海草、睡莲下的水)。 (2026-09-26 包内共用) */
+    static boolean isWaterAt(AltoClef mod, BlockPos pos) {
         BlockState state = mod.getWorld().getBlockState(pos);
         // getFluidState 覆盖 WATER / 流动水以及含水方块 (海草等); 岩浆同样非空,
         // 一并拒绝 (站在岩浆上不是落点)。
@@ -857,8 +859,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      * 落点同样的口径。
      * (2026-09-23) maxDistance: biased 步不得重采样到越过 bias 目标的距离
      * (传入 biasDist-ARRIVED_DISTANCE); 随机步传 +inf 保持原全距离表。
+     * (2026-09-26 static+包内可见, 远征共用, 无实例状态)
      */
-    private BlockPos findDryLandingAlong(AltoClef mod, Vec3d pos, double angle, double maxDistance) {
+    static BlockPos findDryLandingAlong(AltoClef mod, Vec3d pos, double angle, double maxDistance) {
         int fallbackY = (int) Math.floor(pos.y);
         for (double dist : DRY_LANDING_DISTANCES) {
             if (dist > maxDistance) continue;
@@ -986,7 +989,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      * Heightmap.get()-1, 抵消后返回的就是最高匹配方块【上方站立空气格】y
      * (javap 坐实), 直接用, 不要再 +1/-1。
      */
-    private int surfaceYNoLeavesAt(AltoClef mod, int x, int z, int fallbackY) {
+    /** (2026-09-26 static+包内可见, 远征共用, 无实例状态) */
+    static int surfaceYNoLeavesAt(AltoClef mod, int x, int z, int fallbackY) {
         if (mod.getWorld() == null) return fallbackY;
         if (!mod.getChunkTracker().isChunkLoaded(new BlockPos(x, 0, z))) return fallbackY;
         int bottomPlus1 = mod.getWorld().getBottomY() + 1;
