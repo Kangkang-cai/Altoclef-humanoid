@@ -154,6 +154,9 @@ final class ActionSampler {
                     sb.append(",\"id\":");
                     Json.str(sb, StateSampler.itemId(stack.getItem()));
                     sb.append(",\"n\":").append(stack.getCount());
+                    // (2026-09-26 修复) 此前漏掉收尾 '}', 凡开容器界面的帧 JSON 全部
+                    // 不可解析 (20260926-202906 会话 2740 帧毁), 只能正则硬提取。
+                    sb.append('}');
                 }
             } catch (Throwable ignored) {
             }

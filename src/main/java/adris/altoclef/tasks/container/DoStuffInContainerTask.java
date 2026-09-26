@@ -60,6 +60,41 @@ public abstract class DoStuffInContainerTask extends Task {
     // 两拍搬运从头再来 → cursor air<->boots 每 2s 死循环 (20260914-221044 实锤)。
     private EnsureFreeInventorySlotTask _freeTask = null;
 
+    // (2026-09-26 腾位粘滞闩, 1726 会话 furnace 横跳 15 分钟) record 逐帧实锤:
+    // 界面以 ~4 次/秒被关闭重开 (syncId 21→58), 每次关闭 vanilla 把合成格材料
+    // 退回背包, 收成品点击永远追不上换代的 syncId。驱动 = 满包腾位分支关界面后,
+    // 任何一拍"背包看似有空位"(填格期间材料在格里, 真实背包暂空) 都让守卫翻面
+    // → 立刻 walk&open 重开 → 重填 → 又满 → 又关。本闩: 一旦进入腾位分支就置位,
+    // 在【真实空位出现且界面关闭】之前禁止 walk&open 重开, 让腾位级联(丢垃圾/
+    // 穿甲)完整跑完。15s 超时兜底防新死锁, 超时打日志。
+    private boolean _freeingSticky = false;
+    private long _freeingStickySinceMs = 0;
+    private static final long FREEING_STICKY_TIMEOUT_MS = 15000;
+
+    private boolean freeingStickyActive(AltoClef mod) {
+        if (!_freeingSticky) {
+            return false;
+        }
+        boolean realSlotFree = mod.getPlayer() != null
+                && mod.getPlayer().getInventory() != null
+                && mod.getPlayer().getInventory().getEmptySlot() >= 0
+                && StorageHelper.getItemStackInCursorSlot().isEmpty();
+        if (realSlotFree) {
+            Debug.logToFile("altoclef_diag.log",
+                    "[FreeingSticky] real slot freed, releasing reopen latch");
+            _freeingSticky = false;
+            return false;
+        }
+        if (System.currentTimeMillis() - _freeingStickySinceMs > FREEING_STICKY_TIMEOUT_MS) {
+            Debug.logToFile("altoclef_diag.log",
+                    "[FreeingSticky] timeout " + (FREEING_STICKY_TIMEOUT_MS / 1000)
+                            + "s without freeing a slot, releasing reopen latch (freeing cascade stuck?)");
+            _freeingSticky = false;
+            return false;
+        }
+        return true;
+    }
+
     private EnsureFreeInventorySlotTask acquireFreeTask() {
         if (_freeTask == null) {
             _freeTask = new EnsureFreeInventorySlotTask();
@@ -92,6 +127,7 @@ public abstract class DoStuffInContainerTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _freeTask = null;
+        _freeingSticky = false;
         if (_openTableTask == null) {
             // (2026-09-11 开容器目标错位修复) 交互目标优先用父层本 tick 选出的
             // _cachedContainerPosition (canReach 过滤+实时有效), 而不是 tracker 的
@@ -148,6 +184,12 @@ public abstract class DoStuffInContainerTask extends Task {
                 // 挖方块永远被掐断(根因就是这里)。主动关界面后, 父链 isContainerOpen=false
                 // 看到的是"我们自己在腾位", 会停留(不切 walk&open 抢先), 腾完那件掉、
                 // 背包空出一个格, 再回来 open 收产物。等价于"关界面→腾位→重开"。
+                // (2026-09-26 粘滞闩) 关界面即置位, 防止后续任何一拍因"填格期材料
+                // 在格里、背包暂空"而翻面重开 (1726 会话 4 次/秒关开横跳的引擎)。
+                if (!_freeingSticky) {
+                    _freeingSticky = true;
+                    _freeingStickySinceMs = System.currentTimeMillis();
+                }
                 StorageHelper.closeScreen();
                 setDebugState("Freeing inventory before receiving output");
                 return acquireFreeTask();
@@ -323,8 +365,17 @@ public abstract class DoStuffInContainerTask extends Task {
         // 判定用【背包真实空槽数==0】(而非 getSlotThatCanFit, 后者依赖光标物品 —
         // 满包收物时光标常为空, 会误判放得下而跳过腾位)。
         // (2026-09-15 freeingInFlight) 同上: 垃圾上光标腾位进行中别翻去走路。
+        // (2026-09-26 粘滞闩) 腾位已启动(曾因满包关过界面)期间, 即使背包因格料
+        // 退回而"看似满"、或腾位级联某拍光标暂空, 也绝不翻去 walk&open 重开容器
+        // —— 重开会让 vanilla 退格+重填与腾位互相拆台 (1726 会话 4 次/秒横跳,
+        // furnace 15 分钟合不出来)。闩在真实空位出现或 15s 超时后释放。
         if (mod.getPlayer() != null
-                && (mod.getPlayer().getInventory().getEmptySlot() < 0 || isFreeingInFlight())) {
+                && (freeingStickyActive(mod) || isFreeingInFlight()
+                    || mod.getPlayer().getInventory().getEmptySlot() < 0)) {
+            if (!_freeingSticky) {
+                _freeingSticky = true;
+                _freeingStickySinceMs = System.currentTimeMillis();
+            }
             setDebugState("Freeing inventory before opening container");
             return acquireFreeTask();
         }

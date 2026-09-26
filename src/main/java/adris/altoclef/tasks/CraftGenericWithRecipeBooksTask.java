@@ -358,7 +358,12 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
                 "[CraftFill] item=" + _target.getOutputItem().getTranslationKey()
                         + " bulk=" + bulkFill + " remaining=" + remaining
                         + " perCraft=" + perCraft + " have=" + have
-                        + " target=" + _target.getTargetCount());
+                        + " target=" + _target.getTargetCount()
+                        // (2026-09-26) 界面换代关联: 1726 会话 syncId 每 250ms 递增,
+                        // 填充与重开的先后关系靠它对齐。
+                        + " syncId=" + (mod.getPlayer() != null
+                                && mod.getPlayer().currentScreenHandler != null
+                                ? mod.getPlayer().currentScreenHandler.syncId : -1));
     }
 
     /** 停滞看门狗的进度签名: 输出格 + 输入格 + 光标 + 背包空位数。 */

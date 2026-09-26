@@ -51,6 +51,11 @@ public class StorageHelper {
 
     public static List<PlayerSlot> INACCESSIBLE_PLAYER_SLOTS = Stream.concat(Stream.of(PlayerSlot.CRAFT_INPUT_SLOTS), Stream.of(PlayerSlot.ARMOR_SLOTS)).toList();
 
+    // (2026-09-26 界面关闭者诊断) 1726 会话 furnace 合成横跳: 界面以 ~4 次/秒被
+    // 反复关闭重开 (record syncId 21→58), 关闭者不明。closeScreen 是全项目关界面
+    // 唯一汇聚点之一, 在此记录调用者 + 当前 syncId, 250ms 节流。
+    private static long _lastScreenCloseLogMs = 0;
+
     public static void closeScreen() {
         if (MinecraftClient.getInstance().player == null)
             return;
@@ -60,6 +65,21 @@ public class StorageHelper {
                 !(screen instanceof GameMenuScreen) &&
                 !(screen instanceof GameOptionsScreen) &&
                 !(screen instanceof ChatScreen)) {
+            // (2026-09-26 诊断) 关闭者取证: 只读, 不影响主逻辑。
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - _lastScreenCloseLogMs > 250) {
+                _lastScreenCloseLogMs = nowMs;
+                try {
+                    StackTraceElement caller = new Throwable().getStackTrace()[1];
+                    var handler = MinecraftClient.getInstance().player.currentScreenHandler;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[ScreenClose] syncId=" + (handler != null ? handler.syncId : -1)
+                                    + " handler=" + (handler != null ? handler.getClass().getSimpleName() : "null")
+                                    + " caller=" + caller.getClassName() + "." + caller.getMethodName()
+                                    + ":" + caller.getLineNumber());
+                } catch (Throwable ignored) {
+                }
+            }
             // Close the screen if we're in-game
             MinecraftClient.getInstance().player.closeHandledScreen();
         }
