@@ -132,6 +132,17 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         return false;
     }
 
+    /**
+     * (2026-09-26) 沿本步直线的【恶劣地形】拒绝钩子 (默认不启用, 下界/诡异森林
+     * 远征不受影响)。返回 true 时这一步换向重采 —— 注意这只是"拒绝候选步",
+     * 方向的最终变更仍由既有遇障试探机制完成: 连续拒绝累计 _failCounter →
+     * maybeEscalateProbe 同侧加档试探 (+60°…±150°) → 试探走出整步程转正为新
+     * 锁定方位角。已落水 (swimming) 时不调用: 游出去优先, 不做地形挑剔。
+     */
+    protected boolean rejectTerrainAlong(AltoClef mod, Vec3d from, double angle, double step) {
+        return false;
+    }
+
     /** 超时放弃时的补充说明 (可选)。 */
     protected String timeoutDetail(AltoClef mod) {
         return "";
@@ -323,6 +334,11 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
             int candZ = (int) Math.floor(pos.z + Math.sin(angle) * step);
             BlockPos candidate = new BlockPos(candX, (int) Math.floor(pos.y), candZ);
             if (rejectTarget(mod, candidate)) {
+                continue;
+            }
+            // (2026-09-26 恶劣地形拒绝) 岸上时沿本步直线判地形, 极端恶劣 (主世界
+            // = 宽水) 换向重采; 连续全灭由试探机制升级换方向。
+            if (!swimming && rejectTerrainAlong(mod, pos, angle, step)) {
                 continue;
             }
             return candidate;

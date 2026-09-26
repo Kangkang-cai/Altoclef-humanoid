@@ -135,7 +135,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     // 又有溺水风险, 拒绝这一步换方向重采。窄河 (<=上限) 照旧放行。
     // (2026-09-22 用户"12格水限制太严") 放宽到 24: 中等宽度的河也能直接游过,
     // 不必绕路。海洋仍由 isTargetOcean 单独拦截, 不会因放宽而"下海"。
-    private static final int RIVER_CROSS_MAX_BLOCKS = 24;
+    // (2026-09-26) 食物远征 (OverworldExpeditionTask) 恶劣地形拒绝共用同一阈值
+    // —— 单源, 别再抄第二份。
+    static final int RIVER_CROSS_MAX_BLOCKS = 24;
     // (2026-09-16 用户"收集食物时偏置探索的终点经常在水面上, bot 在水上不好获取食物")
     // 找食物探索 (foodExplore) 的落点必须是【干燥陆地】。落点在水面时沿同一方向按
     // 下面这些距离重新采样: 先更远(64/80/96 = 跨到对岸), 再更近(32/24/16 = 退回本岸)。
@@ -781,8 +783,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
      * 口径, 每列最多 320 次) 沿 48 格采样线太贵; 选步每 48 格才执行一次,
      * 窗口 8 格 × 48 采样 = 最多 ~400 次方块读取, 可接受。
      * 区块未加载按干处理 (无法预知, 与 isTargetInWater 同口径)。
+     * (2026-09-26) static + 包内可见: 远征 (BearingExpeditionTask 子类) 恶劣地形
+     * 拒绝复用同一条口径, 不另写拷贝。
      */
-    private int maxWaterSpanAlongLine(AltoClef mod, Vec3d pos, double angle, double maxDist) {
+    static int maxWaterSpanAlongLine(AltoClef mod, Vec3d pos, double angle, double maxDist) {
         int best = 0;
         int cur = 0;
         int yRef = (int) Math.floor(pos.y);
@@ -799,8 +803,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         return best;
     }
 
-    /** (2026-09-22 淌水惩罚) (x,z) 列在 yRef+2..yRef-5 窗口内是否有水。 */
-    private boolean columnWetNearY(AltoClef mod, int x, int z, int yRef) {
+    /** (2026-09-22 淌水惩罚) (x,z) 列在 yRef+2..yRef-5 窗口内是否有水。 (2026-09-26 包内共用) */
+    static boolean columnWetNearY(AltoClef mod, int x, int z, int yRef) {
         for (int y = yRef + 2; y >= yRef - 5; --y) {
             BlockPos p = new BlockPos(x, y, z);
             if (!mod.getChunkTracker().isChunkLoaded(p)) return false;
