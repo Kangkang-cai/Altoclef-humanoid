@@ -303,6 +303,39 @@ public abstract class BearingExpeditionTask extends Task implements ITaskRequire
         return stored + (probe == null ? 0.0 : probe);
     }
 
+    /**
+     * (2026-09-26 方向门) 当前有效方位角 (锁定 + 试探偏置), 供子类定"方向门"锥心
+     * —— 锥心取有效方位而非基准方位, 门才会跟试探一起转, 不跟试探机制对拉。
+     * 与 {@link #pickTarget} 里 {@code nextRandomHeading()} 的返回值同值 (后者
+     * 先抖动并写回基准, 再叠加同一个试探偏置)。
+     */
+    protected final double effectiveBearing() {
+        return currentBearing();
+    }
+
+    /**
+     * (2026-09-26 折返提交) 子类判定"前方是沙漠等非偏好地形, 允许完全折返"时,
+     * 把新方位<b>写回锁定方位角</b> —— 这是真换向, 不是"这一步例外"。
+     *
+     * <p>为什么必须写回: 只做一步例外的话, 下一步锥心仍是旧方位, 被抛在身后的
+     * 偏好点会立刻再次把 bot 拉回来, 在平原/沙漠边界上反复打摆 (用户
+     * 2026-09-26 硬约束)。写回后门随新方位转, 旧方向自然失效。
+     *
+     * <p>顺带清试探偏置与试探起点 (新旧方位叠加会算错), 并把停滞钟重启 ——
+     * 主动换向是"有进展"的一种, 不该被无新最远点判成停滞。
+     *
+     * @param bearingRad 新方位角 (rad); @param reason 诊断原因
+     */
+    protected final void commitBearing(double bearingRad, String reason) {
+        if (_persistKey == null) return;
+        _headingByKey.put(_persistKey, bearingRad);
+        _probeOffsetByKey.put(_persistKey, 0.0);
+        _probeStartMaxByKey.remove(_persistKey);
+        _probeStartPosByKey.remove(_persistKey);
+        _lastProgressTickByKey.put(_persistKey, _tickId);
+        Debug.logMessage(diagTag() + " bearing re-committed to " + fmtDeg(bearingRad) + "° (" + reason + ")");
+    }
+
     // ------------------------------------------------------------------ //
     // 目标选择
     // ------------------------------------------------------------------ //
