@@ -612,8 +612,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             java.nio.file.Path f = fortressVisitedFile();
             if (!java.nio.file.Files.exists(f)) return;
             for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
-                String[] parts = line.trim().split(" ");
-                if (parts.length != 4) continue;
+                // (2026-09-27 空格 key 修复) 统一走 WorldIdentity.decodeLine —— key 取存档
+                // 目录名 (可含空格), 旧空格行右锚定兼容; 旧 `split(" ") + length != 4` 会把
+                // 含空格 key 的行整行静默丢弃。
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 3);
+                if (parts == null) continue;
                 try {
                     BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
                     java.util.LinkedHashSet<BlockPos> set = _visitedCellsByKey.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>());
@@ -632,7 +635,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static void appendVisitedCellLine(String key, BlockPos pos) {
         try {
             java.nio.file.Files.write(fortressVisitedFile(),
-                    (key + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                    adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(key, pos.getX(), pos.getY(), pos.getZ())
                             .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (Exception e) {

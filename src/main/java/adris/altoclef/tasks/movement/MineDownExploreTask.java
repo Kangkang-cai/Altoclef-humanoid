@@ -2422,8 +2422,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             java.nio.file.Path f = selfDugFile();
             if (!java.nio.file.Files.exists(f)) return;
             for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
-                String[] parts = line.trim().split(" ");
-                if (parts.length != 4) continue;
+                // (2026-09-27 空格 key 修复) 统一走 WorldIdentity.decodeLine —— key 取存档
+                // 目录名 (可含空格), 旧空格行右锚定兼容; 旧 `split(" ") + length != 4` 会把
+                // 含空格 key 的行整行静默丢弃 (本文件实测丢 3488 行)。
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 3);
+                if (parts == null) continue;
                 try {
                     BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
                     _selfDugByDim.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>()).add(p);
@@ -2440,7 +2443,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static void appendSelfDugLine(String dim, BlockPos pos) {
         try {
             java.nio.file.Files.write(selfDugFile(),
-                    (dim + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                    adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(dim, pos.getX(), pos.getY(), pos.getZ())
                             .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (Exception e) {
@@ -2454,8 +2458,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             StringBuilder sb = new StringBuilder();
             for (java.util.Map.Entry<String, java.util.LinkedHashSet<BlockPos>> e : _selfDugByDim.entrySet()) {
                 for (BlockPos p : e.getValue()) {
-                    sb.append(e.getKey()).append(' ').append(p.getX()).append(' ')
-                            .append(p.getY()).append(' ').append(p.getZ()).append('\n');
+                    // (2026-09-27 空格 key 修复) 与 appendSelfDugLine 同口径: TAB 分隔。
+                    sb.append(adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(e.getKey(), p.getX(), p.getY(), p.getZ()));
                 }
             }
             java.nio.file.Files.write(selfDugFile(), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -2562,8 +2567,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             java.nio.file.Path f = exploredCaveFile();
             if (!java.nio.file.Files.exists(f)) return;
             for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
-                String[] parts = line.trim().split(" ");
-                if (parts.length != 4) continue;
+                // (2026-09-27 空格 key 修复) 同上: 统一 decodeLine, key 含空格不再被丢弃。
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 3);
+                if (parts == null) continue;
                 try {
                     BlockPos p = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
                     _exploredCaveByKey.computeIfAbsent(parts[0], k -> new java.util.LinkedHashSet<>()).add(p);
@@ -2581,7 +2587,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private static void appendExploredCaveLine(String key, BlockPos pos) {
         try {
             java.nio.file.Files.write(exploredCaveFile(),
-                    (key + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                    adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(key, pos.getX(), pos.getY(), pos.getZ())
                             .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (Exception e) {

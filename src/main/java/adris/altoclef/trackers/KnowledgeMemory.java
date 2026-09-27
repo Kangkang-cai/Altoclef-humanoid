@@ -422,8 +422,12 @@ public final class KnowledgeMemory {
             java.nio.file.Path f = knowledgeFile();
             if (!java.nio.file.Files.exists(f)) return;
             for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
-                String[] parts = line.trim().split(" ");
-                if (parts.length != 5) continue;
+                // (2026-09-27 空格 key 修复) 统一走 WorldIdentity.decodeLine —— key 取存档
+                // 目录名 (可含空格, 如 "新的世界 (5)"), 旧空格行按尾部定长字段右锚定兼容。
+                // 旧写法 `split(" ") + length != 5 → continue` 会把含空格 key 的行静默丢弃
+                // (实测本文件 487 行丢 423, 即 09-17 换目录名口径后的全部记录)。
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 4);
+                if (parts == null) continue;
                 StructureType type = structureTypeByName(parts[1]);
                 if (type == null) continue;
                 try {
@@ -465,7 +469,8 @@ public final class KnowledgeMemory {
         set.add(pos);
         try {
             java.nio.file.Files.write(knowledgeFile(),
-                    (key + " " + type.name() + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                    adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(key, type.name(), pos.getX(), pos.getY(), pos.getZ())
                             .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (Exception e) {

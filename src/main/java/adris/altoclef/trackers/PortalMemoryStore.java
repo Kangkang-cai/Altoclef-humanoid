@@ -69,8 +69,11 @@ public final class PortalMemoryStore {
             Path f = file();
             if (!Files.exists(f)) return;
             for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
-                String[] parts = line.trim().split(" ");
-                if (parts.length != 5) continue;
+                // (2026-09-27 空格 key 修复) 统一走 WorldIdentity.decodeLine —— key 取存档
+                // 目录名 (可含空格), 旧空格行右锚定兼容; 旧 `split(" ") + length != 5` 会把
+                // 含空格 key 的门记录整行静默丢弃 (实测 26 行丢 12)。
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 4);
+                if (parts == null) continue;
                 try {
                     BlockPos p = new BlockPos(Integer.parseInt(parts[2]), Integer.parseInt(parts[3]), Integer.parseInt(parts[4]));
                     Map<String, Set<BlockPos>> target = parts[1].equals("used") ? _usedByKey : _seenByKey;
@@ -92,7 +95,8 @@ public final class PortalMemoryStore {
     private static void appendLine(String key, String type, BlockPos pos) {
         try {
             Files.write(file(),
-                    (key + " " + type + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "\n")
+                    adris.altoclef.util.helpers.WorldIdentity
+                            .encodeLine(key, type, pos.getX(), pos.getY(), pos.getZ())
                             .getBytes(StandardCharsets.UTF_8),
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) {

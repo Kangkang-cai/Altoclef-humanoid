@@ -82,4 +82,58 @@ public final class WorldIdentity {
         }
         return "w2:" + saveDirName() + ":" + dim;
     }
+
+    // =========================================================================
+    // (2026-09-27 空格 key 修复) 记忆文件行的统一编解码 —— 唯一口径。
+    //
+    // 背景: 五处跨会话记忆 (knowledge / fortress_visited / selfdug / explored /
+    // portals) 的落盘格式都是 `key + " " + 字段...`, 而 key 自 2026-09-17 起改用
+    // 存档【目录名】(如 `新的世界 (5)`, 含空格) —— 加载端 `line.trim().split(" ")`
+    // 后段数变多, 被 `parts.length != N → continue` 整行【静默丢弃】(无日志)。
+    // 实测: knowledge.log 487 行丢 423, selfdug.log 6620 行丢 3488,
+    // explored.log 174 行丢 128, portals.log 26 行丢 12 —— 重启进程后地标/堡垒
+    // 走廊/自挖/洞穴/传送门五类记忆一起归零。根因是分隔符与 key 的字符集冲突,
+    // 故改用 TAB 分隔 (存档名不会含 TAB)。
+    //
+    // decodeLine 对【旧空格行】按"尾部定长字段"右锚定回退 —— 存量文件无需迁移
+    // 即可正确读回 (只挪不删)。旧格式里 key 字面为 `w2:.` 的历史脏行仍会因 key
+    // 失配读不到, 属预期 (2026-09-23 normalize 修复前写入, 本就作废)。
+    // =========================================================================
+    private static final String FIELD_SEP = "\t";
+
+    /** 落盘行: key 与各字段以 TAB 分隔, 末尾带换行 (直接写文件用)。 */
+    public static String encodeLine(String key, Object... fields) {
+        StringBuilder sb = new StringBuilder(key);
+        for (Object f : fields) {
+            sb.append(FIELD_SEP).append(f);
+        }
+        return sb.append('\n').toString();
+    }
+
+    /**
+     * 解析记忆文件的一行。
+     *
+     * @param fieldCount key 之后的字段个数 (不含 key)
+     * @return {@code [key, field0, field1, ...]}, 长度 {@code fieldCount + 1};
+     *         行不可解析 (空行 / 段数不符) 时返回 {@code null} —— 调用方跳过即可,
+     *         与旧实现 `parts.length != N → continue` 行为等价。
+     */
+    public static String[] decodeLine(String line, int fieldCount) {
+        if (line == null) return null;
+        String trimmed = line.trim();
+        if (trimmed.isEmpty()) return null;
+        // 新格式: TAB 分隔 (key 含空格也安全)。
+        if (trimmed.indexOf('\t') >= 0) {
+            String[] parts = trimmed.split(FIELD_SEP);
+            return parts.length == fieldCount + 1 ? parts : null;
+        }
+        // 旧格式回退: 尾部 fieldCount 段是定长字段, 其余全部归 key。
+        String[] parts = trimmed.split(" ");
+        if (parts.length < fieldCount + 1) return null;
+        int keyParts = parts.length - fieldCount;
+        String[] out = new String[fieldCount + 1];
+        out[0] = String.join(" ", java.util.Arrays.copyOf(parts, keyParts));
+        System.arraycopy(parts, keyParts, out, 1, fieldCount);
+        return out;
+    }
 }
