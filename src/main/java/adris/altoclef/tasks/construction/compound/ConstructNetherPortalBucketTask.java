@@ -7,11 +7,15 @@ import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.ClearLiquidTask;
 import adris.altoclef.tasks.construction.ClearRegionTask;
 import adris.altoclef.tasks.construction.PlaceObsidianBucketTask;
+import adris.altoclef.tasks.movement.GoToSurfaceTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
+import adris.altoclef.util.helpers.LavaLakeHelper;
+import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import net.minecraft.block.Block;
@@ -252,6 +256,14 @@ public class ConstructNetherPortalBucketTask extends Task {
                     Debug.logMessage("(Searching for lava lake with portalable spot nearby...)");
                     BlockPos lavaPos = findLavaLake(mod, mod.getPlayer().getBlockPos());
                     if (lavaPos != null) {
+                        // (2026-09-27 用户"地上很高的岩浆湖先派回地表再导航过去") 记忆里的湖
+                        // 可能在地表高处 (bot 在地下时 Δy 很大), 直接寻路过去必挂 (要穿几十格
+                        // 岩层)。Δy > 16 就先 GoToSurfaceTask, 升到"够得着"的高度后本轮锚点
+                        // 逻辑自然会接着导航过去; 已在 16 格内则照旧直接开工。
+                        if (lavaPos.getY() - mod.getPlayer().getBlockPos().getY() > 16) {
+                            setDebugState("Lava lake is above, heading to surface first");
+                            return new GoToSurfaceTask();
+                        }
                         // We have a lava lake, set our portal origin!
                         // (2026-08-23) timeoutRange 20 → 8: 就近原则, 传送门应在岩浆
                         // 旁 5-6 格, 不在岩浆上 (用户设计)。20 会外推到很远的可放置点,
@@ -272,12 +284,20 @@ public class ConstructNetherPortalBucketTask extends Task {
             }
 
             if (!foundSpot) {
-                // (2026-09-04 用户"wander 100 无意义, 不是走过去的导航观察探索")
-                // 找不到岩浆湖时派 TimeoutWanderTask(100): 它不感知岩浆(感知靠
-                // BlockTracker), 只是随机游荡/explore, 对找岩浆毫无帮助。改为派
-                // _collectLavaTask (CollectLavaBucketTask) — 完整找岩浆策略(感知
-                // 岩浆源/地下回地表/有界游荡), 会真正移动探索+收集岩浆桶。
-                setDebugState("(timeout: Looking for lava lake, collecting lava instead)");
+                // (2026-09-27 用户口径: 找不到湖 → 先回地表, 再开始找)
+                // 旧版这里打 `(timeout: Looking for lava lake, collecting lava instead)` 并把
+                // 控制权直接交给 CollectLavaBucketTask —— 用户现场反馈两点: ①"附近根本没
+                // 岩浆湖, 只有一条单格源瀑布", "那么快就触发找岩浆超时"; ②该任务的路子是
+                // 就地(地下)找并舀, 会用地下的单格源凑合。现改为分两段:
+                //   还在地下 → 先 GoToSurfaceTask 回地表 (岩浆湖在地表/浅层的概率高得多);
+                //   已在地表/下界 → 才交给收集任务去实地找湖 (它自带地表有界探索 + 湖记忆导航)。
+                // 5s 重扫 (_lavaSearchTimer) 一路照常跑, 一旦"看见"湖就立刻接管去浇铸。
+                if (WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                        && SurfaceHelper.isBelowSurfaceDebounced(mod)) {
+                    setDebugState("No lava lake found, returning to surface to search");
+                    return new GoToSurfaceTask();
+                }
+                setDebugState("No lava lake found, searching around");
                 return _collectLavaTask;
             }
         }
@@ -378,51 +398,64 @@ public class ConstructNetherPortalBucketTask extends Task {
         // 反而是 y=17 深洞岩浆 → 跑 47 格深的洞里搭门。眼前的世界比记忆优先:
         // 人在池子旁, 脚边字面扫描一扫即中, 锚点就地落在池边 ±10 格。
         BlockPos literal = findNearestLavaSourceAround(mod, playerPos, 16, 8);
-        if (literal != null) {
-            Debug.logMessage("(Lava anchor: literal scan found source near player at " + literal.toShortString() + ")");
+        // (2026-09-27 用户"一定是岩浆湖") 字面命中也必须过"湖"判据。现场 20260927-111838:
+        // 一条**单格源岩浆瀑布**被当成湖 (锚点 -399,8,175), bot 只能挤在 1.5 格高的地下洞
+        // 里浇铸, 底托格 -399,7,175 正好是它自己的头格 ⇒ 方块放不进自己身体 ⇒
+        // 摆放↔wander 无限横跳。判据与 KnowledgeMemory 记忆入账共用同一份 (LavaLakeHelper)。
+        if (literal != null && LavaLakeHelper.isLake(mod, literal)) {
+            Debug.logMessage("(Lava anchor: literal scan found lake near player at " + literal.toShortString() + ")");
             return literal;
+        }
+        if (literal != null) {
+            Debug.logMessage("(Lava anchor: literal lava at " + literal.toShortString() + " is not a lake (single source/fall), skipping)");
         }
         double nearestSqDistance = Double.POSITIVE_INFINITY;
         BlockPos nearestLake = null;
         // 限制搜索距离，避免导航到过远的地方（2026-08-23）
         double MAX_SEARCH_DISTANCE = 100; // 最多搜索100格内的岩浆
         double maxSearchSqDistance = MAX_SEARCH_DISTANCE * MAX_SEARCH_DISTANCE;
-
+        // (2026-09-27 湖判据 + 限次) 原口径"只要有岩浆就选为锚点"(2026-08-23)已废 —— 它
+        // 会把单格源/瀑布当湖。改为对 BlockTracker 已知岩浆逐个过 LavaLakeHelper.isLake;
+        // isLake 要扫 h8/v4 盒, 故先按距离排序, 只对最近的 MAX_LAKE_CHECKS 个候选判定。
+        // 距离 <=100 格、高度差 <=16 两把老闸保留 (2026-08-23/09-04 的深洞绕远教训)。
+        final int MAX_LAKE_CHECKS = 8;
+        int lakeChecks = 0;
+        List<BlockPos> lavaCandidates = new ArrayList<>();
         for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.LAVA)) {
             double sqDist = playerPos.getSquaredDistance(pos);
-            // 跳过过远的岩浆位置
-            if (sqDist > maxSearchSqDistance) {
-                Debug.logMessage("Skipping lava at " + pos + " (distance=" + Math.sqrt(sqDist) + " > " + MAX_SEARCH_DISTANCE + ")");
+            if (sqDist > maxSearchSqDistance) continue;
+            if (Math.abs(pos.getY() - playerPos.getY()) > 16) continue;
+            lavaCandidates.add(pos);
+        }
+        lavaCandidates.sort((a, b) ->
+                Double.compare(playerPos.getSquaredDistance(a), playerPos.getSquaredDistance(b)));
+        for (BlockPos pos : lavaCandidates) {
+            if (lakeChecks >= MAX_LAKE_CHECKS) break;
+            lakeChecks++;
+            if (!LavaLakeHelper.isLake(mod, pos)) {
+                Debug.logMessage("(Lava anchor: " + pos.toShortString() + " is not a lake, skipping)");
                 continue;
             }
-            // (2026-09-04 高度差约束) 记忆兜底不选与玩家高度差过大的岩浆:
-            // 深洞岩浆 (Δy=47) 被选为锚点后 bot 会钻深洞搭门, 清障不可达 →
-            // 黑名单 RESET 死循环 (2026-09-04 实测 420,17,341)。
-            // 锚点应在玩家 ±16 格内; 真要下洞时 bot 走进洞后 Δy 自然变小。
-            if (Math.abs(pos.getY() - playerPos.getY()) > 16) {
-                Debug.logMessage("Skipping lava at " + pos + " (height diff " + Math.abs(pos.getY() - playerPos.getY()) + " > 16)");
-                continue;
-            }
-            if (sqDist < nearestSqDistance) {
-                // (2026-08-23 不要求深度) 用户设计: 去掉深度要求, 只要有岩浆
-                // 就选为传送门锚点 (CAST_FRAME 造墙机制支持单格岩浆源, 不依赖
-                // 湖的深浅)。旧逻辑 depth>=12 再降到 >=4 都误伤过, 直接取消。
-                nearestSqDistance = sqDist;
-                nearestLake = pos;
-            }
+            // 已按距离升序 → 第一个命中的就是最近的湖。
+            nearestLake = pos;
+            nearestSqDistance = playerPos.getSquaredDistance(pos);
+            break;
         }
 
         // (2026-09-23 岩浆湖记忆兜底) 脚边字面扫描和 BlockTracker 临时缓存都没
-        // 命中时, 用 KnowledgeMemory 里亲眼见过/跨会话记住的岩浆湖锚点。同款
-        // 100 格 + 高度差 16 过滤 —— 锚点是"湖", 过滤口径保持不变, 不复活深洞
-        // 绕远老问题。
+        // 命中时, 用 KnowledgeMemory 里亲眼见过/跨会话记住的岩浆湖锚点 (记忆锚点
+        // 入账时已过"成片 ≥12"判据, 直接取最近)。
+        // (2026-09-27 用户口径修正) 旧版对记忆锚点也套"|Δy| ≤ 16", 于是**地上很高的
+        // 岩浆湖永远用不上** (用户"这点估计还没实现")。现改: 只丢掉"在玩家下方 >16 格"
+        // 的 (深洞绕远老问题, 2026-09-04 实测 420,17,341); 在玩家**上方**的保留,
+        // 由 onTick 决定"先回地表再导航过去"。
         if (nearestLake == null) {
             for (BlockPos pos : mod.getKnowledgeMemory().getRememberedCenters(
                     adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
                     new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
                             playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
                     MAX_SEARCH_DISTANCE)) {
-                if (Math.abs(pos.getY() - playerPos.getY()) > 16) {
+                if (playerPos.getY() - pos.getY() > 16) {
                     continue;
                 }
                 double sqDist = playerPos.getSquaredDistance(pos);

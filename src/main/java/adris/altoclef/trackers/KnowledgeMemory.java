@@ -2,6 +2,7 @@ package adris.altoclef.trackers;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.util.helpers.LavaLakeHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
@@ -239,12 +240,12 @@ public final class KnowledgeMemory {
     // 已在记住的湖 (mergeDistance 内, 含跨会话持久化锚点) 直接早退: 沿湖长跑
     // 时扫描成本近乎零, 也防止跨会话重复落盘。
     // =========================================================================
+    // (2026-09-27 口径收编) "暴露静止源 ≥12 = 湖" 的判据本体已迁到
+    // adris.altoclef.util.helpers.LavaLakeHelper —— 传送门锚点扫描 (原本是"只要有岩浆
+    // 就选"的旧口径, 会把单格源瀑布当湖) 现在与本处共用同一份, 不再有第二口径。
     private static final int LAKE_SCAN_RADIUS_XZ = 24;
     private static final int LAKE_SCAN_RADIUS_Y = 5;
     private static final int LAKE_LOS_CHECKS = 4;
-    private static final int LAKE_CONFIRM_RADIUS_XZ = 8;
-    private static final int LAKE_CONFIRM_RADIUS_Y = 4;
-    private static final int LAKE_MIN_EXPOSED_SOURCES = 12;
 
     private void scanLavaLakeByLiteralPerception() {
         if (_mod.getWorld() == null || _mod.getPlayer() == null) return;
@@ -263,7 +264,7 @@ public final class KnowledgeMemory {
                 for (int dz = -LAKE_SCAN_RADIUS_XZ; dz <= LAKE_SCAN_RADIUS_XZ; dz++) {
                     if (dx * dx + dz * dz > hSq) continue; // 水平圆截断
                     BlockPos p = feet.add(dx, dy, dz);
-                    if (isExposedLavaSource(p)) candidates.add(p);
+                    if (LavaLakeHelper.isExposedLavaSource(_mod, p)) candidates.add(p);
                 }
             }
         }
@@ -274,36 +275,16 @@ public final class KnowledgeMemory {
             // 最近的几个都看不见 (背对/遮挡) 就等下一轮, 与地标扫描同款节流。
             if (++checks > LAKE_LOS_CHECKS) return;
             if (!VisibilityHelper.isBlockPerceivable(_mod, candidate)) continue;
-            if (countExposedLavaSourcesAround(candidate) >= LAKE_MIN_EXPOSED_SOURCES) {
+            if (LavaLakeHelper.countExposedLavaSourcesAround(_mod, candidate)
+                    >= LavaLakeHelper.MIN_EXPOSED_SOURCES) {
                 remember(StructureType.LAVA_LAKE, candidate);
                 return;
             }
         }
     }
 
-    /** 静止岩浆源 (level 8) 且正上方是空气 —— 即"湖面"上可被看见/可舀的方块。 */
-    private boolean isExposedLavaSource(BlockPos pos) {
-        var world = _mod.getWorld();
-        if (world == null) return false;
-        var state = world.getBlockState(pos);
-        if (state.getBlock() != Blocks.LAVA) return false;
-        var fluid = state.getFluidState();
-        if (!fluid.isStill() || fluid.getLevel() != 8) return false;
-        return world.getBlockState(pos.up()).isAir();
-    }
-
-    /** 统计 center 周围盒内的暴露静止岩浆源数 ("成片"判据, 不数墙后埋着的)。 */
-    private int countExposedLavaSourcesAround(BlockPos center) {
-        int count = 0;
-        for (int dy = -LAKE_CONFIRM_RADIUS_Y; dy <= LAKE_CONFIRM_RADIUS_Y; dy++) {
-            for (int dx = -LAKE_CONFIRM_RADIUS_XZ; dx <= LAKE_CONFIRM_RADIUS_XZ; dx++) {
-                for (int dz = -LAKE_CONFIRM_RADIUS_XZ; dz <= LAKE_CONFIRM_RADIUS_XZ; dz++) {
-                    if (isExposedLavaSource(center.add(dx, dy, dz))) count++;
-                }
-            }
-        }
-        return count;
-    }
+    // (2026-09-27 口径收编) 原 isExposedLavaSource / countExposedLavaSourcesAround
+    // 已迁到 adris.altoclef.util.helpers.LavaLakeHelper, 与传送门锚点扫描共用同一份。
 
     /**
      * Candidate resource areas inferred from remembered structures.
