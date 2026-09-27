@@ -164,6 +164,10 @@ public class AltoClef implements ModInitializer {
         new WorldSurvivalChain(_taskRunner);
         new DeathRecoveryChain(_taskRunner);
         _foodChain = new FoodChain(_taskRunner);
+        // (2026-09-27 出洞收尾) 出地表后"走离洞口 ≥24 格 ×3"的唯一持有者。
+        // 放在 User Tasks 之上一点点 (52), 用来替代"指望各任务自己消费引导配额"
+        // 的隐式契约 —— 详见 chains/SurfaceExitChain 类注释。
+        new SurfaceExitChain(_taskRunner);
 
         // Trackers
         _storageTracker = new ItemStorageTracker(this, _trackerManager, container -> _containerSubTracker = container);

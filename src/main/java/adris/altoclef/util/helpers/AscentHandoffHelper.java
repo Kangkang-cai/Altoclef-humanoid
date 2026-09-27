@@ -80,6 +80,24 @@ public final class AscentHandoffHelper {
     /** 内层完成判据的放宽量:站在目标【下一层】通常已能交互/挖掘,不必强求同层。 */
     private static final int ARRIVED_SLACK = 1;
 
+    /**
+     * (2026-09-27) 到达判据的**水平前提**。与 {@link #ARRIVED_SLACK} 联合生效。
+     *
+     * <p>现场 20260927-152940 实锤: 目标 -70,69,-57 长在崖顶树上, bot 在 y=63 的坑底。
+     * baritone 挂 {@code GoalNear(_pos, 2)} 后沿西侧崖壁爬升 (那是唯一上行路线),
+     * 2.65s 内 y 63→68 —— 脚块 y 已够 {@code targetY - ARRIVED_SLACK}, 但**水平还差
+     * 6.3 格**, GoalNear 从头到尾没满足过。旧判据只看 y, 于是在半路判 done +
+     * release goal ⇒ 调用方回常规导航 ⇒ 走回目标正下方 ⇒ 掉崖回 y=63 ⇒ 重入让位。
+     * 8 轮 / 40s, 每轮 {@code fromY=63} 一字不差, 净位移 ≈0, 零产出。
+     *
+     * <p>阈值 2.0 与全体消费方的 goal 同量级: {@code DestroyBlockTask} 用
+     * {@code GoalNear(_pos, 2)}; {@code InteractWithBlockTask.createGoalForInteract}
+     * 的半径是 {@code max(1, reachDistance)} 而 {@code reachDistance} 当前恒为 0。
+     * 故 2.0 不会把任何"合法到位"误判成"没到" —— 它只否掉"还在几格外爬崖"的假 done。
+     * 真正的业务判据 (挖掘距离够不够 / 右键能不能点到) 仍归调用方, 本类不越权。
+     */
+    private static final double ARRIVAL_XZ = 2.0;
+
     // ==================== tick 返回 ====================
 
     /**
@@ -226,9 +244,15 @@ public final class AscentHandoffHelper {
         boolean onGround = mod.getPlayer().isOnGround();
 
         // ② 到达判定: 只在落地时认, 避免起跳瞬时 y+1 假达标 (20260915-160447 死循环的坑)。
-        if (onGround && y >= _targetY - ARRIVED_SLACK) {
+        //    (2026-09-27) 加水平前提 ARRIVAL_XZ: 只看 y 会在"目标在崖顶、路线要从远处
+        //    绕上去"时半路假 done, 把正在爬的 baritone 腰斩成 5.3s 一循环的死锁。
+        double hxz = _target == null ? 0.0
+                : Math.hypot(mod.getPlayer().getX() - (_target.getX() + 0.5),
+                             mod.getPlayer().getZ() - (_target.getZ() + 0.5));
+        if (onGround && y >= _targetY - ARRIVED_SLACK && hxz <= ARRIVAL_XZ) {
             Debug.logToFile("altoclef_diag.log", "[Ascent] done tag=" + _tag
-                    + " y=" + y + " target=" + shortPos(_target));
+                    + " y=" + y + " hxz=" + String.format(java.util.Locale.ROOT, "%.1f", hxz)
+                    + " target=" + shortPos(_target));
             stop(mod);
             return TickResult.done();
         }

@@ -308,8 +308,12 @@ public interface WorldHelper {
      *
      * 水中无法放方块 (用户提醒): 玩家在水中时不判定为被困, 交给
      * GoToSurfaceTask 的海底退化逻辑(挖到海平面之上)处理。
+     *
+     * (2026-09-27 可见性放开) 由 package-private 改 public: 出洞收尾链
+     * (chains.SurfaceExitChain) 需要"现在是不是蹲在浅坑/峡谷里"这同一个判据,
+     * 而本仓铁律是"同一概念只留一个判据源" —— 放开可见性复用, 不另写一份。
      */
-    static int getPitEscapeY(AltoClef mod) {
+    public static int getPitEscapeY(AltoClef mod) {
         if (mod.getPlayer() == null || mod.getWorld() == null) return -1;
         if (mod.getPlayer().isTouchingWater()) return -1;
         if (isDeepUnderground(mod)) return -1; // 深地下由常规逻辑处理
