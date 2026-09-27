@@ -28,12 +28,24 @@ import java.util.Optional;
 public interface LookHelper {
 
     /**
-     * 【右键交互语义】side==null 时用 3.0 的收紧距离 —— bot 走到容器旁再点。
+     * 【右键交互语义】side==null 时**首选** 3.0 的收紧距离 —— bot 走到容器旁再点。
      *
      * (2026-09-02 持盾右键变举盾, 用户"开箱/熔炉走太远右键变举盾") MC 方块交互距
      * 离是 4.5, 但 bot 在 4.5 格边缘点击时射线常差一点没点中方块 → 副手持盾右键被
      * MC 当成举盾 (不开容器)。点击判定距离收紧到 3 格内: 导航 GoalNear(target,1)
      * 本就停在 1 格, 收紧只改变"何时开始点击", 不影响已走近的交互。
+     *
+     * (2026-09-27 否决闸门 → 首选值) 3.0 不再是否决闸门: 3.0 内判定不为空就用它,
+     * 判定为空则按**真实 reach** 再试 (见 getReach)。起因现场 20260927-222854:
+     * 熔炉 (185,73,39) 与 bot 之间被岩浆隔断 ((185,73,38) 与 (185,72,37) 均为 lava,
+     * baritone 无路可走) → bot 冻在 (185.48,72.00,35.46)，眼到炉 4.31 格。用户手动
+     * 把准星指过去、4 格多距离右键**成功开炉**(MC 真 reach 4.5, 且流体 outline 为空
+     * 不挡准星射线)，而本闸门恒判"够不着" → InteractWithBlockTask 永远停在
+     * CANT_REACH("Getting to our goal")，一次右键都没发出；叠加兜底自锁 → 站死 102.7s。
+     *
+     * 举盾不会被重新引入: 真正的闸门是 InteractWithBlockTask.isPreciselyAiming
+     * (准星射线必须真命中 _target) + 0.3s 点击节流，且盲点兜底已同步收紧为
+     * "仅严格 3.0 内允许" (isWithinStrictInteractReach)。
      *
      * ⚠ 本方法只服务【右键交互】(InteractWithBlockTask.getCurrentReach / 水桶链)。
      * 挖掘与舀液体请走单参 {@link #getReach(BlockPos)} —— 那里要的是真实游戏 reach。
@@ -45,7 +57,15 @@ public interface LookHelper {
         IPlayerContext ctx = BaritoneAPI.getProvider().getPrimaryBaritone().getPlayerContext();
         if (side == null) {
             assert MinecraftClient.getInstance().player != null;
+            // 首选: 收紧距离内点击 (原行为)。
             reachable = RotationUtils.reachable(ctx.player(), target, INTERACT_REACH_NO_SIDE);
+            if (reachable.isEmpty()) {
+                // (2026-09-27) 兜底: 按 MC 真实 reach 再试。只放宽"距离", 不放宽
+                // "必须真命中" —— 点击仍由 isPreciselyAiming 把关, 盲点由调用侧
+                // 限死在严格 3.0 内。
+                reachable = RotationUtils.reachable(ctx.player(), target,
+                        ctx.playerController().getBlockReachDistance());
+            }
         } else {
             Vec3i sideVector = side.getVector();
             Vec3d centerOffset = new Vec3d(0.5 + sideVector.getX() * 0.5, 0.5 + sideVector.getY() * 0.5, 0.5 + sideVector.getZ() * 0.5);

@@ -84,6 +84,30 @@ public class InteractWithBlockTask extends Task {
     // (2026-09-15 统一超时标签) 15s 兜底放弃的边沿标记, 防多条放弃路径重复刷 [TIMEOUT]。
     private boolean _giveUpLogged = false;
 
+    // ==================== (2026-09-27 兜底自锁修复) ====================
+    // 现场 20260927-222854: 熔炉 (185,73,39) 被岩浆隔断, bot 冻在 (185.48,72.00,35.46)
+    // 站死 102.7s —— hSpeed=0.000, inputs 全 false, baritone calc 永远 inProgress,
+    // snapshot 里 blacklisted=false 贯穿全场, 而 "Failed, blacklisting and wandering."
+    // 一次都没打。
+    //
+    // 根因是**两个计时器互相清零**: `_moveChecker` 判负那一拍会走本任务自己的
+    // `_moveChecker.reset()`(继续重试), 这一重置把 DistanceProgressChecker 的 4s
+    // 窗口从头开始 ⇒ 随后约 4s 里 `moveOk` 每拍都判正 ⇒ CANT_REACH 分支末尾那句
+    // `if (moveOk) _giveUpTimer.reset();` 把 15s 兜底每拍清零 ⇒ `_giveUpTimer.elapsed()`
+    // 永不成立 ⇒ `requestBlockUnreachable` 永不执行。日志佐证: [TIMEOUT]
+    // LinearProgressChecker timeout=4.0s 每 4s 准点刷(说明距离表确实在判负), 但放弃
+    // 分支一次没进。
+    //
+    // 修: 15s 兜底改挂**墙钟锚点 + 真实位移**(口径同 InteractWithBlockTask.tickDetour —
+    // "同概念只留一个判据源"), 与 moveChecker 的瞬时闪断彻底解耦。
+    private Vec3d _noProgressAnchor = null;
+
+    /** 记一次"有进展": 重置 15s 无进展窗口 (真实位移 / 派发了实际干活的子任务)。 */
+    private void noteProgress(AltoClef mod) {
+        _noProgressAnchor = mod.getPlayer().getPos();
+        _giveUpTimer.reset();
+    }
+
     /**
      * (2026-09-17 统一爬升协调器) "目标在头顶、够不着"的垂直爬升全权交给它:
      * 1.5s 无进展 → 重挂 baritone 导航(零成本, 能挖的挡块它自己会处理);
@@ -282,6 +306,8 @@ public class InteractWithBlockTask extends Task {
         // (2026-09-11) 无游荡模式的 15s 总兜底计时。
         _giveUpTimer.reset();
         _giveUpLogged = false;
+        // (2026-09-27) 无进展墙钟锚点不跨次进入: 新一次交互应当重新起表。
+        _noProgressAnchor = null;
         // (2026-09-17) 协调器状态不跨实例存活: 被抢占恢复后按新现场重新判定高度差。
         _ascent.stop(mod);
         // (2026-09-17) 脱险抱持不跨次进入 —— 新一次交互应当重新尝试 (static 计数仍生效)。
@@ -378,6 +404,15 @@ public class InteractWithBlockTask extends Task {
         // (2026-09-11) moveChecker 判负不再无条件"拉黑目标+wander": 容器交互
         // (_wanderOnFailure=false) 时 bot 冻结/站桩会让本检查器瞬间判负, 把眼前
         // 熔炉拉黑 → canReach(=黑名单取反)全链失效 → 父任务误判"无容器"重做熔炉。
+        // (2026-09-27 兜底自锁修复) 墙钟无进展: 只有真实位移 >0.2 格才清零 15s 兜底。
+        // 旧实现是 CANT_REACH 分支末尾的 `if (moveOk) _giveUpTimer.reset();`, 与
+        // 下方判负时的 `_moveChecker.reset()` 互为清零源 → `_giveUpTimer` 永不 elapsed
+        // (详见字段区注释)。
+        if (_noProgressAnchor == null
+                || _noProgressAnchor.squaredDistanceTo(mod.getPlayer().getPos()) > 0.04) {
+            noteProgress(mod);
+        }
+
         boolean moveOk = _moveChecker.check(mod);
         if (!moveOk) {
             // 失败=无真实进展, 无游荡模式下兜底计时持续走表。
@@ -483,11 +518,10 @@ public class InteractWithBlockTask extends Task {
                 }
                 _clickTimer.reset();
                 _clickStuckTiming = false;
-                // (2026-09-11) 有真实移动进展才重置无游荡兜底; 冻结站桩时走表,
-                // 15s 后由上方 moveChecker 分支/下方卡死分支回落放弃路径。
-                if (moveOk) {
-                    _giveUpTimer.reset();
-                }
+                // (2026-09-27 兜底自锁修复) 这里原有 `if (moveOk) _giveUpTimer.reset();`
+                // —— moveOk 会在本分支上一拍 `_moveChecker.reset()` 之后连续 ~4s 判正,
+                // 把 15s 兜底每拍清零。已改由 tick 顶部的墙钟锚点统一负责"有进展才清零",
+                // 本处不再有自己的判据源。
             }
             case WAIT_FOR_CLICK -> {
                 setDebugState("Waiting for click");
@@ -946,9 +980,11 @@ public class InteractWithBlockTask extends Task {
                 String crosshairDesc = (diagHit instanceof BlockHitResult diagB)
                         ? diagB.getBlockPos().toShortString() + "/" + diagB.getSide()
                         : diagHit.getType().toString();
-                if (pouringFluid) {
-                    Debug.logInternal("(InteractWithBlockTask) SKIP force-click: pouring fluid bucket, crosshair="
-                            + crosshairDesc + " != target " + _target.toShortString() + ", waiting for precise aim");
+                if (pouringFluid || !isWithinStrictInteractReach(mod)) {
+                    Debug.logInternal("(InteractWithBlockTask) SKIP force-click: "
+                            + (pouringFluid ? "pouring fluid bucket" : "beyond strict interact reach")
+                            + ", crosshair=" + crosshairDesc + " != target "
+                            + _target.toShortString() + ", waiting for precise aim");
                 } else {
                     Debug.logInternal("(InteractWithBlockTask) FORCE-CLICK crosshair=" + crosshairDesc
                             + ", target=" + _target.toShortString() + ", dir=" + _direction);
@@ -980,6 +1016,22 @@ public class InteractWithBlockTask extends Task {
 
     public Optional<Rotation> getCurrentReach() {
         return LookHelper.getReach(_target, _direction);
+    }
+
+    /**
+     * (2026-09-27 盲点闸门) 目标是否在**严格交互距离**(LookHelper.INTERACT_REACH_NO_SIDE
+     * = 3.0)之内 —— 允许"盲点"(准星还没压上目标就 forcePress)的唯一前提。
+     *
+     * 为什么必须同时收紧: LookHelper 已把"够不着"的否决闸门从 3.0 放宽到 MC 真实
+     * reach(4.5)。若盲点兜底照旧在 4.5 格边缘触发, 就退回 2026-09-02 的持盾事故
+     * (准星偏差 → forcePress 右键 → MC 判成举盾, 容器永远不开)。规则:
+     * ≤3.0 允许盲点(射程宽裕, 角度差一点也能命中); 3.0~4.5 一律等
+     * isPreciselyAiming(准星射线真命中 _target)成立才点。
+     */
+    private boolean isWithinStrictInteractReach(AltoClef mod) {
+        double d = LookHelper.INTERACT_REACH_NO_SIDE;
+        Vec3d eye = mod.getPlayer().getCameraPosVec(1.0F);
+        return eye.squaredDistanceTo(Vec3d.ofCenter(_target)) <= d * d;
     }
 
     /**
