@@ -24,8 +24,9 @@ public class PlaceObsidianBucketTask extends Task {
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5, true); // This can get stuck forever, so we increase the range.
-    // (0927) 上一拍是否在挖掘。见 onTick 的"挖掘→非挖掘边沿停表"。
-    private boolean _wasBreaking = false;
+    // (2026-09-27) 原先这里有一个本任务私有的"挖掘→非挖掘边沿停表"latch(_wasBreaking),
+    // 用于绕开 MovementProgressChecker 距离表的挖矿期空转鬼影。该缺陷已在共享类里
+    // 根治(挖矿期距离表无条件停表, 见 MovementProgressChecker:52 注释), 局部副本已回收。
     // (2026-09-04 误触诊断) 倒岩浆阶段诊断日志节流 (1s)。
     private final adris.altoclef.util.time.TimerGame _pourDiagTimer = new adris.altoclef.util.time.TimerGame(1);
 
@@ -102,7 +103,6 @@ public class PlaceObsidianBucketTask extends Task {
 
         // (0927) 首拍即定保护开关, 不留 "onStart → onTick" 之间的空窗。
         refreshCastFrameProtection(mod);
-        _wasBreaking = false;
         _progressChecker.reset();
     }
 
@@ -127,23 +127,10 @@ public class PlaceObsidianBucketTask extends Task {
             }
         }
 
-        // (0927 挖掘→非挖掘边沿停表) 本任务的 MovementProgressChecker 同时持有
-        // DistanceProgressChecker(6s, 0.1) 与 LinearProgressChecker(0.5s, 0.001),
-        // 由 isBreakingBlock() 二选一: 挖掘中只喂挖掘进度 (距离表**不更新却继续空转**),
-        // 非挖掘时才喂位置。于是"原地连挖 9.4s 哭泣黑曜石"一旦某拍 reach 闪断
-        // (现场 20260927-104143 的 10:57:25.688 出现过一次 "Breaking the normal way.")
-        // 切到距离分支, 就会拿 6 秒前的位置来比较 → 位置自然没变 → 判负 → return
-        // _wanderTask。现场 10:57:22.139 与 0.5s 那条同时打出的
-        // `timeout=6.0s minProgress=0.1 actual=0.0` 就是这个鬼影。
-        //
-        // 修法只在**边沿**(上一拍在挖、这一拍不挖)停一次表, 让距离表从当前时刻
-        // 重新起算; 挖掘期照旧交给 check() 内部的挖掘进度判据兜底, 不改共享类,
-        // 不影响其他使用 MovementProgressChecker 的任务。
-        boolean breaking = mod.getControllerExtras().isBreakingBlock();
-        if (_wasBreaking && !breaking) {
-            _progressChecker.reset();
-        }
-        _wasBreaking = breaking;
+        // (2026-09-27 I) 原先此处有一段本任务私有的"挖掘→非挖掘边沿停表"(_wasBreaking),
+        // 用于绕开 MovementProgressChecker 距离表的挖矿期空转鬼影(现场 20260927-104143
+        // 10:57:22.139 的 `timeout=6.0s minProgress=0.1 actual=0.0`)。该缺陷已在共享类
+        // 根治(挖矿期距离表无条件停表), 局部副本已回收, 本任务恢复为直接 check()。
 
         // Manual wander to try and make this godforesaken task work
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
