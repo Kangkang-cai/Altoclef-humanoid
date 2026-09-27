@@ -12,6 +12,7 @@ import baritone.api.utils.input.Input;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.util.ActionResult;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 /**
@@ -39,6 +40,10 @@ import net.minecraft.util.math.Vec3d;
  *      (3) 处于导航/挖掘类主任务（复用 movement 包名判定），非战斗。
  *      (4) 屏幕关闭 (非容器/合成/聊天/死亡)。
  *      (5) 3 秒（SWIM_STUCK_WINDOW_TICKS）内玩家水平位移 < 1 格 → 判卡住。
+ *      (6) 同一目标方块的破坏进度【未在推进】(2026-09-27 新增, 见字段区
+ *          2026-09-27 注释): 挖矿时 XZ 天然零位移, 不加此条则"挖着挖着被判
+ *          游泳卡住"→ 抢权 forceCancel 掉 baritone 已规划好的路线。用户口径:
+ *          "有持续挖掘进度时不应该下潜游", 且必须是"进度在推进"而非"正在挖"。
  *  - 触发动作 = 兜底阶梯 (2026-09-12 升级):
  *      ① 脚下垫方块止浮 (WaterStandHelper, 优先): 现场 20260912-085838 实锤
  *         bot 在水面 y7↔9 每 0.5s 上下振荡 (bobbing), dive+sprint 10+ 次零
@@ -136,6 +141,34 @@ public class SwimDiveChain extends TaskChain {
     private long _lastInWaterTick = Long.MIN_VALUE;
     private long _lastDiagTick = Long.MIN_VALUE;
     private String _lastDiagReason = null;
+
+    // ==== (2026-09-27) 挖掘进度豁免 (用户口径: "必须进度在推进") ====
+    // 现场 20260927-171238 实锤 (误触发 → 直接致死):
+    //   17:16:53.953 WINDOW_START (pos=-45,37,-99) → 恰好 60 tick 后
+    //   17:16:56.953 [SWIM-DIVE] 抢权。窗口内 bot 一直在挖:
+    //   OccluderClear -44,40,-99、Stuck-break #2/#3 holding left click on
+    //   -44,37,-99(water)/-44,39,-99(stone); 且 NAV-STUCK 显示
+    //   baritone[customGoal=true pathing=true] path[present=true segLen=16
+    //   dest=(-29,29,-99)] —— "有路线 + 正在挖 + XZ 零位移"被读成"游泳卡住"。
+    //   XZ 零位移是挖矿的固有属性 (挖掘不产生位移), 60 tick 窗口必然攒满。
+    //   伤害: dive 用 SNEAK 强制下沉, 两次各把 bot 往下扎 5 格多 ——
+    //   17:17:00.052 y36.6 → 17:17:03.052 DIVE_END pos={-43,31,-99} air 1.00→0.81;
+    //   17:17:12.051 y37.3 → 17:17:15.052 pos={-42,32,-99} air 再掉 20%。
+    //   两跳合计烧掉约 40% 空气, 正是后面 17:17:39 溺水死亡的空气预算来源。
+    //
+    // 判据 (用户定: 不是"正在挖"就算豁免, 而是"进度在推进"才豁免):
+    //   同一个目标方块, 本 tick 的 currentBreakingProgress 严格大于上一采样
+    //   → 视为"正在有效推进", 清零卡住窗口, 本 tick 绝不触发下潜/垫方块。
+    // 为什么不能只看 isBreakingBlock(): 泡水悬空挖掘有 5x 水 × 5x 悬空 = 25x
+    //   惩罚, "按住左键但进度恒 0" 恰恰是真卡住, 那时最需要下潜/垫方块兜底
+    //   (DestroyBlockTask 的 WATER-EXIT 与本站原始设计意图都依赖它)。
+    // 进度来源: ClientBlockBreakMixin → ClientPlayerInteractionManager
+    //   .currentBreakingProgress (0..1 累计), 每 tick updateBlockBreakingProgress
+    //   发布; 换目标方块 / 取消挖掘 (BlockBreakingCancelEvent) 时归零。
+    // 与 JumpStuckResolver 的 [DigGuard] 同性质 (那里是"只要在挖就豁免"),
+    //   本站按用户口径收紧为"进度在推进", 不复制其宽判据。
+    private BlockPos _lastBreakPos = null;
+    private double _lastBreakProgress = -1.0;
 
     public SwimDiveChain(TaskRunner runner) {
         super(runner);
@@ -266,6 +299,14 @@ public class SwimDiveChain extends TaskChain {
         if (mod.getMobDefenseChain().isInCombat()) {
             diagGate(mod, "IN_COMBAT");
             resetState();
+            return;
+        }
+
+        // (2026-09-27) 挖掘进度豁免 —— 必须在窗口累积与触发选择【之前】返回。
+        // 挖矿时 XZ 天然零位移, 不豁免则 60 tick 窗口必攒满 → 误判游泳卡住。
+        if (miningProgressAdvancing(mod)) {
+            resetWindow();
+            diagGate(mod, "MINING_PROGRESS");
             return;
         }
 
@@ -566,6 +607,36 @@ public class SwimDiveChain extends TaskChain {
         Task main = mod.getUserTaskChain().getCurrentTask();
         if (main == null) return false;
         return main.thisOrChildSatisfies(SwimDiveChain::isNavOrMiningTask);
+    }
+
+    /**
+     * (2026-09-27) "有持续挖掘进度" 判据 (见字段区 2026-09-27 注释)。
+     *
+     * 返回 true 的三个必要条件（缺一不可）:
+     *   ① 正在破坏方块 (isBreakingBlock，来自 ClientBlockBreakMixin 的事件);
+     *   ② 破坏目标与上一采样是同一个方块;
+     *   ③ 本 tick 的 currentBreakingProgress 严格大于上一采样值。
+     *
+     * 即"同一目标、进度在推进"。仅"按住左键"不算 —— 泡水悬空 25x 惩罚下进度
+     * 恒 0 恰好是真卡住，那种情况必须保留原有的下潜/垫方块兜底。
+     * 不碰世界/不回调 baritone（只读控制器的两个字段），无性能与递归风险。
+     */
+    private boolean miningProgressAdvancing(AltoClef mod) {
+        var extras = mod.getControllerExtras();
+        if (!extras.isBreakingBlock()) {
+            // 没在挖：清采样，下次进入挖掘时重新起算（避免拿旧进度比出新"推进"）。
+            _lastBreakPos = null;
+            _lastBreakProgress = -1.0;
+            return false;
+        }
+        BlockPos pos = extras.getBreakingBlockPos();
+        double progress = extras.getBreakingBlockProgress();
+        boolean advancing = _lastBreakPos != null
+                && _lastBreakPos.equals(pos)
+                && progress > _lastBreakProgress;
+        _lastBreakPos = pos;
+        _lastBreakProgress = progress;
+        return advancing;
     }
 
     private static boolean isNavOrMiningTask(Task t) {
