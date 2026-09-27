@@ -561,6 +561,61 @@ public class AltoClef implements ModInitializer {
         // 中心 <0.85 格就 MOVE_BACK 刹车) 只会在灵魂沙上原地蹭, 关掉它保持一致。
         getExtraBaritoneSettings().treatSoulSandAsOrdinaryBlock(true);
 
+        // ---- (2026-09-27) 杜鹃花丛"隐形体": baritone 两套判据打架 ----
+        //
+        // 现场 (会话 20260927-145243, record t=10557..10855 实锤):
+        //   bot **站在杜鹃花丛顶面** (脚所在格 (-47,-29,-29), 其下一格 = azalea,
+        //   再下 moss_block; 脚底 y 精确 -29.000 = 花丛碰撞盒顶面), 位置钉死在
+        //   格子边界 (-46.5,-28.5)±0.1, hSpeed 恒定 0.063~0.064 (贴边推挤),
+        //   15s 内 yaw 累计转 7800°+ (约 22 圈 = 用户"疯狂转向不动")。
+        //   任务链 = ConstructNetherPortalBucketTask -> PlaceObsidianBucketTask ->
+        //   DestroyBlockTask, 三者全 extends Task ⇒ 卡死处置链一处未接 ⇒
+        //   6s 进度判负 -> TimeoutWanderTask (wander 同样穿不过, 原地卡到会话结束)。
+        //   同会话 (-48,-25,-44) 还有约 330 帧同类现场。
+        //
+        // 根因在方块注册本身 (minecraft-project jar 字节码实锤):
+        //   AZALEA = register("azalea", new AzaleaBlock(Settings.of(Material.PLANT)
+        //              .breakInstantly().sounds(AZALEA).nonOpaque()));
+        //   **只调 nonOpaque(), 没有 noCollision()** ⇒
+        //     碰撞盒 = Settings 默认满立方 (物理实心阻挡)
+        //     isOpaque() = false
+        //   于是 baritone 对**同一个方块**的两套判据结论相反:
+        //     canWalkThrough 用 isOpaqueFullCube -> false ⇒ **判"可穿过"**(错)
+        //     canWalkOn      用 isShapeFullCube   -> true  ⇒ 判"可站上去"(对)
+        //   baritone 照前者规划出一条**穿过花丛的路径**, 物理上花丛实心 ⇒ 撞死。
+        //   这也顺带解释了"bot 为什么会站在花丛上": canWalkOn 一侧本来就放行。
+        //   → 症状家族 = 03-consistency.md"两侧口径不一致", 与 09-19 栅栏
+        //     (canWalkThrough 特批放行 vs canWalkOn 覆盖不到) 同族, 方向相反。
+        //
+        // 为什么用 avoidWalkingThrough, 而不是 canWalkOnForce 的反向:
+        //   本仓 baritone 只有 force-* 两个通行钩子 ——
+        //     getForceWalkOnPredicates()           (canWalkOn 放行)
+        //     getForceAvoidWalkThroughPredicates() (canWalkThrough / canWalkOn 拒绝)
+        //   后者在 MovementHelper.canWalkThrough (offset 124~128) 与 canWalkOn
+        //   (offset 186~192) 各有一个消费点, 语义 = "这格不许身体进去" —— 正是
+        //   "别把路径规划到花丛里"需要的窄语义 (既有唯一消费点 = 龙息)。
+        //
+        // ⚠ 必修的例外: 谓词命中会让 canWalkOn 那边把**下方那格**判成不可站 ——
+        //   若不排除 bot 自己当前站位, 一旦 bot 已经站在花丛上 (本现场正是如此),
+        //   A* 起点判据全灭 = Open set size: 0 = 比卡住更死的站桩。
+        //   与 09-19 栅栏 / 09-20 灵魂沙"只解冻当前站位"同构: 放行"我正站在这里",
+        //   不放行"我要走过去"。isOwnCurrentSupport 已含脚格与脚下方格。
+        //
+        // 范围: 只收 azalea / flowering_azalea (用户本场所报)。同族的
+        //   azalea_leaves / flowering_azalea_leaves (同样 nonOpaque + 满格碰撞)
+        //   刻意**不放**: 树冠通行是另一个高频场景, 改动面必须单独评估。
+        // 开销: 谓词跑在 baritone A* 热路径, 但先做 O(1) 方块类型早退 (非杜鹃即
+        //   返回 false), 与上面的 forceWalkOn 谓词同款。只读世界、不回调 baritone。
+        getExtraBaritoneSettings().getForceAvoidWalkThroughPredicates().add(pos -> {
+            ClientWorld world = MinecraftClient.getInstance().world;
+            if (world == null) return false;
+            int y = pos.getY();
+            if (y < world.getBottomY() || y >= world.getTopY()) return false;
+            Block b = world.getBlockState(pos).getBlock();
+            if (b != Blocks.AZALEA && b != Blocks.FLOWERING_AZALEA) return false;
+            return !isOwnCurrentSupport(pos);
+        });
+
         // Give baritone more time to calculate paths. Sometimes they can be really far away.
         // Was: 2000L
         getClientBaritoneSettings().failureTimeoutMS.value = 6000L;
