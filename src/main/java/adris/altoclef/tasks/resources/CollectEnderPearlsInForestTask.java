@@ -831,7 +831,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 pickNextTarget(mod);
             }
             if (_target == null) {
-                setDebugState("Patrol: no signal-block candidates in cache; waiting for scans");
+                setDebugState("Patrol: no signal-block candidates in cache ("
+                        + _scanFluidRejected + " fluid-blocked); waiting for scans");
                 return null;
             }
             if (_target != _pathedTarget) {
@@ -912,6 +913,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             _bestPos = null;
             _bestDist = -1;
             _nextGoalYOffset = 1;
+            // (2026-09-27) 刻意【不】清零 _scanFluidRejected: 与同拍 scanCandidates
+            // 的两轮合计, 才是"这一拍一共多少候选因岩浆被否"的完整口径
+            // (scanCandidates 每次调用开头清一次, 所以逐拍自然重置)。
             // 第一遍: 方位角走廊 (cos60°=0.5, 即 ±60° 扇形); 第二遍: 任意方向。
             double[] corridorCos = {PATROL_ADVANCE_CORRIDOR_COS, -2.0};
             for (double cos : corridorCos) {
@@ -946,6 +950,10 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
                     continue;
                 }
+                if (hasFluid(mod, standPos)) {
+                    _scanFluidRejected++;
+                    continue;
+                }
                 if (d > _bestDist) {
                     _bestDist = d;
                     _bestPos = p;
@@ -969,6 +977,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             _bestPos = null;
             _bestDist = Double.MAX_VALUE;
             _nextGoalYOffset = 1;
+            _scanFluidRejected = 0;
             pickFromList(mod, anchor, bot, minHopSq, corridorCos,
                     mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
             // (2026-09-20 用户预判核实) WARPED_WART_BLOCK 是【实心方块】不是植物 ——
@@ -985,6 +994,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         private double _bestDist = Double.MAX_VALUE;
         // 选中目标相对缓存格的 Y 偏移 (0/1): 寻路与到达判定共用。
         private int _nextGoalYOffset = 1;
+        // (2026-09-27) 本轮选点里"被流体挡掉"的候选数 —— 零行为诊断, 只用于
+        // 解释"为什么没有候选"(菌岩被流动岩浆盖住时的量化证据)。
+        private int _scanFluidRejected = 0;
 
         /**
          * 方位角走廊判定: 候选相对 bot 的方向与锁定方位角的归一化点积 ≥ cos。
@@ -1026,6 +1038,18 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 if (isCollidable(mod, standPos) || !isCollidable(mod, standPos.down())) {
                     continue;
                 }
+                // (2026-09-27 实锤, 现场 20260927-212247) 站进去之前先看有没有流体:
+                // 菌岩顶面被【流动岩浆】盖住时, 站立格是岩浆 —— 不是实心块, 
+                // isSolidBlock 返回 false, 上面两条校验全部放行 ⇒ 目标落到岩浆里
+                // ⇒ baritone 算不出路 (岩浆格不可达/高危), 20s target-timeout 换
+                // 下一个候选, 附近整片都是岩浆就一路换、一路到不了, 用户观感
+                // "目标老是选到有流动岩浆覆盖的方块上, 所以导航不到"。
+                // 判据用流体状态而不是方块类型: 岩浆源/流动岩浆/水全覆盖, 空气与
+                // 无碰撞植物 (菌菇/菌索) 的 fluidState 为空, 不影响原有语义。
+                if (hasFluid(mod, standPos)) {
+                    _scanFluidRejected++;
+                    continue;
+                }
                 if (d < _bestDist) {
                     _bestDist = d;
                     _bestPos = p;
@@ -1037,6 +1061,15 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         /** 该格是否不可穿过 (有碰撞箱): 空气/植物/菌索均可穿过, 返回 false。 */
         private boolean isCollidable(AltoClef mod, BlockPos pos) {
             return mod.getWorld().getBlockState(pos).isSolidBlock(mod.getWorld(), pos);
+        }
+
+        /**
+         * (2026-09-27) 该格是否含流体 (岩浆源/流动岩浆/水)。
+         * 与 {@link #isCollidable} 互补 —— 岩浆不是实心块, 只查碰撞箱会把它当"可站立"。
+         * 同口径用法见 {@code InteractWithBlockTask:813}、{@code ClearLiquidTask:45}。
+         */
+        private boolean hasFluid(AltoClef mod, BlockPos pos) {
+            return !mod.getWorld().getBlockState(pos).getFluidState().isEmpty();
         }
 
         /** 水平进入目标半径且脚下高度对得上 → 算"已站上"。 */
