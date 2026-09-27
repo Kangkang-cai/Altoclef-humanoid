@@ -193,7 +193,16 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         if (entity instanceof SkeletonEntity || entity instanceof PassiveEntity) {
             return MELEE_HUG_DISTANCE;
         }
-        // 其余会主动靠近的近战敌怪 (僵尸/蜘蛛/苦力怕/末影人/等): +1 格远离。
+        // (2026-09-27 用户拍板 B, 现场 20260927-222854) 末影人不适用下面那条
+        // "+1 格" —— 该规则的前提是"这类敌怪会主动贴上来补满最后一段距离"
+        // (09-22 原话)。末影人不会走过去, 它是【瞬移】贴脸: +1 格只是把 bot
+        // 钉在 reach (3.2) 之外, 等一个不会"走"过来的目标, 同时把自己推离
+        // 攻击射程 (4.0 > 3.2 恒不可命中, 只能等 FULLY-CLOSE 兜底救场)。
+        // 维持 MELEE_HUG_DISTANCE 贴身: 落在 reach 内, 停靠即可出手。
+        if (entity instanceof EndermanEntity) {
+            return MELEE_HUG_DISTANCE;
+        }
+        // 其余会主动靠近的近战敌怪 (僵尸/蜘蛛/苦力怕/等): +1 格远离。
         return MELEE_HUG_DISTANCE + 1.0;
     }
 
@@ -428,11 +437,37 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
      * (2026-09-22 贴脸让位, 用户"小白就在脸上, 已经不用再靠近了, 得让出来")
      * 目标已在攻击射程内 → 绕位不再抢控制, 交战分支 (盾战/出刀) 接管。
      * 射程口径与攻击判定一致 (entityReachRange, 默认 3.2)。
+     *
+     * (2026-09-27 用户拍板 A, 现场 20260927-222854) 阈值由硬编码 reach 放开为
+     * max(reach, 停靠距离 approachDistance)。旧口径有死区: 对"会主动靠近的
+     * 近战敌怪" approachDistance = MELEE_HUG_DISTANCE + 1.0 = 4.0, 比 reach
+     * (3.2) 大 0.8 —— 距离落在 3.2~4.0 时既不算"贴脸"(父类判 false → 落到
+     * 绕位导航) 又已在停靠点(不再靠近); 相机射线一旦被地形吃掉 (末影人瞄脚,
+     * 0.10/0.25 身高, 极易被脚下方块吃) 就走绕位 = 主动开一条新导航。
+     * 现场: 该区间内连续 6 次 [LOS-Reposition] (committing to 128,85,59 →
+     * 131,90,54), bot 位移 11 格/净爬升 6 格, 而愤怒的末影人已贴脸。
+     * 放开到停靠距离后: 停靠点以内被挡 = 直接交战 (瞄准 + 清障 +
+     * FULLY-CLOSE 兜底), 与"距离到了就不再导航"的意图一致。
      */
     @Override
     protected boolean isPointBlankCombat(AltoClef mod, Entity entity) {
         double reach = mod.getModSettings().getEntityReachRange();
-        return entity.squaredDistanceTo(mod.getPlayer()) <= reach * reach;
+        double stop = Math.max(reach, approachDistance(mod, entity));
+        return entity.squaredDistanceTo(mod.getPlayer()) <= stop * stop;
+    }
+
+    /**
+     * (2026-09-27 用户拍板 C) 已在交战迟滞圈内 (上一拍判定进入过交战, 只是这
+     * 一拍射线被吃) → 禁止用"绕位"重获视线。迟滞圈的语义就是"已在交战", 在
+     * 圈内绕位等于把 bot 从交战距离带出去 (现场 20260927-222854 的 11 格位移)。
+     * 与 A 互补: A 管"停靠距离以内", C 管"迟滞圈以内"(含 approachDistance 与
+     * exit 圈之间的过渡带, 以及末影人瞬移造成的一拍距离跳变)。
+     * 近战击杀适用; 交易/剪羊毛等非战斗交互保持父类默认 (false) —— 被墙挡住
+     * 时必须走出去才能看到目标, 站桩只会让交互超时。
+     */
+    @Override
+    protected boolean holdPositionWhenBlockedInInteract(AltoClef mod, Entity entity) {
+        return true;
     }
 
     // (2026-08-23) 瞄准点: 末影人瞄准眼睛 (脚底 +1.5), 其余生物默认脚底。
@@ -531,14 +566,19 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 蹲守期本来就不许出刀, 不能因为"没出刀"就往两只末影人中间凑。
         boolean sweepGuarded = entity instanceof EndermanEntity && hasAdjacentEnderman(mod, entity);
 
-        Task move = new GetToEntityTask(entity, approachDistance(mod, entity));
+        // (2026-09-27 诊断准确性) 停靠距离提到变量: 原日志把返回值硬编码成
+        // "GetToEntityTask(0.8)", 与实际值 (approachDistance 或 FULLY_CLOSE) 无关,
+        // 现场会误读成"bot 在往 0.8 格挤"。
+        double approachDist = approachDistance(mod, entity);
+        Task move = new GetToEntityTask(entity, approachDist);
         // (2026-09-26 完全靠近兜底, 用户) 交战中 2s 没对本目标出过一刀 (距离
         // 停靠点在 reach 外干站 / 藤蔓吃准心 swing DECLINED) → 贴近距离临时
         // 换成 1 格, 逼到贴脸让准心落回目标身上; 出一刀后 isMeleeSwingDrought
         // 自动翻 false, 恢复正常 approachDistance。仅无盾近战分支: 盾战分支的
         // 格挡节奏 (波内只格挡最多 4s) 本来就合法不出刀, 不适用。
         if (!sweepGuarded && isMeleeSwingDrought(mod, entity)) {
-            move = new GetToEntityTask(entity, FULLY_CLOSE_DISTANCE);
+            approachDist = FULLY_CLOSE_DISTANCE;
+            move = new GetToEntityTask(entity, approachDist);
             long nowMs = System.currentTimeMillis();
             if (nowMs - _lastFullyCloseLogMs > 3000) {
                 _lastFullyCloseLogMs = nowMs;
@@ -571,7 +611,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
             if (nowMs - _lastMeleeFixLog > 1000) {
                 _lastMeleeFixLog = nowMs;
                 Debug.logToFile("altoclef_diag.log",
-                        "[MELEE-FIX]\t[MovingAndAttacking]\tmelee: attack() side-effect while returning GetToEntityTask(0.8)");
+                        "[MELEE-FIX]\t[MovingAndAttacking]\tmelee: attack() side-effect while returning GetToEntityTask("
+                                + approachDist + ")");
             }
         }
         return move;

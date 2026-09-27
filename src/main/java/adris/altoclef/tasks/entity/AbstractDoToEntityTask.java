@@ -62,6 +62,8 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     private static final double LOS_CLEAR_GRACE_SECONDS = 2;
     private long _losClearSinceTick = Long.MIN_VALUE;
     private long _lastObstructionLogTick = Long.MIN_VALUE;
+    // (2026-09-27 用户拍板 C) "迟滞圈内被挡改交战 (不再绕位)" 的取证日志节流 (1s)。
+    private long _lastHoldCloseLogTick = Long.MIN_VALUE;
 
     // (2026-09-14 接近失败诊断, 232015 场次) wander 两个触发点的取证日志节流
     // key (5s)。目的: 区分"目标从感知/候选消失"与"接近无进展", 并拿到触发时
@@ -250,7 +252,26 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 // 现场 20260922-132249: Approach entity <-> Getting to block 39,-42,6
                 // ForceProtect 打架 (13:30:47~49), 判定逐 tick 翻面, bot 站桩挨射
                 // 11s 掉到 0.45 血。近战子类声明贴脸时绕位让位, 交战分支接管。
-                if (isPointBlankCombat(mod, entity)) {
+                boolean pointBlank = isPointBlankCombat(mod, entity);
+                // (2026-09-27 用户拍板 C, 现场 20260927-222854) 已在交战迟滞圈内
+                // (上一拍判定进入过交战, 只是这一拍射线被吃) 且子类认这是战斗 →
+                // 同样交给交战分支, 不用绕位导航把 bot 带走。迟滞圈的语义就是
+                // "已在交战"。与 A 互补: A 覆盖"停靠距离以内", C 覆盖 A 与 exit 圈
+                // 之间的过渡带 + 末影人瞬移造成的一拍距离跳变。默认 false, 非战斗
+                // 交互 (交易/剪羊毛) 被墙挡住时仍需走出去看目标, 保持原绕位行为。
+                boolean holdClose = !pointBlank && _withinInteract
+                        && holdPositionWhenBlockedInInteract(mod, entity);
+                if (holdClose) {
+                    long holdNow = WorldHelper.getTicks();
+                    if (_lastHoldCloseLogTick == Long.MIN_VALUE
+                            || holdNow - _lastHoldCloseLogTick > 20) {
+                        _lastHoldCloseLogTick = holdNow;
+                        Debug.logToFile("altoclef_diag.log", "[COMBAT-FIX]\t[HoldClose]\tblocked inside"
+                                + " interact ring (dist=" + String.format("%.1f", Math.sqrt(sqDist))
+                                + ") -> fighting, no reposition");
+                    }
+                }
+                if (pointBlank || holdClose) {
                     _visibleAimPoint = computeVisibleAimPoint(mod, entity);
                     // (2026-09-25 贴脸墙挡清障, 用户"瞄准怪物后要清干净挡着的障碍,
                     // 障碍可能有两格") 瞄准点全部被挡 = 真有墙隔着 (不是相机擦沿
@@ -387,6 +408,17 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
      * 与交战互抢控制 (0922 站桩挨射事故)。
      */
     protected boolean isPointBlankCombat(AltoClef mod, Entity entity) {
+        return false;
+    }
+
+    /**
+     * (2026-09-27 用户拍板 C) 已在交战迟滞圈内 (上一拍判定进入过交战, 这一拍
+     * 射线被吃) 时, 是否禁止"绕位"重获视线。默认 false —— 猪灵交易/剪羊毛等
+     * 非战斗交互保持绕位 (被墙挡住时必须走出去才能看到目标, 站桩只会让交互
+     * 超时)。近战击杀子类覆写为 true: 迟滞圈内绕位 = 把 bot 从交战距离带出去,
+     * 现场 20260927-222854 下界末影人 3 秒内 6 次换绕位点 / 位移 11 格。
+     */
+    protected boolean holdPositionWhenBlockedInInteract(AltoClef mod, Entity entity) {
         return false;
     }
 
