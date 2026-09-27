@@ -49,7 +49,17 @@ public class PlayerInteractionFixChain extends TaskChain {
     // 看过去，长按左键 2 秒把它撸掉。和人类"瞄准方向然后长按"一致，
     // 不依赖任务层的精确方块定位。
     private final TimerGame _stuckDetectTimer = new TimerGame(1.5);
-    private Vec3d _lastPos = null;
+    /**
+     * (2026-09-27 判据修正) 卡住窗口锚点 —— "是否在动"改看**窗口内水平净位移**，
+     * 不再看瞬时位移。详见 tick 内注释。
+     */
+    private Vec3d _stuckAnchorPos = null;
+    /**
+     * (2026-09-27) 窗口内水平净位移 ≥ 此值即认定"真的在走"（格）。与
+     * SwingThroughChain 的 `STUCK_MIN_MOVE` 同口径 —— 两条卡住反应链必须用
+     * 同一把尺子，否则一条判"卡住"、另一条判"在动"，行为互相矛盾。
+     */
+    private static final double STUCK_MIN_MOVE = 1.0;
     private boolean _breakingForward = false;
     private int _breakForwardTicks = 0;
     private BlockPos _breakForwardTarget = null;
@@ -159,59 +169,85 @@ public class PlayerInteractionFixChain extends TaskChain {
                 LookHelper.lookAt(mod, _breakForwardTarget);
             }
         } else if (screenClosed && tryingToMove && !mod.getControllerExtras().isBreakingBlock()) {
+            // (2026-09-27 判据修正: "瞬时位移" → "窗口净位移")
+            //
+            // 旧判据 `_lastPos.squaredDistanceTo(pos) < 0.0025`（≈0.05 格 / **tick**）
+            // 要求每一 tick 都几乎纹丝不动。而"被方块顶在格子边缘"时玩家恰恰会以
+            // **±0.19 格幅度来回抖动** —— record 20260927-145243 t=10557..10855
+            // 实锤: bot 站在杜鹃花丛顶面, 位置在 -46.40 ↔ -46.59 之间周期摆动,
+            // `hSpeed` 恒定 0.064 而整段 15s 的水平净位移只有 0.08~0.12 格。
+            // ⇒ 旧判据每 tick 都判"在动" ⇒ `_stuckDetectTimer` 每 tick 被 reset
+            // ⇒ **永远凑不满 1.5s** ⇒ 本反应在最该生效的场景（花丛/栅栏楔住）下
+            // 从不触发 —— 8 条历史 [Stuck-break] 全部来自真正静止的门/围栏场景。
+            // 同族教训见 detail/03 "瞬时判据横跳 / latch 缺失"。
+            //
+            // 新判据: 锚点固定, 只看**水平净位移**（与 SwingThroughChain 同口径）——
+            // 来回抖动会互相抵消, 真移动不会。y 刻意不计: 原地垫塔/上浮不归本反应。
             Vec3d pos = mod.getPlayer().getPos();
-            boolean stationary = _lastPos != null && _lastPos.squaredDistanceTo(pos) < 0.0025; // ~0.05 格
-            _lastPos = pos;
-            if (stationary) {
-                if (_stuckDetectTimer.elapsed()) {
-                    BlockPos front = getFrontBlockingBlock(mod);
-                    if (front != null) {
-                        Block fblock = mod.getWorld().getBlockState(front).getBlock();
-                        // (2026-08-27 开门, 用户)
-                        // 挡路的是【木门】(云杉/深色云杉/橡木等全部类型) → 右键
-                        // 打开, 不是左键硬砸。木门也属于"可挖", 但硬砸要好几下、
-                        // 还会一直卡门反复横跳 — 人类是直接开门走进去。
-                        // 用硬度区分: 1.18 木门 hardness=3.0, 铁门(徒手开不了)=5.0。
-                        boolean openableDoor = fblock instanceof DoorBlock
-                                && fblock.getDefaultState().getHardness(mod.getWorld(), front) < 5.0f;
-                        if (openableDoor) {
-                            _stuckBreakCount++;
-                            String m = "[Stuck-door] #" + _stuckBreakCount + " opening "
-                                    + front.toShortString() + " (" + fblock.getTranslationKey() + ")";
-                            Debug.logMessage(m);
-                            Debug.logToFile("altoclef_diag.log", m);
-                            LookHelper.lookAt(mod, front);
-                            _breakingForwardIsDoor = true;
-                            mod.getInputControls().hold(Input.CLICK_RIGHT);
-                            _breakingForward = true;
-                            _breakForwardTicks = DOOR_OPEN_HOLD_TICKS;
-                            _breakForwardTarget = front;
-                        } else if (WorldHelper.canBreak(mod, front)) {
-                            _stuckBreakCount++;
-                            String m = "[Stuck-break] #" + _stuckBreakCount + " holding left click on "
-                                    + front.toShortString() + " ("
-                                    + fblock.getTranslationKey() + ")";
-                            Debug.logMessage(m);
-                            Debug.logToFile("altoclef_diag.log", m);
-                            LookHelper.lookAt(mod, front);
-                            _breakingForwardIsDoor = false;
-                            mod.getInputControls().hold(Input.CLICK_LEFT);
-                            _breakingForward = true;
-                            _breakForwardTicks = BREAK_FORWARD_HOLD_TICKS;
-                            _breakForwardTarget = front;
-                        } else {
-                            // 前方没有可撸的实体方块：不触发，等下一轮卡住计时。
-                            _stuckDetectTimer.reset();
-                        }
-                    } else {
-                        _stuckDetectTimer.reset();
-                    }
-                }
-            } else {
+            if (_stuckAnchorPos == null) {
+                _stuckAnchorPos = pos;
+                // TimerGame 新建即到期, 新窗口必须显式 reset 才能重新计满 1.5s。
+                _stuckDetectTimer.reset();
+            } else if (Math.hypot(pos.x - _stuckAnchorPos.x, pos.z - _stuckAnchorPos.z)
+                    >= STUCK_MIN_MOVE) {
+                // 真的在走 → 重锚 + 重新计时。
+                _stuckAnchorPos = pos;
                 _stuckDetectTimer.reset();
             }
+
+            // (2026-09-27 避让) 左键已被别的反应按住时让位。
+            // `InputControls.hold/release` 直接 `KeyBinding.setPressed`, **没有引用
+            // 计数** —— 而 SwingThroughChain（25 tick 窗口, 触发得比本链的 1.5s 更早）
+            // 会 hold 左键持续挖 60 tick。两条反应链若同时上, 会各自 lookAt 不同
+            // 目标, 且一方 release 会把**另一方正按着的键松开**（挖掘进度归零）
+            // ⇒ 修好判据反而互相抵消。只读查询, 不改任何既有状态。
+            if (!mod.getInputControls().isHeldDown(Input.CLICK_LEFT)
+                    && _stuckDetectTimer.elapsed()) {
+                BlockPos front = getFrontBlockingBlock(mod);
+                if (front != null) {
+                    Block fblock = mod.getWorld().getBlockState(front).getBlock();
+                    // (2026-08-27 开门, 用户)
+                    // 挡路的是【木门】(云杉/深色云杉/橡木等全部类型) → 右键
+                    // 打开, 不是左键硬砸。木门也属于"可挖", 但硬砸要好几下、
+                    // 还会一直卡门反复横跳 — 人类是直接开门走进去。
+                    // 用硬度区分: 1.18 木门 hardness=3.0, 铁门(徒手开不了)=5.0。
+                    boolean openableDoor = fblock instanceof DoorBlock
+                            && fblock.getDefaultState().getHardness(mod.getWorld(), front) < 5.0f;
+                    if (openableDoor) {
+                        _stuckBreakCount++;
+                        String m = "[Stuck-door] #" + _stuckBreakCount + " opening "
+                                + front.toShortString() + " (" + fblock.getTranslationKey() + ")";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                        LookHelper.lookAt(mod, front);
+                        _breakingForwardIsDoor = true;
+                        mod.getInputControls().hold(Input.CLICK_RIGHT);
+                        _breakingForward = true;
+                        _breakForwardTicks = DOOR_OPEN_HOLD_TICKS;
+                        _breakForwardTarget = front;
+                    } else if (WorldHelper.canBreak(mod, front)) {
+                        _stuckBreakCount++;
+                        String m = "[Stuck-break] #" + _stuckBreakCount + " holding left click on "
+                                + front.toShortString() + " ("
+                                + fblock.getTranslationKey() + ")";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                        LookHelper.lookAt(mod, front);
+                        _breakingForwardIsDoor = false;
+                        mod.getInputControls().hold(Input.CLICK_LEFT);
+                        _breakingForward = true;
+                        _breakForwardTicks = BREAK_FORWARD_HOLD_TICKS;
+                        _breakForwardTarget = front;
+                    } else {
+                        // 前方没有可撸的实体方块：不触发，等下一轮卡住计时。
+                        _stuckDetectTimer.reset();
+                    }
+                } else {
+                    _stuckDetectTimer.reset();
+                }
+            }
         } else {
-            _lastPos = null;
+            _stuckAnchorPos = null;
             _stuckDetectTimer.reset();
         }
 
