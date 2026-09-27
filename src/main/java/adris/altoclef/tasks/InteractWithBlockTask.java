@@ -9,6 +9,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.baritone.GoalAnd;
 import adris.altoclef.util.baritone.GoalBlockSide;
+import adris.altoclef.util.baritone.GoalOr;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
@@ -253,7 +254,7 @@ public class InteractWithBlockTask extends Task {
         this(ItemTarget.EMPTY, null, target, Input.CLICK_RIGHT, false, Vec3i.ZERO, false, wanderOnFailure);
     }
 
-    private static Goal createGoalForInteract(BlockPos target, int reachDistance, Direction interactSide, Vec3i interactOffset, boolean walkInto) {
+    private static Goal createGoalForInteract(BlockPos target, int reachDistance, Direction interactSide, Vec3i interactOffset, boolean walkInto, int standY) {
 
         boolean sideMatters = interactSide != null;
         if (sideMatters) {
@@ -283,12 +284,37 @@ public class InteractWithBlockTask extends Task {
                 Goal sideGoal = new GoalBlockSide(target, interactSide, 1);
                 return new GoalAnd(sideGoal, new GoalNear(target.add(interactOffset), reachDistance));
             } else {
+                // (2026-09-27 y 差 1 缝: 目标恰比 bot 高 1 格) 交互"站位面"就是 bot
+                // 自己这一层 —— 眼在 standY+1.62, 目标块占 targetY..targetY+1, 站到
+                // 目标的水平邻格时眼到目标侧面仅 ~0.8 格, 与站在目标同层等效。
+                //
+                // 但 GoalNear(target,1) 的 in-goal 集合是 distSq≤1 的 6 个面邻格:
+                // 在 standY = targetY-1 这一层里, 只有"目标正下方那格"命中 —— 而它
+                // 正是目标的**支撑方块**(恒实心), 站不进去 ⇒ **这一层天然无解**,
+                // baritone 只能想办法把 bot 抬进目标层。目标层被岩浆/整面地形隔断时
+                // ⇒ 永久 CANT_REACH (现场 20260927-222854: 熔炉 (185,73,39) 比 bot
+                // 高 1 格、中间隔岩浆, 站死 102.7s; 而用户在同位置**手动右键能开炉**)。
+                // 也与两条兜底的缝同源: 爬升协调器只认 `feetY < targetY-1`、水平绕行
+                // 只认 `feetY == targetY`, Δy==1 落在中间。
+                //
+                // 修: 这种几何下再补一个"bot 自己这一层"的目标, 与原来那个**取任一**
+                // (GoalOr) ⇒ in-goal = 目标层的 4 个水平邻格 **或** bot 这一层的 4 个
+                // 水平邻格, 后者正是人类"走到炉子旁边"的位置。
+                // 为什么不能只换成下移一格的目标: 台阶其实走得上去时那样会舍近求远
+                // (甚至绕去挖走廊); 单一 GoalNear 必然丢掉两条路中的一条, 见 GoalOr。
+                // standY 与 targetY 相等或差 ≥2 时**逐字保持旧行为**。
                 // (2026-09-01 用户"熔炉距离太远右键失败, 用人类交互逻辑") 旧
                 // GoalTwoBlocks(target.up()) 让 bot 停在目标上方/过远位置, 开容器
                 // (熔炉/箱子/工作台) 时右键够不着 → CANT_REACH↔WAIT_FOR_CLICK 反复
                 // 打转。改为 GoalNear(target, 1): 走到容器旁 1 格内再右键, 人类开
                 // 箱就是走到跟前再点。
-                return new GoalNear(target.add(interactOffset), Math.max(1, reachDistance));
+                int reach = Math.max(1, reachDistance);
+                if (target.getY() == standY + 1) {
+                    return new GoalOr(
+                            new GoalNear(target.add(interactOffset), reach),
+                            new GoalNear(target.down().add(interactOffset), reach));
+                }
+                return new GoalNear(target.add(interactOffset), reach);
             }
         }
     }
@@ -438,7 +464,8 @@ public class InteractWithBlockTask extends Task {
             _moveChecker.reset();
         }
 
-        Goal moveGoal = createGoalForInteract(_target, reachDistance, _direction, _interactOffset, _walkInto);
+        Goal moveGoal = createGoalForInteract(_target, reachDistance, _direction, _interactOffset, _walkInto,
+                mod.getPlayer().getBlockPos().getY());
         ICustomGoalProcess proc = mod.getClientBaritone().getCustomGoalProcess();
 
         _cachedClickStatus = rightClick(mod);
@@ -460,6 +487,10 @@ public class InteractWithBlockTask extends Task {
                 // 判不可达"推进, 且有明确的 6s 级决策点, 不再出现"baritone 原地跳
                 // 半小时没人管"。仅在还差 ≥2 格时才启动, 免得已到位却点不动时
                 // 反复 start/done 空转。
+                // (2026-09-27) Δy==1 **刻意不并入本闸门** —— 目标只高一格时交互站位
+                // 面可以是 bot 自己这一层 (见 createGoalForInteract 的 GoalOr), 靠
+                // "站位面取任一 + 同层绕行"解决; 若塞进爬升协调器, 会在"站旁边其实
+                // 就能点"的场景里反复搭塔。
                 int feetY = mod.getPlayer().getBlockPos().getY();
                 int attempts = _ascentAttempts.getOrDefault(_target, 0);
                 boolean needsClimb = feetY < _target.getY() - 1;
@@ -472,7 +503,8 @@ public class InteractWithBlockTask extends Task {
                     if (!_ascent.isActive()) {
                         _ascent.start(mod, _target, _target.getY(),
                                 () -> createGoalForInteract(_target, reachDistance, _direction,
-                                        _interactOffset, _walkInto),
+                                        _interactOffset, _walkInto,
+                                        mod.getPlayer().getBlockPos().getY()),
                                 "interact target above, feetY=" + feetY
                                         + " targetY=" + _target.getY());
                     }
@@ -714,8 +746,16 @@ public class InteractWithBlockTask extends Task {
     private Task tickDetour(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
         BlockPos feet = mod.getPlayer().getBlockPos();
+        // (2026-09-27 y 差 1 缝) 闸门由"严格同层"放宽到"同层 **或** 目标恰高一格"。
+        // 旧闸门 `feet.getY() == _target.getY()` 与爬升协调器的 `feetY < targetY-1`
+        // 恰好错开, Δy==+1 落在两条兜底之间的缝里 (现场 20260927-222854 站死 102.7s)。
+        // 目标高一格时交互站位面就是 bot 自己这一层 (见 createGoalForInteract), 所以
+        // 走廊也必须在这一层挖 —— 这也是人类做法: 沿着自己这层挖到炉子旁边。
+        // Δy==-1 不放进来: 那种几何下 GoalNear 自带"站在目标正上方"的 in-goal 格,
+        // 不缺兜底, 不扩大行为面。
+        int dyToTarget = _target.getY() - feet.getY();
         boolean gate = _direction == null
-                && feet.getY() == _target.getY()
+                && (dyToTarget == 0 || dyToTarget == 1)
                 && Math.abs(feet.getX() - _target.getX()) <= 3
                 && Math.abs(feet.getZ() - _target.getZ()) <= 3
                 && !mod.getClientBaritone().getPathingBehavior().isPathing()
@@ -790,11 +830,18 @@ public class InteractWithBlockTask extends Task {
     }
 
     /**
-     * BFS(4 方向, 固定 y=targetY): 起点 feet → 目标 4 个水平邻位之一,
+     * BFS(4 方向, 固定层 = **bot 自己脚下的层**): 起点 feet → 目标的水平 4 邻位之一,
      * 空气格 cost=1、可挖实心格 cost=100 (优先少挖)。返回需挖实心块序列
      * (bot 侧 → 目标侧); 无通路或挖块超过 {@link #DETOUR_MAX_BLOCKS} 返回 null。
+     *
+     * (2026-09-27 y 差 1 缝) 旧实现把层写死成 `_target.getY()` —— 在 Δy==1 的几何下
+     * 等于"在目标层找站位格", 而 bot 根本抬不上那一层 (这正是无解的那一层) ⇒ 走廊
+     * 计划出来也没用。改为挂在 bot 自己的层: `feetY == targetY` 时 `planeY ==
+     * _target.getY()`、horizManhattan 与 manhattan 等价, **与旧行为逐字等价**;
+     * `feetY == targetY-1` 时才有新行为 (在自己这层挖到炉子旁边)。
      */
     private List<BlockPos> planDetourPath(AltoClef mod, BlockPos start) {
+        final int planeY = start.getY();
         PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Integer.compare(a.cost, b.cost));
         Map<BlockPos, Node> best = new HashMap<>();
         Node root = new Node(start, 0, null);
@@ -804,14 +851,14 @@ public class InteractWithBlockTask extends Task {
         while (!open.isEmpty() && goal == null) {
             Node cur = open.poll();
             if (best.get(cur.pos) != cur) continue;
-            if (!cur.pos.equals(start) && cur.pos.getY() == _target.getY()
-                    && cur.pos.getManhattanDistance(_target) == 1) {
+            if (!cur.pos.equals(start) && cur.pos.getY() == planeY
+                    && horizManhattan(cur.pos, _target) == 1) {
                 goal = cur;
                 break;
             }
             for (Direction d : Direction.Type.HORIZONTAL) {
                 BlockPos np = cur.pos.offset(d);
-                if (np.getY() != _target.getY()
+                if (np.getY() != planeY
                         || Math.abs(np.getX() - _target.getX()) > 3
                         || Math.abs(np.getZ() - _target.getZ()) > 3) {
                     continue;
@@ -885,6 +932,16 @@ public class InteractWithBlockTask extends Task {
         _detourBlocks = null;
         _detourIndex = 0;
         _detourTask = null;
+    }
+
+    /**
+     * (2026-09-27 y 差 1 缝) 只看水平轴的曼哈顿距离。旧实现用
+     * {@link BlockPos#getManhattanDistance} —— Δy==1 时它会把 |dy|=1 也算进去, 于是
+     * "水平邻格"永远凑不满 1, 走廊目标不可达。走廊层固定 = bot 自己的层, 层差由闸门
+     * 管, 这里只判水平。
+     */
+    private static int horizManhattan(BlockPos a, BlockPos b) {
+        return Math.abs(a.getX() - b.getX()) + Math.abs(a.getZ() - b.getZ());
     }
 
     /** 直查真实世界(绕过 tracker 黑名单): 保证刚挖开的格能被认成空气。 */
