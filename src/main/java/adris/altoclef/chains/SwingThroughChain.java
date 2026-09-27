@@ -11,7 +11,6 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -52,6 +51,22 @@ import net.minecraft.util.shape.VoxelShape;
  *     找到就盯住它**持续挖**（上限 60 tick）而不是盲挥 4 tick；找不到退回旧行为。
  *   - 目标合法性走 WorldHelper.canBreak（已含 shouldAvoidBreaking 全部保护谓词），
  *     围场 9x9 保护盒内的栅栏不会被本反应拆掉。
+ *
+ * (2026-09-27 两处致命修复) 现场 20260927-145243 record t=10557..10855:
+ *   bot **站在杜鹃花丛顶面** (脚下一格 = azalea) 卡 14s —— 位置钉死在格子边界
+ *   (-46.5,-28.5)±0.1、hSpeed 恒定 0.064、yaw 累计转 22 圈，任务链
+ *   <ConstructNetherPortalBucketTask → PlaceObsidianBucketTask → DestroyBlockTask>
+ *   最后超时切 TimeoutWanderTask。本链全程 **0 次触发**，两条原因都在这文件里:
+ *   ① **首次触发整型溢出**（致命）: `_lastSwingTick` 初值 Long.MIN_VALUE，
+ *      `nowTick - Long.MIN_VALUE` 溢出为负数 ⇒ 冷却判据恒 false ⇒ 首次永远
+ *      进不来，而首次进不来 _lastSwingTick 就永远是 MIN_VALUE —— **自 2026-08-31
+ *      建链至今从未触发过一次**（全历史 [SWING-BREAK] 计数 = 0，09-19 那次为它
+ *      专门做的"栅栏楔住"扩展也因此从未生效）。修 = 显式判等初值。
+ *   ② **阻挡判据漏掉花丛**: `findThinBlocker` 原本排除"满立方"
+ *      (`Block.isShapeFullCube`)，而杜鹃花丛正是"满格碰撞 + nonOpaque" ⇒ 被
+ *      跳过 ⇒ 只剩盲挥 4 tick，对花丛无效。修 = 改用与 baritone
+ *      `MovementHelper.canWalkThrough` **同源**的 `isOpaqueFullCube` 排除真墙
+ *      (判据同源铁律见 03-consistency.md)。
  */
 public class SwingThroughChain extends TaskChain {
 
@@ -187,8 +202,16 @@ public class SwingThroughChain extends TaskChain {
 
         // 连续卡满阈值 tick，且距上次挥击已过冷却 => 触发挥击。
         long stuckForTicks = nowTick - _windowStartTick;
-        if (stuckForTicks >= STUCK_WINDOW_TICKS
-                && (nowTick - _lastSwingTick) >= RE_SWING_COOLDOWN_TICKS) {
+        // (2026-09-27 首次触发整型溢出, 致命) 原写法是直接
+        //     (nowTick - _lastSwingTick) >= RE_SWING_COOLDOWN_TICKS
+        // 而 _lastSwingTick 初值 = Long.MIN_VALUE ⇒ `nowTick - Long.MIN_VALUE` 在
+        // long 上**溢出为负数** ⇒ 恒 < 100 ⇒ **首次永远进不来**; 而既然首次进不来,
+        // _lastSwingTick 永远是 MIN_VALUE ⇒ 本链自 2026-08-31 建链至今**一次都没
+        // 触发过** (全历史日志 [SWING-BREAK] 计数 = 0, 含 09-19 那次为它专门做的
+        // "栅栏楔住"扩展也从未生效)。修 = 显式判等初值, 不让哨兵参与减法。
+        boolean cooldownOk = _lastSwingTick == Long.MIN_VALUE
+                || (nowTick - _lastSwingTick) >= RE_SWING_COOLDOWN_TICKS;
+        if (stuckForTicks >= STUCK_WINDOW_TICKS && cooldownOk) {
             triggerSwing(mod, stuckForTicks);
         }
     }
@@ -254,11 +277,21 @@ public class SwingThroughChain extends TaskChain {
      *
      * 只看三个候选位 (bot 自己脚所在格 → 正前方同层 → 正前方上一层，与
      * getFrontNonAirBlock 同口径)，条件：
-     *   非空气 ∧ 碰撞箱非空 ∧ **非满立方** ∧ WorldHelper.canBreak。
-     * 为什么限定"非满立方"：栅栏/墙/栏杆玻璃板这类细方块是 baritone 唯一处理不了的
-     * 形状 —— 路径走的是格中心，而格中心正是那根柱子，于是 bot 被顶在格子边缘推不动；
-     * 满立方是 baritone 的正常业务 (它自己会挖)，且 bot 若被满立方埋住，眼睛在方块
-     * 内部，getReach 打不到，取了也挖不动。
+     *   非空气 ∧ 碰撞箱非空 ∧ **baritone 判"可穿过"** ∧ WorldHelper.canBreak。
+     *
+     * <b>(2026-09-27 判据改同源)</b> 原判据是"非满立方"(`Block.isShapeFullCube`)，
+     * 它把**杜鹃花丛**这类"满格碰撞 + nonOpaque"的隐形体一起排除掉了 —— 而花丛
+     * 恰恰是本链最常遇到、也最需要处置的那一类。现场 record 20260927-145243
+     * t=10557..10855：bot 站在 azalea 顶面卡 14s (hSpeed 恒 0.064, yaw 转 22 圈)，
+     * 本链全程 0 次触发，只能靠任务层超时切 wander。
+     *
+     * 新判据 = 排除 `isOpaqueFullCube` (= baritone 自己会挖的真墙)，与
+     * `MovementHelper.canWalkThrough` **同源** (它就是用 `isOpaqueFullCube` 判"可穿")。
+     * 留下的正好是 "baritone 认为可穿过、物理上却挡人"的隐性阻挡集合：
+     *   杜鹃花丛 / 栅栏 / 墙 / 栏杆玻璃板 / 树叶 …
+     * 石头/泥土等 opaque 满立方仍交给 baritone 自己挖 (它们的眼睛射线也打不进去)。
+     * 判据同源的理由见 03-consistency.md 铁律: 造第二份口径必然与第一份漂移。
+     *
      * 为什么用 WorldHelper.canBreak 当闸门：它内部已消费 shouldAvoidBreaking，即
      * 全局保护谓词 (围场 9x9 保护盒 / 门体 / 任务注册的临时保护) 全部生效 ——
      * 本反应绝不会去拆自己的围场，也不会新增一套判据口径。
@@ -277,7 +310,7 @@ public class SwingThroughChain extends TaskChain {
             if (s.isAir()) continue;
             VoxelShape shape = s.getCollisionShape(mod.getWorld(), c);
             if (shape.isEmpty()) continue;
-            if (Block.isShapeFullCube(shape)) continue;
+            if (s.isOpaqueFullCube(mod.getWorld(), c)) continue;
             if (!WorldHelper.canBreak(mod, c)) continue;
             return c.toImmutable();
         }
