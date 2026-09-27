@@ -140,7 +140,26 @@ public class ConstructNetherPortalBucketTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
 
-        if (_refreshTimer.elapsed()) {
+        // (2026-09-27 挖哭泣黑曜石被周期性打断) 这道 "Duct tape" 每 11s 无条件
+        // 双击刷新整个主背包 (refreshInventory 对 36 槽各发两次 PICKUP) —— 会打断
+        // 正在进行的挖掘 (BlockBreakingCancelEvent → _blockBreakProgress 归零),
+        // 而本类往下会派 PlaceObsidianBucketTask 去挖门框位的 `crying_obsidian`
+        // (hardness 50, 钻石镐需 **约 9.4s 不间断**)。11s 周期必然落在挖掘中途。
+        //
+        // 现场 20260927-104143 (`_pos = -419,70,244`, 位在 bot 头顶上方 5 格):
+        //   10:57:21.788 Duct tape 刷新 → 10:57:22.139 [TIMEOUT] LinearProgressChecker
+        //     timeout=0.5s minProgress=0.001 actual=-0.645 (进度从 0.645 归零)
+        //   10:57:32.839 刷新 → 10:57:33.189 actual=-0.672
+        //   10:57:43.889 刷新 → 10:57:44.339 actual=-0.251
+        //   **三次差值恒为 +0.35s/+0.35s/+0.45s, 与 11s 周期严格对齐** ⇒ 父任务
+        //   PlaceObsidianBucketTask 判负 → return _wanderTask ⇒ 用户所见"裂纹到
+        //   七八成突然走开"。其他方块 0.4~1.5s 就挖完, 撞不上该周期, 故只有这格出事。
+        //
+        // 修法对齐 PlayerInteractionFixChain:224 的既有守卫 (同类刷新在那里本来就
+        // 带 `!isBreakingBlock()` 判据, 本文件漏了)。
+        // 注意**不在漏判时 reset timer** — 否则要再等满 11s; 保持 elapsed 为真,
+        // 挖掘一结束立刻补刷, "防卡死"的原意不受影响 (最长推迟 = 单次挖掘时长)。
+        if (_refreshTimer.elapsed() && !mod.getControllerExtras().isBreakingBlock()) {
             Debug.logMessage("Duct tape: Refreshing inventory again just in case");
             _refreshTimer.reset();
             mod.getSlotHandler().refreshInventory();
