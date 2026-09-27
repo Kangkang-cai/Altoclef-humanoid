@@ -140,13 +140,23 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 站在目标格里) 必须在 progressChecker 之前: 站在目标格内
         // 必然"无移动进展", 走 checker 会先被超时打断成 wander → 又掉回坑里
         // 死循环。这里确定性走出目标格后再交给 baritone。
-        if (mod.getPlayer().getBlockPos().equals(_target)) {
+        //
+        // (2026-09-27 身位占格扩展) 判据从"脚格 == 目标"扩为"脚格 **或头格** == 目标"。
+        // 现场 20260927-111838: 目标格 -399,7,175 (CAST_FRAME 的 (0,-1,0) 底托格) 是
+        // 空气, 而 bot 脚在 -399,6,175 —— 它的上半身/头正好占着目标格, vanilla 禁止
+        // 把方块放进自己身体 ⇒ baritone 不放置也不报错; 旧判据只认脚格, 于是落到下面的
+        // 距离判据, 每 2s 判一次 `actual=0.0` 并 `Failed to place, wandering timeout.`
+        // (11:27:16 `[PlaceStuck] placement progress failed at -399, 7, 175 (failCount=1)`)
+        // 用户现场: "他自己站在那一个, 刚要跳起来放方块结果任务就跳了" —— 就是这条判负
+        // 把刚要起跳放置的动作腰斩。修 = 先认身位占格, 让位后再交给 baritone。
+        BlockPos playerCell = mod.getPlayer().getBlockPos();
+        if (playerCell.equals(_target) || playerCell.up().equals(_target)) {
             BlockPos stepOut = pickStepOutPos(mod);
             if (stepOut != null) {
-                setDebugState("Standing inside target cell, stepping out first");
+                setDebugState("Standing in/under target cell, stepping out first");
                 return new GetToBlockTask(stepOut, false);
             }
-            setDebugState("Standing inside target cell, no walkable neighbor, wandering");
+            setDebugState("Standing in/under target cell, no walkable neighbor, wandering");
             _progressChecker.reset();
             return _wanderTask;
         }
@@ -284,12 +294,26 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
      * "Failed to place, wandering timeout" 每 5s 死循环, 见
      * memory/detail/04-symptoms.md「bot 站在目标格里」)。返回一个可站立的
      * 水平邻格 (非固体 + 头顶非固体), 让 bot 先走出目标格。
+     *
+     * (2026-09-27 身位占格) 目标格 = 自己**头格**时 (脚在 _target.down(), 见 onTick 注释),
+     * 目标同层的水平邻格基本会被"头顶被堵"整批判否 —— 1.5 格高的横洞里 y+1 就是天花板
+     * (现场 20260927-111838: 四邻 -398/-400,7,175 与 -399,7,174/176 的 y+1 全是实心)。
+     * 但 bot **自己那一层**的水平邻格其实能站也能伸手放 (现场: bot 脚在 -399,6,175 沿 x
+     * 一路可走)。故补一层"玩家脚所在层"的候选, 让 bot 侧移半步再交给 baritone。
      */
     private BlockPos pickStepOutPos(AltoClef mod) {
         for (Vec3i offset : STEP_OUT_OFFSETS) {
             BlockPos p = _target.add(offset);
             if (WorldHelper.isSolid(mod, p)) continue;      // 被堵
             if (WorldHelper.isSolid(mod, p.up())) continue; // 头顶被堵
+            return p;
+        }
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        for (Vec3i offset : STEP_OUT_OFFSETS) {
+            BlockPos p = feet.add(offset);
+            if (p.equals(_target)) continue;                // 别又退回目标格
+            if (WorldHelper.isSolid(mod, p)) continue;
+            if (WorldHelper.isSolid(mod, p.up())) continue;
             return p;
         }
         return null;
