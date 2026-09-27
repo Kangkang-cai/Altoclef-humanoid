@@ -3574,12 +3574,30 @@ public class BeatMinecraft2Task extends Task {
                 // (no-enderman-seen) → 120s 冷却 → 冷却期站桩 (19:05 引入的 hold-still)。
                 // 枯竭 ≠ 该停: 巡逻本身有走廊推进/锚点漂移 (30~60 格跨步), 且
                 // PatrolSession 跨重建保留方位角与已访问集合, 重建实例零成本 ——
-                // 直接丢弃实例【不设冷却】, 继续往下走扫描/重建, 同拍换新蹲守实例 =
-                // 巡逻无缝续走。camp-timeout (总时长上限, 让位主线) 仍走原冷却。
+                // 直接丢弃实例【不设冷却】, 下一拍用全新实例续巡逻。
+                // camp-timeout (总时长上限, 让位主线) 仍走原冷却。
                 if ("no-enderman-seen".equals(camp.getGiveUpReason())) {
                     Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCAMP-RECYCLE reason=no-enderman-seen"
                             + " (dry, no cooldown — fresh instance, patrol continues)");
-                    // 故意不 return: 落到下方扫描/重建流程。
+                    // (2026-09-27 实锤修复, 事故现场 20260927-204546) 这里必须【本拍
+                    // return null】, 让父级 Task.tickInternal 把 _sub stop 掉并置空,
+                    // 下一拍才装得上新实例。
+                    // 原写法"故意不 return, 落到下方扫描/重建流程"看似零成本换实例,
+                    // 实际踩中框架的等价判定: Task.tickInternal 用
+                    // newSub.isEqual(_sub) 决定是否替换, 而
+                    // CollectEnderPearlsInForestTask.isEqualResource 只比 _count ⇒
+                    // 新建的(未放弃)实例与栈上(已放弃)实例判为等价 ⇒ 【拒绝替换】,
+                    // 已放弃的旧实例被永久钉在任务栈上: onResourceTick 每 tick 走
+                    // `if (_gaveUp) return null` 既不派生子任务也不结束 ⇒ 整条
+                    // User Tasks 链停摆 (烈焰棒主线也拿不回所有权)。
+                    // 现场证据: 21:09:24.632 CAMP-RECYCLE 后 bot 原地冻结 64s 直到
+                    // 用户手动 @stop; NAV-STUCK mode=frozen + baritone 全空
+                    // (pathing=false path=false exec=null); [PEARL-NEAR] SCAN 仍每秒
+                    // 一条 (证明本方法每 tick 都在重建新实例, 只是被丢弃), 而
+                    // debugstate 任务栈纹丝不动地停在 "Gave up pearl camp"。
+                    // 返回 null 一拍 (= 50ms 空档): _sub.stop() 且 _sub=null, 下一拍
+                    // _sub==null 时新实例无条件装上。零冷却语义不受影响。
+                    return null;
                 } else {
                     long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
                     _pearlCampBlockedUntilMs = now + cooldownMs;
