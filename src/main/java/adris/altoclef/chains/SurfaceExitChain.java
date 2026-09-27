@@ -47,7 +47,7 @@ import net.minecraft.util.math.BlockPos;
  * <h2>与既有 3 个消费方的关系</h2>
  * 远征/探索任务的引导代码保留不动。它们跑在 FoodChain(55) 或 User Tasks(50) 之下:
  * 前者优先级高于本链 → 由它们自己消费配额 (结果相同); 后者低于本链 → 本链先接管,
- * 它们根本进不了武装窗口。两条路径都收敛到"走够 3 个落点", 不会双重消费 ——
+ * 它们根本进不了武装窗口。两条路径都收敛到"走够配额", 不会双重消费 ——
  * 因为配额是 {@link SurfaceExitGuide} 的静态计数, 谁先到达谁计数。
  */
 public class SurfaceExitChain extends SingleTaskChain {
@@ -60,7 +60,7 @@ public class SurfaceExitChain extends SingleTaskChain {
 
     /**
      * 单个落点的预算 (墙钟秒)。落点本身由 {@link SurfaceExitGuide} 保证是"露天干地面
-     * 的强签名列", 正常都在 24~64 格内, 直接可达; 但"可站立"不等于"可达" (中间可能
+     * 的强签名列", 正常都在 24~32 格内 (2026-09-27 收窄后的距离环), 直接可达; 但"可站立"不等于"可达" (中间可能
      * 隔水/隔崖)。超预算即用 {@link SurfaceExitGuide#reject} 拉黑换下一个 ——
      * 否则一个不可达的落点会把本链钉满整个 90s 武装窗口。
      */
@@ -142,7 +142,8 @@ public class SurfaceExitChain extends SingleTaskChain {
     /**
      * 本链此刻是否该接管。四个前提全部满足:
      * <ol>
-     *   <li>引导仍在武装期 ({@link SurfaceExitGuide#isArmed}: 维度=主世界 + 未满 3 次 + 90s 内);</li>
+     *   <li>引导仍在武装期 ({@link SurfaceExitGuide#isArmed}: 维度=主世界 + 未满
+     *       {@code SurfaceExitGuide.REQUIRED_ARRIVALS}(现为 2) 次 + 90s 内);</li>
      *   <li>**当下确已在地表** —— 引导的配额在翻回地下时是刻意保留的
      *       ({@code onBackBelow}: "quota kept"), 没有这道闸, 刚出洞又下去的
      *       {@code MineDownExploreTask} 会被本链硬拽回地表;</li>

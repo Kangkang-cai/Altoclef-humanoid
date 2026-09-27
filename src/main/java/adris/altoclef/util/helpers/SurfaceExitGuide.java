@@ -40,10 +40,18 @@ import net.minecraft.world.Heightmap;
  * 确实在地表 (SurfaceHelper 迟滞口径)。横跳循环里 bot 从没真正走上草地,
  * 计数不会被错误消耗; 每次重新 below→surface 翻面都重新武装 (配额清零)。
  *
- * <h3>作用域</h3>
- * 仅主世界、仅地表资源探索消费方自愿接入 (OverworldExpeditionTask 与
- * foodExplore=true 的 BiasedExploreTask); 下界远征 / 砍木挖矿探索不接入。
- * static 状态按世界隔离, 已挂 WorldStateGuard.registerAll。
+ * <h3>作用域与持有者</h3>
+ * 仅主世界、仅"当下确在地表"时生效 ({@link #isArmed} 的维度闸 + {@link #recordArrived}
+ * 的地表闸)。
+ *
+ * <p>(2026-09-27) 武装后的**执行者**是 {@code chains.SurfaceExitChain} (prio 52) ——
+ * 这之前它是"被动配额", 靠 3 个远征/探索任务自愿消费, 于是回表面主路径一处没接、
+ * 配额空转到超时 (现场 20260927-152940: 15:32:23.568 武装, 同一毫秒上层就把
+ * GoToSurfaceTask 换掉了)。远征/探索的引导分支保留, 但它们跑在 FoodChain(55) 或
+ * User Tasks(50) 之下: 前者高于 SurfaceExitChain ⇒ 自己消费; 后者低于 ⇒ 链先接管。
+ * 配额是静态计数, 两条路径不会双重消费。
+ *
+ * <p>static 状态按世界隔离, 已挂 WorldStateGuard.registerAll。
  *
  * <p>诊断标签: {@code [SURFACE-EXIT]}。
  */
@@ -52,18 +60,33 @@ public final class SurfaceExitGuide {
     private SurfaceExitGuide() {
     }
 
-    /** 出洞后强制安全落点导航的成功次数。 */
-    private static final int REQUIRED_ARRIVALS = 3;
+    /**
+     * 出洞后强制安全落点导航的成功次数。
+     * (2026-09-27 用户拍板 3 → 2: "要求分 3 次可能多余了, 分两次"。)
+     */
+    private static final int REQUIRED_ARRIVALS = 2;
     /** 安全落点距出洞位置 (洞口) 的最小水平距离 (用户拍板 24)。 */
     private static final double MIN_ANCHOR_DISTANCE = 24;
     /** 距当前玩家的最小步长 (避免选回脚下), 基础扫描半径与连续空扫描后的扩环。 */
     private static final double MIN_PLAYER_DISTANCE = 16;
-    private static final int SCAN_RADIUS = 64;
-    private static final int SCAN_RADIUS_STAGE2 = 96;  // 连续空扫描 2s 后
-    private static final int SCAN_RADIUS_STAGE3 = 128; // 再持续 4s 后: 推到已加载块边缘逼新区块
+    /**
+     * (2026-09-27 收窄) 扫描半径与距离环由"放远到 64/96/128"改为以 24 为锚的近程带。
+     *
+     * <p>用户反馈"距离要求似乎远了一点" —— 旧距离环是 {@code {24,28,32,40,48,56,64}} 且
+     * 角度锥在外层、距离环在内层, 所以偏好方向上 24 不可用时它会一路试到 64 才换方向,
+     * 空扫描后还会扩到 96/128 (被读作"要走 24~72 格")。现在距离环改成 24 起步的紧邻档:
+     * 就近优先, 宁可换个方向走 24 也不在同一方向上走 64。
+     *
+     * <p>三段仍是**连续**的 (24→32 / 36→48 / 56→80), 所以扩大只发生在"更近的档全灭"
+     * 之后 —— 那是"没得选", 不是"要求更远"。总上限由 128 收到
+     * {@link #SCAN_RADIUS_STAGE3}, 只在连续空扫描 ~6s 后才用到。
+     */
+    private static final int SCAN_RADIUS = 32;
+    private static final int SCAN_RADIUS_STAGE2 = 48;  // 连续空扫描 2s 后
+    private static final int SCAN_RADIUS_STAGE3 = 80;  // 再持续 4s 后: 推到已加载块边缘逼新区块
     private static final int EMPTY_SCANS_STAGE2 = 40;  // ~2s (缓存使实际 ~8 轮)
     private static final int EMPTY_SCANS_STAGE3 = 120; // ~6s
-    /** 武装总时长: 超时找不到 3 个可达安全点则解除, 退回普通探索防新卡死。 */
+    /** 武装总时长: 超时找不到 {@link #REQUIRED_ARRIVALS} 个可达安全点则解除, 退回普通探索防新卡死。 */
     private static final long ARM_TIMEOUT_MS = 90_000;
     /** 到达判定: 距安全目标 XZ ≤ 此值算走到 (与远征 ARRIVE_XZ=5 相容)。 */
     private static final double ARRIVE_XZ = 6;
@@ -86,10 +109,10 @@ public final class SurfaceExitGuide {
             Math.toRadians(157.5), -Math.toRadians(157.5),
             Math.PI
     };
-    /** 距离环 (相对玩家, 格): 第一跳 24 起步逐档放远; 空扫描持续时扩到 96/128。 */
-    private static final int[] DISTANCES = {24, 28, 32, 40, 48, 56, 64};
-    private static final int[] DISTANCES_STAGE2 = {72, 80, 88, 96};
-    private static final int[] DISTANCES_STAGE3 = {104, 112, 120, 128};
+    /** 距离环 (相对玩家, 格): 第一跳 24 (用户拍板"水平离开 24 格"), 就近兜底到 32。 */
+    private static final int[] DISTANCES = {24, 28, 32};
+    private static final int[] DISTANCES_STAGE2 = {36, 40, 48};
+    private static final int[] DISTANCES_STAGE3 = {56, 64, 80};
 
     // ===== 武装状态 (static: 跨探索任务实例存活, 与 SurfaceHelper 翻面同源) =====
     private static boolean _armed = false;
@@ -102,7 +125,7 @@ public final class SurfaceExitGuide {
     // 空扫描缓存 (玩家 2 格网格键 + 时间)
     private static BlockPos _nullCachePos = null;
     private static long _nullCacheAt = 0;
-    /** 连续空扫描计数 (命中落点即清零): 决定扩环档位 64→96→128。 */
+    /** 连续空扫描计数 (命中落点即清零): 决定扩环档位 32→48→80。 */
     private static int _emptyScans = 0;
 
     /** 消费方导航失败的安全点拉黑 (防确定性重选同一个不可达点), tick 时间戳 TTL。 */
@@ -233,7 +256,7 @@ public final class SurfaceExitGuide {
             return null;
         }
 
-        // 连续空扫描扩环: 64 → 96 (~2s) → 128 (~6s)。用带真实站立 y 的 3D 目标
+        // 连续空扫描扩环: 32 → 48 (~2s) → 80 (~6s)。用带真实站立 y 的 3D 目标
         // 走到已加载边缘即逼服务端下发新区块 (审查 Medium-3), 绝不发纯 XZ 目标。
         int maxRadius = _emptyScans >= EMPTY_SCANS_STAGE3 ? SCAN_RADIUS_STAGE3
                 : _emptyScans >= EMPTY_SCANS_STAGE2 ? SCAN_RADIUS_STAGE2 : SCAN_RADIUS;
