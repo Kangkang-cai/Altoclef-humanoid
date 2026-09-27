@@ -127,10 +127,32 @@ public class PlayerInteractionFixChain extends TaskChain {
                 // 后 current 变 suitable 自动停手, 不与 baritone 的放块选槽打架;
                 // 任务层装备优先权由 taskToolEquipDefers 保持 (2026-09-16)。
                 if (bestToolSlot.isPresent() && !bestToolSlot.get().equals(currentEquipped)) {
+                    ItemStack handStack = StorageHelper.getItemStackInSlot(currentEquipped);
+                    ItemStack bestStack = StorageHelper.getItemStackInSlot(bestToolSlot.get());
                     // ONLY equip if the item class is STRICTLY different (otherwise we swap around a lot)
-                    if (StorageHelper.getItemStackInSlot(currentEquipped).getItem() != StorageHelper.getItemStackInSlot(bestToolSlot.get()).getItem()) {
+                    if (handStack.getItem() != bestStack.getItem()) {
                         Debug.logMessage("Found better tool in inventory, equipping.");
-                        mod.getSlotHandler().forceEquipSlot(bestToolSlot.get());
+                        // (2026-09-27 装备失效修复, 现场 20260927-185332)
+                        // 原为 forceEquipSlot(bestToolSlot): 实测在"无界面 + 正在破坏方块"
+                        // 上下文里该点击零效果 —— craftclick.log 18:59:42.799→19:00:01.499
+                        // 连发 33 次**参数完全相同**的 SWAP slot=20 btn=7, 手上物品 18s 一次
+                        // 没变; 同期挖一格深板岩烧掉 15.3s (18:59:42.349→18:59:57.650, 铁镐
+                        // 只需 ~0.5s) ⇒ 聊天栏 "Found better tool in inventory, equipping."
+                        // 每 0.55s 刷一条而工具永远换不上手 (用户: "明明有镐子却在手挖石头")。
+                        // 触发场景: 放工作台把手持槽换成方块后, 丢垃圾流程 (ThrowCursorTask) 的
+                        // DestroyBlockTask 挖隧道 —— 挖方块本身无装备职责, 全靠本链兜底, 而
+                        // 兜底恰好是失效的实现。
+                        // 改用挖矿任务同款且库内已验证的 forceEquipItem(item) (真实扫描背包 +
+                        // 显式落位; 见 MineAndCollectTask.makeSureToolIsEquipped 2026-09-01 同
+                        // 根因说明), 全库只剩这一处仍在用 forceEquipSlot。
+                        // 诊断: 日志记录点击前后的手持物品, 供"是否真的换上手"定案。
+                        boolean ok = mod.getSlotHandler().forceEquipItem(bestStack.getItem());
+                        Debug.logToFile("altoclef_diag.log", "[BetterTool] state=" + state.getBlock()
+                                + " hand=" + handStack.getItem() + " best=" + bestStack.getItem()
+                                + " sel=" + mod.getPlayer().getInventory().selectedSlot
+                                + " bestSlot=" + bestToolSlot.get()
+                                + " ok=" + ok + " after="
+                                + StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem());
                     }
                 }
             }
