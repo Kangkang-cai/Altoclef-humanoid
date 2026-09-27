@@ -47,6 +47,24 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
 
     private final BlockPos _pos;
     private final MovementProgressChecker _moveChecker = new MovementProgressChecker(6, 0.1, 4, 0.01);
+
+    // ==== (2026-09-27) 溺水逃生豁免：本实例不参与 WATER-EXIT 让位 ====
+    // 现场 20260927-171238 实锤的跨链死结：
+    //   WorldSurvivalChain 的溺水逃生链在 17:17:16.752 判出正确动作
+    //   "DIG THROUGH blocker -42,37,-99"（挖穿压顶去够隔壁 -43,38,-99 的空气），
+    //   并用 setTask(new DestroyBlockTask(blocker)) 派发 —— 但本类自己的
+    //   WATER-EXIT 规则（下方【泡水漂浮停挖离水】段）判"泡水漂浮 + 有可达空气出口"
+    //   → 把任务转成 GetToLandTask。于是逃生链"想挖"，它派的活"被规则禁止挖"，
+    //   实际执行变成 12 秒里反复 `Getting to land`（target=-26,-99 / -31,-88 /
+    //   -42,-83 各 4s、netXZ 恒 0），而逃生链对 DestroyBlockTask 是粘性的
+    //   （WorldSurvivalChain 的 `_mainTask instanceof DestroyBlockTask` 分支一路持权），
+    //   察觉不到任务已被换掉 →
+    //   17:17:38.852 才等到 6s 零进度超时（此时空气 17:17:25.602 已掉到 0.11），
+    //   17:17:39.75 淹死。
+    // 语义：水中的"泡水漂浮就上岸"是常规采掘的省时策略（25x 惩罚下挖不动就别挖），
+    //   但对"溺水逃生"这条链，挖穿压顶恰恰是唯一出路 —— 上岸策略在这里是反向的。
+    //   故由调用方显式声明豁免，不改默认行为。
+    private final boolean _skipWaterExit;
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5, true);
 
     private final TimerGame _tryToMineTimer = new TimerGame(5);
@@ -214,7 +232,17 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     // AscentHandoffHelper, "反应式补一次"的语义不变, 只是不再由本类持有。
 
     public DestroyBlockTask(BlockPos pos) {
+        this(pos, false);
+    }
+
+    /**
+     * (2026-09-27) skipWaterExit=true 时本实例不参与 WATER-EXIT 让位（见字段区注释）。
+     * 仅供 WorldSurvivalChain 的溺水逃生链使用：它要挖穿压顶换气，被切成"上岸"
+     * 就等于放弃逃生。其余所有调用点保持默认构造器 = 行为不变。
+     */
+    public DestroyBlockTask(BlockPos pos, boolean skipWaterExit) {
         _pos = pos;
+        _skipWaterExit = skipWaterExit;
     }
 
     @Override
@@ -559,7 +587,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             // 【保活返回 + 松闩】已上提到 onTick 顶部 —— bob 顶端 reach 闪断时本块
             // 整段会被旁路, v2 因此仍每 0.2~0.4s 拆一次子任务。本块只负责【触发】
             // 与上岸后的重复触发拉黑; 触发当 tick 的就地返回保留 (立即交权, 不等下一 tick)。
-            if (reach.isPresent()) {
+            //
+            // (2026-09-27 溺水逃生豁免) _skipWaterExit=true 的实例整段跳过本规则:
+            //   逃生链要挖穿压顶换气，"泡水漂浮就上岸"在这里是反向策略（见字段区注释）。
+            //   顶部 `if (_waterExitLatched)` 保活块无需改 —— 本实例永远不会置闩。
+            if (!_skipWaterExit && reach.isPresent()) {
                 // 上岸后短时间内同目标又漂回来 = 只能泡水挖 → 拉黑换目标。
                 if (!_waterExitLatched
                         && _waterExitGroundedTick >= 0
@@ -1245,7 +1277,10 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected boolean isEqual(Task other) {
         if (other instanceof DestroyBlockTask task) {
-            return task._pos.equals(_pos);
+            // (2026-09-27) 豁免开关计入等价判据：同坐标但"是否让位给上岸"不同 =
+            // 行为不同，不能被判为同一任务复用旧实例（否则逃生派的豁免实例会被
+            // 主任务的普通实例顶掉，或反之）。
+            return task._pos.equals(_pos) && task._skipWaterExit == _skipWaterExit;
         }
         return false;
     }

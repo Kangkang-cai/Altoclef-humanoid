@@ -121,6 +121,40 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // (2026-09-22 垂直上浮优先) 只在进入该分支那一下打日志, 避免每 tick 刷屏。
     private boolean _loggedSwimUpOnce = false;
 
+    // ==== (2026-09-27 用户定案: 统一靠挖头顶逃生 + 弃挖改游门槛) ====
+    // 触发阈值 0.7 不变 (DROWN_ESCAPE_AIR_FRACTION)。本次统一的是【逃生动作用什么】:
+    // 一律先竖着挖头顶 (从 feet.up(1) 起向上扫 DROWN_DIG_UP_MAX 格, 取第一块
+    // 非空气/非水的方块), 挖得动就一直挖; 只有挖不动才允许"游出去"。
+    // 动机 (用户原话): "所有的水中脱困都要挖头顶, 游出去不可靠, 地形复杂"。
+    //   之前的落地只有一半 —— c5d3bf52 插了垂直挖顶, 但 fbcd9f90/b3d75bc6 加进来的
+    //   DIRECT SWIM (_drownSwimTarget) 判定排在整条链最前面, 一激活就整段跳过挖顶
+    //   (20260927-171238 现场 17:17:04.653 就是这么抢先的)。
+    //
+    // 弃挖改游判据 (用户口径: "空气在一定值时进度没超过一个值就触发游泳")：
+    //   ① 空气硬线 + 进度落后: air <= 0.2 且 breakProgress < 0.2;  或
+    //   ② 进度停滞: 正在挥击 (isBreakingBlock) 却连续 60 tick (3s) 进度零增长。
+    // 阈值怎么来的 (不拍脑袋, 用用户实测反推)：
+    //   实测基准 = 石镐 + 石头方块, 空气 50% 开挖, 满血, 掉 ~12 滴血后逃生成功。
+    //   模型: maxAir 300t; 水下(无水下速掘)÷5 × 悬空÷5 = 25x 惩罚;
+    //         石镐 speed=4.0, 石头 hardness=1.5 ⇒ 每 tick 进度 = (4.0/25)/1.5/30
+    //         ⇒ 一格 = 281 tick ≈ 14.05s; 空气 50% = 150t = 7.5s; 空气耗尽后
+    //         20t(1s) 到 -20 起掉血 2 HP/s ⇒ 7.5 + 1 + 5.55 ≈ 14.05s 完成
+    //         ⇒ 掉血 ≈ 11 滴 —— 与实测 12 滴吻合 (误差 <1 滴), 模型可用。
+    //   ⇒ 生存时间 T_surv(a) = 15a + 11 秒 (300a/20 秒耗尽 + 1s 宽限 + 满血 10s)。
+    //   取 air 门槛 0.2: T_surv(0.2) = 14s; 本次要游 4.5 格 ≈ 2.3s + 出水 2s ≈ 4.3s
+    //     ⇒ 余 ~9.7s, 够用; 再往后就必须动掉血预算了。
+    //   取 progress 门槛 0.2 (与 air 同值): 按上面基准, 空气掉到 0.2 时正常进度应约
+    //     90/281 ≈ 0.32 ⇒ 门槛 0.2 = "只比基准落后约 1/3 才弃挖", 既保住实测那次
+    //     成功 (0.32 > 0.2 不弃), 又能挡住恒 0 的情况。
+    private static final int DROWN_DIG_UP_MAX = 4;
+    private static final double DROWN_DIG_BAIL_AIR_FRACTION = 0.2;
+    private static final double DROWN_DIG_BAIL_PROGRESS = 0.2;
+    private static final int DROWN_DIG_STALL_TICKS = 60;
+    private static final int DROWN_DIG_DIAG_TICKS = 10;
+    private long _drownDigLastProgressTick = Long.MIN_VALUE;
+    private double _drownDigLastProgress = -1;
+    private long _drownDigDiagTick = Long.MIN_VALUE;
+
     // ==== 盾牌看门狗 (2026-09-11, 用户复盘 21:10 死于骷髅射杀) ====
     // 每 30s 检查一次 (2026-09-22 用户 60→30): 副手+背包都没盾时, 材料够
     // (1 铁锭+6 木板)就马上合成, 材料不够跳过不管(不主动去挖铁, 用户原话"没有就跳过不管了")。
@@ -570,7 +604,25 @@ public class WorldSurvivalChain extends SingleTaskChain {
         // 已有逃生任务在跑:
         if (isCurrentlyRunning(mod)) {
             if (_mainTask instanceof DestroyBlockTask) {
-                // 挖穿障碍中: 粘性直至挖掉或任务自身放弃 (6s 无进度自兜底)。
+                // (2026-09-27) 挖顶/挖穿期间评估"还挖不挖得动": 不合格就弃挖改游。
+                if (shouldBailDigToSwim(mod, airFrac)) {
+                    BlockPos bailAir = findNearestBreathable(mod);
+                    if (bailAir != null) {
+                        setTask(null);
+                        _drownSwimTarget = bailAir;
+                        _drownSwimStartTick = WorldHelper.getTicks();
+                        _drownSwimStartPos = p.getPos();
+                        try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
+                        String m = "[DROWN-ESCAPE] dig bailed -> SWIM OUT to " + bailAir.toShortString()
+                                + " (air=" + String.format("%.2f", airFrac)
+                                + " progress=" + String.format("%.2f", mod.getControllerExtras().getBreakingBlockProgress())
+                                + ") player=" + p.getBlockPos();
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                        return DROWN_ESCAPE_PRIORITY;
+                    }
+                }
+                // 挖穿障碍中: 粘性直至挖掉或任务自身放弃。
                 return DROWN_ESCAPE_PRIORITY;
             }
             if (_mainTask instanceof GetToBlockTask) {
@@ -598,20 +650,33 @@ public class WorldSurvivalChain extends SingleTaskChain {
         //    铁矿石压顶, feet.up(2)=(1030,21,-320) 才是旧的 cap。旧代码只查 up(2), 漏掉
         //    紧贴头顶的 up(1), 反让 DestroyBlockTask 去清 cap 前方 occluder 卡死淹死);
         //  - 垂直方向从 up(1) 起被实心厚顶/不可碎封死 → 回退 findNearestBreathable。
-        // 判断必须覆盖 feet.up(1) 与 feet.up(2) 两格: 水底时脚在 y, 身体占 y~y+2,
-        // 真正挡住上浮的是这区间里的第一块实心方块。
+        // (2026-09-27) 扫描深度已从"必须覆盖 feet.up(1) 与 feet.up(2) 两格"泛化为
+        // DROWN_DIG_UP_MAX 格: 水底时脚在 y、身体占 y~y+2, 但 bot 半浮/下潜过后
+        // 压顶完全可能落在第 3、4 格 (本次现场就是 up(3)), 只扫两格会漏。
         BlockPos feetPos = p.getBlockPos();
-        BlockPos up1 = feetPos.up(1);
-        BlockPos up2 = feetPos.up(2);
-        // 从 up(1) 开始: 若整格都是可呼吸(空气/水)则该格可穿过, 继续看 up(2)。
-        boolean up1Breathable = mod.getChunkTracker().isChunkLoaded(up1)
-                && (WorldHelper.isAir(mod, up1)
-                    || mod.getWorld().getBlockState(up1).getBlock() == Blocks.WATER);
-        boolean up2Breathable = mod.getChunkTracker().isChunkLoaded(up2)
-                && (WorldHelper.isAir(mod, up2)
-                    || mod.getWorld().getBlockState(up2).getBlock() == Blocks.WATER);
-        if (up1Breathable && up2Breathable) {
-            // 头顶两格都通 → 直接向上游, 绕过 baritone 水下寻路死区。
+        // (2026-09-27 从"只看 up(1)/up(2)"泛化为 DROWN_DIG_UP_MAX 格)
+        // 从 up(1) 起向上找第一块"非空气且非水"的方块 = 真正挡住上浮的压顶。
+        //   · 扫描窗口内全是空气/水 → 上方是通的, 直接向上游;
+        //   · 找到且可挖 → 挖它 (统一逃生动作);
+        //   · 找到但不可挖 (厚顶/不可碎/区块未载) → 回退 findNearestBreathable。
+        // 现场依据 20260927-171238: bot 卡在 y=34, 压顶其实在 up(3) (-42,37,-99),
+        // 旧版只扫两格 ⇒ 直接落到侧向路径 ⇒ "挖头顶"这条规矩在这类现场根本不生效。
+        BlockPos upBlocker = null;
+        boolean upBlockerUnbreakable = false;
+        for (int i = 1; i <= DROWN_DIG_UP_MAX; i++) {
+            BlockPos cell = feetPos.up(i);
+            if (!mod.getChunkTracker().isChunkLoaded(cell)) {
+                upBlockerUnbreakable = true; // 未载 = 不能断言可挖, 按封死处理
+                break;
+            }
+            BlockState cs = mod.getWorld().getBlockState(cell);
+            if (cs.isAir() || cs.getBlock() == Blocks.WATER) continue; // 可穿过, 继续往上找
+            upBlocker = cell;
+            if (!WorldHelper.canBreak(mod, cell)) upBlockerUnbreakable = true;
+            break;
+        }
+        if (upBlocker == null) {
+            // 头顶扫描窗口全通 → 直接向上游, 绕过 baritone 水下寻路死区。
             _loggedNoBreathable = false;
             _drownSwimTarget = null;
             try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
@@ -625,47 +690,32 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 _loggedSwimUpOnce = true;
                 String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
                         + " -> SWIM UP (vertical) player=" + feetPos
-                        + " head=" + up1.toShortString();
+                        + " head=" + feetPos.up(1).toShortString();
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
             }
             return DROWN_ESCAPE_PRIORITY;
         }
         _loggedSwimUpOnce = false;
-        // 紧贴头顶 up(1) 就有实心方块 (现场的 feet.up(1) 铁矿石) → 优先挖它,
-        // 这是最靠近的压顶, 挖掉后身体就有上浮空间。别再派 cap(up2) 让它去清 occluder。
-        if (mod.getChunkTracker().isChunkLoaded(up1)
-                && !WorldHelper.isAir(mod, up1)
-                && mod.getWorld().getBlockState(up1).getBlock() != Blocks.WATER
-                && WorldHelper.canBreak(mod, up1)) {
+        // (2026-09-27) 统一逃生动作 = 挖头顶: 挖掉 up1..up4 里第一块实心可碎的方块,
+        // 挖通后该格变空气/水, 下一轮扫描自然继续往上一格推进, 直到通到水面。
+        // skipWaterExit=true —— 否则 DestroyBlockTask 自己的"泡水漂浮就上岸"规则
+        // 会把这条唯一活路切成 GetToLandTask (20260927-171238 死因, 见该类字段区注释)。
+        if (upBlocker != null && !upBlockerUnbreakable) {
             _drownSwimTarget = null;
-            setTask(new DestroyBlockTask(up1));
+            setTask(new DestroyBlockTask(upBlocker, true));
             _drownReissueTimer.reset();
             _drownPathlessTimer.reset();
+            resetDrownDigTracking();
             String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
-                    + " -> DIG UP cap(1) " + up1.toShortString()
+                    + " -> DIG UP cap " + upBlocker.toShortString()
+                    + " (up" + (upBlocker.getY() - feetPos.getY()) + ")"
                     + " player=" + feetPos;
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
             return DROWN_ESCAPE_PRIORITY;
         }
-        // up(1) 通了但 up(2) 有实心方 → 挖 up(2)。
-        if (mod.getChunkTracker().isChunkLoaded(up2)
-                && !WorldHelper.isAir(mod, up2)
-                && mod.getWorld().getBlockState(up2).getBlock() != Blocks.WATER
-                && WorldHelper.canBreak(mod, up2)) {
-            _drownSwimTarget = null;
-            setTask(new DestroyBlockTask(up2));
-            _drownReissueTimer.reset();
-            _drownPathlessTimer.reset();
-            String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
-                    + " -> DIG UP cap(2) " + up2.toShortString()
-                    + " player=" + feetPos;
-            Debug.logMessage(m);
-            Debug.logToFile("altoclef_diag.log", m);
-            return DROWN_ESCAPE_PRIORITY;
-        }
-        // up(1)/up(2) 均不可穿过也不可碎 (实心厚顶/不可碎) → 回退 findNearestBreathable。
+        // 压顶不可挖 (实心厚顶/不可碎/区块未载) → 回退 findNearestBreathable 找侧向出路。
         _drownSwimTarget = null;
         BlockPos air = findNearestBreathable(mod);
         if (air == null) {
@@ -681,9 +731,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
         _loggedNoBreathable = false;
         BlockPos blocker = findBlockerOnLine(mod, air);
         if (blocker != null) {
-            setTask(new DestroyBlockTask(blocker));
+            setTask(new DestroyBlockTask(blocker, true));
             _drownReissueTimer.reset();
             _drownPathlessTimer.reset();
+            resetDrownDigTracking();
             String m = "[DROWN-ESCAPE] air=" + String.format("%.2f", airFrac)
                     + " -> DIG THROUGH blocker " + blocker.toShortString()
                     + " (target air " + air.toShortString() + ") player=" + p.getBlockPos();
@@ -722,6 +773,64 @@ public class WorldSurvivalChain extends SingleTaskChain {
             }
         }
         return DROWN_ESCAPE_PRIORITY;
+    }
+
+    /** 换挖顶目标时重置进度跟踪 (见字段区 2026-09-27 注释)。 */
+    private void resetDrownDigTracking() {
+        _drownDigLastProgressTick = WorldHelper.getTicks();
+        _drownDigLastProgress = -1;
+    }
+
+    /**
+     * (2026-09-27) 逃生挖顶"弃挖改游"判据 (阈值推导见字段区注释)。
+     *
+     * 返回 true = 放弃挖掘、改为直接游向最近呼吸点：
+     *   ① air <= 0.2 且破坏进度 < 0.2 (空气硬线 + 进度落后); 或
+     *   ② 正在挥击却连续 DROWN_DIG_STALL_TICKS(60t) 进度零增长
+     *      (本次事故形态: DigGuard 202 tick 恒零进度)。
+     * 顺带每 DROWN_DIG_DIAG_TICKS 打一条零行为诊断 [DROWN-DIG-DIAG]:
+     *   "在挖却零进度"到底是进度被反复清零、还是攻击根本没生效、还是准星漂了,
+     *   靠 progress / stall / breaking / crosshairOn 四列区分。不改任何行为。
+     */
+    private boolean shouldBailDigToSwim(AltoClef mod, double airFrac) {
+        var p = mod.getPlayer();
+        if (p == null) return false;
+        var extras = mod.getControllerExtras();
+        boolean breaking = extras.isBreakingBlock();
+        double progress = extras.getBreakingBlockProgress();
+        long nowTick = WorldHelper.getTicks();
+
+        // 进度有增长 → 刷新跟踪; 没在挥击 (baritone 还在接近目标) → 同样刷新, 不计停滞。
+        if (!breaking || progress > _drownDigLastProgress) {
+            _drownDigLastProgress = progress;
+            _drownDigLastProgressTick = nowTick;
+        }
+        long stallTicks = _drownDigLastProgressTick == Long.MIN_VALUE
+                ? 0 : nowTick - _drownDigLastProgressTick;
+
+        if (nowTick - _drownDigDiagTick >= DROWN_DIG_DIAG_TICKS) {
+            _drownDigDiagTick = nowTick;
+            try {
+                BlockPos bt = extras.getBreakingBlockPos();
+                Debug.logToFile("altoclef_diag.log", "[DROWN-DIG-DIAG] air="
+                        + String.format("%.2f", airFrac)
+                        + " progress=" + String.format("%.3f", progress)
+                        + " stall=" + stallTicks + "/" + DROWN_DIG_STALL_TICKS
+                        + " breaking=" + breaking
+                        + " target=" + (bt == null ? "none" : bt.toShortString())
+                        + " crosshairOn=" + (bt != null && LookHelper.isLookingAt(mod, bt))
+                        + " onGround=" + p.isOnGround()
+                        + " inWater=" + p.isTouchingWater()
+                        + " pos=" + p.getBlockPos().toShortString());
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (!breaking) return false; // 还没开挥 (接近途中) 不算挖不动
+        if (airFrac <= DROWN_DIG_BAIL_AIR_FRACTION && progress < DROWN_DIG_BAIL_PROGRESS) {
+            return true;
+        }
+        return stallTicks >= DROWN_DIG_STALL_TICKS;
     }
 
     /**
@@ -773,9 +882,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 && WorldHelper.canBreak(mod, headBlocker)
                 && !mod.getWorld().getBlockState(headBlocker).isAir()) {
             _drownSwimTarget = null;
-            setTask(new DestroyBlockTask(headBlocker));
+            setTask(new DestroyBlockTask(headBlocker, true));
             _drownReissueTimer.reset();
             _drownPathlessTimer.reset();
+            resetDrownDigTracking();
             String m = "[DROWN-ESCAPE] dig HEAD blocker " + headBlocker.toShortString()
                     + " (direct swim stalled) player=" + feet;
             Debug.logMessage(m);
@@ -789,9 +899,10 @@ public class WorldSurvivalChain extends SingleTaskChain {
                 && WorldHelper.canBreak(mod, frontBlocker)
                 && !mod.getWorld().getBlockState(frontBlocker).isAir()) {
             _drownSwimTarget = null;
-            setTask(new DestroyBlockTask(frontBlocker));
+            setTask(new DestroyBlockTask(frontBlocker, true));
             _drownReissueTimer.reset();
             _drownPathlessTimer.reset();
+            resetDrownDigTracking();
             String m = "[DROWN-ESCAPE] dig FRONT blocker " + frontBlocker.toShortString()
                     + " (direct swim stalled) player=" + feet;
             Debug.logMessage(m);
