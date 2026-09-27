@@ -159,6 +159,22 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
             return _unstuckTask;
         }
 
+        // (2026-09-27 卡死处置接线) wander 自己也会卡 —— 而且卡住时本任务原来的
+        // 脱困逻辑够不着它:
+        //   ① 上面的 _unstuckTask 只在 _progressChecker 失败(6s)时、且
+        //      `stuckInBlock` 命中 ANNOYING_STUCK_BLOCKS 才设置；该白名单 =
+        //      木围栏 + ItemHelper.FLOWER + 藤蔓/芽等，**不含杜鹃花丛**；
+        //   ② `stuckInBlock` 只查 p / p.up() / 四周 sides，**不查 p.down()**，
+        //      而杜鹃花丛恰恰在 bot 脚下一格。
+        // 现场 20260927-145243 record t=10557..10855: 任务超时切到本任务后仍原地
+        // 卡到会话结束 ([NAV-STUCK] dur=10.149s mode=frozen)。这里接上通用跳卡
+        // 处置 (挖障/forceCancel/强制脱离)，与 CustomBaritoneGoalTask 同款前置。
+        // 注: JumpStuckResolver 内已有挖掘/岩浆/垫柱三条豁免，合法静止不会误触发。
+        Task jumpFix = JumpStuckResolver.tick(mod);
+        if (jumpFix != null) {
+            return jumpFix;
+        }
+
         if (_executingPlanB) {
             setDebugState("Plan B: Bearing-locked direction.");
             if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {

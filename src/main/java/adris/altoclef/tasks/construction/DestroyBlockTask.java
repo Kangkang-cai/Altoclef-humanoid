@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.movement.GetToLandTask;
+import adris.altoclef.tasks.movement.JumpStuckResolver;
 import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
@@ -620,6 +621,28 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         } else {
             setDebugState("Getting to block...");
+
+            // (2026-09-27 卡死处置接线) "走向目标"这一段是 baritone 自己在跑
+            // (下面 setGoalAndPath)，而本类是 `extends Task` —— **卡死处置链
+            // (JumpStuckResolver) 原本一处都没接**，只有 5 个导航类任务接了。
+            // 于是"去目标的路上被卡住"这条路径上，挖障/forceCancel/强制脱离
+            // 全部不可达: 全历史日志里本次这类链 0 条 [JumpStuck]。
+            //
+            // 现场 20260927-145243 record t=10557..10855 实锤: bot 站在杜鹃花丛
+            // 顶面 (脚下一格 = azalea) 卡 14s —— 位置钉死在 (-46.5,-29,-28.5)±0.1、
+            // hSpeed 恒定 0.064、yaw 累计转 22 圈；本任务 debug state 全程
+            // "Getting to block..." 直至上层 6s 进度判负切 TimeoutWanderTask。
+            // (根因见 AltoClef.initializeBaritoneSettings 的 avoidWalkingThrough
+            //  注册点注释: 花丛 nonOpaque+满格碰撞 ⇒ baritone 误判可穿。)
+            //
+            // 接在 tryClearOccluder 之前: 那个是"目标被遮挡"的专用处置 (要求目标
+            // 已在挖掘距离内)，本处是"走都走不动"的通用处置 —— 后者不解决，前者
+            // 也没机会生效。JumpStuckResolver 自带 1s streak + 三证据 + 挖掘/岩浆/
+            // 垫柱三条豁免，正常导航不会误触发。
+            Task jumpFix = JumpStuckResolver.tick(mod);
+            if (jumpFix != null) {
+                return jumpFix;
+            }
 
             // (2026-09-15 叶包裹不垫塔) 目标本体已在挖掘距离内、只是视线被中间方块
             // (树叶等可挖方块)挡住 → 先挖掉挡块, 不进垫塔。现场 20260915-174702:
