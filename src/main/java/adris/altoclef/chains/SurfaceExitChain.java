@@ -140,6 +140,29 @@ public class SurfaceExitChain extends SingleTaskChain {
     }
 
     /**
+     * 恒 true —— **本仓链的铁律, 漏了等于本链不存在**。
+     *
+     * <p>{@link adris.altoclef.tasksystem.TaskRunner} 的仲裁循环开头就是
+     * {@code if (!chain.isActive()) continue;}, 而 {@link SingleTaskChain#isActive()}
+     * 的默认实现是 {@code _mainTask != null}。本链是"按需 setTask"型 (平时没有任务),
+     * 于是形成死锁: 不 setTask ⇒ isActive=false ⇒ getPriority 永不被调用 ⇒ 永远不会
+     * setTask。
+     *
+     * <p>**首次实跑就是这么栽的** (会话 20260927-161127): 16:12:04.404 武装、
+     * 16:13:34.004 超时解除, 全程 **0 次** getPriority 调用、0 条所有权变更日志,
+     * 那 2 次配额被 {@code BiasedExploreTask}(食物探索) 顺手消费掉 —— 日志看起来
+     * "修复生效了"(armed 2 次 / reached ×2 / disarmed), 实则本链一次没跑。
+     *
+     * <p>同款覆写见 {@code WorldSurvivalChain:1004} / {@code MLGBucketFallChain:118} /
+     * {@code SwingThroughChain:398}; 唯一不该覆写的是 {@code UserTaskChain}(它靠
+     * _mainTask 判活)。
+     */
+    @Override
+    public boolean isActive() {
+        return true;
+    }
+
+    /**
      * 本链此刻是否该接管。四个前提全部满足:
      * <ol>
      *   <li>引导仍在武装期 ({@link SurfaceExitGuide#isArmed}: 维度=主世界 + 未满

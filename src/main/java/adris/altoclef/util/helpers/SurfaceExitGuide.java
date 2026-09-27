@@ -376,7 +376,7 @@ public final class SurfaceExitGuide {
         Debug.logMessage("[SURFACE-EXIT] reached safe landing " + _arrivedCount + "/"
                 + REQUIRED_ARRIVALS + " at " + mod.getPlayer().getBlockPos());
         if (_arrivedCount >= REQUIRED_ARRIVALS) {
-            disarm("3 safe surface arrivals completed");
+            disarm(REQUIRED_ARRIVALS + " safe surface arrivals completed");
         }
         return true;
     }
