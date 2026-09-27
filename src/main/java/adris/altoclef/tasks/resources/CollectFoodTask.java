@@ -154,6 +154,46 @@ public class CollectFoodTask extends Task {
     }
 
     /**
+     * (2026-09-26 远征收队, 用户"这个远征应该在再次收集到一定量食物时关闭, 比如
+     * 20 units") 远征态下检查: 背包食物分数相对【进入远征那一刻】的基线增量
+     * 达到 {@code Settings.foodExpeditionExitUnits} → 关闭远征态。
+     *
+     * <p>语义: 远征是"连续长时间没找到食物"的应急手段 (锁方位角一路向)。增量
+     * 达标 = 已走出食物真空区、重新开始有产出, 此时继续锁着方位角行军只会把
+     * bot 带离刚找到的食源地 —— 该恢复正常觅食。
+     *
+     * <p>关闭时必须一并重置搜索时钟: {@code s_foodSearchStartMs} 停留在进远征
+     * 之前的旧值, 若不清, 下一 tick "无增长超时" 立刻再次成立 → 退出即重进,
+     * 判据形同虚设。基线分数缺省 (-1, 旧会话残留 / 换存档后首拍) 时只补记、
+     * 本轮不判退出, 避免把"进远征前就有的存量"误算成增量。
+     *
+     * <p>不改 {@code s_foodPeakReached} : 峰值锁存是"吃满过就不再为回落而收集"
+     * 的独立语义, 与远征开关无关。
+     */
+    private void checkExpeditionExit(AltoClef mod) {
+        int exitUnits = mod.getModSettings().getFoodExpeditionExitUnits();
+        if (exitUnits <= 0) return;
+        int cur = StorageHelper.calculateInventoryFoodScore(mod);
+        if (FoodChain.s_foodExpeditionBaselineScore < 0) {
+            FoodChain.s_foodExpeditionBaselineScore = cur;
+            return;
+        }
+        int gained = cur - FoodChain.s_foodExpeditionBaselineScore;
+        if (gained < exitUnits) return;
+        int baseline = FoodChain.s_foodExpeditionBaselineScore;
+        FoodChain.s_foodExpeditionActive = false;
+        FoodChain.s_foodExpeditionBaselineScore = -1;
+        FoodChain.s_foodSearchStartMs = System.currentTimeMillis();
+        FoodChain.s_foodSearchBestPotential = calculateFoodPotential(mod);
+        FoodChain.s_foodGainPendingSinceMs = -1;
+        _expeditionMode = false;
+        Debug.logToFile("altoclef_diag.log",
+                "[FOOD-EXPEDITION]\tcollected +" + gained + " >= " + exitUnits
+                        + " units since expedition start (score " + baseline + " -> " + cur
+                        + ") -> expedition mode OFF, exploration unlocked");
+    }
+
+    /**
      * (2026-09-15 进下界前硬闸) ignoreExpeditionReduction=true 时达标线不受
      * 觅食远征降低量影响 —— 硬性门槛 (如进地狱前 150 units) 必须收满。
      */
@@ -389,16 +429,19 @@ public class CollectFoodTask extends Task {
             if (timeoutSeconds > 0
                     && System.currentTimeMillis() - FoodChain.s_foodSearchStartMs >= timeoutSeconds * 1000) {
                 FoodChain.s_foodExpeditionActive = true;
+                FoodChain.s_foodExpeditionBaselineScore = StorageHelper.calculateInventoryFoodScore(mod);
                 _expeditionMode = true;
                 int reduced = mod.getModSettings().getFoodExpeditionReducedUnits();
                 Debug.logToFile("altoclef_diag.log",
                         "[FOOD-EXPEDITION]\tno food progress for " + (int) timeoutSeconds
                                 + "s (best potential " + (int) FoodChain.s_foodSearchBestPotential
                                 + ", need " + (int) _unitsNeeded + ") -> expedition mode, target reduced to "
-                                + Math.min(_unitsNeeded, reduced > 0 ? reduced : _unitsNeeded));
+                                + Math.min(_unitsNeeded, reduced > 0 ? reduced : _unitsNeeded)
+                                + ", baseline score " + FoodChain.s_foodExpeditionBaselineScore);
             }
         } else {
             _expeditionMode = true;
+            checkExpeditionExit(mod);
         }
 
         // If we were previously smelting, keep on smelting.

@@ -55,6 +55,13 @@ public class FoodChain extends SingleTaskChain {
     public static boolean s_foodExpeditionActive = false;
     public static long s_foodSearchStartMs = -1;
     public static double s_foodSearchBestPotential = -1;
+    /**
+     * (2026-09-26 远征收队) 进入远征那一刻的背包食物分数基线; 远征期间当前分数
+     * 相对它的增量达到 {@code Settings.foodExpeditionExitUnits}(默认 20) 即关闭
+     * 远征态 (已走出食物真空区)。<0 = 无有效基线 (尚未进远征/刚被清), 此时
+     * 由 CollectFoodTask 用当前分数补记, 本轮不判退出。
+     */
+    public static int s_foodExpeditionBaselineScore = -1;
     // (2026-09-22 防尖峰重置) 潜力新高的"持续确认"起点: 新高必须持续
     // FOOD_GAIN_CONFIRM_MS (CollectFoodTask) 才重置无增长时钟。static 跨实例
     // 存续, 与上方三个字段同理。
@@ -72,6 +79,7 @@ public class FoodChain extends SingleTaskChain {
         s_foodSearchStartMs = -1;
         s_foodSearchBestPotential = -1;
         s_foodGainPendingSinceMs = -1;
+        s_foodExpeditionBaselineScore = -1;
     }
 
     private int _cachedFoodScore;

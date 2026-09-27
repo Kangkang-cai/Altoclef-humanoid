@@ -141,6 +141,17 @@ public class Settings implements IFailableConfigFile {
      */
     private int foodExpeditionReducedUnits = 120;
 
+    /**
+     * (2026-09-26 远征收队, 用户"这个远征应该在再次收集到一定量食物时关闭, 比如
+     * 20 units") 远征期间背包食物分数相对【进入远征那一刻】的增量达到该值 →
+     * 关闭远征态 (s_foodExpeditionActive=false), 达标线恢复常规、探索不再锁方位角。
+     * <p>
+     * 语义: 远征是"长时间找不到食物"的应急手段, 增量达标 = 已走出食物真空区、
+     * 重新开始有产出, 此时继续锁着方位角行军反而把 bot 带离已找到的食源地。
+     * <=0 时禁用该收队判据 (远征只能靠食物达标结束)。
+     */
+    private int foodExpeditionExitUnits = 20;
+
 
     /**
      * Chests are cached for their contents.
@@ -1010,6 +1021,10 @@ public class Settings implements IFailableConfigFile {
 
     public int getFoodExpeditionReducedUnits() {
         return foodExpeditionReducedUnits;
+    }
+
+    public int getFoodExpeditionExitUnits() {
+        return foodExpeditionExitUnits;
     }
 
     public boolean isMobDefense() {
