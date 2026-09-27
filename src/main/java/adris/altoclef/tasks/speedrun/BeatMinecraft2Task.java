@@ -3569,44 +3569,26 @@ public class BeatMinecraft2Task extends Task {
         if (_opportunisticPearlTask != null) {
             if (_opportunisticPearlTask instanceof CollectEnderPearlsInForestTask camp && camp.hasGivenUp()) {
                 _opportunisticPearlTask = null;
-                // (2026-09-21 用户拍板"冷却=原地不动没意义, 继续 patrolling 找末影人,
-                // 走的距离远一点") 现场 230958: 蹲守 60s 没见末影人 giveup
-                // (no-enderman-seen) → 120s 冷却 → 冷却期站桩 (19:05 引入的 hold-still)。
-                // 枯竭 ≠ 该停: 巡逻本身有走廊推进/锚点漂移 (30~60 格跨步), 且
-                // PatrolSession 跨重建保留方位角与已访问集合, 重建实例零成本 ——
-                // 直接丢弃实例【不设冷却】, 下一拍用全新实例续巡逻。
-                // camp-timeout (总时长上限, 让位主线) 仍走原冷却。
-                if ("no-enderman-seen".equals(camp.getGiveUpReason())) {
-                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCAMP-RECYCLE reason=no-enderman-seen"
-                            + " (dry, no cooldown — fresh instance, patrol continues)");
-                    // (2026-09-27 实锤修复, 事故现场 20260927-204546) 这里必须【本拍
-                    // return null】, 让父级 Task.tickInternal 把 _sub stop 掉并置空,
-                    // 下一拍才装得上新实例。
-                    // 原写法"故意不 return, 落到下方扫描/重建流程"看似零成本换实例,
-                    // 实际踩中框架的等价判定: Task.tickInternal 用
-                    // newSub.isEqual(_sub) 决定是否替换, 而
-                    // CollectEnderPearlsInForestTask.isEqualResource 只比 _count ⇒
-                    // 新建的(未放弃)实例与栈上(已放弃)实例判为等价 ⇒ 【拒绝替换】,
-                    // 已放弃的旧实例被永久钉在任务栈上: onResourceTick 每 tick 走
-                    // `if (_gaveUp) return null` 既不派生子任务也不结束 ⇒ 整条
-                    // User Tasks 链停摆 (烈焰棒主线也拿不回所有权)。
-                    // 现场证据: 21:09:24.632 CAMP-RECYCLE 后 bot 原地冻结 64s 直到
-                    // 用户手动 @stop; NAV-STUCK mode=frozen + baritone 全空
-                    // (pathing=false path=false exec=null); [PEARL-NEAR] SCAN 仍每秒
-                    // 一条 (证明本方法每 tick 都在重建新实例, 只是被丢弃), 而
-                    // debugstate 任务栈纹丝不动地停在 "Gave up pearl camp"。
-                    // 返回 null 一拍 (= 50ms 空档): _sub.stop() 且 _sub=null, 下一拍
-                    // _sub==null 时新实例无条件装上。零冷却语义不受影响。
-                    return null;
-                } else {
-                    long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
-                    _pearlCampBlockedUntilMs = now + cooldownMs;
-                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
-                            + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
-                    // (2026-09-19) 冷却一生效就必须退出。原来这里没有 return, 会继续往下
-                    // 用旧锚点重建蹲守任务 → "放弃→同 tick 立刻重开"横跳, 冷却形同虚设。
-                    return null;
-                }
+                // (2026-09-27 用户拍板"短时间内不再触发收集末影珍珠") 枯竭放弃
+                // (no-enderman-seen) 与总时长放弃 (camp-timeout) 统一走冷却:
+                // 冷却期 getForestPearlCampTask 返回 null → 顺手阶段烈焰棒主线
+                // 自然接管 (= "换任务")。原 no-enderman-seen "无冷却原地重开"
+                // (09-21 拍板) 实测 = 在同一片没货的林子里反复蹭步, 已由蹲守任务
+                // 内部的"dry 过半定向远走"档取代 (放大行走距离找新林盘)。
+                long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
+                _pearlCampBlockedUntilMs = now + cooldownMs;
+                Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
+                        + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
+                // (2026-09-27 实锤修复, 事故现场 20260927-204546) 这里必须【本拍
+                // return null】, 让父级 Task.tickInternal 把 _sub stop 掉并置空,
+                // 下一拍才装得上新实例。"故意不 return, 落到下方扫描/重建"会被
+                // Task.tickInternal 的 newSub.isEqual(_sub) 判等价 (isEqualResource
+                // 只比 _count) 而拒绝替换, 已放弃的死实例被永久钉在任务栈上:
+                // onResourceTick 每 tick return null 既不派生子任务也不结束 ⇒
+                // 整条 User Tasks 链停摆 (现场: bot 原地冻结 64s 直到用户手动停;
+                // [PEARL-NEAR] SCAN 每秒一条证明上层一直在重建新实例但全被丢弃)。
+                // 返回 null 一拍后冷却已生效, 下一拍在方法开头即被挡住, 不会重建。
+                return null;
             } else if (shouldForce(mod, _opportunisticPearlTask)) {
                 return _opportunisticPearlTask;
             }

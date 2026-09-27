@@ -149,6 +149,23 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final int PATROL_VISITED_CAP = 400;
 
     // ------------------------------------------------------------------
+    // (2026-09-27 用户拍板) 枯竭分级: dry 计时过半 (30s) 就切"定向远走"档 ——
+    // 沿锁定方位角连走 24~48 格找新林盘, 不再在小盘里 1~3 格蹭步 (现场
+    // 20260927-213328: 22 秒 visited +5 全是小步, 且 anchor-advance 在两点间
+    // 弹跳); dry 线 (60s) 到点才放弃+冷却。远走的落点必须落在森林缓存点上,
+    // 到位即把锚点推进过去 (远走 = 锚点沿走廊推进, 防"走远又被拽回旧锚")。
+    // ------------------------------------------------------------------
+    /** dry 计时到枯竭线的这个比例时切入远走档 (60s 线 → 30s 切)。 */
+    private static final double DRY_EXPEDITION_FRACTION = 0.5;
+    /** 单段远走的步长范围 (格): 随机取值, 净位移 = 步长。 */
+    private static final double DRY_EXPEDITION_STEP_MIN = 24.0;
+    private static final double DRY_EXPEDITION_STEP_MAX = 48.0;
+    /** 远走落点与 bot 的最小距离 (格): 保住"放大行走距离"的语义, 不选近点。 */
+    private static final double DRY_EXPEDITION_MIN_DIST = 20.0;
+    /** 远走到位半径: 进到落点这么多格内即算走完这一段。 */
+    private static final int DRY_EXPEDITION_ARRIVE_RADIUS = 8;
+
+    // ------------------------------------------------------------------
     // (2026-09-20 用户机制) 锁定末影人"卡住不露面"的失联节奏: 先原地等一会儿,
     // 再【定向远走】一段; 每空一轮, 等得更久、走得更远。全程不对失联目标做
     // 任何寻路 —— 刻意不用 tracker 里穿墙可见的坐标。
@@ -231,6 +248,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     private static final long RETURN_LOG_INTERVAL_MS = 5000;
     private static final long PATROL_BEAT_INTERVAL_MS = 30000;
 
+    // (2026-09-27) 枯竭远走档的实例状态: 当前远走段任务与落点 (onStart 清零,
+    // Task 框架铁律; 接战会重置 dry 计时自然退出本档, 残留段下次进档时续走或重建)。
+    private Task _dryExpeditionWalk = null;
+    private BlockPos _dryExpeditionTarget = null;
+
     /**
      * (2026-09-20 打完末影人回头修复) 巡逻会话状态: 蹲守实例被上层重建时
      * ({@code BeatMinecraft2Task} 每次接战结束都 {@code new}), 锚点重找 + visited
@@ -309,6 +331,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // (2026-09-19) 实例复用/二次进入时清零可变状态 (Task 框架铁律: onStart 必须
         // 把上一条命的闩/实例级状态清干净, 否则"带着上一次的拉回模式开局")。
         _returning = false;
+        // (2026-09-27) 枯竭远走段一并清零 (同一条铁律)。
+        _dryExpeditionWalk = null;
+        _dryExpeditionTarget = null;
         _lastEndermanSeenMs = System.currentTimeMillis();
         // (2026-09-20 单目标锁) 实例复用/二次进入时清零 (Task 框架铁律: onStart
         // 必须把上一条命的锁/失联节奏清干净, 不能带着上一场的锁定开局)。
@@ -418,6 +443,17 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return null;
         }
 
+        // 3.5) (2026-09-27 用户拍板"放大行走距离, 尽量朝一个方向") dry 过半 →
+        //      定向远走档: 沿方位角走廊连走 24~48 格找新林盘。拉回闩照常置位但
+        //      本档【不消费】(与失联远走同款先例, 否则走一步被拽回来一步);
+        //      到位即把锚点推进到落点, 回巡逻后拉回判据用新锚点, 不会拽回旧盘。
+        //      dry 线到点仍由 3) 放弃 → 上层冷却 120s → 主线接管。
+        double dryFor = (_dryTimer == null) ? 0.0 : _dryTimer.getDuration();
+        double dryLine = mod.getModSettings().getOpportunisticPearlDrySeconds();
+        if (_dryTimer != null && dryFor >= dryLine * DRY_EXPEDITION_FRACTION) {
+            return dryExpeditionBeat(mod, dryFor, dryLine);
+        }
+
         // 4) 没末影人: 回到锚点 / 在林子里小步巡逻等刷新。
         //
         //    (2026-09-19 横跳修复) 双阈值迟滞: 出界(> CAMP_RADIUS)上闩, 走到
@@ -505,6 +541,94 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             _goToAnchor = new GetWithinRangeOfBlockTask(_anchor, RETURN_RADIUS);
         }
         return _goToAnchor;
+    }
+
+    /**
+     * (2026-09-27 用户拍板) 枯竭远走档 —— dry 计时过半 (30s) 没见末影人时,
+     * 不再在小盘里 1~3 格蹭步 (现场 20260927-213328: 22 秒 visited +5 全是小步,
+     * anchor-advance 还在两点间弹跳), 而是【沿锁定方位角连走一段 24~48 格】,
+     * 到位把锚点推进到落点再回巡逻; dry 线 (60s) 到点仍由主流程放弃。
+     *
+     * <p>实现要点:
+     * <ul>
+     *   <li>方向 = 会话方位角 ±{@link #PATROL_BEARING_JITTER_DEG} 抖动, 与巡逻/
+     *       anchor-advance 同一条走廊纪律 —— "尽量朝一个方向";</li>
+     *   <li>落点 = 森林缓存里走廊内 ≥{@link #DRY_EXPEDITION_MIN_DIST} 格的可站立
+     *       点取最远 (复用 {@link #pickLostWalkForestTarget}, minDist 参数化);
+     *       缓存够不着才盲走几何点 (打 kind=blind-fallback 供观测);</li>
+     *   <li>拉回闩照常置位但本档【不消费】(与失联远走同款先例); 到位即把锚点
+     *       推进到落点, 回巡逻后拉回判据用新锚点 —— 远走 = 锚点沿走廊推进,
+     *       结构上杜绝"走远又被拽回旧锚"的振荡;</li>
+     *   <li>末影人出现: 主流程分支 2 每 tick 先跑, 直接接管, 远走段残留到下次
+     *       进档续走 (目标仍是走廊方向, 无害)。</li>
+     * </ul>
+     */
+    private Task dryExpeditionBeat(AltoClef mod, double dryFor, double dryLine) {
+        // —— 上一段还在走 / 刚到位 ——
+        if (_dryExpeditionWalk != null) {
+            if (_dryExpeditionWalk.isFinished(mod)) {
+                BlockPos arrived = _dryExpeditionTarget;
+                _dryExpeditionWalk = null;
+                _dryExpeditionTarget = null;
+                if (arrived != null) {
+                    BlockPos old = _anchor;
+                    _anchor = arrived;
+                    _returning = false;
+                    _goToAnchor = null;
+                    // (锚点推进, 与巡逻 anchor-advance 同款处理; 方位角不重掷 ——
+                    //  远走方向本就沿走廊, 抖动留给下一次 patrol advance。)
+                    _patrolSession.bearingDeg =
+                            (_patrolSession.bearingDeg + (Math.random() * 2.0 - 1.0)
+                                    * PATROL_BEARING_JITTER_DEG) % 360.0;
+                    touchVisited(arrived);
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tDRY-EXPEDITION-ARRIVED"
+                            + " anchor-advance old=" + (old == null ? "none" : old.toShortString())
+                            + " new=" + arrived.toShortString()
+                            + " dryFor=" + (int) dryFor + "s/" + (int) dryLine + "s"
+                            + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL)
+                            + "/" + _count + " (枯竭远走到位, 锚点推进, 回巡逻)");
+                }
+                return null; // 空一拍, 下一 tick 回巡逻
+            }
+            return _dryExpeditionWalk;
+        }
+        // —— 起一段新远走 ——
+        double bearing = Double.isNaN(_patrolSession.bearingDeg)
+                ? Math.random() * 360.0
+                : (_patrolSession.bearingDeg + (Math.random() * 2.0 - 1.0) * PATROL_BEARING_JITTER_DEG);
+        bearing = (bearing % 360.0 + 360.0) % 360.0;
+        double rad = Math.toRadians(bearing);
+        float step = (float) (DRY_EXPEDITION_STEP_MIN
+                + Math.random() * (DRY_EXPEDITION_STEP_MAX - DRY_EXPEDITION_STEP_MIN));
+        BlockPos walkTarget = pickLostWalkForestTarget(mod, step, rad, DRY_EXPEDITION_MIN_DIST);
+        String targetKind = "forest-cache";
+        if (walkTarget == null) {
+            // 缓存够不着 (林盘外没有已感知的森林点): 盲走几何点兜底, 远区扫描
+            // 会持续补缓存, 下一段大概率回到 forest-cache。
+            Vec3d p = mod.getPlayer().getPos();
+            walkTarget = new BlockPos(
+                    (int) Math.floor(p.x + Math.cos(rad) * step),
+                    (int) Math.floor(p.y),
+                    (int) Math.floor(p.z + Math.sin(rad) * step));
+            targetKind = "blind-fallback";
+        }
+        _dryExpeditionTarget = walkTarget;
+        _dryExpeditionWalk = new GetWithinRangeOfBlockTask(walkTarget, DRY_EXPEDITION_ARRIVE_RADIUS);
+        Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tDRY-EXPEDITION-START"
+                + " dryFor=" + (int) dryFor + "s/" + (int) dryLine + "s"
+                + " step=" + (int) step + " bearing=" + (int) bearing
+                + " target=" + walkTarget.toShortString() + " kind=" + targetKind
+                + " (dry 过半, 定向远走找新林盘 — 不再小盘蹭步)");
+        return _dryExpeditionWalk;
+    }
+
+    /** 远走落点记入已访问集合 (复用巡逻的 visited 上限语义), 防原地反复选同一点。 */
+    private void touchVisited(BlockPos p) {
+        Set<Long> visited = _patrolSession.visited;
+        visited.add(p.asLong());
+        if (visited.size() > PATROL_VISITED_CAP) {
+            visited.clear();
+        }
     }
 
     private static EndermanEntity findTrackedById(List<EndermanEntity> list, UUID id) {
@@ -620,7 +744,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             // (2026-09-20 用户拍板) 目标必须落在诡异森林地形: 先从信号方块缓存里
             // 挑"方位角走廊内最远、且不超过本轮步长"的森林落点; 缓存够不着才
             // 退回盲走几何点 (旧行为, 打 fallback 标记供观测)。
-            BlockPos walkTarget = pickLostWalkForestTarget(mod, step, rad);
+            BlockPos walkTarget = pickLostWalkForestTarget(mod, step, rad, LOST_WALK_MIN_DIST);
             String targetKind = "forest-cache";
             if (walkTarget == null) {
                 walkTarget = new BlockPos(
@@ -651,19 +775,20 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     }
 
     /**
-     * (2026-09-20 用户拍板"失联远走不能乱跑") 失联远走目标的森林落点选点:
-     * 4 类信号方块缓存中, 方位角走廊 (±60°, 与巡逻同口径) 内、距 bot
-     * ≥ {@link #LOST_WALK_MIN_DIST} 且 ≤ 本轮步长 1.25 倍、可站立 (寻路格无
-     * 碰撞 + 脚下有支撑) 的候选, 取【最远】者 —— 净位移大且全程落在林子上。
-     * 两遍降级: 先保 ≥12 格 (远走引出语义), 没有再放宽到任意距离;
-     * 缓存里完全没有够得着的森林点 → 返回 null (调用方退回盲走几何点,
-     * 日志打 kind=blind-fallback 供观测)。
+     * (2026-09-20 用户拍板"失联远走不能乱跑"; 2026-09-27 minDist 参数化供枯竭
+     * 远走档复用) 远走目标的森林落点选点: 4 类信号方块缓存中, 方位角走廊
+     * (±60°, 与巡逻同口径) 内、距 bot ≥ {@code minDist} 且 ≤ 本轮步长 1.25 倍、
+     * 可站立 (寻路格无碰撞 + 脚下有支撑) 的候选, 取【最远】者 —— 净位移大且
+     * 全程落在林子上。两遍降级: 先保 minDist (远走引出语义), 没有再放宽到
+     * 任意距离; 缓存里完全没有够得着的森林点 → 返回 null (调用方退回盲走
+     * 几何点, 日志打 kind=blind-fallback 供观测)。
      */
-    private BlockPos pickLostWalkForestTarget(AltoClef mod, float step, double rad) {
+    private BlockPos pickLostWalkForestTarget(AltoClef mod, float step, double rad, double minDist) {
         BlockPos bot = mod.getPlayer().getBlockPos();
         double maxDistSq = (step * 1.25) * (step * 1.25);
         double bX = Math.cos(rad), bZ = Math.sin(rad);
-        double[] minDistTiers = {LOST_WALK_MIN_DIST * LOST_WALK_MIN_DIST, 0.0};
+        // 两遍降级: 先保 minDist (远走引出语义), 没有再放宽到任意距离。
+        double[] minDistTiers = {minDist * minDist, 0.0};
         for (double minSq : minDistTiers) {
             BlockPos best = null;
             double bestDistSq = -1;
@@ -868,8 +993,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             // → 锚点沿走廊推进 (pickAdvanceAnchor), 不再有"任意方向近点"档。
             BlockPos best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP, true);
             if (best == null) {
-                // 降级: 走廊内近处也去 (≥到达半径), 动起来总比站着好。
-                best = scanCandidates(mod, 0, true);
+                // 降级: 走廊内没有 ≥ 最小步距的候选 → 放开方向 (±60° → 任意), 但
+                // (2026-09-27 用户"放大行走距离") 步距下限【不放开】—— 现场实锤
+                // 降级到 0 后每 0.1~0.5s 一个 target-reached、步距 1~3 格, 观感
+                // "反复来回走"。没有 ≥6 格候选就交给 anchor-advance / 远走档。
+                best = scanCandidates(mod, PATROL_MIN_HOP * PATROL_MIN_HOP, false);
             }
             if (best == null) {
                 // 一轮覆盖走完 (走廊内盘内可站立候选全部已访问)。原做法: 清 visited
@@ -916,8 +1044,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             // (2026-09-27) 刻意【不】清零 _scanFluidRejected: 与同拍 scanCandidates
             // 的两轮合计, 才是"这一拍一共多少候选因岩浆被否"的完整口径
             // (scanCandidates 每次调用开头清一次, 所以逐拍自然重置)。
-            // 第一遍: 方位角走廊 (cos60°=0.5, 即 ±60° 扇形); 第二遍: 任意方向。
-            double[] corridorCos = {PATROL_ADVANCE_CORRIDOR_COS, -2.0};
+            // 第一遍: 方位角走廊 (cos60°=0.5, 即 ±60° 扇形); 第二遍: ±90° 半球
+            // (2026-09-27 弹跳修复: 原第二遍 -2.0 不限方向, 现场实锤在 96,40,65 ↔
+            // 110,34,126 两点间来回弹跳 —— "任意方向挑最远未访问点"挑回了正后半球
+            // 的老地方。排除正后半球 (dot ≥ 0) 保住方向惯性, 后半球候选交给远走档)。
+            double[] corridorCos = {PATROL_ADVANCE_CORRIDOR_COS, 0.0};
             for (double cos : corridorCos) {
                 advanceFromList(mod, anchor, bot, cos,
                         mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM), 1);
