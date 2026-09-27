@@ -41,6 +41,11 @@ public class PlaceObsidianBucketTask extends Task {
     private BlockPos _currentCastTarget;
     private BlockPos _currentDestroyTarget;
 
+    // (2026-09-27 清场死锁修复) 模具位保护开关 —— 每拍由 onTick 刷新, 谓词只读不写。
+    // 口径 = "清场已完成" (_pos / _pos.up() / _pos.up(2) 都无需清除)。清场期间一律放行。
+    // 详见 onStart 里 avoidBlockBreaking 谓词的注释。
+    private boolean _protectCastFrame = false;
+
     public PlaceObsidianBucketTask(BlockPos pos) {
         _pos = pos;
     }
@@ -49,7 +54,36 @@ public class PlaceObsidianBucketTask extends Task {
     protected void onStart(AltoClef mod) {
         mod.getBehaviour().push();
         // Don't break cast
+        //
+        // (2026-09-27 清场死锁修复) 原实现**无条件**保护 CAST_FRAME 六格 —— 而这六格
+        // 是 _pos 的【正下 + 四个水平邻 + 右上出水口】, 也就是从任何站位瞄准 _pos 的
+        // 射线**必经**的格子 (只有从正上方俯视才不经过任何一格; 五个水平/下方方向全部
+        // 落在模具位上)。于是当 _pos 自身需要挖掉时 (废墟传送门自带门框是
+        // `crying_obsidian`, 哭黑不能被点燃, 必须换成 obsidian), DestroyBlockTask 的
+        // 挡块判定查到该格 → shouldAvoidBreaking 恒 true → neverOccluder 拒拆
+        // → 目标永远清不掉。
+        //
+        // 现场 20260927-085834 (`_pos = -419, 70, 244`, 该格 = `crying_obsidian`):
+        //   09:22:36~09:24:16 每 2s 一条(节流上限)
+        //     `[OccluderClear] refused protected -419, 69, 244 (cobblestone)
+        //      blocking target=-419, 70, 244`
+        //   —— `-419,69,244` 正是 CAST_FRAME 的 `(0,-1,0)`, 且那格圆石还是 **bot 自己
+        //   垫上去的** (用户现场确认) ⇒ **自己垫的方块被自己的谓词锁死**。
+        //   另两条 refused 位置 `-420,70,244`=`(-1,0,0)`、`-419,69,243` 同样是模具位。
+        //   末 `Blacklist: -419,70,244: Try 4/4`, `<Construct Nether Portal>` 无休止。
+        //
+        // 保护的真实用途只有一个: **岩浆/水浇铸期间别把模具挖塌**。所以判据从"无条件"
+        // 收紧为"清场已完成" (`_protectCastFrame`, 由 onTick 每拍刷新) —— 清场阶段模具位
+        // 一律放行, 浇铸阶段照旧全保护。
+        //
+        // 配套改动见 onTick 开头: 清场判定已**前移**到 "Build the cast frame" 之前 ——
+        // 否则时序仍是"先砌满模具 → 再挖 _pos", 目标会被自己刚砌的模具**物理**围住,
+        // 即便谓词放行也会变成"挖模具 → 再砌模具"的反复 (churn)。
         mod.getBehaviour().avoidBlockBreaking(block -> {
+            if (!_protectCastFrame) {
+                // 清场阶段 (或 _pos 尚未就绪): 模具位此刻是瞄准通道, 不是模具。
+                return false;
+            }
             for (Vec3i castPosRelativeToLava : PlaceObsidianBucketTask.CAST_FRAME) {
                 BlockPos castPos = _pos.add(castPosRelativeToLava);
                 if (block.equals(castPos)) {
@@ -64,11 +98,18 @@ public class PlaceObsidianBucketTask extends Task {
             return block.equals(_pos) || block.equals(waterTarget);
         });
 
+        // (0927) 首拍即定保护开关, 不留 "onStart → onTick" 之间的空窗。
+        refreshCastFrameProtection(mod);
         _progressChecker.reset();
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (0927 清场死锁修复) 模具位保护开关每拍刷新 —— 见 onStart 的
+        // avoidBlockBreaking 谓词注释。放在最前, 保证本拍 spawn 的任何子任务
+        // (含 DestroyBlockTask 的挡块判定) 看到的都是刷新后的口径。
+        refreshCastFrameProtection(mod);
 
         // Clear leftover water
         if (mod.getBlockTracker().blockIsValid(_pos, Blocks.OBSIDIAN) && mod.getBlockTracker().blockIsValid(_pos.up(), Blocks.WATER)) {
@@ -109,20 +150,14 @@ public class PlaceObsidianBucketTask extends Task {
             }
         }
 
-        // Build the cast frame
-        if (_currentCastTarget != null && WorldHelper.isSolid(mod, _currentCastTarget)) {
-            // Current cast frame already built.
-            _currentCastTarget = null;
-        }
-        for (Vec3i castPosRelative : CAST_FRAME) {
-            BlockPos castPos = _pos.add(castPosRelative);
-            if (!WorldHelper.isSolid(mod, castPos)) {
-                _currentCastTarget = castPos;
-                return null;
-            }
-        }
-
-        // Cast frame built. Now, place lava.
+        // (0927 清场死锁修复) 清场判定**前移到砌模之前**。
+        // 原顺序是"先砌满 CAST_FRAME 模具 → 再清 _pos", 但模具六格正是 _pos 的正下 +
+        // 四个水平邻 (见 onStart 注释) ⇒ 砌满之后目标被自己的模具**物理**四面包住;
+        // 而那六格又同时被 avoidBlockBreaking 判为禁破坏 —— 等于亲手把自己锁进盒子。
+        // 现场 20260927-085834 `_pos = -419,70,244` (废墟传送门自带的 crying_obsidian):
+        //   机器人反复 `<Destroy block at -419,70,244> Getting to block...`,
+        //   `[Ascent] start/done` 每 50ms 翻面 (全场 391:391), 一个字也挖不动。
+        // 清场放在砌模之前 ⇒ 挖 _pos 时周围还没有我们自己砌的模具。
         if (mod.getWorld().getBlockState(_pos).getBlock() != Blocks.LAVA) {
 
             // (2026-09-25 树叶挡射线修复) 清场判定从 isSolid 扩为 needsClearing:
@@ -147,6 +182,23 @@ public class PlaceObsidianBucketTask extends Task {
                 _currentDestroyTarget = _pos.up(2);
                 return null;
             }
+        }
+
+        // Build the cast frame
+        if (_currentCastTarget != null && WorldHelper.isSolid(mod, _currentCastTarget)) {
+            // Current cast frame already built.
+            _currentCastTarget = null;
+        }
+        for (Vec3i castPosRelative : CAST_FRAME) {
+            BlockPos castPos = _pos.add(castPosRelative);
+            if (!WorldHelper.isSolid(mod, castPos)) {
+                _currentCastTarget = castPos;
+                return null;
+            }
+        }
+
+        // Cast frame built. Now, place lava.
+        if (mod.getWorld().getBlockState(_pos).getBlock() != Blocks.LAVA) {
 
             // Make sure we have water, juuust in case we have another creeper appear run end here
             if (!mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
@@ -245,6 +297,26 @@ public class PlaceObsidianBucketTask extends Task {
 
     public BlockPos getPos() {
         return _pos;
+    }
+
+    /**
+     * (2026-09-27 清场死锁修复) 刷新 {@code _protectCastFrame} —— CAST_FRAME 模具位保护开关。
+     *
+     * 口径 = "清场已完成" = `_pos` / `_pos.up()` / `_pos.up(2)` 三格都无需清除。
+     * 这三格正是 onTick 里会派给 DestroyBlockTask 的全部目标; 只要其中任一格还没清完,
+     * CAST_FRAME 六格此刻就是"瞄准通道"而不是"模具", 谓词必须放行 —— 否则
+     * DestroyBlockTask 的挡块判定 (`neverOccluder` → `shouldAvoidBreaking`) 会把它们
+     * 全判为受保护, 目标永远清不掉 (现场 20260927-085834, 见 onStart 谓词注释)。
+     *
+     * 反之清场一结束 (倒岩浆之前) 立刻回到"全保护" —— 保护的本职 (浇铸期间别把模具
+     * 挖塌) 没有削弱半分。
+     *
+     * 每拍调用一次 (onStart + onTick 开头), 谓词侧只读布尔, 不做任何世界查询。
+     */
+    private void refreshCastFrameProtection(AltoClef mod) {
+        _protectCastFrame = !needsClearing(mod, _pos)
+                && !needsClearing(mod, _pos.up())
+                && !needsClearing(mod, _pos.up(2));
     }
 
     /**
