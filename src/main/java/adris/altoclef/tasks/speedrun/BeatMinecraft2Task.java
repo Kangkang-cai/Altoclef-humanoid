@@ -1508,6 +1508,15 @@ public class BeatMinecraft2Task extends Task {
                 && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
                 && !_ranStrongholdLocator
                 && System.currentTimeMillis() >= _bedRecoverGiveUpUntilMs
+                // (2026-09-28 让位, 与上方 :1105 那处【必须同步】) 同上: `_goToNetherTask`
+                // 内部的 NetherBedSpawn 步骤会自己放床+设重生点, 本分支不退让就会在
+                // "床刚放下、出生点还没设"的窗口里把它拆掉 (现场 20260928-171146 17:24:48
+                // 实锤: `freshly placed bed detected` 后 **50ms** 即
+                // `STOP interruptedBy=<Destroy block at -219,65,113> spawnSet=false`)。
+                // 注意这条是**另一处**收床 (different from :1116 的 "my placed bed (recover)"),
+                // 2026-08-26 那次只加了 `!_ranStrongholdLocator` 保护"要塞阶段", 而
+                // 下界重生点发生在要塞之前 ⇒ 漏网; 两处都加才封死。
+                && !(_goToNetherTask.isActive() && !_goToNetherTask.isFinished(mod))
                 // (2026-09-11) 区块未加载 → getBlockState 恒空气, 会误判"床没了"并
                 // 在宽限后清记忆 (走远再回来 = 丢床)。未加载一律不判定。
                 && mod.getChunkTracker().isChunkLoaded(selfBed)) {
