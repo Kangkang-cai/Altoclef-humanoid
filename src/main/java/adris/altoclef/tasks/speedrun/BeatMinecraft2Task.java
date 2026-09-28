@@ -4212,17 +4212,21 @@ public class BeatMinecraft2Task extends Task {
      * 齐全要进地狱时跳过睡觉") 逻辑现恒返回 false: 不应因去传送门跳过睡觉。
      */
     private boolean shouldSkipSleepForNether(AltoClef mod) {
-        // (2026-09-18 用户改判) "不应该因为去传送门跳过睡觉" —— 先睡满再进下界,
-        // 入口不差这一夜。2026-09-05 的跳过逻辑停用, 代码保留备查。当日实锤:
-        // 12:03:00 拿到床后 canSleep=true 却 1 秒内切去 Going to Nether, 夜间
-        // 直接裸奔 (death #3 正是被围殴死在去传送门路上)。
-        return false;
-        /*
+        // (2026-09-28 恢复 2026-09-05 跳过逻辑) 现场 latest.log 17:46:48:
+        // bot 已在 <Going to nether portal>, 夜里却被 <Sleeping through the night>
+        // 打断, 转去"放床+设重生点"(游牧, 睡完撸床)。这与"进地狱门前设重生点"
+        // 的语义矛盾 —— 进门前应走 _goToNetherTask 内部的 NetherBedSpawn 步骤
+        // (DefaultGoToDimensionTask:283, _stayInBed=false 只设点不睡不撸)。
+        //
+        // 2026-09-18 曾把本方法改成恒 return false("先睡满再进下界"), 理由是
+        // "跳过睡眠 → 夜里裸奔去传送门 → death #3 被围殴死"。但当时还没有
+        // netherPortalBedSpawnTask(2026-09-22 才加): 裸奔是"没床可设点"的直接后果。
+        // 现在进门前有 NetherBedSpawn 兜底(带床去门附近设重生点), 恢复跳过睡眠
+        // 不会复现裸奔 —— 反而让"夜里进地狱门"走上"设点而非睡觉"的正确路径。
         if (mod.getBlockTracker().getKnownLocations(Blocks.NETHER_PORTAL).isEmpty()) return false;
         boolean eyeGearSatisfied = StorageHelper.itemTargetsMet(mod, COLLECT_EYE_GEAR_MIN)
                 && StorageHelper.isArmorEquippedAll(mod, COLLECT_EYE_ARMOR);
         return eyeGearSatisfied || _diamondCollectGivenUp;
-        */
     }
 
     /**
