@@ -233,6 +233,71 @@ public class BeatMinecraft2Task extends Task {
                 .toArray(ItemTarget[]::new);
     }
 
+    /**
+     * (2026-09-28 补剑) 后期阶段剑用坏/爆掉后的补给判据。
+     * 铁装阶段只做一次剑, 之后剑的耐久不被任何判据关注 — 剑快爆了/爆掉了
+     * 无人补, bot 徒手打 (KillAura 没剑就 deequip)。这里补一道"补剑闸":
+     * 返回 true 当且仅当 ① 背包里完全没有剑 (爆掉, 物品槽消失), 或
+     * ② 持有的最好剑耐久率 < 15% (快爆, 提前做新剑)。
+     * 用真实背包口径扫 ItemStack.getDamage(), 不看缓存计数 (剑耐久缓存不追踪)。
+     */
+    private static final Item[] SWORD_ITEMS = new Item[] {
+            Items.NETHERITE_SWORD, Items.DIAMOND_SWORD, Items.IRON_SWORD, Items.STONE_SWORD, Items.WOODEN_SWORD
+    };
+    private static final double SWORD_REPLACE_DURABILITY_RATIO = 0.15;
+
+    private static boolean swordNeedsReplace(AltoClef mod) {
+        if (mod.getPlayer() == null) return false;
+        // 真实背包扫所有剑: 主背包 + 副手 + 光标 (与 hasItemOrDroppedInEnd 口径一致)。
+        ItemStack bestSword = null;
+        for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
+            if (stack.isEmpty()) continue;
+            if (isSwordItem(stack.getItem())) {
+                if (bestSword == null || swordPriority(stack.getItem()) > swordPriority(bestSword.getItem())) {
+                    bestSword = stack;
+                }
+            }
+        }
+        if (bestSword == null) {
+            // 一把剑都没有 → 爆掉了, 必须补。
+            return true;
+        }
+        // 快爆: 耐久率 < 15%。getMaxDamage 对非耐耗物品返回 0, 但剑一定 > 0。
+        int max = bestSword.getMaxDamage();
+        if (max <= 0) return false;
+        double ratio = 1.0 - (double) bestSword.getDamage() / (double) max;
+        return ratio < SWORD_REPLACE_DURABILITY_RATIO;
+    }
+
+    private static boolean isSwordItem(Item item) {
+        for (Item s : SWORD_ITEMS) {
+            if (item == s) return true;
+        }
+        return false;
+    }
+
+    private static int swordPriority(Item item) {
+        // 越高越好, 与 KillAura.swordsTopPriorityFirst 顺序一致: 下界合金 > 钻 > 铁 > 石 > 木。
+        for (int i = 0; i < SWORD_ITEMS.length; i++) {
+            if (item == SWORD_ITEMS[i]) return SWORD_ITEMS.length - i;
+        }
+        return 0;
+    }
+
+    /**
+     * (2026-09-28 补剑) 补剑的目标: 现有最好材料。有钻做钻石剑, 没钻做铁剑,
+     * 没铁做石剑 (与 KillAura 装备优先级一致)。木剑价值太低不主动造。
+     */
+    private static ItemTarget[] swordReplaceTarget(AltoClef mod) {
+        if (mod.getItemStorage().hasItem(Items.DIAMOND) || StorageHelper.countItemInInventoryReal(mod, Items.DIAMOND) > 0) {
+            return toItemTargets(Items.DIAMOND_SWORD);
+        }
+        if (mod.getItemStorage().hasItem(Items.IRON_INGOT) || StorageHelper.countItemInInventoryReal(mod, Items.IRON_INGOT) > 0) {
+            return toItemTargets(Items.IRON_SWORD);
+        }
+        return toItemTargets(Items.STONE_SWORD);
+    }
+
     // (2026-08-27 盾牌诊断日志) 每 2 秒一条写到独立文件, 方便测试后检索。
     private static long _lastShieldDiagLog = 0;
     private static void logShieldDiag(AltoClef mod) {
@@ -2694,6 +2759,18 @@ public class BeatMinecraft2Task extends Task {
                                     + " (ironSwordHeld=" + ironSwordHeld(mod) + ")" );
                     _gearTask = TaskCatalogue.getSquashedItemTask(ironGearTargets(mod));
                     _gearTaskIsDiamond = false; // 铁装阶段不受钻石时间上限约束
+                    return _gearTask;
+                }
+
+                // (2026-09-28 补剑闸) 铁装阶段已完成 (gearMinMet 翻真), 但后期战斗
+                // 会磨爆剑。剑爆掉/耐久 <15% 时补一把新剑 (现有最好: 钻→铁→石),
+                // 复用同一套 squash 合成链。放在铁甲/钻石阶段之前 — 剑是战斗刚需,
+                // 快爆时优先补剑再往下推。
+                if (swordNeedsReplace(mod)) {
+                    diagIronPhase(mod, "replace worn sword",
+                            "best sword durability < " + (int)(SWORD_REPLACE_DURABILITY_RATIO * 100) + "% or none held");
+                    _gearTask = TaskCatalogue.getSquashedItemTask(swordReplaceTarget(mod));
+                    _gearTaskIsDiamond = false;
                     return _gearTask;
                 }
 
