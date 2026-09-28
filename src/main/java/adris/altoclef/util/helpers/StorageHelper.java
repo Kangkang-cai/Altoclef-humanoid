@@ -737,7 +737,33 @@ public class StorageHelper {
 
             final int totalFoodScore = calcTotalFoodScore;
 
-            if (!possibleSlots.isEmpty()) {
+            // (2026-09-28 用户钦定: 垃圾名单不可能穷举, 只保证"不丢重要物资")
+            // 现场 20260928-171146 17:21:56: 满包腾位把热栏 5 槽的 cooked_chicken x9
+            // 整堆拿上光标抛掉 (craftclick slot=41 PICKUP -> cooked_chickenx9, 之后
+            // FOOD-DIAG 里该物品彻底消失)。当时背包里还有 moss_block x10 / white_wool x2
+            // / cocoa_beans x6 这类没人会心疼的东西 —— 只因下面"食物间比较器"写反了
+            // (return -1 * (leftCost - rightCost) 配 stream().min() = 专挑
+            // hunger×count 最大的那堆), 把最贵的熟鸡肉顶成了第一候选。
+            // 用户原则: 名单永远列不全 (草丛块/羊毛/可可豆都没在名单里), 所以不靠扩名单,
+            // 靠分层 —— 只要还存在【非食物】候选, 食物一律不动; 食物降到最后一层。
+            final List<Slot> nonFoodSlots = new ArrayList<>();
+            final List<Slot> foodSlots = new ArrayList<>();
+            for (Slot slot : possibleSlots) {
+                ItemStack s = StorageHelper.getItemStackInSlot(slot);
+                if (s.isEmpty()) continue;
+                if (s.getItem().isFood()) {
+                    foodSlots.add(slot);
+                } else {
+                    nonFoodSlots.add(slot);
+                }
+            }
+            final List<Slot> pool = nonFoodSlots.isEmpty() ? foodSlots : nonFoodSlots;
+            if (nonFoodSlots.isEmpty() && !foodSlots.isEmpty()) {
+                Debug.logMessage("(StorageHelper) Discard pool is all food — "
+                        + "discarding the cheapest food as last resort.");
+            }
+
+            if (!pool.isEmpty()) {
                 // (2026-08-23 丢物优先级) 用户原则: 石头/杂石偏多, 满背包
                 // 时优先丢超量 (>64) 的最大石头堆; 原木绝不优先丢 (木头是
                 // 燃料/合成刚需), 只有别无可丢才轮到它。原逻辑最后按
@@ -746,7 +772,7 @@ public class StorageHelper {
                 int biggestBulkCount = 64;
                 List<Slot> nonLogSlots = new ArrayList<>();
                 boolean sawLog = false;
-                for (Slot slot : possibleSlots) {
+                for (Slot slot : pool) {
                     ItemStack stack = StorageHelper.getItemStackInSlot(slot);
                     if (stack.isEmpty()) continue;
                     if (ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) {
@@ -763,7 +789,7 @@ public class StorageHelper {
                     return Optional.of(biggestBulk);
                 }
                 // 原木垫底: 有非原木候选就只在非原木里挑。
-                List<Slot> candidates = nonLogSlots.isEmpty() && sawLog ? possibleSlots : nonLogSlots;
+                List<Slot> candidates = nonLogSlots.isEmpty() && sawLog ? pool : nonLogSlots;
                 if (candidates.isEmpty()) {
                     return Optional.empty();
                 }
@@ -800,13 +826,19 @@ public class StorageHelper {
                             return 1;
                         }
                     }
-                    // If both are food, pick the better cost.
+                    // (2026-09-28 比较器方向修复) 两者都是食物时, min() 要挑出
+                    // "该被丢掉的那个" = hunger×count 最小的那堆。
+                    // 原式 `-1 * (leftCost - rightCost)` 与 min() 组合后方向正好相反:
+                    // a 被判定"更小"的条件变成 costA > costB ⇒ 专挑最贵的食物丢
+                    // (现场 20260928-171146: 9×6=54 的熟鸡肉打败 1×2=2 的生鸡肉被丢)。
+                    // 去掉负号后为 costA < costB ⇒ 丢最便宜的, 与本分支上方
+                    // (食物最后丢) 及下方 (丢最小堆) 的取向一致。
                     if (leftIsFood && rightIsFood) {
                         assert left.getItem().getFoodComponent() != null;
                         assert right.getItem().getFoodComponent() != null;
                         int leftCost = left.getItem().getFoodComponent().getHunger() * left.getCount(),
                                 rightCost = right.getItem().getFoodComponent().getHunger() * right.getCount();
-                        return -1 * (leftCost - rightCost);
+                        return leftCost - rightCost;
                     }
 
                     // Just discard the one with the smallest quantity, but this doesn't really matter.
