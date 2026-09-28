@@ -1202,10 +1202,13 @@ public class BeatMinecraft2Task extends Task {
                     BlockPos still = selfBedStillThere(mod, strBed);
                     if (still != null) {
                         _bedMissingSinceMs = 0; // 床还在, 宽限计时作废
-                        // (2026-09-28) 睡成的重生点床不收 —— 床=当前重生点, 拆了重生点失效。
-                        if (isCurrentSpawnPointBed(mod, still)) {
-                            return null; // 放行, 不拆重生点床
-                        }
+                        // (2026-09-28 语义修正, 用户) 睡觉只是睡觉, 睡成的床不因
+                        // "是重生点"而被永久保护 —— 睡完照常收走 (speedrunner 带床走)。
+                        // 下界放床设重生点由 _goToNetherTask 让位保护、要塞阶段由
+                        // _ranStrongholdLocator 保护, 均已另有闸门, 此处不再按重生点过滤。
+                        // (回退 123a955b 的 isCurrentSpawnPointBed 跳过: 其 return null
+                        // 还会把本拍 onTick 整棵树压死在此处, 事故 20260928-214511
+                        // 睡醒后冻结 33s, 收合成台/装备/下矿等全部后置分支不可达。)
                         if (still.isWithinDistance(mod.getPlayer().getPos(), 8)) {
                             setDebugState("Picking up my placed bed (recover).");
                             _bedRecoverTask = new DestroyBlockTask(still);
@@ -1617,10 +1620,10 @@ public class BeatMinecraft2Task extends Task {
                     return _bedRecoverTask;
                 }
                 scheduleForgetSelfBed(mod, selfBed);
-            } else if (!isCurrentSpawnPointBed(mod, bedAt)
-                    && bedAt.isWithinDistance(mod.getPlayer().getPos(), 8)) {
-                // (2026-09-28) 睡成的重生点床不收 (isCurrentSpawnPointBed), 与上方
-                // :1205 "白天优先收床"同款保护 —— 床=当前重生点, 拆了重生点失效。
+            } else if (bedAt.isWithinDistance(mod.getPlayer().getPos(), 8)) {
+                // (2026-09-28 语义修正, 用户) 睡成的床不再按"重生点床"跳过 (回退
+                // 123a955b 的 isCurrentSpawnPointBed 过滤), 与上方 :1205 白天收床
+                // 同步 —— 睡觉只是睡觉, 睡完照常收走。
                 setDebugState("Picking up our placed bed.");
                 _bedRecoverTask = new DestroyBlockTask(bedAt);
                 _bedRecoverStartMs = System.currentTimeMillis();
@@ -4518,31 +4521,11 @@ public class BeatMinecraft2Task extends Task {
         return null;
     }
 
-    /**
-     * (2026-09-28 睡成的重生点床不收) 这张自放床是不是玩家【当前重生点】。
-     *
-     * 现场 latest.log 20:28:21 夜间睡觉睡成(已设置重生点, wasSleeping=true),
-     * 20:28:26 天亮后"白天优先收床"/"PICK UP OUR OWN BED"两处收床逻辑把这张
-     * 重生点床撸掉 → 重生点失效。vanilla 睡床 = 必然 setSpawnPoint(床), 床就是
-     * 重生点载体, 拆床 = 重生点没了。收床逻辑的本意是收"错过夜/没睡成的滞留床"
-     * (speedrunner 带走床), 而不是睡成的重生点床 —— 二者用"是否=最近睡成的床"区分。
-     *
-     * 判据用 AltoClef._lastSleptInBed (PlaceBedAndSetSpawnTask 睡成时记录, 见
-     * 其 isSleeping 分支)。不能用 vanilla getSpawnPointPosition —— 那是
-     * ServerPlayerEntity 的方法, 客户端 ClientPlayerEntity 拿不到重生点坐标。
-     * 床占两格, 重生点可能落在床头或床尾, 逐半块比对。
+    /* (2026-09-28 回退 123a955b) isCurrentSpawnPointBed 已删: 该保护想护住的
+     * 下界床/末地床分别由 _goToNetherTask 让位闸门与 _ranStrongholdLocator
+     * 跳过收床覆盖, 夜间睡成的床无需按重生点保护 (用户语义: 睡觉只是睡觉,
+     * 睡完照常收走)。AltoClef._lastSleptInBed 记录侧保留, 供日后诊断使用。
      */
-    private boolean isCurrentSpawnPointBed(AltoClef mod, BlockPos bedPos) {
-        if (bedPos == null) return false;
-        BlockPos slept = mod.getLastSleptInBed();
-        if (slept == null) return false;
-        if (slept.equals(bedPos)) return true;
-        // 床占两格, 重生点可能是另一半
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
-            if (slept.equals(bedPos.offset(dir))) return true;
-        }
-        return false;
-    }
 
     /**
      * [2026-08-22 收床防丢 / 2026-09-11 世界直扫兜底] 记忆床位置附近 (水平 6 格 ×
