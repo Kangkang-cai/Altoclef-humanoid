@@ -285,14 +285,24 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
-     * (2026-09-28 补剑) 补剑的目标: 现有最好材料。有钻做钻石剑, 没钻做铁剑,
-     * 没铁做石剑 (与 KillAura 装备优先级一致)。木剑价值太低不主动造。
+     * (2026-09-28 补剑) 补剑的目标: 材料齐备的最好剑。铁剑优先。
+     * 现场 20260928-184630 教训: 旧实现"有 1 颗钻就做钻石剑" — 钻石剑要 2 钻+
+     * 木棍, 背包只有 1 钻 → 展开成挖钻 → 挖钻需镐但镐也全爆 → 级联做木镐/木棍/
+     * 木板, 超长链每被打断就重置, 2 分钟做不出剑, death#2 死在空窗期。
+     * 改为: 只有材料【齐备】才选那个档位, 否则降级。剑配方需 1 根木棍(所有剑
+     * 通用) + N 块材料锭/宝石。木剑价值太低不主动造。
+     *   - 钻石 ≥2 且木棍 ≥1 → 钻石剑
+     *   - 否则 铁锭 ≥2 且木棍 ≥1 → 铁剑 (铁剑优先, 材料通常足)
+     *   - 否则 → 石剑 (圆石通常足, 木棍不足时 squash 链自动补)
      */
     private static ItemTarget[] swordReplaceTarget(AltoClef mod) {
-        if (mod.getItemStorage().hasItem(Items.DIAMOND) || StorageHelper.countItemInInventoryReal(mod, Items.DIAMOND) > 0) {
+        int stick = StorageHelper.countItemInInventoryReal(mod, Items.STICK);
+        int diamond = StorageHelper.countItemInInventoryReal(mod, Items.DIAMOND);
+        int ironIngot = StorageHelper.countItemInInventoryReal(mod, Items.IRON_INGOT);
+        if (diamond >= 2 && stick >= 1) {
             return toItemTargets(Items.DIAMOND_SWORD);
         }
-        if (mod.getItemStorage().hasItem(Items.IRON_INGOT) || StorageHelper.countItemInInventoryReal(mod, Items.IRON_INGOT) > 0) {
+        if (ironIngot >= 2 && stick >= 1) {
             return toItemTargets(Items.IRON_SWORD);
         }
         return toItemTargets(Items.STONE_SWORD);
@@ -500,6 +510,12 @@ public class BeatMinecraft2Task extends Task {
     // 才受时间上限约束。赋值处置位: 铁装 getSquashedItemTask → false; 钻石
     // COLLECT_EYE gear → true。计时只对钻石收集 (此类下 _gearTask) 生效。
     private boolean _gearTaskIsDiamond = false;
+    // (2026-09-28 补剑熔断) 补剑闸派发做剑任务后, 若任务做不出来(材料不足/被打断),
+    // 每 2s 重触发重派发会死循环 (现场 20260928-184630: 选钻石剑卡 2 分钟)。
+    // 这里记录最近一次派发补剑的时间, 熔断窗口内不再重复派发 — 给 squash 合成链
+    // 一个连续推进的窗口, 而不是被闸门每 tick 拆掉重建。
+    private long _lastSwordReplaceDispatchMs = 0;
+    private static final long SWORD_REPLACE_COOLDOWN_MS = 20_000;
     // (2026-09-04 钻石放弃后进下界前补金靴) 金靴和钻石件同在 COLLECT_EYE_ARMOR,
     // 钻石超时放弃时金靴被一并放弃 → 裸脚下界, 到防火药水阶段前有猪灵敌对窗口。
     // give up 后去下界前只补金靴 (4 金锭, 不碰钻石件): 没穿没持有 → 收集合成
@@ -2763,15 +2779,32 @@ public class BeatMinecraft2Task extends Task {
                 }
 
                 // (2026-09-28 补剑闸) 铁装阶段已完成 (gearMinMet 翻真), 但后期战斗
-                // 会磨爆剑。剑爆掉/耐久 <15% 时补一把新剑 (现有最好: 钻→铁→石),
+                // 会磨爆剑。剑爆掉/耐久 <15% 时补一把新剑 (材料齐备优先: 铁剑优先),
                 // 复用同一套 squash 合成链。放在铁甲/钻石阶段之前 — 剑是战斗刚需,
                 // 快爆时优先补剑再往下推。
+                // 熔断: getSquashedItemTask 每次 new 新实例, 若每次 tick 重新派发,
+                // 旧实例被打断后 shouldForce 变 false → 重建 → 从零重跑 → 死循环
+                // (现场 20260928-184630: 钻石剑缺料卡 2 分钟)。这里保留上一 tick 的
+                // _gearTask 实例续跑, 只在它失效时才重建; 冷却挡"失败后立刻重建"的
+                // 抖动 (任务反复失败时至少隔 20s 才再派, 而不是每 tick 派)。冷却
+                // 期内任务失效则本 tick 落空往下走, 由下方分支接手, 下 tick 冷却到
+                // 期再补 — 避免 return 一个已失效/null 实例。
                 if (swordNeedsReplace(mod)) {
-                    diagIronPhase(mod, "replace worn sword",
-                            "best sword durability < " + (int)(SWORD_REPLACE_DURABILITY_RATIO * 100) + "% or none held");
-                    _gearTask = TaskCatalogue.getSquashedItemTask(swordReplaceTarget(mod));
-                    _gearTaskIsDiamond = false;
-                    return _gearTask;
+                    boolean taskAlive = _gearTask != null && shouldForce(mod, _gearTask);
+                    if (taskAlive) {
+                        return _gearTask; // 续跑已派发的补剑任务
+                    }
+                    long now = System.currentTimeMillis();
+                    boolean cooldownExpired = now - _lastSwordReplaceDispatchMs >= SWORD_REPLACE_COOLDOWN_MS;
+                    if (cooldownExpired) {
+                        _lastSwordReplaceDispatchMs = now;
+                        diagIronPhase(mod, "replace worn sword",
+                                "best sword durability < " + (int)(SWORD_REPLACE_DURABILITY_RATIO * 100) + "% or none held");
+                        _gearTask = TaskCatalogue.getSquashedItemTask(swordReplaceTarget(mod));
+                        _gearTaskIsDiamond = false;
+                        return _gearTask;
+                    }
+                    // 冷却中且任务失效: 不 return, 落空往下走, 等冷却到期。
                 }
 
                 // (2026-08-30 铁套保护, 用户) 工具 (铁剑/镐/盾) 就绪后、进钻石前,
