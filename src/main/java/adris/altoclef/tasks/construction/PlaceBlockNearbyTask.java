@@ -64,6 +64,15 @@ public class PlaceBlockNearbyTask extends Task {
     /** 本轮让位的起始墙钟 (ms); 0 = 未开始计时。 */
     private long _wanderSinceMs = 0;
 
+    // (2026-09-28 快路径假成功根修) 上一拍"眼前直接放"(getCurrentlyLookingBlockPlace +
+    // place) 的右键落点, 需下一拍核实 —— 客户端世界更新滞后一拍。null = 无待核实。
+    private BlockPos _fastAttempt = null;
+    // (2026-09-28 快路径假成功根修) 已证明"右键只会开容器界面、放不出方块"的落点。
+    // 必须持久记住而不是只跳过一拍: 界面一被 closeScreen 关掉, 隔一拍准星就恢复,
+    // 若不清空/不记住就会再点一次 ⇒ 界面照样反复开合(现场 syncId 4→16 每 300ms 一轮)。
+    // 该落点交给下面的 baritone 路径(它能对着容器侧面/顶面正常放置)。
+    private BlockPos _fastBlockedCell = null;
+
     // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。
     private GetToLandTask _toLand = null;
     // (v3) 回岸模式的锁存位: 一旦进入就不再每 tick 重估 isTouchingWater (水面浮动会闪烁)。
@@ -112,12 +121,18 @@ public class PlaceBlockNearbyTask extends Task {
         // 对齐 PlaceBlockTask.onStart (其 L115 已有 _progressChecker.reset())。
         _progressChecker.reset();
         _wanderSinceMs = 0;
+        _fastAttempt = null;
+        _fastBlockedCell = null;
 
         mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
 
         // Check for blocks being placed
         _onBlockPlaced = EventBus.subscribe(BlockPlaceEvent.class, evt -> {
             if (ArrayUtils.contains(_toPlace, evt.blockState.getBlock())) {
+                // (2026-09-28 快路径假成功根修) 真值来源: 方块【确实落地】才认完成。
+                // isFinished 读 _justPlaced, 旧实现只由 place() 的"右键 SUCCESS"设置,
+                // 而那个 SUCCESS 可能只是打开了容器界面(见 place() 注释) ⇒ 会撒谎。
+                _justPlaced = evt.blockPos;
                 stopPlacing(_mod);
             }
         });
@@ -156,12 +171,34 @@ public class PlaceBlockNearbyTask extends Task {
         // Close screen first
         StorageHelper.closeScreen();
 
+        // (2026-09-28 快路径假成功根修) 核实上一拍"眼前直接放"的结果。客户端世界更新
+        // 滞后一拍, 所以在本拍核实: 那一拍的右键很可能只是打开了容器界面 —— 工作台 /
+        // 熔炉 / 箱子这类"有 onUse 的方块"被右键时, interactBlock 照样返回 SUCCESS,
+        // 但一个方块也没放出去。旧实现据此就认成功 ⇒ 上层每 tick 重投一次右键。
+        // 现场 20260928-111156: diag.log [ScreenClose] handler=class_1714(工作台界面)
+        // syncId 4→16 两秒开了又关 7 轮, 15 次 PRESSED, 而炉子【物品】计数全程不变。
+        if (_fastAttempt != null) {
+            BlockPos attempted = _fastAttempt;
+            _fastAttempt = null;
+            if (ArrayUtils.contains(_toPlace, mod.getWorld().getBlockState(attempted).getBlock())) {
+                _justPlaced = attempted;      // 真的放出去了
+                return null;
+            }
+            // 没放成 ⇒ 该落点右键只会开界面, 拉黑它(本任务内不再重投), 交给 baritone。
+            _fastBlockedCell = attempted;
+        }
+
         // Try placing where we're looking right now.
         BlockPos current = getCurrentlyLookingBlockPlace(mod);
+        if (current != null && current.equals(_fastBlockedCell)) {
+            current = null;   // 该落点已证明"右键只开界面", 本拍不走快路径
+        }
         if (current != null && _canPlaceHere.test(current)) {
             setDebugState("Placing since we can...");
             if (mod.getSlotHandler().forceEquipItem(ItemHelper.blocksToItems(_toPlace))) {
-                if (place(mod, current)) {
+                if (place(mod)) {
+                    // 不在这里认成功 —— 下一拍核实(顶部), 真值也由 BlockPlaceEvent 兜底。
+                    _fastAttempt = current;
                     return null;
                 }
             }
@@ -353,7 +390,7 @@ public class PlaceBlockNearbyTask extends Task {
         return StorageHelper.isEquipped(mod, ItemHelper.blocksToItems(_toPlace));
     }
 
-    private boolean place(AltoClef mod, BlockPos targetPlace) {
+    private boolean place(AltoClef mod) {
         if (!mod.getExtraBaritoneSettings().isInteractionPaused() && blockEquipped(mod)) {
             // Shift click just for 100% container security.
             mod.getInputControls().hold(Input.SNEAK);
@@ -369,7 +406,12 @@ public class PlaceBlockNearbyTask extends Task {
             assert MinecraftClient.getInstance().interactionManager != null;
             if (MinecraftClient.getInstance().interactionManager.interactBlock(mod.getPlayer(), mod.getWorld(), hand, (BlockHitResult) mouseOver)  == ActionResult.SUCCESS) {
                 mod.getPlayer().swingHand(hand);
-                _justPlaced = targetPlace;
+                // (2026-09-28 快路径假成功根修) 这里【不能】把 SUCCESS 认成"方块放出去了":
+                // 右键工作台 / 熔炉 / 箱子这类"有 onUse 的方块"会打开界面, interactBlock
+                // 同样返回 SUCCESS —— 旧实现据此设 _justPlaced, 上层就每 tick 重投一次右键
+                // (现场 20260928-111156: 两秒 15 次 PRESSED + 工作台界面开合 7 轮)。
+                // 真值改由两条独立来源提供: onTick 顶部的"下一拍世界核实", 以及
+                // BlockPlaceEvent(_onBlockPlaced, 方块真正落地的事件)。
                 Debug.logMessage("PRESSED");
                 return true;
             }
