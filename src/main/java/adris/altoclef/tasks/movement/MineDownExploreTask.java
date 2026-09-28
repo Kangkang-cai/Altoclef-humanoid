@@ -382,6 +382,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     private int _step = 0;
     // (2026-09-14 v2 目标跑到头顶 → 重锚) 上次重锚时刻, 用于 1 秒节流 (见重锚调用处)。
     private long _lastReanchorMs = 0;
+    // (20260928 疣块挖不掉) 上一次触发重锚时的队首格。重锚对"fast-forward 穿过
+    // 已挖空气后队首不变"的情况是纯空操作 (重铺几何还是落到同一格), 唯一实际
+    // 效果是 return null 打断 DestroyBlockTask ⇒ 挖掘进度每 1s 清零。记录它以
+    // 跳过同头重锚, 见重锚调用处注释。
+    private BlockPos _lastReanchorHead = null;
     // (2026-09-10 空跳修复) 本实例【真实挖掉】的方块数 = 本轮挖掘预算的消耗量。
     // 与几何路径索引 _step 严格分离: _step 会被 FAST-FORWARD 空跳刷高, 不代表
     // 任何真实挖掘; reachedBottom 的步数上限只看 _realDigs — 空跳不能再替
@@ -1541,8 +1546,24 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         if (head != null
                 && head.getY() - mod.getPlayer().getBlockPos().getY() > MAX_TARGET_ABOVE_FEET
                 && System.currentTimeMillis() - _lastReanchorMs > 1000) {
-            reanchorToPlayer(mod);
-            return null;
+            // (20260928 疣块挖不掉) 重锚 = 清队列+以脚为锚重铺几何; 若 fast-forward
+            // 穿过已挖空气后队首还是同一格 (典型: 45° 上行爬出自己刚挖的楼梯,
+            // 下一格实体天然在头顶 3-4 格), 重锚不改变任何决策, 唯一效果是本方法
+            // return null ⇒ 框架把正在挖掘的 DestroyBlockTask 停掉再重启 ⇒ 原版
+            // 机制下松开左键挖掘进度清零。现场 20260928-210453 实锤: 队首
+            // 13,76,-53 nether_wart_block (硬度 1.0, 无镐加成 ~1.5s) 每 1.0s 被
+            // 重锚打断一次, 进度永远 ~2/3, 10s 后 [MineDown-DigStuck] 放弃 →
+            // 下一格同款 → "一直挖不掉, 差一点点就停"。
+            // 处置: 同头不再重锚, 放行让它连续挖; 头真的不可达由下方 10s stall
+            // 超时兜底 (与旧重锚循环的结局一致, 无回归)。头变化时仍保留一次
+            // 重锚, 保留对"目标跑到头顶"原始场景的处置能力。
+            if (head.equals(_lastReanchorHead)) {
+                // fall through: 不重锚, 继续派发同一格
+            } else {
+                _lastReanchorHead = head;
+                reanchorToPlayer(mod);
+                return null;
+            }
         }
         // (2026-09-14 挖掘停滞放弃) 队首没换 = 上一格还没挖掉。超时 ⇒ 它有某种我们
         // 不知道的障碍, 继续派发 DestroyBlockTask 只会让它左右键到天荒地老。
