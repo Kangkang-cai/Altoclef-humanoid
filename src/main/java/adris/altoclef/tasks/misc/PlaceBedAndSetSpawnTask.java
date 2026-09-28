@@ -90,6 +90,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2);
     private BlockPos _currentBedRegion;
     private BlockPos _currentStructure, _currentBreak;
+    /**
+     * (2026-09-28) 本实例内【放置 / 站位导航 / 地基】失败过的 bed region(foot 格)。
+     * 弃区重扫时跳过它们, 防在原地打转 —— 现场 20260928-140502: 7 轮尝试里有 4 轮
+     * 是同一批"放不上"的位置被反复选中(bamboo / oak_leaves 格), 每轮白耗 3~10s。
+     * onStart 清空(实例复用时跨轮不继承)。
+     */
+    private final java.util.Set<BlockPos> _failedBedRegions = new java.util.HashSet<>();
     private boolean _spawnSet;
     // (2026-09-21) 睡觉超时放弃后的一次性完成 latch, 防放弃分支每 tick 重入刷屏。
     private boolean _gaveUpSetSpawn;
@@ -256,6 +263,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
         _currentBedRegion = null;
         _interactClearedVeg = false;
         _structureTimer = null;
+        // (2026-09-28) 失败位置拉黑表随轮次清空 —— 实例复用(跨夜晚/跨 sleep 请求)
+        // 时不继承上一轮"放弃过的位置", 否则新地形下会白跳过一批可用点。
+        _failedBedRegions.clear();
         // (2026-09-08) 新一轮睡觉尝试: 重置拆障保活/放弃态
         // (2026-09-24 换侧机制删除, 尝试计数随之移除)
         _blockerClearTask = null;
@@ -890,6 +900,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     Debug.logToFile("altoclef_diag.log", m);
                     adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.foundation",
                             STRUCTURE_TIMEOUT_SECONDS + "s building bed foundation, rescanning region");
+                    if (_currentBedRegion != null) _failedBedRegions.add(_currentBedRegion);
                     _currentStructure = null;
                     _structureTimer = null;
                     _currentBedRegion = null;
@@ -920,16 +931,15 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
         BlockPos toStand = _currentBedRegion.add(BED_PLACE_STAND_POS);
         // Our bed region is READY TO BE PLACED
-        // (2026-09-28 站位判据收紧, 现场 20260928-130354 + 用户手工复现)
-        // 旧判据只比【方块坐标】: 玩家碰撞箱宽 0.6, 停在格子的 +X 半边时
-        // getBlockPos() 依然等于 toStand, 但身体已经压到床格上 → 服务端 canPlace
-        // 直接拒放。用户现场原话: "明明只有那两格空却放不进去; 跳到那个格子上方
-        // 朝脚下放就能放" —— 后者正是不占格、不压边的姿势, 反证成败取决于身体
-        // 与床格的相对位置, 而不是"那两格干不干净"。
-        // 床格恒在 toStand 的 +X 侧 (BED_PLACE_STAND_POS = (-1,0,0)), Z 方向与
-        // 站位同格是正常的(床沿 X 展开), 故只需约束 X: 碰撞箱右缘必须留在床格
-        // 左边界之外。判据与导航目标(GoalBlock 会走到格中心)一致, 不会来回震荡。
-        if (!isStandingWellForBed(mod, toStand)) {
+        // (2026-09-28 判据回退, 现场 20260928-140502 实锤回归) 上一版把
+        // isStandingWellForBed(碰撞箱不压床格) 当成【到位前置闸门】是错的:
+        // baritone 的 GoalBlock 只保证"站在这格方块内", 不保证站位偏哪半边,
+        // 于是出现 "stand pos -76,74,20" 与 "player=-76,74,20" 方块坐标完全
+        // 相同却判【未到位】→ 派 GetToBlockTask → baritone 认为已到位不动 →
+        // 死等 10s STAND NAV TIMEOUT → 弃区。判据比导航目标严 = 死锁。
+        // 现回到方块级到位判据; "身体别压床格"改用【放置失败后的后退】兜底
+        // (见下方 Scoot backwards 段), 不再阻塞导航。
+        if (!mod.getPlayer().getBlockPos().equals(toStand)) {
             _placeAttemptTimer = null;
             // (2026-09-24 站位导航超时) 见字段区注释: baritone 算不出路径时
             // GetToBlockTask 会永久死等, 10s 未到位 → 弃区重扫, 不再僵住。
@@ -945,6 +955,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                         (STAND_NAV_TIMEOUT_MS / 1000) + "s navigating to bed stand pos, rescanning region");
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
+                if (_currentBedRegion != null) _failedBedRegions.add(_currentBedRegion);
                 _currentBedRegion = null;
                 _standNavRegion = null;
                 // (2026-09-24 审查补充②) 弃区连带清残留, 防回拆旧区格子。
@@ -1055,6 +1066,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 adris.altoclef.util.helpers.TimeoutLog.hit("PlaceBedAndSetSpawnTask.placeBed", "3s place timeout, rescanning region");
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
+                if (_currentBedRegion != null) _failedBedRegions.add(_currentBedRegion);
                 _currentBedRegion = null;
                 _justPlacedBed = null;
                 // (2026-09-24 审查补充②) 同 foundation-timeout: 弃区连带清残留。
@@ -1076,12 +1088,19 @@ public class PlaceBedAndSetSpawnTask extends Task {
         }
 
         // Scoot backwards if we're trying to place and fail
+        // (2026-09-28) 点击已尝试却没放上, 多半是身体压在床格上/贴边 —— 这时才后退。
+        // isStandingWellForBed 挪到这里当【兜底判据】(而不是前置闸门, 原因见上方判据
+        // 回退注释): 方块级到位已过、身体却仍压着床格时多退一步, 直到站回床格之外。
+        // 后退方向恰是 -X(远离床格), 与 bot 看向床格的朝向相反。
         if (thisOrChildSatisfies(task -> {
             if (task instanceof InteractWithBlockTask intr)
                 return intr.getClickStatus() == InteractWithBlockTask.ClickResponse.CLICK_ATTEMPTED;
             return false;
         })) {
             mod.getInputControls().tryPress(Input.MOVE_BACK);
+            if (!isStandingWellForBed(mod, toStand)) {
+                mod.getInputControls().tryPress(Input.MOVE_BACK);
+            }
         }
 
         return new InteractWithBlockTask(new ItemTarget("bed", 1), BED_PLACE_DIRECTION, toPlace.offset(BED_PLACE_DIRECTION.getOpposite()), false);
@@ -1317,6 +1336,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 for (int dy = footY + SCAN_DY_MIN; dy <= footY + SCAN_DY_MAX; ++dy) {
                     // Test range
                     BlockPos attemptStandPos = new BlockPos(dx, dy, dz);
+                    // (2026-09-28) 失败过的位置不再选 —— 见 _failedBedRegions 注释。
+                    if (_failedBedRegions.contains(attemptStandPos)) continue outer;
                     double distance = attemptStandPos.getSquaredDistance(mod.getPlayer().getPos());
                     // 候选的最终评分 >= 原始距离: 原始距离都大于当前最优分就跳过。
                     if (distance > closestDist) continue;
@@ -1470,7 +1491,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private boolean bedCellNeedsClear(AltoClef mod, BlockPos pos) {
         if (WorldHelper.isAir(mod, pos)) return false;
         if (!mod.getWorld().getBlockState(pos).getFluidState().isEmpty()) return false;
-        return !mod.getWorld().getBlockState(pos).getMaterial().isReplaceable();
+        // (2026-09-28 二次根修, 现场 20260928-140502) 不再判断"可否被替换"。
+        // 靠猜 Material/BlockState.isReplaceable 这条路是漏的: 现场床格为
+        // minecraft:bamboo 与 minecraft:oak_leaves 时, 选区收下、放置被服务端
+        // canReplaceExisting 反复拒 —— 日志里 124 / 62 次 ">>> about to place
+        // bed here" 而 0 次 DestroyBlock, 最后床物品耗尽转去重做床。
+        // 改为"床要占的格, 只要不是空气/流体就一律清掉", 用确定性换成本:
+        // 草/花是多挖几棵(breakInstantly, 近零成本), 换来绝不再猜错。
+        return true;
     }
 
     /**
