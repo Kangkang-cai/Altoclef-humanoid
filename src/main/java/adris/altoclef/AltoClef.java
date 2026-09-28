@@ -1255,6 +1255,20 @@ public class AltoClef implements ModInitializer {
         _lastSelfPlacedBed = pos;
     }
 
+    // ==== Slept-in bed spawn point (2026-09-28 睡成的重生点床不收) ====
+    // 最近一次"真睡进去(设了重生点)"的床位置。vanilla 睡床=必然 setSpawnPoint,
+    // 睡成的床就是重生点载体, 拆了重生点失效。收床逻辑(speedrunner 带走床)只该
+    // 收"没睡成的滞留床", 不该收这张重生点床 —— 用本字段区分二者。
+    private BlockPos _lastSleptInBed = null;
+
+    public BlockPos getLastSleptInBed() {
+        return _lastSleptInBed;
+    }
+
+    public void setLastSleptInBed(BlockPos pos) {
+        _lastSleptInBed = pos;
+    }
+
     /**
      * The user task chain (runs your command. Ex. Get Diamonds, Beat the Game)
      */

@@ -449,6 +449,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
             _wasSleeping = true;
             _spawnSet = true;
             _inBedTimer.reset();
+            // (2026-09-28) 记录睡成的重生点床: vanilla 睡床=必然 setSpawnPoint(床),
+            // 床就是重生点载体。收床逻辑(speedrunner 带走床)据此跳过这张床, 不拆。
+            if (_bedForSpawnPoint != null) {
+                mod.setLastSleptInBed(_bedForSpawnPoint);
+            } else if (_justPlacedBed != null) {
+                mod.setLastSleptInBed(_justPlacedBed);
+            }
             if (_stayInBed) {
                 setDebugState("Sleeping through night...");
                 return null;
