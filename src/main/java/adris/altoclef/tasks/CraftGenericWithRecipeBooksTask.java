@@ -343,6 +343,9 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         if (_gridOwnerOutput == _target.getOutputItem()) {
             _gridOwnerOutput = null;
         }
+        // (2026-09-28 租约泄漏根修) 被抢占 STOP 后停止续租, 但租约要等满
+        // LEASE_MS(3s) 才过期 ⇒ 对方空等。与上方清理同处收口。现场 20260928-084126。
+        CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CRAFT);
     }
 
     /**

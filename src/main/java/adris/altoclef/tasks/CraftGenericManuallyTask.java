@@ -134,7 +134,10 @@ public class CraftGenericManuallyTask extends Task implements ITaskUsesCraftingG
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
+        // (2026-09-28 租约泄漏根修) 同 EnsureFreePlayerCraftingGridTask.onStop:
+        // 被抢占 STOP 后停止续租, 但租约要等满 LEASE_MS(3s) 才过期 ⇒ 对方空等。
+        // 持有方已停手, STOP 即释放。现场 20260928-084126。
+        CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CRAFT);
     }
 
     @Override

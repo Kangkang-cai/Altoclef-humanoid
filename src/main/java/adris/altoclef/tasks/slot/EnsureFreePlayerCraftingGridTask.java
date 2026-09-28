@@ -58,7 +58,11 @@ public class EnsureFreePlayerCraftingGridTask extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
+        // (2026-09-28 租约泄漏根修) 被抢占 STOP 后本任务不再续租, 但租约不会自己
+        // 消失 —— 必须等满 LEASE_MS(3s) 才过期, 对方在这 3 秒里纯空等。持有方
+        // 已停手, 留着租约只伤人, 故 STOP 即释放。release() 只对持有者本人生效,
+        // 无副作用。现场 20260928-084126: took=16.4s 内夹 2 次 3s 空等。
+        CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CLEAR);
     }
 
     @Override

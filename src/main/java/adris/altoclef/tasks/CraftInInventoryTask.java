@@ -218,6 +218,17 @@ public class CraftInInventoryTask extends ResourceTask implements ITaskUsesCraft
     }
 
     @Override
+    protected void onStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-28 租约泄漏根修) 本类原先【没有】onStop, 被抢占 STOP 后 CRAFT
+        // 租约不自释 —— 持有方停止续租, 但租约要等满 LEASE_MS(3s) 才过期, CLEAR
+        // 侧纯空等 3 秒。必须调用 super.onStop: ResourceTask.onStop(:281) 负责
+        // behaviour.pop() 与 onResourceStop 派发(本类的 pop 在 :216), 漏调会破
+        // 坏 push/pop 配对。先 super 后 release。现场 20260928-084126。
+        super.onStop(mod, interruptTask);
+        CraftingGridArbiter.release(CraftingGridArbiter.INTENT_CRAFT);
+    }
+
+    @Override
     public boolean isFinished(AltoClef mod) {
         // (2026-09-13 料尽即收工) collect=false 且连一份材料都凑不出 = 不可能再完成。
         // 必须在这里也给出口: super.isFinished 走 ItemTarget 的目标数量判定(哨兵值下
