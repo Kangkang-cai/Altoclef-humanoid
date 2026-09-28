@@ -333,6 +333,16 @@ public class BeatMinecraft2Task extends Task {
     private CollectEnderPearlsInForestTask.PatrolSession _pearlPatrolSession = null;
     // 上次蹲守放弃后的冷却截止时刻 (墙钟 ms)。
     private long _pearlCampBlockedUntilMs = 0;
+    // (2026-09-28 用户拍板"冷却到期后, 只有看到林子才再次触发") 冷却置位时同时
+    // 挂上本闩: 冷却结束后禁用"脚下群系=诡异森林 → anchor=脚下"的 O(1) 快路径,
+    // 锚点必须来自 LOS (findVisibleSignal 亲眼看到菌岩) 才重开蹲守, LOS 命中一次
+    // 即解除。现场 20260928-095237 实锤: bot 站在林缘, 脚下群系命中但视野里没有
+    // 菌岩 (每轮 DRY-EXPEDITION 全是 blind-fallback 佐证缓存空), 冷却整 120s 一到
+    // (09:54:22→09:56:22→09:58:07→10:00:07) 立刻 SCAN anchor=脚下 dist=0 马上
+    // 开蹲 → 60s 枯竭 → 再冷却, 2 分钟一轮循环, 珍珠 5→6 几乎零进展。
+    private boolean _pearlCampRequireLosUntilSeen = false;
+    // (2026-09-28) REOPEN-GATE 日志的独立节流戳 (不与 SCAN 日志共用, 防互相重置)。
+    private long _lastReopenGateLogMs = 0;
     // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
 
     /** (2026-09-20 冷却 hold 拉回) 离林锚点超过该半径就走回去, 防随机 wander 漂离林子。 */
@@ -3577,8 +3587,12 @@ public class BeatMinecraft2Task extends Task {
                 // 内部的"dry 过半定向远走"档取代 (放大行走距离找新林盘)。
                 long cooldownMs = (long) (mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds() * 1000);
                 _pearlCampBlockedUntilMs = now + cooldownMs;
+                // (2026-09-28 用户拍板) 冷却结束后必须【亲眼看到林子】才重开蹲守:
+                // 挂 LOS 确认闩, 禁群系快路径 (见字段注释的现场证据)。
+                _pearlCampRequireLosUntilSeen = true;
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
-                        + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds());
+                        + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds()
+                        + " (重开需 LOS 确认看到林子)");
                 // (2026-09-27 实锤修复, 事故现场 20260927-204546) 这里必须【本拍
                 // return null】, 让父级 Task.tickInternal 把 _sub stop 掉并置空,
                 // 下一拍才装得上新实例。"故意不 return, 落到下方扫描/重建"会被
@@ -3601,7 +3615,12 @@ public class BeatMinecraft2Task extends Task {
             // 同架构), 常态应该是 0~几 ms; 若突然变毫秒级两位数, 说明有人把信号方块
             // 弄成了按需全量扫描, 或者缓存被灌爆了 —— 那时再查, 别默默忍受。
             long scanStartNs = System.nanoTime();
-            _pearlForestAnchor = findPerceivedWarpedForest(mod);
+            // (2026-09-28) 冷却结束后的重开确认: LOS 确认闩挂着时禁群系快路径,
+            // 只有亲眼看到林子 (findVisibleSignal 命中) 才给锚。
+            _pearlForestAnchor = findPerceivedWarpedForest(mod, !_pearlCampRequireLosUntilSeen);
+            if (_pearlForestAnchor != null) {
+                _pearlCampRequireLosUntilSeen = false;
+            }
             long scanMs = (System.nanoTime() - scanStartNs) / 1_000_000L;
             // 日志节流 (2026-09-19 20:0x): 看得见(anchor 有值)必打 —— 那是关键状态变化;
             // 看不见时 10s 一条就够了 —— 否则主线一跑几十分钟, diag.log 会被每秒一条的
@@ -3671,6 +3690,17 @@ public class BeatMinecraft2Task extends Task {
      * (SearchChunkForBlockTask 那套), 保持拟人。
      */
     private BlockPos findPerceivedWarpedForest(AltoClef mod) {
+        return findPerceivedWarpedForest(mod, true);
+    }
+
+    /**
+     * @param allowBiomeFastPath 是否允许"脚下群系=诡异森林 → anchor=脚下"的 O(1)
+     *                           快路径。冷却结束后的重开确认期 ({@code
+     *                           _pearlCampRequireLosUntilSeen}) 传 false —— 群系
+     *                           判定不代表看得见 (bot 站林缘空地/空洞, 视野里没有
+     *                           菌岩), 2026-09-28 实锤它让冷却一到期就马上开蹲。
+     */
+    private BlockPos findPerceivedWarpedForest(AltoClef mod, boolean allowBiomeFastPath) {
         // 1) 脚下群系就是诡异森林 → "身处林中", O(1) 且零代价。
         //    (2026-09-18 22:46 卡死事故) 走过这条 O(1) 路径很重要: 见下。
         //    (2026-09-20 现场 20260920-123212 实锤) 这条快路径必须顺带静默注册信号
@@ -3681,7 +3711,20 @@ public class BeatMinecraft2Task extends Task {
         var biome = mod.getWorld().getBiome(playerPos);
         if (biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST)) {
             CollectEnderPearlsInForestTask.ensureSignalBlocksTracked(mod);
-            return playerPos;
+            // (2026-09-28) 重开确认期: 群系命中但被闩挡下 → 打节流日志可观测,
+            // 落到 LOS 判定 (看到菌岩才算)。
+            if (!allowBiomeFastPath) {
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - _lastReopenGateLogMs > PEARL_SCAN_LOG_INTERVAL_MS) {
+                    _lastReopenGateLogMs = nowMs;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tREOPEN-GATE suppress biome-fastpath"
+                            + " at " + playerPos.toShortString()
+                            + " (群系命中但要求亲眼看到林子 — 冷却后重开确认)");
+                }
+                // 注意: 仍落到下方 LOS 判定 —— 注册已在上面做过, LOS 有机会命中。
+            } else {
+                return playerPos;
+            }
         }
         // 2) 否则看能不能真的看见一片林子 (远处森林): 走 CollectEnderPearlsInForestTask
         //    .findVisibleSignal —— 与"看见堡垒"同一架构: BlockTracker 缓存查表 →
