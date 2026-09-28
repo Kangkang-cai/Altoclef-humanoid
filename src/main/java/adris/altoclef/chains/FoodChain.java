@@ -36,6 +36,8 @@ public class FoodChain extends SingleTaskChain {
     private boolean _isTryingToEat = false;
     private boolean _requestFillup = false;
     private boolean _needsFood = false;
+    // (2026-09-28 低血量进食豁免) 见 updateLowHealthEatLatch。
+    private boolean _lowHealthEatLatched = false;
 
     // ---- (2026-09-08 贪婪食物峰值, 用户) ----
     // 库存食物分数一旦达到过 settings.getFoodPeakUnits()(默认 240) 即永久锁存。
@@ -106,6 +108,7 @@ public class FoodChain extends SingleTaskChain {
                     + " combat=" + mod.getMobDefenseChain().isInCombat()
                     + " falling=" + mod.getMLGBucketChain().isFallingOhNo(mod)
                     + " needEat=" + _lastNeedsToEat
+                    + " exempt=" + _lowHealthEatLatched
                     + " hasFood=" + _cachedFoodScore
                     + " bestFood=" + (_cachedPerfectFood.isPresent()
                             ? _cachedPerfectFood.get().toString() : "none")
@@ -180,6 +183,30 @@ public class FoodChain extends SingleTaskChain {
         - We're kind of hungry and have food that fits perfectly
          */
 
+        // (2026-09-28 低血量进食豁免, 用户"前提得保证12格内无怪物, 然后就触发吃,
+        // 吃东西时间内怪物可能到几格可接受") 背景: 20260928-184630 两次阵亡
+        // (19:15:25 / 19:20:10) 期间 hp 11.9→10.8 / 15.1→0, 背包 166 食物分,
+        // 全程一口不吃 —— needEat 早就是 true, 被"战斗中禁食"闸门整段压死。
+        // 豁免三要素:
+        //   触发 = health < combatExemptEatMaxHealth(12) 且 needsToEat
+        //          且 12 格内无敌对怪 (nearestHostileDistance, 含听觉/记忆口径);
+        //   锁存 = 开吃后只要怪不进 combatExemptEatAbortRadius(6, 贴脸) 就吃到
+        //          不需要吃为止 —— 不因怪在 6~12 格徘徊而反复打断 (打断=吐出
+        //          进度, 永远吃不完);
+        //   优先级 = combatExemptEatPriority(85): 压过逃跑(80), 让位盾核(90)/
+        //          must-kill(95)/MLG(100) —— 怪真贴脸开打时战斗照常抢回。
+        // 只豁免"战斗中禁食"闸门; 空中/跳跃/坠落 (2026-09-14 事故) 是物理安全
+        // 闸, 与怪无关, 照旧不豁免。
+        Pair<Integer, Optional<Item>> calculation = calculateFood(mod);
+        _cachedFoodScore = calculation.getLeft();
+        _cachedPerfectFood = calculation.getRight();
+
+        boolean hasFood = _cachedFoodScore > 0;
+        boolean needEat = needsToEat(mod);
+        _lastNeedsToEat = needEat;
+
+        boolean combatEatExempt = updateLowHealthEatLatch(mod, hasFood, needEat);
+
         // We're in danger, don't eat now!!
         if (mod.getMobDefenseChain().isDoingAcrobatics() || mod.getMLGBucketChain().isFallingOhNo(mod)) {
             stopEat(mod);
@@ -190,19 +217,12 @@ public class FoodChain extends SingleTaskChain {
         // (2026-08-30 战斗中举盾不吃东西, 用户) 正在打斗(尤其举盾 vs 骷髅/苦力怕)
         // 时别自动吃—— 吃东西和举盾都是右键, 会互相抢 (会是顶走去吃 → 盾放下不
         // 格挡 → 挨射), 且战斗中进食等于站桩挨打。让战斗优先, 战斗结束再吃。
-        if (mod.getMobDefenseChain().isInCombat()) {
+        // (2026-09-28) 低血量+12格净空豁免: 见上方 combatEatExempt 注释。
+        if (mod.getMobDefenseChain().isInCombat() && !combatEatExempt) {
             stopEat(mod);
             logFoodDiag(mod, "idle", "in-combat");
             return Float.NEGATIVE_INFINITY;
         }
-
-        Pair<Integer, Optional<Item>> calculation = calculateFood(mod);
-        _cachedFoodScore = calculation.getLeft();
-        _cachedPerfectFood = calculation.getRight();
-
-        boolean hasFood = _cachedFoodScore > 0;
-        boolean needEat = needsToEat(mod);
-        _lastNeedsToEat = needEat;
 
         // If we requested a fillup but we're full, stop.
         if (_requestFillup && mod.getPlayer().getHungerManager().getFoodLevel() == 20) {
@@ -254,8 +274,10 @@ public class FoodChain extends SingleTaskChain {
                 }
                 stopEat(mod);
                 setTask(new EatItemTask(_config.eatTaskTimeoutSeconds));
-                logFoodDiag(mod, "foreground-eat", "");
-                return _config.eatForegroundPriority;
+                // (2026-09-28 低血量豁免) 豁免期前台优先级 85: 压过逃跑(80) 才能
+                // 在撤退状态中途停下来吃; 仍让位盾核(90)/must-kill(95)/MLG(100)。
+                logFoodDiag(mod, combatEatExempt ? "foreground-eat(lowhp-exempt)" : "foreground-eat", "");
+                return combatEatExempt ? _config.combatExemptEatPriority : _config.eatForegroundPriority;
             }
             // 异步补食 (不饿只补满): 保留只读闸门 —— 面向容器时右键会开界面
             // 而不是吃, 让位即可; 但不 closeScreen/不转视角 (副作用已移出评估路径)。
@@ -328,6 +350,40 @@ public class FoodChain extends SingleTaskChain {
 
         // Food eating is handled asynchronously.
         return Float.NEGATIVE_INFINITY;
+    }
+
+    /**
+     * (2026-09-28 低血量进食豁免) 锁存维护。触发后进入 _lowHealthEatLatched,
+     * 返回 true = 本 tick 豁免"战斗中禁食"闸门。
+     *
+     * 触发: hp < combatExemptEatMaxHealth(12) 且 needEat 且背包有食物
+     *       且 12 格 (combatExemptEatClearRadius) 内无敌对怪。
+     * 维持: 怪不进 6 格 (combatExemptEatAbortRadius, 贴脸) 且仍 needEat 且仍有
+     *       可吃食物 —— 用户明确接受"吃东西期间怪可能到几格"。
+     * 解除: 吃饱/无需吃/断粮/怪进贴脸半径 → 交还战斗链 (EatItemTask 被抢占时
+     *       onStop 释放右键, 进度作废是预期行为)。
+     */
+    private boolean updateLowHealthEatLatch(AltoClef mod, boolean hasFood, boolean needEat) {
+        if (_lowHealthEatLatched) {
+            double nearest = MobDefenseChain.nearestHostileDistance(mod);
+            if (!needEat || !hasFood || nearest < _config.combatExemptEatAbortRadius) {
+                _lowHealthEatLatched = false;
+                Debug.logToFile("altoclef_diag.log", "[FOOD-EXEMPT] latch released: needEat=" + needEat
+                        + " hasFood=" + hasFood
+                        + " nearestHostile=" + (nearest == Double.MAX_VALUE ? "none" : String.format("%.1f", nearest)));
+            }
+            return _lowHealthEatLatched;
+        }
+        if (needEat && hasFood
+                && mod.getPlayer().getHealth() < _config.combatExemptEatMaxHealth
+                && MobDefenseChain.nearestHostileDistance(mod) >= _config.combatExemptEatClearRadius) {
+            _lowHealthEatLatched = true;
+            Debug.logToFile("altoclef_diag.log", "[FOOD-EXEMPT] latch engaged: health=" + mod.getPlayer().getHealth()
+                    + " hunger=" + mod.getPlayer().getHungerManager().getFoodLevel()
+                    + " nearestHostile=" + (MobDefenseChain.nearestHostileDistance(mod) == Double.MAX_VALUE
+                            ? "none" : String.format("%.1f", MobDefenseChain.nearestHostileDistance(mod))));
+        }
+        return _lowHealthEatLatched;
     }
 
     @Override
@@ -668,5 +724,14 @@ public class FoodChain extends SingleTaskChain {
         public float eatForegroundPriority = 62;
         // 前台进食任务超时 (秒): 换盾失败/装备失败等异常时兜底退出, 防永久卡死。
         public double eatTaskTimeoutSeconds = 20;
+        // ---- (2026-09-28 低血量进食豁免, 用户"12格内无怪才吃, 吃期间怪到几格可接受") ----
+        // 触发血量上限: hp 低于此值才允许豁免"战斗中禁食"。
+        public float combatExemptEatMaxHealth = 12;
+        // 触发净空半径: 最近敌对怪 (含听觉/记忆口径) 不小于此距离才触发。
+        public float combatExemptEatClearRadius = 12;
+        // 锁存中止半径: 开吃后怪进入此距离 (贴脸) 立即交还战斗链。
+        public float combatExemptEatAbortRadius = 6;
+        // 豁免期前台进食优先级: 压过逃跑(80), 让位盾核(90)/must-kill(95)/MLG(100)。
+        public float combatExemptEatPriority = 85;
     }
 }

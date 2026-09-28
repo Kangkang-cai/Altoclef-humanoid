@@ -661,6 +661,21 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
+     * (2026-09-28 低血量进食豁免, 用户"12格内无怪物就触发吃东西") 最近存活敌对怪
+     * 的距离; 16 格内无怪 → {@link Double#MAX_VALUE}。复用 {@link #getNearbyHostiles}
+     * 感知口径 (含听觉与 20s 记忆 —— 听见的怪也算威胁, 进食判定从保守, 不会为了
+     * 吃饭无视墙后的怪)。只读, 不改变威胁评估本身。
+     */
+    public static double nearestHostileDistance(AltoClef mod) {
+        double best = Double.MAX_VALUE;
+        for (Entity h : getNearbyHostiles(mod)) {
+            double d = mod.getPlayer().distanceTo(h);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+
+    /**
      * (2026-09-24 派发证据门, 事故 20260924-230344) 主动猎杀类派发 (自信战斗/
      * 近战直打) 只认有"交战证据"的怪: 【当前亲眼可见】或【实际伤害过 bot】
      * (60s 窗口)。getNearbyHostiles 的感知口径含听觉与 20s 记忆 —— 墙后/
