@@ -240,6 +240,19 @@ public abstract class Task {
      * STILL RUNS `onStop`
      *
      * Doesn't stop it all-together (meaning `isActive` still returns true)
+     *
+     * (2026-09-28 取证补充, 勿与 `stop()` 混淆)
+     *  - **会走 onStop**: 让位(链被抢占)时任务的收尾/资源释放照常发生。
+     *    `SingleTaskChain.onInterrupt` 正是调本方法 (`_mainTask.interrupt(mod, null)`)。
+     *  - **与 `stop()` 的关键差别**: `stop()` 会写 `TaskSwitchLogger.taskStopped` +
+     *    `Debug.logInternal("Task STOP: …, interrupted by …")`; 本方法**一条日志都不打**。
+     *    ⇒ 让位"到底有没有触发 onStop / 释放资源"在日志里**完全不可观测**
+     *    (2026-09-28 那次 30s 黑盒排查即因此失去线索, 并一度被误判成"不 stop 任务")。
+     *  - **只递归 `_sub`**: 覆盖范围是"任务树"; **不负责"链自身持有的全局资源"**
+     *    (如 FoodChain 在 getPriority 里 startEat 施加的 hold / interactionPaused,
+     *    释放全押在 stopEat 上)。
+     *  - 两个前置门: `!_active` 直接 return; `_first == true`(尚未 tick 过)会跳过 onStop。
+     *  细节: detail/03-consistency.md 第 4 节 + detail/11「放床第四轮」。
      */
     public void interrupt(AltoClef mod, Task interruptTask) {
         if (!_active) return;

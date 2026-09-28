@@ -41,6 +41,33 @@ public class InputControls {
         };
     }
 
+    /**
+     * 按一下键 —— 但**实际效果是"按住到下一帧"**, 调用方必须知道这一点。
+     *
+     * (2026-09-28 事故 20260928-145156 复盘) 本方法只负责按下, 真正的
+     * `setPressed(false)` 推迟到**下一帧**的 `onTickPre()` (走队列 `_toUnpress`);
+     * 而 `onTickPost()` 只清 `_waitForRelease`、不清键。AltoClef 的帧结构:
+     *     AltoClef:315 onTickPre()   ← 清上一帧留下的按下
+     *                   … TaskRunner.tick → 本方法 → setPressed(true) …
+     *     AltoClef:410 onTickPost()
+     * ⇒ 键从"本帧按下"一直保持 true 到"下一帧 onTickPre", **跨帧边界**。
+     *
+     * 下游后果 (vanilla `MinecraftClient.handleInputEvents`):
+     *     中断"持续使用物品"状态的唯一条件 = `isUsingItem() && !useKey.isPressed()`
+     *     ⇒ **每帧都调本方法 ⇒ 键恒 pressed ⇒ `stopUsingItem` 永不触发**
+     *     ⇒ 举盾 / 进食 / 拉弓 / 望远镜 这类"持续使用"状态一旦开始就**永不被打断**。
+     *
+     * ⇒ **调用纪律: 绝不每帧无节流地重复调用本方法。**
+     *   单次点击只让状态多持续一帧(下一帧被 onTickPre 清掉, 无感); 但**每帧点击**
+     *   会让任何"持续使用"状态永久粘住。需要重复点击时**必须自带节流**
+     *   (先例: `MLGBucketFallChain._pickupRepeatTimer`), 或改用 `hold()` +
+     *   在 onStop / 收尾路径里成对 release。
+     *   反例: `PlaceBedAndSetSpawnTask` 旧版点床分支每帧 `tryPress(CLICK_RIGHT)`,
+     *   当副手持盾且 MC 准星 MISS(落进 `doItemUse` 的 `interactItem(OFF_HAND)`
+     *   分支 → 盾牌 use())时, 表现为"床边持续举盾 30s"。详见
+     *   `detail/03-consistency.md` 第 4 节。
+     *   注: `forcePress()` 是"release + tryPress", 同样具备上述跨帧特性。
+     */
     public void tryPress(Input input) {
         // We just pressed, so let us release.
         if (_waitForRelease.contains(input)) {

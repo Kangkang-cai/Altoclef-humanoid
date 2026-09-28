@@ -737,10 +737,22 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     // 射线判"命中床"、MC 准星却是 MISS, 于是每 tick 的"点床"都在
                     // 举盾, 卡 30s 后被用户手动停止。
                     // 用 forcePress 而非 tryPress: tryPress 在"键已被别人 hold 按住"
-                    // 时产生不了干净的 use 边沿 —— EatItemTask.hold(CLICK_RIGHT) 在
-                    // 链让位后无人 release(SingleTaskChain.onInterrupt 只设 _interrupted
-                    // 不 stop 任务), 现场那个实例冻结了 50.7s。forcePress 先 release
-                    // 清残留再短按, 正是 InputControls 里为"不长按反而举盾"写的入口。
+                    // 时产生不了干净的 use 边沿; forcePress 先 release 清残留再短按
+                    // (InputControls 里为"不长按反而举盾"写的入口)。
+                    //
+                    // (2026-09-28 残留风险, 本次未消除) forcePress 仍是**每帧调用**,
+                    // 因而仍带 InputControls.tryPress 的"跨帧保持 pressed"特性
+                    // (详见该方法注释)。本次止住举盾靠的是"判据与 MC 同源 ⇒ 不再
+                    // MISS ⇒ 走 interactBlock 而非 interactItem(OFF_HAND)", 并**没有**
+                    // 消除"每帧点击 ⇒ useKey 恒 pressed"。
+                    // 残余窗口: 若准星确在床、但 interactBlock 未被 accepted(白天 /
+                    // 床被占), vanilla 会 break 到 for(Hand) → interactItem(OFF_HAND)
+                    // → 仍可能举盾; 好在 _spawnSet + _inBedTimer(1s) 会收尾, 窗口约 1 秒。
+                    // 彻底消除 = 给点床加"点击后 N tick 抑制窗"(让键真正空闲一帧),
+                    // 或让 InputControls 提供"保证释放过至少一帧"的点击语义。
+                    // (更正: 早期版本此处曾写"EatItemTask.hold 因 SingleTaskChain
+                    //  onInterrupt 不 stop 任务而残留" —— 该判断有误, onInterrupt 会调
+                    //  _mainTask.interrupt → Task.interrupt 会走 onStop。见 detail/11。)
                     mod.getInputControls().forcePress(Input.CLICK_RIGHT);
                     // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部
                     // SleepingChatScreen 分支。

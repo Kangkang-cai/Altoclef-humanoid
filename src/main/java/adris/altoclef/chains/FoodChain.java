@@ -241,6 +241,15 @@ public class FoodChain extends SingleTaskChain {
                 // 正在操作界面, 抢了只会两边都卡。
                 if (!(mod.getPlayer().currentScreenHandler instanceof PlayerScreenHandler)) {
                     logFoodDiag(mod, "wait", "container-screen-open");
+                    // (2026-09-28 已知漏口, 未修) 这里直接 return 会**跳过紧随其后的
+                    // stopEat(mod)** —— 而 startEat() 施加的 hold(CLICK_RIGHT) 与
+                    // setInteractionPaused(true), 释放责任**全在 stopEat 里**, Task 层
+                    // 的 interrupt/onStop 覆盖不到"链自身持有的资源"(FoodChain 是
+                    // SingleTaskChain, 让位只 interrupt `_mainTask`)。
+                    // 现网很少发作的原因: 本方法 (getPriority) 被 TaskRunner **每帧对
+                    // 所有 active chain 调用** ⇒ 正常下一帧就会走到下面的 stopEat 完成
+                    // 释放(幂等兜底); 只有"容器界面持续开着"才让 hold 一直挂着。
+                    // 收敛做法(未实施): 本分支 return 前先 stopEat(mod)。
                     return Float.NEGATIVE_INFINITY;
                 }
                 stopEat(mod);
