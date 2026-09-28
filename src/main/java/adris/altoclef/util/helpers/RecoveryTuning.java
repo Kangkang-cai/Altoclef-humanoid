@@ -77,4 +77,23 @@ public final class RecoveryTuning {
 
     /** 单块走廊方块挖掘超时 (ms), 超过视为挖不动 → 走 detourBlockTimeout 分支。 */
     public static final long BLOCK_DETOUR_BLOCK_TIMEOUT_MS = 10_000;
+
+    /**
+     * (2026-09-28 (i) 先绕后挖) 挖走廊**之前**先把交互站位半径放宽到此值, 再给一次
+     * 重新寻路的机会。
+     *
+     * <p><b>为什么有效</b>: {@code createGoalForInteract} 实际用的半径恒为 1
+     * (字段 {@code reachDistance} 恒 0 ⇒ {@code Math.max(1, 0) = 1}), 因此 in-goal
+     * 只有目标的 **6 个面邻格**。目标贴脸被实心环封堵时, 那 6 格全站不进去 ⇒ baritone
+     * 无解, 唯一出路是挖 (现场 20260923-085300: GoalNear 站位环全实心, A* 每 6s 超时
+     * 重启 57 万节点, 站桩 146s —— 这正是 {@code tickDetour} 被引入的原因)。
+     * 放宽到 2 后 in-goal 扩到"距离 ≤2"的斜位/稍远位, 靠真实方块 reach (约 4.5) 仍能
+     * 点到目标 —— 即人类"退半步、斜着站"的做法。
+     *
+     * <p><b>顺序</b>: 半径 1 无路径 + 3s 无位移 → 放宽到本值 (再给一次 3s) → 仍不行才挖走廊。
+     */
+    public static final int WIDENED_STAND_RADIUS = 2;
+
+    /** "已放宽过站位半径"的目标集合容量上限 (static, 跨实例存活)。 */
+    public static final int WIDENED_STAND_MAP_CAPACITY = 256;
 }

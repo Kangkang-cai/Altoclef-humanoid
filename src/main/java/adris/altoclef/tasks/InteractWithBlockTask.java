@@ -177,6 +177,9 @@ public class InteractWithBlockTask extends Task {
     private static final int DETOUR_MAX_ROUNDS = RecoveryTuning.BLOCK_DETOUR_MAX_ROUNDS;
     private static final long DETOUR_BLOCK_TIMEOUT_MS = RecoveryTuning.BLOCK_DETOUR_BLOCK_TIMEOUT_MS;
     private static final Map<BlockPos, Integer> _detourRounds = new HashMap<>();
+    // (2026-09-28 (i) 先绕后挖) 已放宽过"交互站位半径"的目标。static: 跨实例存活,
+    // 与 _detourRounds 同口径 (上层重建任务实例不重置"这个目标试过几步")。
+    private static final Set<BlockPos> _widenedStand = new HashSet<>();
     private final TimerGame _detourTimer = new TimerGame(DETOUR_TRIGGER_SECONDS);
     private boolean _detourTiming = false;
     private Vec3d _detourAnchor = null;
@@ -343,6 +346,8 @@ public class InteractWithBlockTask extends Task {
         // (2026-09-17) 脱险抱持不跨次进入 —— 新一次交互应当重新尝试 (static 计数仍生效)。
         _escaping = false;
         // (2026-09-23) 绕行计时/路径不跨实例; static 轮次仍生效。
+        // (2026-09-28 (i)) static 的 _widenedStand 同理不在 onStart 清 —— "这个目标需要
+        // 放宽站位半径"是客观几何事实, 重建任务实例不该让它退回半径 1 再撞一次墙。
         _detourTiming = false;
         _detourAnchor = null;
         _detourBlocks = null;
@@ -468,7 +473,12 @@ public class InteractWithBlockTask extends Task {
             _moveChecker.reset();
         }
 
-        Goal moveGoal = createGoalForInteract(_target, reachDistance, _direction, _interactOffset, _walkInto,
+        // (2026-09-28 (i) 先绕后挖) 被实心环封堵过的目标: 交互站位半径放宽
+        // (1 → RecoveryTuning.WIDENED_STAND_RADIUS), 给 baritone 一次"退半步 / 斜着站"
+        // 的机会 —— 这是挖走廊之前的"绕"。未放宽过的目标逐字保持旧行为 (半径 1)。
+        int standRadius = _widenedStand.contains(_target)
+                ? RecoveryTuning.WIDENED_STAND_RADIUS : reachDistance;
+        Goal moveGoal = createGoalForInteract(_target, standRadius, _direction, _interactOffset, _walkInto,
                 mod.getPlayer().getBlockPos().getY());
         ICustomGoalProcess proc = mod.getClientBaritone().getCustomGoalProcess();
 
@@ -810,6 +820,31 @@ public class InteractWithBlockTask extends Task {
             return null;
         }
         if (!_detourTimer.elapsed()) return null;
+
+        // (2026-09-28 (i) 先绕后挖) 3s 无位移 + baritone 无路径 —— 但先别挖:
+        // 先把交互站位半径放宽一次 (1 → WIDENED_STAND_RADIUS), 给 baritone 一次
+        // "退半步 / 斜着站" 的重新寻路机会; 仍然无解才挖走廊。
+        // 依据: 半径 1 的 in-goal 只有目标的 6 个面邻格, 站位环全实心时天然无解
+        // (现场 20260923-085300 就是本机制被引入的那次)。这一步即用户要的"先绕"。
+        if (!_widenedStand.contains(_target)) {
+            if (_widenedStand.size() > RecoveryTuning.WIDENED_STAND_MAP_CAPACITY) {
+                _widenedStand.clear();
+            }
+            _widenedStand.add(_target);
+            _detourTiming = false;
+            // 旧 goal 的 A* 可能仍 inProgress —— 不清就永远用不上新 goal 重算。
+            try {
+                mod.getClientBaritone().getPathingBehavior().cancelEverything();
+            } catch (Throwable ignored) {
+            }
+            Debug.logMessage("(InteractWithBlockTask) [Detour] widen stand radius to "
+                    + RecoveryTuning.WIDENED_STAND_RADIUS + " for " + _target.toShortString()
+                    + " (try walking around before digging)");
+            Debug.logToFile("altoclef_diag.log", "[RECOVERY]\t[WidenStand]\tradius 1 -> "
+                    + RecoveryTuning.WIDENED_STAND_RADIUS + " at " + _target.toShortString()
+                    + " (no path + no move 3s; reposition attempt before corridor)");
+            return null;
+        }
 
         // 触发一轮
         if (_detourRounds.size() > 256) _detourRounds.clear();
