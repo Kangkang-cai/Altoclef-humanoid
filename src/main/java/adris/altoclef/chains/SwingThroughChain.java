@@ -11,6 +11,7 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
+import net.minecraft.block.BedBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -372,6 +373,13 @@ public class SwingThroughChain extends TaskChain {
         for (BlockPos c : candidates) {
             BlockState s = mod.getWorld().getBlockState(c);
             if (s.isAir()) continue;
+            // (2026-09-28 放床即被拆根因) 床是任务主动放置/使用的方块, 不是"楔住
+            // 自己的隐形体"。BedBlock 碰撞箱仅 0.5 格高、isOpaqueFullCube=false,
+            // 恰好落入本集合, 而 PlaceBedAndSetSpawnTask 早已删掉"永不拆床"谓词、
+            // 床方块本身无 avoidBreaking 保护 ⇒ canBreak(床)=true ⇒ 挥击拆掉刚放
+            // 的床, 重生点设了又失效 (现场 latest.log 17:50:16 已设置重生点 →
+            // 17:50:17 [SWING-BREAK] target=-204,68,302 拆床)。床不在本链职责内。
+            if (s.getBlock() instanceof BedBlock) continue;
             VoxelShape shape = s.getCollisionShape(mod.getWorld(), c);
             if (shape.isEmpty()) continue;
             if (s.isOpaqueFullCube(mod.getWorld(), c)) continue;
