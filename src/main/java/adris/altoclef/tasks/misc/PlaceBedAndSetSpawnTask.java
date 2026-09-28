@@ -816,14 +816,23 @@ public class PlaceBedAndSetSpawnTask extends Task {
         }
         if (_currentBedRegion == null) {
             setDebugState("Searching for spot to place bed, wandering...");
+            // (2026-09-28 根修, 事故 20260928-130354) 旧实现是
+            //     return new TimeoutWanderTask();      ← 无参 = Float.POSITIVE_INFINITY
+            // 单段 128 格、目标还可高出 20+ 格: 现场 baritone 目标 (-154,96,-51),
+            // 即玩家 89 格外 / 高 23 格, bot 顺着该路径起跳爬到 y=74 后回不到站位,
+            // GetToBlockTask 死等满 10s → STAND NAV TIMEOUT → 弃区重扫, 整轮报废。
+            // 而下游 locateBedRegion 只扫 SCAN_RANGE = 10 格 —— 走得越远越选不中,
+            // "无限距离让位"与"10 格内选位"逻辑自相矛盾。改用字段里那把有限游荡
+            // (4 格起), 目标稳定且留在扫描半径的量级内。
+            // 同时 chat 侧不再每 tick 刷 "diverting to WANDER"(一次失败刷几十条),
+            // 只保留 diag 文件记录; 状态仍走 setDebugState 给 HUD 显示。
             String m = "[Diag-bed] diverting to WANDER instead of sleeping. stayInBed=" + _stayInBed
                     + " anyBed=" + anyBed
                     + " hasBedItem=" + mod.getItemStorage().hasItem(ItemHelper.BED)
                     + " player=" + mod.getPlayer().getBlockPos().toShortString();
-            Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         _placeAttemptTimer = null;
-            return new TimeoutWanderTask();
+            return _wanderTask;
         }
 
         // Clear and make bed foundation
@@ -911,7 +920,16 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
         BlockPos toStand = _currentBedRegion.add(BED_PLACE_STAND_POS);
         // Our bed region is READY TO BE PLACED
-        if (!mod.getPlayer().getBlockPos().equals(toStand)) {
+        // (2026-09-28 站位判据收紧, 现场 20260928-130354 + 用户手工复现)
+        // 旧判据只比【方块坐标】: 玩家碰撞箱宽 0.6, 停在格子的 +X 半边时
+        // getBlockPos() 依然等于 toStand, 但身体已经压到床格上 → 服务端 canPlace
+        // 直接拒放。用户现场原话: "明明只有那两格空却放不进去; 跳到那个格子上方
+        // 朝脚下放就能放" —— 后者正是不占格、不压边的姿势, 反证成败取决于身体
+        // 与床格的相对位置, 而不是"那两格干不干净"。
+        // 床格恒在 toStand 的 +X 侧 (BED_PLACE_STAND_POS = (-1,0,0)), Z 方向与
+        // 站位同格是正常的(床沿 X 展开), 故只需约束 X: 碰撞箱右缘必须留在床格
+        // 左边界之外。判据与导航目标(GoalBlock 会走到格中心)一致, 不会来回震荡。
+        if (!isStandingWellForBed(mod, toStand)) {
             _placeAttemptTimer = null;
             // (2026-09-24 站位导航超时) 见字段区注释: baritone 算不出路径时
             // GetToBlockTask 会永久死等, 10s 未到位 → 弃区重扫, 不再僵住。
@@ -1453,6 +1471,27 @@ public class PlaceBedAndSetSpawnTask extends Task {
         if (WorldHelper.isAir(mod, pos)) return false;
         if (!mod.getWorld().getBlockState(pos).getFluidState().isEmpty()) return false;
         return !mod.getWorld().getBlockState(pos).getMaterial().isReplaceable();
+    }
+
+    /**
+     * (2026-09-28 站位判据收紧, 事故 20260928-130354 + 用户手工复现)
+     * bot 是否真的站到了"能放床"的位置。
+     *
+     * 只比方块坐标不够: 玩家碰撞箱宽 0.6, 停在格子的 +X 半边时
+     * getBlockPos() 依然等于站位格, 但身体已经压到床格上 → 服务端 canPlace
+     * 拒放, 表现成"明明两格都空却放不上, 跳起来朝脚下放反倒一定成"
+     * (跳起时不占格、不压边)。
+     *
+     * 床格恒在 toStand 的 +X 侧 (BED_PLACE_STAND_POS = (-1,0,0)); Z 方向与
+     * 站位同格是正常的(床沿 X 展开), 所以只约束 X。
+     */
+    private boolean isStandingWellForBed(AltoClef mod, BlockPos toStand) {
+        if (!mod.getPlayer().getBlockPos().equals(toStand)) return false;
+        final double PLAYER_HALF_WIDTH = 0.3;    // MC 玩家实体宽 0.6
+        final double EPS = 0.02;                 // 贴边余量
+        double playerMaxX = mod.getPlayer().getPos().x + PLAYER_HALF_WIDTH;
+        double bedEdgeX = toStand.getX() + 1.0;  // 床格左边界
+        return playerMaxX <= bedEdgeX - EPS;
     }
 
     /**
