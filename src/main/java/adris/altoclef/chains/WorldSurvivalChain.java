@@ -502,7 +502,18 @@ public class WorldSurvivalChain extends SingleTaskChain {
                         + mod.getPlayer().getBlockPos().toShortString() + ")";
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
-                _pickaxeCraftTask = new SatisfyMiningRequirementTask(MiningRequirement.WOOD, "pickaxe-watchdog");
+                // (2026-09-28 续租断链修复) setTask 按 isEqual 去重: 若 _mainTask 已挂着
+                // 同 requirement 的旧实例, new 出来的新实例不会成为 _mainTask → 续租判据
+                // (_mainTask == _pickaxeCraftTask) 永假 → 每次重派只拿 1 tick 就让位,
+                // 10s 周期空转 (20260928-221851 现场: latch 883 冻结 + 90s 零进展,
+                // 断镐后造镐链永远做不完)。与盾牌续租断链修复 (0925) 同族 —— 复用
+                // _mainTask 上的旧实例, 保持引用一致。
+                if (_mainTask instanceof SatisfyMiningRequirementTask existing
+                        && existing.equals(new SatisfyMiningRequirementTask(MiningRequirement.WOOD, "pickaxe-watchdog"))) {
+                    _pickaxeCraftTask = existing;
+                } else {
+                    _pickaxeCraftTask = new SatisfyMiningRequirementTask(MiningRequirement.WOOD, "pickaxe-watchdog");
+                }
                 _pickaxeCraftSinceMs = System.currentTimeMillis();
                 setTask(_pickaxeCraftTask);
                 return PICKAXE_WATCHDOG_PRIORITY;
