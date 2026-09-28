@@ -149,6 +149,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // MISS 单列 + 拆障累计上限硬闸门。
     // "等待朝向到位"日志 2s 节流 (同 _crosshairBlockedLogTimer 口径)。
     private final TimerGame _aimWaitLogTimer = new TimerGame(2);
+    // (2026-09-28 点床判据同源) "这次到底点没点"原先零日志 —— 现场 20260928-145156
+    // 卡 30s 完全无法区分"点了没生效"与"根本没点"。此日志 2s 节流补齐该盲区。
+    private final TimerGame _bedClickLogTimer = new TimerGame(2);
     // 朝向到位容差(度): 只需拦住"朝向被劫持压向正下方"(pitch 差常 >30°),
     // 不必苛求精确到位 —— baritone 逼近会留几度残差, 收太紧会永远等 → 一直换侧。
     private static final double AIM_ALIGN_TOLERANCE_DEG = 20.0;
@@ -247,6 +250,45 @@ public class PlaceBedAndSetSpawnTask extends Task {
         return mod.getWorld().raycast(new RaycastContext(
                 eye, end, RaycastContext.ShapeType.OUTLINE,
                 RaycastContext.FluidHandling.NONE, mod.getPlayer()));
+    }
+
+    /**
+     * (2026-09-28 根修: 点床判据与 MC 同源) MC 当帧准星是否真的落在【床】方块上。
+     *
+     * 为什么必须换成这个判据, 而不是自有射线 (raycastToAimPoint):
+     * 现场 20260928-145156 —— bot 副手盾, "点床"变成【持续举盾不放】卡满 30s,
+     * 用户手动停止。vanilla `MinecraftClient.doItemUse()` 的分支是:
+     *   准星命中方块 → interactBlock(MAIN_HAND) → 主手空手时 fallback 到
+     *                 blockState.onUse → 床的 onUse → 正常上床
+     *                 (副手盾轮不到 —— 这正是"人类拿盾点床也没事"的原因);
+     *   准星 MISS   → 掉到 for(Hand) 循环 → interactItem(MAIN) PASS →
+     *                 interactItem(OFF_HAND) → 盾牌 use() → **举盾**。
+     * 而本任务原先用自有射线判"命中床 → tryPress": 该射线方向只由 aimPoint
+     * 决定、与当前朝向无关; 在 AIM_ALIGN_TOLERANCE_DEG=20° 的粗容差下, MC 准星
+     * 完全可能落在 MISS —— 于是每一次"点床"实际都在举盾。两套判据不同源 = 根因。
+     * 改用同源判据后, 只要点了就必然进 interactBlock 分支, 副手盾永不介入。
+     */
+    private boolean isCrosshairOnBed(AltoClef mod) {
+        HitResult target = MinecraftClient.getInstance().crosshairTarget;
+        if (!(target instanceof BlockHitResult bhr) || bhr.getType() != HitResult.Type.BLOCK) {
+            return false;
+        }
+        return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock() instanceof BedBlock;
+    }
+
+    /** 把 MC 当帧准星指向什么渲染成一行文本, 供睡眠点击路径的节流日志使用。 */
+    private String describeCrosshair(AltoClef mod) {
+        HitResult target = MinecraftClient.getInstance().crosshairTarget;
+        if (target == null) return "null";
+        if (target instanceof EntityHitResult ehr) {
+            return "entity:" + ehr.getEntity().getType().getName();
+        }
+        if (target instanceof BlockHitResult bhr) {
+            if (bhr.getType() == HitResult.Type.MISS) return "MISS";
+            return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock().getName().getString()
+                    + "@" + bhr.getBlockPos().toShortString();
+        }
+        return String.valueOf(target.getType());
     }
 
     public PlaceBedAndSetSpawnTask() {
@@ -686,6 +728,41 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     if (alt != null) {
                         LookHelper.lookAt(mod, alt);
                     }
+                } else if (isCrosshairOnBed(mod)) {
+                    // ===== (2026-09-28 根修: 点床判据与 MC 同源) =====
+                    // 唯一允许点右键的分支 —— 且条件就是"MC 当帧准星真的落在床上"。
+                    // 这样 doItemUse() 必然走 interactBlock(MAIN_HAND) 分支(床 onUse
+                    // → 上床), 而不是 MISS 分支(interactItem(OFF_HAND) → 副手盾
+                    // use() → 举盾)。现场 20260928-145156 铁证: 20° 粗容差下自有
+                    // 射线判"命中床"、MC 准星却是 MISS, 于是每 tick 的"点床"都在
+                    // 举盾, 卡 30s 后被用户手动停止。
+                    // 用 forcePress 而非 tryPress: tryPress 在"键已被别人 hold 按住"
+                    // 时产生不了干净的 use 边沿 —— EatItemTask.hold(CLICK_RIGHT) 在
+                    // 链让位后无人 release(SingleTaskChain.onInterrupt 只设 _interrupted
+                    // 不 stop 任务), 现场那个实例冻结了 50.7s。forcePress 先 release
+                    // 清残留再短按, 正是 InputControls 里为"不长按反而举盾"写的入口。
+                    mod.getInputControls().forcePress(Input.CLICK_RIGHT);
+                    // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部
+                    // SleepingChatScreen 分支。
+                    _inBedTimer.reset();
+                    // (2026-09-21 用户拍板"右键点了就行, 不用等消息") 右键命中床
+                    // 即视为设点成功: vanilla 1.18.2 trySleep 里 setSpawnPoint 在
+                    // isDay 检查之前, 白天右键床重生点已设置 (动作栏消息只是提示,
+                    // mod 侧 GameOverlayEvent 不保证收到 → 旧口径只能 12s 超时
+                    // 拉黑, 还让上级把床数目标虚增 +1 → 误判缺床回地表)。
+                    // _inBedTimer 1s 后 isFinished 干净收尾; 夜晚真睡进去走
+                    // SleepingChatScreen 分支语义一致。
+                    _spawnSet = true;
+                    if (_bedClickLogTimer.elapsed()) {
+                        _bedClickLogTimer.reset();
+                        String m = "[Diag-bed] sleep click: crosshair ON BED ("
+                                + describeCrosshair(mod)
+                                + ") yawOff=" + String.format("%.1f", yawOff)
+                                + " pitchOff=" + String.format("%.1f", pitchOff)
+                                + " (player=" + pp.toShortString() + ")";
+                        Debug.logMessage(m);
+                        Debug.logToFile("altoclef_diag.log", m);
+                    }
                 } else {
                     // ===== (2026-09-13 修复B+C: 判据换源 + MISS 单列) =====
                     // 不再用 crosshairTarget 决定"该不该破坏方块"。旧版 (9dbeb779:582)
@@ -694,26 +771,30 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     // 两条 "blocked by block 空气 … destroying it" 铁证), 且同 tick 读到
                     // 的是转向前的旧朝向 → 误判后 DestroyBlockTask 每 tick lookAt 劫持
                     // 朝向, 竖直挖穿自锁。
-                    // 权威判据改为"眼位 → 床头瞄点"的方块射线(OUTLINE, 同 MC 准心口径):
-                    //   命中床      → 点右键睡觉
+                    // 拆障判据(只管拆障)维持"眼位 → 床头瞄点"的方块射线(OUTLINE):
+                    //   命中床      → 朝向还差一点, 不点不拆, 继续让 lookAt 逼近
                     //   命中非床方块 → 确实挡在这条射线上, 拆它合法(限权内建, 无需额外校验)
-                    //   落空/非方块 → 瞄点几何不可达, 不点不拆, 等 3s 换侧
+                    //   落空/非方块 → 瞄点几何不可达, 不点不拆
+                    // (2026-09-28 注: "点右键"已移交上方 isCrosshairOnBed 同源分支独占 ——
+                    //  这里再点一次就会重新引入"自有射线说能点、MC 准星 MISS → 举盾"。)
                     HitResult probe = raycastToAimPoint(mod, aimPoint);
                     if (probe instanceof BlockHitResult pbhr && pbhr.getType() == HitResult.Type.BLOCK) {
                         BlockPos hitPos = pbhr.getBlockPos();
                         boolean hitIsBed = mod.getWorld().getBlockState(hitPos).getBlock() instanceof BedBlock;
                         if (hitIsBed) {
-                            mod.getInputControls().tryPress(Input.CLICK_RIGHT);
-                            // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部 SleepingChatScreen 分支
-                            _inBedTimer.reset();
-                            // (2026-09-21 用户拍板"右键点了就行, 不用等消息") 右键命中床
-                            // 即视为设点成功: vanilla 1.18.2 trySleep 里 setSpawnPoint 在
-                            // isDay 检查之前, 白天右键床重生点已设置 (动作栏消息只是提示,
-                            // mod 侧 GameOverlayEvent 不保证收到 → 旧口径只能 12s 超时
-                            // 拉黑, 还让上级把床数目标虚增 +1 → 误判缺床回地表)。
-                            // _inBedTimer 1s 后 isFinished 干净收尾; 夜晚真睡进去走
-                            // SleepingChatScreen 分支语义一致。
-                            _spawnSet = true;
+                            // (2026-09-28) 自有射线命中床、MC 准星却没落床 = 朝向还差一点。
+                            // 点床已被上方同源分支独占: 这里既不点(点了必是 MISS → 副手盾
+                            // 举盾)也不拆(床不能拆), 只让 648 行的 lookAt 继续逼近。
+                            if (_bedClickLogTimer.elapsed()) {
+                                _bedClickLogTimer.reset();
+                                String m = "[Diag-bed] aim ray ON BED but crosshair off it, keep aligning"
+                                        + " crosshair=" + describeCrosshair(mod)
+                                        + " yawOff=" + String.format("%.1f", yawOff)
+                                        + " pitchOff=" + String.format("%.1f", pitchOff)
+                                        + " (player=" + pp.toShortString() + ")";
+                                Debug.logMessage(m);
+                                Debug.logToFile("altoclef_diag.log", m);
+                            }
                         } else if (WorldHelper.canBreak(mod, hitPos)
                                 && mod.getWorld().getBlockEntity(hitPos) == null) {
                             // (2026-09-24 容器守卫) 瞄准射线上的容器方块 (熔炉/箱子) 不拆,
