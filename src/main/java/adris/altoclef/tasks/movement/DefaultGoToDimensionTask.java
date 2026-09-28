@@ -122,7 +122,21 @@ public class DefaultGoToDimensionTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return WorldHelper.getCurrentDimension() == _target;
+        boolean finished = WorldHelper.getCurrentDimension() == _target;
+        // (2026-09-28 根修) 设点闩锁在"进下界"这一动作完成时使命即结束, 立即重置。
+        // 旧实现 _netherBedSpawnDone 只在 netherPortalBedSpawnTask 里置 true 后
+        // 永不重置, 而 _goToNetherTask 是粘性实例(BeatMinecraft2Task:461)跨多次进
+        // 下界复用 ⇒ 第一次进下界(18:53)设点后, 之后从下界回来再进下界(19:17 起)
+        // 一律跳过设点(现场 latest.log 反复 Going to nether portal 却无 Setting
+        // spawn, 重生点早已失效/消耗)。这里在"已抵达目标维度"的瞬间重置, 让下一次
+        // 主世界→下界重新走 netherPortalBedSpawnTask 设重生点。
+        if (finished && _netherBedSpawnDone) {
+            _netherBedSpawnDone = false;
+            _netherBedSpawnStarted = false;
+            Debug.logMessage("(NetherBedSpawn) entered nether, resetting spawn latch for next visit.");
+            Debug.logToFile("altoclef_diag.log", "[NetherBedSpawn]\treset latch on dimension entry");
+        }
+        return finished;
     }
 
     private Task goToOverworldFromNetherTask(AltoClef mod) {
