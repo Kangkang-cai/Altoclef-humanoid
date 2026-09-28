@@ -464,6 +464,16 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
      * exit 圈之间的过渡带, 以及末影人瞬移造成的一拍距离跳变)。
      * 近战击杀适用; 交易/剪羊毛等非战斗交互保持父类默认 (false) —— 被墙挡住
      * 时必须走出去才能看到目标, 站桩只会让交互超时。
+     *
+     * (2026-09-28 (b) 定案, 用户拍板) 击杀链路**明确采用"被挡直接挖 / 站桩交战",
+     * 不再绕位** —— 理由: 贴脸被挡多为相机射线擦沿/瞄脚被地形吃, 绕位会把 bot 带出
+     * 交战距离; 而挖掉挡路的某一格通常比绕过去更快, 且 FULLY-CLOSE 兜底已覆盖
+     * "贴脸准心吃不到"的场景。后果 (已核对): 父类 `repositionForLineOfSight` 及其
+     * 粘滞字段 `_repositionTarget` / `_repositionSwitchTimer` 对击杀链路**逻辑不可达**
+     * (进交互分支时 _withinInteract 已置 true ⇒ `pointBlank || holdClose` 恒真),
+     * 仅供非战斗交互 (剪羊毛 / 挤奶 / 猪灵交易) 使用。击杀链路"被挡"的出路 =
+     * `onObstructionPersistent` 清障挖除 / 站桩到 kill timeout 拉黑换目标 ——
+     * 故 `_losBlockedSinceTick` 计时必须跨实例存活 (见父类 L2 static map)。
      */
     @Override
     protected boolean holdPositionWhenBlockedInInteract(AltoClef mod, Entity entity) {

@@ -14,6 +14,7 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
+import adris.altoclef.util.helpers.RecoveryTuning;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -168,10 +169,13 @@ public class InteractWithBlockTask extends Task {
     // 侧面走廊, 逐块 DestroyBlockTask 挖通(抱持, 单块 10s 超时)。只挖近场、非容器/
     // 功能方块、canBreak、不邻岩浆、头/脚空间合格的方块。同目标 2 轮封顶 →
     // startEscape 拉黑脱险。绝不挖 _target 本体。
-    private static final double DETOUR_TRIGGER_SECONDS = 3;
-    private static final int DETOUR_MAX_BLOCKS = 4;
-    private static final int DETOUR_MAX_ROUNDS = 2;
-    private static final long DETOUR_BLOCK_TIMEOUT_MS = 10_000;
+    // (2026-09-28 L1) 参数统一收口到 RecoveryTuning —— 本地别名保留, 调用点零改动;
+    // 与实体侧 AbstractDoToEntityTask 的"被挡 → 清障"时长现在同一处可见 (调参只改一处)。
+    // 两者为何不同 (2s vs 3s), 见 RecoveryTuning 类注释。
+    private static final double DETOUR_TRIGGER_SECONDS = RecoveryTuning.BLOCK_DETOUR_TRIGGER_SECONDS;
+    private static final int DETOUR_MAX_BLOCKS = RecoveryTuning.BLOCK_DETOUR_MAX_BLOCKS;
+    private static final int DETOUR_MAX_ROUNDS = RecoveryTuning.BLOCK_DETOUR_MAX_ROUNDS;
+    private static final long DETOUR_BLOCK_TIMEOUT_MS = RecoveryTuning.BLOCK_DETOUR_BLOCK_TIMEOUT_MS;
     private static final Map<BlockPos, Integer> _detourRounds = new HashMap<>();
     private final TimerGame _detourTimer = new TimerGame(DETOUR_TRIGGER_SECONDS);
     private boolean _detourTiming = false;
@@ -435,7 +439,7 @@ public class InteractWithBlockTask extends Task {
         // 下方判负时的 `_moveChecker.reset()` 互为清零源 → `_giveUpTimer` 永不 elapsed
         // (详见字段区注释)。
         if (_noProgressAnchor == null
-                || _noProgressAnchor.squaredDistanceTo(mod.getPlayer().getPos()) > 0.04) {
+                || _noProgressAnchor.squaredDistanceTo(mod.getPlayer().getPos()) > RecoveryTuning.STUCK_MOVE_EPSILON_SQ) {
             noteProgress(mod);
         }
 
@@ -800,7 +804,7 @@ public class InteractWithBlockTask extends Task {
             _detourTimer.reset();
             return null;
         }
-        if (_detourAnchor != null && _detourAnchor.squaredDistanceTo(pos) > 0.04) {
+        if (_detourAnchor != null && _detourAnchor.squaredDistanceTo(pos) > RecoveryTuning.STUCK_MOVE_EPSILON_SQ) {
             _detourAnchor = pos;
             _detourTimer.reset();
             return null;

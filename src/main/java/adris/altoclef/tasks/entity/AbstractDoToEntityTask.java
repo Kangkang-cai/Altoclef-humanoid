@@ -9,6 +9,7 @@ import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.RecoveryTuning;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -53,17 +54,54 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
     // 与 persist 相同量级, 探头一瞬仍不清零。
     // = 维持绕位, 战斗等其他任务行为完全不变 (scope 收敛)。
     // =========================================================================
-    private static final double OBSTRUCTION_PERSIST_SECONDS = 2;
-    private long _losBlockedSinceTick = Long.MIN_VALUE;
+    // (2026-09-28 L1) 阈值统一收口到 RecoveryTuning —— 本地别名保留, 调用点零改动;
+    // 与方块侧 InteractWithBlockTask.tickDetour 的对应量现在同一处可见 (调参只改一处)。
+    private static final double OBSTRUCTION_PERSIST_SECONDS = RecoveryTuning.ENTITY_OBSTRUCTION_PERSIST_SECONDS;
     // (2026-09-20 计时器加固) 连续可见满这个时长才重置"持续被挡"计时 —— 末影人
     // 瞬移/探头制造的单拍可见不再把计时器打回零 (现场 20260920-213856 实锤:
     // 3 次 KillTimeout 全程 LOS-Obstruction 0 条 = 8s 持续条件永远凑不满,
     // 遮挡消除钩子死路, 用户设计的对策从未生效)。
-    private static final double LOS_CLEAR_GRACE_SECONDS = 2;
-    private long _losClearSinceTick = Long.MIN_VALUE;
+    private static final double LOS_CLEAR_GRACE_SECONDS = RecoveryTuning.ENTITY_LOS_CLEAR_GRACE_SECONDS;
     private long _lastObstructionLogTick = Long.MIN_VALUE;
     // (2026-09-27 用户拍板 C) "迟滞圈内被挡改交战 (不再绕位)" 的取证日志节流 (1s)。
     private long _lastHoldCloseLogTick = Long.MIN_VALUE;
+
+    // =========================================================================
+    // (2026-09-28 L2) "持续被挡 / 连续可见" 这对计时改为**按目标 UUID 存活于 static map**。
+    //
+    // 为什么必须 static: 上层 (MobDefenseChain 每秒重建 <Killing entity.X>) 会把实例
+    // 字段洗回初值, 计时从零开始 —— 2s 阈值永远凑不满。现场 20260927-222854 实证:
+    // 击杀实例存活 2.1s / 3.4s / 7.8s / 9.1s / 11.7s / 14.6s (阈值恰 2s), 全场
+    // [LOS-Obstruction] 0 条 = 清障从未触发过。而 0927 的 A+C 之后它是击杀链路
+    // "被挡"场景**唯一**的自救计时源 (绕位已不可达, 另两条路只剩"挖除成功"或
+    // "站桩到 15s kill timeout 拉黑换目标")。
+    //
+    // 索引: 0 = blockedSinceTick, 1 = clearSinceTick; 不存 = Long.MIN_VALUE。
+    // 生命周期与 AbstractKillEntityTask._meleeEngageAnchor 同模式: **不按实例清**
+    // (按实例清会误伤其它目标的计时), 靠容量上限自净; 陈旧残留由 LOS_TIMER_STALE_TICKS 兜。
+    // =========================================================================
+    private static final java.util.Map<java.util.UUID, long[]> _losTimersByTarget = new java.util.HashMap<>();
+
+    private static long losTimerGet(java.util.UUID id, int idx) {
+        long[] a = _losTimersByTarget.get(id);
+        return a == null ? Long.MIN_VALUE : a[idx];
+    }
+
+    private static void losTimerSet(java.util.UUID id, int idx, long value) {
+        if (_losTimersByTarget.size() > RecoveryTuning.LOS_TIMER_MAP_CAPACITY) {
+            long now = WorldHelper.getTicks();
+            _losTimersByTarget.entrySet().removeIf(en -> {
+                long[] v = en.getValue();
+                long newest = Math.max(v[0], v[1]);
+                return newest != Long.MIN_VALUE && now - newest > RecoveryTuning.LOS_TIMER_STALE_TICKS;
+            });
+        }
+        long[] a = _losTimersByTarget.computeIfAbsent(id, k -> new long[]{Long.MIN_VALUE, Long.MIN_VALUE});
+        a[idx] = value;
+        if (a[0] == Long.MIN_VALUE && a[1] == Long.MIN_VALUE) {
+            _losTimersByTarget.remove(id);
+        }
+    }
 
     // (2026-09-14 接近失败诊断, 232015 场次) wander 两个触发点的取证日志节流
     // key (5s)。目的: 区分"目标从感知/候选消失"与"接近无进展", 并拿到触发时
@@ -283,11 +321,15 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                     // 计时器早已超限, 下一格【立即】继续挖, 不再等第二个 2s
                     // ("两格障碍"整条清通)。持续窗口内仍照常交战 (0922 贴脸让位
                     // 行为不变, 交战分支优先, 不与绕位互抢)。
+                    java.util.UUID losId = entity.getUuid();
                     if (_visibleAimPoint == null) {
                         long blankNow = WorldHelper.getTicks();
-                        if (_losBlockedSinceTick == Long.MIN_VALUE) {
-                            _losBlockedSinceTick = blankNow;
-                        } else if (blankNow - _losBlockedSinceTick
+                        long blockedSince = losTimerGet(losId, 0);
+                        // (L2) 陈旧残留 (上一场交战遗留) → 重置起点, 不立刻触发挖掘。
+                        if (blockedSince == Long.MIN_VALUE
+                                || blankNow - blockedSince > RecoveryTuning.LOS_TIMER_STALE_TICKS) {
+                            losTimerSet(losId, 0, blankNow);
+                        } else if (blankNow - blockedSince
                                 > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
                             BlockPos blankObstruction = findObstructingBlock(mod, entity);
                             if (blankObstruction != null) {
@@ -300,7 +342,7 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                         }
                     } else {
                         // 真能看到目标 (探头/露头) → 恢复 0922 原语义: 清零计时, 直接交战。
-                        _losBlockedSinceTick = Long.MIN_VALUE;
+                        losTimerSet(losId, 0, Long.MIN_VALUE);
                     }
                     _progress.reset();
                     setDebugState("Target in face, fighting instead of repositioning");
@@ -308,12 +350,15 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 }
                 setDebugState("Target blocked, repositioning for line of sight");
                 _progress.reset();
-                _losClearSinceTick = Long.MIN_VALUE;
+                java.util.UUID repLosId = entity.getUuid();
+                losTimerSet(repLosId, 1, Long.MIN_VALUE);
                 // (2026-09-09 遮挡消除钩子) 绕位持续被挡 (2026-09-20 起 2s) → 交子类决定是否挖除。
                 long now = WorldHelper.getTicks();
-                if (_losBlockedSinceTick == Long.MIN_VALUE) {
-                    _losBlockedSinceTick = now;
-                } else if (now - _losBlockedSinceTick > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
+                long repBlockedSince = losTimerGet(repLosId, 0);
+                if (repBlockedSince == Long.MIN_VALUE
+                        || now - repBlockedSince > RecoveryTuning.LOS_TIMER_STALE_TICKS) {
+                    losTimerSet(repLosId, 0, now);
+                } else if (now - repBlockedSince > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
                     BlockPos obstruction = blockObstruction != null ? blockObstruction : findObstructingBlock(mod, entity);
                     if (obstruction != null) {
                         if (now - _lastObstructionLogTick > 100) {
@@ -326,16 +371,23 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                         if (clearTask != null) return clearTask;
                     }
                 }
+                // (2026-09-28 (b) 定案) 击杀子类走不到这里: holdPositionWhenBlockedInInteract=true
+                // 且进入交互分支时 _withinInteract 已置 true ⇒ 上面 `pointBlank || holdClose`
+                // 恒真, 必走让位分支。击杀链路的"被挡"出路 = 清障挖除 / 站桩到 kill timeout 拉黑。
+                // 本分支 (绕位) 仅服务非战斗交互 (剪羊毛 / 挤奶 / 猪灵交易)。
                 return repositionForLineOfSight(mod, entity);
             }
             _progress.reset();
             // (2026-09-20 计时器加固) 可见需连续保持 LOS_CLEAR_GRACE_SECONDS 才重置
             // "持续被挡"计时; 单拍可见 (瞬移/探头掠过) 不清零。
             long clearNow = WorldHelper.getTicks();
-            if (_losClearSinceTick == Long.MIN_VALUE) {
-                _losClearSinceTick = clearNow;
-            } else if (clearNow - _losClearSinceTick > (long) (LOS_CLEAR_GRACE_SECONDS * 20)) {
-                _losBlockedSinceTick = Long.MIN_VALUE;
+            java.util.UUID clearLosId = entity.getUuid();
+            long clearSince = losTimerGet(clearLosId, 1);
+            if (clearSince == Long.MIN_VALUE
+                    || clearNow - clearSince > RecoveryTuning.LOS_TIMER_STALE_TICKS) {
+                losTimerSet(clearLosId, 1, clearNow);
+            } else if (clearNow - clearSince > (long) (LOS_CLEAR_GRACE_SECONDS * 20)) {
+                losTimerSet(clearLosId, 0, Long.MIN_VALUE);
             }
             return onEntityInteract(mod, entity);
         } else {
@@ -547,8 +599,10 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
         mod.getMobDefenseChain().setTargetEntity(null);
         mod.getMobDefenseChain().resetForceField();
         _repositionTarget = null; // (2026-08-31) 长任务停止时清掉绕位记忆, 避免遗留下次误用
-        _losBlockedSinceTick = Long.MIN_VALUE; // (2026-09-09) 遮挡计时一并清掉
-        _losClearSinceTick = Long.MIN_VALUE; // (2026-09-20) 可见宽限计时一并清掉
+        // (2026-09-28 L2) 遮挡/可见计时已改为 static map (按目标 UUID), **不在这里清**:
+        // 按实例清会误伤其它目标的计时, 且上层每秒重建实例会把它清成"永远从头计时"
+        // —— 那正是 20260927-222854 全场 [LOS-Obstruction] 0 条的成因。
+        // 过期由 RecoveryTuning.LOS_TIMER_STALE_TICKS + 容量上限自净。
         _visibleAimPoint = null; // (2026-09-12) 可见瞄准点一并清掉
         // (2026-09-18) _lastChaseTarget 故意不清: 任务实例长期复用 (如 _tradeTask),
         // 进食抢占等打断恢复后还能续上最后已知追击; 残留无风险 —— 追击仅在
