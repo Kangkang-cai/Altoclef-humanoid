@@ -118,9 +118,23 @@ public interface LookHelper {
     }
 
     static EntityHitResult raycast(Entity from, Entity to, double reachDistance) {
-        Vec3d fromPos = getCameraPos(from),
-                toPos = getCameraPos(to);
-        Vec3d direction = (toPos.subtract(fromPos).normalize().multiply(reachDistance));
+        return raycast(from, to, getCameraPos(to), reachDistance);
+    }
+
+    /**
+     * (2026-09-28 自适应瞄准点, 用户拍板 B) 与 {@link #raycast(Entity, Entity, double)}
+     * **同一口径** (同一处 ProjectileUtil 调用, 不再写第二份), 只是射线方向指向
+     * 调用方给的瞄点而不是目标的默认瞄点。
+     *
+     * 用途: "从包围盒表面采样点里挑一个真能打到的点" —— 出刀判定 (crosshairTarget)
+     * 与这里完全同源 (OUTLINE 形状方块射线 + 实体 AABB, 取更近者), 所以返回非 null
+     * ⇔ 准星压在该方向上时这一刀真能落到目标身上。同时覆盖两类"看得见却打不到":
+     *   ① 方块 (含草/藤蔓/菌根等只有轮廓没有碰撞的软植物) 在实体之前挡住 ⇒ null;
+     *   ② 射线只是擦过碰撞箱边缘 (瞄点贴在 AABB 边界) ⇒ null。
+     */
+    static EntityHitResult raycast(Entity from, Entity to, Vec3d aimPoint, double reachDistance) {
+        Vec3d fromPos = getCameraPos(from);
+        Vec3d direction = aimPoint.subtract(fromPos).normalize().multiply(reachDistance);
         Box box = to.getBoundingBox();
         return ProjectileUtil.raycast(from, fromPos, fromPos.add(direction), box, entity -> entity.equals(to), 0);
     }
