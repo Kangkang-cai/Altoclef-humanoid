@@ -48,7 +48,21 @@ public class PlaceBlockNearbyTask extends Task {
     // + L4 Wander for 2.0 blocks, 08:48:20.6), 与 PlaceBlockTask 的 checker 同源
     // 6s 叠加 → 放置失败要等 6s 才动。移动中 distance 有进展不触发。
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2, 0.1, 0.5, 0.001, 1);
-    private final TimeoutWanderTask _wander = new TimeoutWanderTask(2);
+
+    // (2026-09-28 让位超时硬上限) 现场 20260928-091258 实锤: 判负后返回 _wander 进
+    // 「Wandering, will try to place again later.」分支 (下方 L182), 该分支唯一的
+    // 出口是 `_wander.isFinished()` = 走满 2 格, 而 baritone 在那个窄通道
+    // `pathing=false pathPresent=false` (anomaly.log 原文) ⇒ bot 89 秒零位移
+    // (SWING-BREAK 三次采样坐标 15 位小数完全一致), 同时该分支每 tick
+    // `_progressChecker.reset()` 保证自己永不再判负 ⇒ 僵尸态永不自愈。
+    // _wander 自带的 `_failCounter > 10` 逃生门也没打开 —— 它全程只判负过一次
+    // (diag.log 09:21:20.907), 此后 check() 转入挖掘分支, 距离表每 tick reset。
+    // 这里补墙钟硬上限: 让位超过 WANDER_GIVEUP_MS 仍无位移 ⇒ 丢弃本轮 wander
+    // (换新实例 → isActive() 归假), 本拍落到下方重新选点重试, 并留下日志。
+    private static final long WANDER_GIVEUP_MS = 8000;
+    private TimeoutWanderTask _wander = new TimeoutWanderTask(2);
+    /** 本轮让位的起始墙钟 (ms); 0 = 未开始计时。 */
+    private long _wanderSinceMs = 0;
 
     // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。
     private GetToLandTask _toLand = null;
@@ -75,6 +89,30 @@ public class PlaceBlockNearbyTask extends Task {
     @Override
     protected void onStart(AltoClef mod) {
         _mod = mod;
+
+        // (2026-09-28 time-base 修复 —— 本次卡死的触发源) 本任务是
+        // DoStuffInContainerTask 构造时创建、并长期复用的缓存实例
+        // (DoStuffInContainerTask:120 `_placeTask = new PlaceBlockNearbyTask(...)`,
+        //  :161/:302 反复 return 同一实例), 而 `_progressChecker` 的计时器是从
+        // **实例构造那一刻**起算的。onStart 原先不重置它, 于是:
+        //   实例构造 > timeout(2s) 之后才第一次走到 checker 时,
+        //   LinearProgressChecker.setProgress 的 `_first` 分支先把 _lastProgress
+        //   赋成当前值 (LinearProgressChecker:34-37) ⇒ improvement ≡ 0
+        //   < minProgress(0.1) ⇒ **必然判负**, 与 bot 有没有移动无关。
+        //
+        // 现场 20260928-091258 diag.log 铁证:
+        //   09:21:20.907 [TIMEOUT] site=LinearProgressChecker task=PlaceBlockNearbyTask
+        //                timeout=2.0s minProgress=0.1 actual=0.0
+        //   09:21:20.907 [TIMEOUT] site=ProgressCheckerRetry task=PlaceBlockNearbyTask
+        //                attempts=1 exhausted
+        // 判负发生在 Place structure{crafting_table} 启动后仅 49ms (1 tick) —— baritone
+        // 连一次放置机会都没拿到就进了让位分支。同一处判负在本会话出现 5 次
+        // (09:14:54.249 / 09:15:55.450 / 09:15:56.402 / 09:20:47.256 / 09:21:20.907),
+        // 前几次没暴露只因恰好走了 L124「眼前能放就直接放」的快路径, 压根没碰 checker。
+        // 对齐 PlaceBlockTask.onStart (其 L115 已有 _progressChecker.reset())。
+        _progressChecker.reset();
+        _wanderSinceMs = 0;
+
         mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
 
         // Check for blocks being placed
@@ -179,10 +217,26 @@ public class PlaceBlockNearbyTask extends Task {
         }
 
         // Wander while we can.
+        // (2026-09-28 让位硬上限) 本分支原先只有 `_wander.isFinished()` 一个出口,
+        // baritone 走不动时就永久停在这里 (见字段区 WANDER_GIVEUP_MS 注释的现场)。
+        // 超时 ⇒ 换新 wander 实例 (isActive() 归假 ⇒ 本拍不再 return 它), 落到下方
+        // 重新选点, 至少每 8s 一轮推进而不是彻底静止。
         if (_wander.isActive() && !_wander.isFinished(mod)) {
-            setDebugState("Wandering, will try to place again later.");
-            _progressChecker.reset();
-            return _wander;
+            if (_wanderSinceMs == 0) {
+                _wanderSinceMs = System.currentTimeMillis();
+            }
+            if (System.currentTimeMillis() - _wanderSinceMs > WANDER_GIVEUP_MS) {
+                Debug.logMessage("[PlaceNearby] 让位 wander 超时 " + (WANDER_GIVEUP_MS / 1000)
+                        + "s 未产生位移 (baritone 疑似无路径), 丢弃本轮让位并重新选点");
+                _wander = new TimeoutWanderTask(2);
+                _wanderSinceMs = 0;
+                _tryPlace = null;              // 强制重新选点, 不复用已被拉黑的旧目标
+                _progressChecker.reset();
+            } else {
+                setDebugState("Wandering, will try to place again later.");
+                _progressChecker.reset();
+                return _wander;
+            }
         }
         // Fail check
         if (!_progressChecker.check(mod)) {

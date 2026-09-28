@@ -44,7 +44,17 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     // (08:48:13→20.6), 单次放置总耗时 13.1s, 用户反馈观感差。移动中 distance
     // 有进展不会触发, 故 2s 只压缩"真卡住"的等待。其余参数保持默认。
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(2, 0.1, 0.5, 0.001, 1);
-    private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(3, true); // This can get stuck forever, so we increase the range.
+
+    // (2026-09-28 让位硬上限, 与 PlaceBlockNearbyTask 同族) 本字段原注释就写着
+    // "This can get stuck forever, so we increase the range", 但只放大了 range,
+    // 没给出口: 下方 L134 的让位分支唯一出口是 `_wanderTask.isFinished()` = 走满
+    // 3 格, baritone 无路径时 (pathPresent=false) 永不满足, 而该分支每 tick
+    // `_progressChecker.reset()` ⇒ 永不再判负 ⇒ 僵尸态。同族现场 20260928-091258
+    // 在 PlaceBlockNearbyTask 上实锤 89 秒零位移卡死。这里补同款墙钟硬上限。
+    private static final long WANDER_GIVEUP_MS = 8000;
+    private TimeoutWanderTask _wanderTask = new TimeoutWanderTask(3, true);
+    /** 本轮让位的起始墙钟 (ms); 0 = 未开始计时。 */
+    private long _wanderSinceMs = 0;
     private Task _materialTask;
     private int _failCount = 0;
     // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
@@ -113,6 +123,7 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     @Override
     protected void onStart(AltoClef mod) {
         _progressChecker.reset();
+        _wanderSinceMs = 0;
         // If we get interrupted by another task, this might cause problems...
         //_wanderTask.resetWander();
     }
@@ -131,10 +142,23 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         }
 
         // Perform timeout wander
+        // (2026-09-28 让位硬上限, 见字段区注释) 超时 ⇒ 换新 wander 实例 (isActive()
+        // 归假 ⇒ 本拍不再 return 它), 落到下方继续尝试 (baritone 放置 / alternative way)。
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
-            setDebugState("Wandering.");
-            _progressChecker.reset();
-            return _wanderTask;
+            if (_wanderSinceMs == 0) {
+                _wanderSinceMs = System.currentTimeMillis();
+            }
+            if (System.currentTimeMillis() - _wanderSinceMs > WANDER_GIVEUP_MS) {
+                Debug.logMessage("[PlaceStuck] 让位 wander 超时 " + (WANDER_GIVEUP_MS / 1000)
+                        + "s 未产生位移 at " + _target.toShortString() + " (baritone 疑似无路径), 丢弃本轮让位");
+                _wanderTask = new TimeoutWanderTask(3, true);
+                _wanderSinceMs = 0;
+                _progressChecker.reset();
+            } else {
+                setDebugState("Wandering.");
+                _progressChecker.reset();
+                return _wanderTask;
+            }
         }
 
         // (2026-09-14 站在目标格里) 必须在 progressChecker 之前: 站在目标格内
