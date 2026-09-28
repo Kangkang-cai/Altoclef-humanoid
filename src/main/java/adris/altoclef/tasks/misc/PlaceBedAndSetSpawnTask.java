@@ -743,9 +743,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     //  onInterrupt 不 stop 任务而残留" —— 该判断有误, onInterrupt 会调
                     //  _mainTask.interrupt → Task.interrupt 会走 onStop。见 detail/11。)
                     mod.getInputControls().forcePress(Input.CLICK_RIGHT);
-                    // 每 tick 点过就 reset _inBedTimer (1s), 若真成功睡进去会走顶部
-                    // SleepingChatScreen 分支。
-                    _inBedTimer.reset();
+                    // (2026-09-28 根修) _inBedTimer 只在【首次设点成功】时 reset 一次,
+                    // 不能每帧 reset —— forcePress 每帧调用 ⇒ 旧写法每帧 reset ⇒ 计时器
+                    // 永不到 1s elapsed ⇒ isFinished 恒 false ⇒ 白天设完点后卡在"去睡床"
+                    // 流程空转几十秒 (现场 latest.log 18:38:35~18:39:25 实锤 50s)。
+                    // 用 _spawnSet 从 false→true 的边沿判"首次", 之后不再 reset。
+                    if (!_spawnSet) {
+                        _inBedTimer.reset();
+                    }
                     // (2026-09-21 用户拍板"右键点了就行, 不用等消息") 右键命中床
                     // 即视为设点成功: vanilla 1.18.2 trySleep 里 setSpawnPoint 在
                     // isDay 检查之前, 白天右键床重生点已设置 (动作栏消息只是提示,
@@ -1240,6 +1245,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
             Debug.logWarning("Can't place spawnpoint/sleep in a bed unless we're in the overworld!");
             return true;
         }
+        // (2026-09-28 进门前设点"点一下就走") 永久设点(_stayInBed=false, 进地狱门
+        // NetherBedSpawn / 末地 setSpawnNearPortalTask)时, 右键命中床即 _spawnSet=true
+        // 就【立即收尾】—— 不需要睡进去、不需要等 _inBedTimer。现场 latest.log
+        // 18:38:35 已设置重生点后却卡在"去睡床"流程空转 50s(直到 18:39:25 用户手动
+        // 停): 根因是 _inBedTimer 被点床分支每帧 reset(见 onTick 点床处)永不到
+        // elapsed, isFinished 恒 false。永久设点本就不要求"睡进去", 设点成功即走。
+        // 游牧(_stayInBed=true)不受影响, 仍走下方拆床 + _inBedTimer 路径。
+        if (!_stayInBed && _spawnSet) return true;
         // (2026-08-27 睡完拆床) stayInBed 睡醒但还没拆床 → 不算完成, 等 onTick 的
         // 拆床阶段把 _justPlacedBed 处理掉(拆走/捡起/放弃)再收尾, 否则任务一结束
         // 床就滞留世界 (用户: 睡完不拆床)。
