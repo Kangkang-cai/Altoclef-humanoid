@@ -1104,6 +1104,15 @@ public class BeatMinecraft2Task extends Task {
                 _bedMissingSinceMs = 0;
             } else if (!_ranStrongholdLocator
                     && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                    // (2026-09-28 死循环根修) 让位给"进下界"流程: `_goToNetherTask` 内部的
+                    // NetherBedSpawn 步骤 (DefaultGoToDimensionTask:283) 会自己放床 + 设重生点;
+                    // 本分支若不退让, 就会在"床刚放下、出生点还没设"的那个窗口里把它拆掉 ——
+                    // 现场 20260928-164218 铁证: 放床约 50ms 后即 `interruptedBy=<Destroy block>`,
+                    // `spawnSet=false`, 位置 125→126→129 轮着换, 8 轮死循环。
+                    // 判据用 `isActive() && !isFinished()` 而非只 isActive: 该任务是粘性实例
+                    // (:461 "To keep the portal build cache"), 被反复 return, `_active` 不会因
+                    // 完成而自动归假(只有 stop() 会), 单看 isActive 会永久挡住收床。
+                    && !(_goToNetherTask.isActive() && !_goToNetherTask.isFinished(mod))
                     && System.currentTimeMillis() >= _bedRecoverGiveUpUntilMs) {
                 // (2026-09-11) 区块未加载时 getBlockState 恒返回空气 → 会误判"床没了"
                 // 并把记忆清掉 (走远再回来 = 丢床)。未加载一律不判定、宽限计时归零,
