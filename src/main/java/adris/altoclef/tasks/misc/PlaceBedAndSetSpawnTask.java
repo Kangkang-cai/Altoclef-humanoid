@@ -838,16 +838,21 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
         outer:
         // (2026-09-24 用户改革"不需要清理那么大") 清理范围从 Z=-1..1 两侧外扩
-        // 18 格 收缩到 footprint 两列 (dx=0..1, dy=0..1, dz=0) 的实心方块 ——
+        // 18 格 收缩到 footprint 两列 (dx=0..1, dy=0..1, dz=0) 内【床占不了】的格 ——
         // 上方有方块才需要清, 床两侧不再清。
+        // (2026-09-28 根修) 判定从 WorldHelper.isSolid 改为 bedCellNeedsClear:
+        // 竹子这类不可替换的非实心方块同样要清, 否则选区收下它却没人清 = 死结
+        // (事故 20260928-114406, 见 bedCellNeedsClear 注释)。
         for (int dx = 0; dx < BED_CLEAR_SIZE.getX(); ++dx) {
             for (int dy = 0; dy < BED_CLEAR_SIZE.getY(); ++dy) {
                 BlockPos toClear = _currentBedRegion.add(dx, dy, 0);
-                if (WorldHelper.isSolid(mod, toClear)) {
+                if (bedCellNeedsClear(mod, toClear)) {
                     // (2026-09-24 容器守卫) 运行期落进区域的容器方块 (如合成链放的
                     // 合成台) 不拆 —— 跳过继续清别的格, 拆不动就靠下方 3s place
                     // timeout 换区域。见 isGoodAsBorder 同款守卫注释 (现场铁律)。
                     if (mod.getWorld().getBlockEntity(toClear) != null) continue;
+                    // (2026-09-28 根修) 挖不动的格不要占住 _currentBreak 反复重试。
+                    if (!WorldHelper.canBreak(mod, toClear)) continue;
                     _currentBreak = toClear;
                     break outer;
                 }
@@ -1407,21 +1412,47 @@ public class PlaceBedAndSetSpawnTask extends Task {
     }
 
     private boolean isGoodAsBorder(AltoClef mod, BlockPos pos) {
-        if (WorldHelper.isSolid(mod, pos)) {
-            // (2026-09-24 容器守卫, 用户: 放床卡死+反复做铁镐) 带 BlockEntity 的方块
-            // (熔炉/合成台/箱子…) 不作清地目标 —— 现场 20260924-181522: 选区把自家的
-            // 熔炉 (-633,74,1290) 圈进清地区 → 为拆熔炉先做镐 (ToolGate) → 合成链
-            // 放置的合成台又落进清地区被拆 → 清地目标高频翻转 → satisfy 链每 ~3s 被
-            // 杀重来 (铁镐做 5 次才成 1 次)。区域含容器直接拒选, 让选区另寻他处。
-            if (mod.getWorld().getBlockEntity(pos) != null) return false;
-            return WorldHelper.canBreak(mod, pos);
-        }
+        // 流体(水/岩浆)拒绝, 避免把床放在水里。
+        if (!mod.getWorld().getBlockState(pos).getFluidState().isEmpty()) return false;
         // (2026-08-25 草原上搭石头平台修复) 非实心: 空气或植被(草/花/藤等)不
         // 挡床, 接受 — 否则草原上地面区域因周边有草被判不可用, bot 选到空中
         // 区域再往地上搭石头平台放床 (用户实测: 明明平坦草原却先放石头再放床)。
-        // 流体(水/岩浆)仍拒绝, 避免把床放在水里。
-        if (WorldHelper.isAir(mod, pos)) return true;
-        return mod.getWorld().getBlockState(pos).getFluidState().isEmpty();
+        // (2026-09-28 根修) 判定改走 bedCellNeedsClear 统一口径 —— 旧写法
+        // "非实心 + 非流体 = 可用"太宽: 竹子 noCollision 但 Material.BAMBOO
+        // 【不可替换】, 收下后清理循环又不动它 ⇒ 选区收下、清不掉、放不上。
+        if (!bedCellNeedsClear(mod, pos)) return true;
+        // 要清的格: 只要能清掉就算可用。
+        // (2026-09-24 容器守卫, 用户: 放床卡死+反复做铁镐) 带 BlockEntity 的方块
+        // (熔炉/合成台/箱子…) 不作清地目标 —— 现场 20260924-181522: 选区把自家的
+        // 熔炉 (-633,74,1290) 圈进清地区 → 为拆熔炉先做镐 (ToolGate) → 合成链
+        // 放置的合成台又落进清地区被拆 → 清地目标高频翻转 → satisfy 链每 ~3s 被
+        // 杀重来 (铁镐做 5 次才成 1 次)。区域含容器直接拒选, 让选区另寻他处。
+        if (mod.getWorld().getBlockEntity(pos) != null) return false;
+        return WorldHelper.canBreak(mod, pos);
+    }
+
+    /**
+     * (2026-09-28 根修, 事故 20260928-114406) 床要占的一格, 是否需要【先清掉】
+     * 才能放。
+     *
+     * 旧口径散在两处、各漏一半, 竹子正好卡进缝里:
+     *   ① isGoodAsBorder 旧写法 "非实心 + 非流体 = 可用" ⇒ 竹子(Material.BAMBOO,
+     *      noCollision 但【不可替换】)被当成天然可用格收下;
+     *   ② 清理循环只清 WorldHelper.isSolid ⇒ 竹子非实心, 不在清理名单。
+     * 结果: 选区收下、清理不动、床放不上 —— 现场 footprint 第二格
+     * (-64,73,12)=minecraft:bamboo, `here=air above=air hereIsBed=false` 反复
+     * 空转 28s, 用户按键手动停 (快照 11:56:20 / 11:56:21 两次抓拍均见该格 bamboo,
+     * 且 placeFaces 缺 up 恰说明该格上空是空气 —— 不是站位问题)。
+     *
+     * 统一口径: 空气 / 可替换的非流体 ⇒ 天然可放 (草/花/蕨走
+     * Material.REPLACEABLE_PLANT, 2026-08-25 草原修复的意图原样保留);
+     * 其余(实心本体 或 竹子这类不可替换的非空气) ⇒ 必须先清掉。
+     * 竹子是 breakInstantly, 清它几乎零成本, 比"选区另找位置"更就地。
+     */
+    private boolean bedCellNeedsClear(AltoClef mod, BlockPos pos) {
+        if (WorldHelper.isAir(mod, pos)) return false;
+        if (!mod.getWorld().getBlockState(pos).getFluidState().isEmpty()) return false;
+        return !mod.getWorld().getBlockState(pos).getMaterial().isReplaceable();
     }
 
     /**
