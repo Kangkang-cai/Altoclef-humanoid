@@ -2298,6 +2298,19 @@ public class BeatMinecraft2Task extends Task {
                     }
                     }
                 }
+                // (2026-09-28 深水/超时拉黑) 废墟传送门宝箱被 LootContainerTask 判"深水
+                // 跳过"或"打不开超时"而放弃后, 该箱子在世界上仍未开 → locateClosestUnopened
+                // RuinedPortalChest 会再次选中它 → 每 tick 重建新任务 (死循环)。此处显式拉黑。
+                if (_lootTask instanceof LootContainerTask lootAbandoned
+                        && lootAbandoned.wasRefusedOrTimedOut()) {
+                    _notRuinedPortalChests.add(lootAbandoned.getChestPos());
+                    Debug.logMessage("(LootSweep) abandon ruined portal chest "
+                            + lootAbandoned.getChestPos().toShortString()
+                            + " (deep water / open timeout) — blacklisted");
+                    Debug.logToFile("altoclef_diag.log", "[LOOT-BLACKLIST]\truinedPortal\t"
+                            + lootAbandoned.getChestPos().toShortString());
+                    _lootTask = null;
+                }
                 if(shouldForce(mod, _lootTask)) {
                     return _lootTask;
                 }

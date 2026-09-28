@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.misc;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.container.LootContainerTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.Task;
@@ -59,6 +60,16 @@ public class RavageRuinedPortalsTask extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-28 深水/超时拉黑) 与 BeatMinecraft2Task 同款: LootContainerTask 因
+        // "深水跳过"或"打不开超时"放弃后, 箱子仍在世界里 (locate 谓词仍为 true) →
+        // 不拉黑就会每 tick 重建新任务。显式加进本实例的黑名单。
+        if (_lootTask instanceof LootContainerTask abandoned && abandoned.wasRefusedOrTimedOut()) {
+            _notRuinedPortalChests.add(abandoned.getChestPos());
+            Debug.logMessage("(RuinedPortals) abandon chest "
+                    + abandoned.getChestPos().toShortString()
+                    + " (deep water / open timeout) — blacklisted");
+            _lootTask = null;
+        }
         if(_lootTask != null && _lootTask.isActive() && !_lootTask.isFinished(mod)) {
             return _lootTask;
         }

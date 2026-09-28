@@ -12,10 +12,14 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.slots.Slot;
 
 import net.minecraft.entity.Entity;
+import net.minecraft.fluid.Fluid;
+import net.minecraft.fluid.FluidState;
+import net.minecraft.fluid.Fluids;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +47,32 @@ public class LootContainerTask extends Task {
     private Slot _pendingPickup = null;
     private long _pendingPickupSinceMs = 0;
     private static final long PICKUP_SYNC_GRACE_MS = 500;
+
+    // ==================== (2026-09-28 深水宝箱忽略 + 打不开超时放弃) ====================
+    // 用户口径 (2026-09-28):
+    //   ① 贪婪开箱要忽略"浸在很深的水里"的宝箱 —— bot 不会/不该游泳下潜, 走过去只会
+    //      泡在水里打不开。判定: 容器上方连续水体 ≥ DEEP_WATER_MIN_DEPTH(3) 格, 即容器
+    //      位于水平面以下 ≥3 格。
+    //   ② 到过箱子旁 OPEN_NEAR_TIMEOUT_MS(10s) 仍打不开 → 放弃; 另挂
+    //      TASK_TOTAL_TIMEOUT_MS(60s) 总活跃兜底, 覆盖"根本走不到"(baritone 无路径)
+    //      导致任务无限占用主线的情形。
+    // 两条都实现【在本任务内】→ 所有贪婪开箱入口 (就近搜刮 / 废墟传送门 / 沙漠神殿)
+    // 自动统一生效, 调用方零改动: 置 _weDoneHere 后 isFinished 成立, 调用方 shouldForce
+    // 自然放手; 拉黑由调用方既有名单 (BeatMinecraft2Task._sweptContainers 派发即拉黑 /
+    // _notRuinedPortalChests) 承担。
+    private static final int DEEP_WATER_MIN_DEPTH = 3;
+    private static final long OPEN_NEAR_TIMEOUT_MS = 10_000;
+    private static final long TASK_TOTAL_TIMEOUT_MS = 60_000;
+    private static final double NEAR_CONTAINER_RANGE = 5.0;
+    /** 两 tick 间隔超过此值视为"被抢占后重入", 该间隔不并入活跃时长 (防把中断时长算成卡住时长)。 */
+    private static final long ACTIVE_TICK_GAP_CAP_MS = 250;
+
+    private long _activeMs = 0;
+    private long _nearMs = 0;
+    private long _lastTickMs = 0;
+    private long _lastNearMs = 0;
+    private boolean _timedOut = false;
+    private boolean _refused = false;
 
     public LootContainerTask(BlockPos chestPos, List<Item> items) {
         this(chestPos, null, items, x -> true);
@@ -79,6 +109,10 @@ public class LootContainerTask extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-28) 两道闸都置 _weDoneHere (isFinished 成立) 让调用方放手:
+        // ① 深水容器 → 直接跳过; ② 卡住 (打不开 / 走不到) → 超时放弃。
+        if (rejectDeepWaterContainer(mod)) return null;
+        if (checkLootTimeout(mod)) return null;
         if(!ContainerType.screenHandlerMatches(ContainerType.CHEST)) {
             if (_entity != null) {
                 return openMinecart(mod);
@@ -174,6 +208,108 @@ public class LootContainerTask extends Task {
     protected void onStop(AltoClef mod, Task task) {
         StorageHelper.closeScreen();
         mod.getBehaviour().pop();
+    }
+
+    /** 容器目标方块位 (矿车箱子取实体所在格)。 */
+    private BlockPos targetPos() {
+        return _entity != null ? _entity.getBlockPos() : chest;
+    }
+
+    /**
+     * (2026-09-28 深水宝箱忽略) 容器浸在 ≥{@link #DEEP_WATER_MIN_DEPTH} 格连续水体里
+     * → 判为"深水里的宝箱", 直接放弃 (bot 不下潜)。
+     * 放在 onTick 而非 onStart: 首次进入时目标区块可能尚未加载, 水柱判不出来。
+     * @return true = 已拒绝 (调用方不应再执行任何开箱动作)
+     */
+    private boolean rejectDeepWaterContainer(AltoClef mod) {
+        if (_refused || _weDoneHere) return true;
+        // 无实体且坐标为 ORIGIN 属异常构造, 不做水体判定以免误杀 (0,0,0 附近的水)。
+        if (_entity == null && chest.equals(BlockPos.ORIGIN)) return false;
+        BlockPos pos = targetPos();
+        if (!isSubmergedInDeepWater(mod, pos)) return false;
+        _refused = true;
+        _weDoneHere = true;
+        Debug.logMessage("(LootContainer) skip container submerged in deep water (>="
+                + DEEP_WATER_MIN_DEPTH + " blocks) at " + pos.toShortString());
+        Debug.logToFile("altoclef_diag.log", "[LOOT-DEEPWATER]\tskip\t" + pos.toShortString()
+                + "\tdepth>=" + DEEP_WATER_MIN_DEPTH + "\tminecart=" + (_entity != null));
+        return true;
+    }
+
+    /**
+     * 容器上方连续水体格数是否达到"深水"阈值 (只数净水, 岩浆/空气/实心都终止计数)。
+     * 未加载区块 → 视为不足, 宁可尝试也不误杀。
+     */
+    private static boolean isSubmergedInDeepWater(AltoClef mod, BlockPos pos) {
+        if (mod.getWorld() == null || pos == null) return false;
+        int depth = 0;
+        for (BlockPos p = pos.up(); depth < DEEP_WATER_MIN_DEPTH; p = p.up()) {
+            if (!mod.getChunkTracker().isChunkLoaded(p)) break;
+            FluidState fs = mod.getWorld().getBlockState(p).getFluidState();
+            if (fs.isEmpty()) break;
+            Fluid f = fs.getFluid();
+            if (f != Fluids.WATER && f != Fluids.FLOWING_WATER) break;
+            depth++;
+        }
+        return depth >= DEEP_WATER_MIN_DEPTH;
+    }
+
+    /**
+     * (2026-09-28 打不开超时) 累计【任务活跃时长】与【已在容器旁但屏幕仍未打开】的时长:
+     * 到达后 10s 打不开 → 放弃; 总活跃 60s (含走不到的情形) → 也放弃。
+     * 两 tick 间隔 > {@link #ACTIVE_TICK_GAP_CAP_MS} 视为被抢占, 不计入 (避免把
+     * 高优先级任务占用的时间算成"卡住")。
+     * @return true = 已超时并结束本任务
+     */
+    private boolean checkLootTimeout(AltoClef mod) {
+        long now = System.currentTimeMillis();
+        if (_lastTickMs != 0) {
+            long dt = now - _lastTickMs;
+            if (dt > 0 && dt <= ACTIVE_TICK_GAP_CAP_MS) _activeMs += dt;
+        }
+        _lastTickMs = now;
+        if (isNearContainer(mod)) {
+            // 已进交互范围 → 开始计"打不开"的时长 (首次置锚, 不一次性设满)。
+            if (_lastNearMs != 0) {
+                long dt = now - _lastNearMs;
+                if (dt > 0 && dt <= ACTIVE_TICK_GAP_CAP_MS) _nearMs += dt;
+            }
+            _lastNearMs = now;
+        } else {
+            _lastNearMs = 0;
+        }
+        boolean nearTimeout = _nearMs >= OPEN_NEAR_TIMEOUT_MS;
+        boolean totalTimeout = _activeMs >= TASK_TOTAL_TIMEOUT_MS;
+        if (!nearTimeout && !totalTimeout) return false;
+        _timedOut = true;
+        _weDoneHere = true;
+        String why = nearTimeout
+                ? ("stuck at container " + (OPEN_NEAR_TIMEOUT_MS / 1000) + "s without opening")
+                : ("total " + (TASK_TOTAL_TIMEOUT_MS / 1000) + "s without reaching/opening");
+        Debug.logMessage("(LootContainer) give up looting " + targetPos().toShortString() + " — " + why);
+        Debug.logToFile("altoclef_diag.log", "[LOOT-TIMEOUT]\tgiveUp\t" + targetPos().toShortString()
+                + "\t" + why + "\tactiveMs=" + _activeMs + "\tnearMs=" + _nearMs);
+        return true;
+    }
+
+    /** 玩家是否已在容器的交互邻近范围内 (含一点余量, 覆盖各类 reach 口径)。 */
+    private boolean isNearContainer(AltoClef mod) {
+        if (mod.getPlayer() == null) return false;
+        Vec3d c = (_entity != null) ? _entity.getPos() : Vec3d.ofCenter(chest);
+        return mod.getPlayer().getPos().squaredDistanceTo(c) <= NEAR_CONTAINER_RANGE * NEAR_CONTAINER_RANGE;
+    }
+
+    /**
+     * (2026-09-28) 本任务是否因"深水跳过"或"超时放弃"而结束 —— 供调用方把该容器
+     * 加入自己的黑名单 (否则"未开箱"的目标会被 locate 再次选中 → 每 tick 重建死循环)。
+     */
+    public boolean wasRefusedOrTimedOut() {
+        return _refused || _timedOut;
+    }
+
+    /** 该任务对应的容器方块位 (废墟传送门等按 BlockPos 定位的调用方用于拉黑)。 */
+    public BlockPos getChestPos() {
+        return chest;
     }
 
     @Override
