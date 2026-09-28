@@ -672,6 +672,10 @@ public class PlaceBedAndSetSpawnTask extends Task {
             mod.getInputControls().release(Input.SNEAK);
             mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.SNEAK, false);
             mod.getSlotHandler().forceDeequipRightClickableItem();
+            // (2026-09-28 点床举盾矛盾) forceDeequipRightClickableItem 只卸主手,
+            // 副手(OFFHAND slot 45)的盾从未被碰 → 点床右键走 interactItem(OFF_HAND)
+            // 分支时仍会举盾。这里补卸副手盾, 根除"点床=持续举盾"矛盾。
+            mod.getSlotHandler().forceDeequipOffhand();
             LookHelper.lookAt(mod, aimPoint);
 
                 // ===== (2026-09-13 修复A: 瞄准与判定解耦) =====

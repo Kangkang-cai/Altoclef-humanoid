@@ -179,6 +179,29 @@ public class SlotHandler {
     public boolean forceDeequipHitTool() {
         return forceDeequip(stack -> stack.getItem() instanceof ToolItem);
     }
+    /**
+     * (2026-09-28 点床举盾矛盾根因) 卸掉副手的"右键可交互物"(典型=盾)。
+     *
+     * 背景: 点床前旧代码只调 forceDeequipRightClickableItem(), 而 forceDeequip
+     * 走 PlayerSlot.getEquipSlot() 默认 = MAINHAND, 只碰主手+光标, **副手
+     * (OFFHAND slot 45) 的盾从未被卸**。于是 vanilla doItemUse() 一旦走
+     * interactItem(OFF_HAND) 分支(准星 MISS 或 interactBlock 不被 accepted
+     * 的白天/床被占场景), 副手盾 use() → 举盾, 与"点床睡觉"矛盾, 卡几十秒
+     * (现场 latest.log 17:46:54~17:47:43 sleep click 打 49s 睡不进)。
+     *
+     * 幂等: 副手已空则无操作。单 tick: 直接把副手物品捡到主背包空位, 不依赖
+     * 跨 tick 状态机。光标被占时(正在合成/换物)不动, 让调用方下 tick 再试。
+     */
+    public void forceDeequipOffhand() {
+        ItemStack offhand = StorageHelper.getItemStackInSlot(PlayerSlot.OFFHAND_SLOT);
+        if (offhand.isEmpty()) return;
+        // 光标非空时插入会与光标上的物品交换, 叠上节流丢步就落在中间态
+        // (同 tryEquipShield 的"光标被占一步都不动"纪律)。
+        if (!StorageHelper.getItemStackInCursorSlot().isEmpty()) return;
+        Optional<Slot> fittable = _mod.getItemStorage().getSlotThatCanFitInPlayerInventory(offhand, false);
+        if (fittable.isEmpty()) return;
+        clickSlotForce(PlayerSlot.OFFHAND_SLOT, 0, SlotActionType.PICKUP);
+    }
     public void forceDeequipRightClickableItem() {
         forceDeequip(stack -> {
             Item item = stack.getItem();
