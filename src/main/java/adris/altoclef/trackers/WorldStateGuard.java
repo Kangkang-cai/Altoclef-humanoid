@@ -142,5 +142,7 @@ public final class WorldStateGuard {
         register("SurfaceHelper(地表判据迟滞)", SurfaceHelper::onWorldBoundary);
         register("SurfaceExitGuide(出洞安全落点引导)", SurfaceExitGuide::onWorldBoundary);
         register("BiasedExploreTask(够不着的目标拉黑表)", BiasedExploreTask::onWorldBoundary);
+        register("DiagonalJumpFailDetector(斜跳失败计数/抑制窗口)",
+                adris.altoclef.util.helpers.DiagonalJumpFailDetector::onWorldBoundary);
     }
 }

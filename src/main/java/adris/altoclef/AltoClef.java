@@ -289,6 +289,12 @@ public class AltoClef implements ModInitializer {
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
             tickInteractionPauseWatchdog();
+            // (2026-09-28 斜跳反复失败保险) 反应式缺口: 普通地形上同一斜跳落点连续
+            // 跳不上去 (JumpStuckResolver 的零速 streak 口径接不住跳跃循环) → 短暂
+            // 关跳 + 重算让 A* 改选垫块路线, 窗口到期自动恢复。必须先于
+            // tickLavaNavGuard 执行 —— 后者每 tick 写回 allowDiagonalAscend (合并
+            // 两个抑制源), 详见 DiagonalJumpFailDetector 类注释。
+            adris.altoclef.util.helpers.DiagonalJumpFailDetector.tick(this);
             // (2026-09-18 岩浆邻域导航保险) 旋转跳 (斜向升格) 失败率>50%, 落地邻域
             // 有岩浆时动态禁跳 (下界全程 + 主世界深层), 详见 tickLavaNavGuard 注释。
             tickLavaNavGuard();
@@ -1065,7 +1071,11 @@ public class AltoClef implements ModInitializer {
         // 每 tick 强制写 (applyState 可能随时把任务栈里的旧值写回 baritone settings)。
         // 未抑制时写回基线 true, 与 initializeBaritoneSettings 的原值一致。
         // 只动这一个开关: blockPlacementPenalty 已于 2026-09-19 移出本保险。
-        getClientBaritoneSettings().allowDiagonalAscend.value = !_lavaNavSuppressActive;
+        // (2026-09-28) 抑制源合并: 岩浆危险 (LavaNav, 预测式) ∨ 斜跳反复失败
+        // (DiagonalJumpFailDetector, 反应式)。
+        getClientBaritoneSettings().allowDiagonalAscend.value =
+                !(_lavaNavSuppressActive
+                        || adris.altoclef.util.helpers.DiagonalJumpFailDetector.isSuppressing());
     }
 
     /**
