@@ -397,7 +397,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             // 已在走廊模式: 扫描失败/没格子时保持上一个目标走, 别掉回野外。
             corridorAvailable = _currentTarget != null;
         }
-        if (!_corridorMode && (corridorAvailable || _perceivedBrickCache.isPresent())) {
+        // (2026-09-28 修) 走廊模式进入前置必须是 _corridorEnabled —— forPiglins()
+        // 明确传 false, 但本判定只看"看见线索方块"(CRIMSON_NYLIUM 站在绯红森林时
+        // 最近 1.2 格恒命中) ⇒ 被顶进走廊模式, 而 scanFortressFloorCells 因
+        // !_corridorEnabled 恒返回空 ⇒ pickCorridorTarget 恒 null ⇒ 从不
+        // setGoalAndPath ⇒ 原地冻结 85s (现场 20260928-173600, 坐标小数 15 位不变)。
+        // 且本判定只在 !_corridorMode 时生效, 进了就出不去。
+        if (_corridorEnabled && !_corridorMode && (corridorAvailable || _perceivedBrickCache.isPresent())) {
             _corridorMode = corridorAvailable || nearSeenBrick(mod);
         }
 
@@ -416,6 +422,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // ------------------------------------------------------------------ //
 
     private Task tickCorridor(AltoClef mod) {
+        // (2026-09-28 修) 双保险: 非走廊任务 (找猪灵 forPiglins) 即使被顶进走廊
+        // 模式也直接走野外分支, 不进"无目标可派发"的死锁 (现场 20260928-173600)。
+        if (!_corridorEnabled) {
+            return tickOutside(mod);
+        }
         BlockPos player = mod.getPlayer().getBlockPos();
 
         // (2026-09-18 修) 有目标 = 没卡死, 复位船降卡死计时 —— 否则首次卡死
