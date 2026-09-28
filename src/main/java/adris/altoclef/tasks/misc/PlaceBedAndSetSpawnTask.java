@@ -1001,7 +1001,15 @@ public class PlaceBedAndSetSpawnTask extends Task {
             }
         }
         if (_currentBreak != null) {
-            if (!WorldHelper.isSolid(mod, _currentBreak)) {
+            // (2026-09-28 判据统一, 现场 20260928-152357) 这里必须与赋值端
+            // bedCellNeedsClear 同口径 —— 旧写法用 isSolid 复检, 而草丛/竹子/树叶
+            // 全都【非实心】, 于是刚被选中的格子下一 tick 立刻被判"不用清了":
+            //   :858 bedCellNeedsClear(grass)=true → _currentBreak=草丛
+            //   :903 !isSolid(grass)=true          → _currentBreak=null  ← 白选
+            // 结果草丛永远留在床格里 → 服务端放置被挡 + 射线先命中草(点不到床格
+            // 下方的顶面) → 放置任务"走到能点的位置" 与 站位任务每 2s 互相打断,
+            // 同一个 region 空转 28s。
+            if (!bedCellNeedsClear(mod, _currentBreak)) {
                 _currentBreak = null;
             } else {
                 setDebugState("Clearing region for bed");
@@ -1116,9 +1124,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
         //    任务"的前一刻才 reset, 3 秒从真正交互开始时算起。
         //  - 只有当前子任务不是 Interact (这是第一次进段 / 从别的段第一次切回
         //    来) 才 reset, 避免每 tick 都重置=超时永不触发。
-        boolean currentlyRunningPlaceInteract = thisOrChildSatisfies(task -> task instanceof InteractWithBlockTask);
-        if (!currentlyRunningPlaceInteract) {
-            // 本 tick 要第一次派 Interact 子任务 → 重置计时器。
+        // (2026-09-28 计时器不再被横跳清零, 现场 20260928-152357) 旧写法"当前子任务
+        // 不是 Interact 就重建"埋了雷: 放置段里 InteractWithBlockTask(放床) 与
+        // GetToBlockTask(回站位) 每 2s 互相打断时, 每次轮到 GetToBlock 就把计时器
+        // 重置 → 3s 超时【永不 elapsed】 → 清障与弃区两条兜底全失效, 同一个 region
+        // 白耗 28s(日志 58 次 placed-check 全 false)。现只在"还没有计时器"时创建
+        // (进入放置段 / 换区清障后第一次), 横跳不再重置它。
+        if (_placeAttemptTimer == null) {
             _placeAttemptTimer = new TimerGame(3);
             _placeAttemptTimer.reset();
         }
