@@ -276,21 +276,6 @@ public class PlaceBedAndSetSpawnTask extends Task {
         return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock() instanceof BedBlock;
     }
 
-    /** 把 MC 当帧准星指向什么渲染成一行文本, 供睡眠点击路径的节流日志使用。 */
-    private String describeCrosshair(AltoClef mod) {
-        HitResult target = MinecraftClient.getInstance().crosshairTarget;
-        if (target == null) return "null";
-        if (target instanceof EntityHitResult ehr) {
-            return "entity:" + ehr.getEntity().getType().getName();
-        }
-        if (target instanceof BlockHitResult bhr) {
-            if (bhr.getType() == HitResult.Type.MISS) return "MISS";
-            return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock().getName().getString()
-                    + "@" + bhr.getBlockPos().toShortString();
-        }
-        return String.valueOf(target.getType());
-    }
-
     public PlaceBedAndSetSpawnTask() {
 
     }
@@ -768,7 +753,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     if (_bedClickLogTimer.elapsed()) {
                         _bedClickLogTimer.reset();
                         String m = "[Diag-bed] sleep click: crosshair ON BED ("
-                                + describeCrosshair(mod)
+                                + WorldHelper.describeCrosshair(mod)
                                 + ") yawOff=" + String.format("%.1f", yawOff)
                                 + " pitchOff=" + String.format("%.1f", pitchOff)
                                 + " (player=" + pp.toShortString() + ")";
@@ -800,7 +785,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
                             if (_bedClickLogTimer.elapsed()) {
                                 _bedClickLogTimer.reset();
                                 String m = "[Diag-bed] aim ray ON BED but crosshair off it, keep aligning"
-                                        + " crosshair=" + describeCrosshair(mod)
+                                        + " crosshair=" + WorldHelper.describeCrosshair(mod)
                                         + " yawOff=" + String.format("%.1f", yawOff)
                                         + " pitchOff=" + String.format("%.1f", pitchOff)
                                         + " (player=" + pp.toShortString() + ")";

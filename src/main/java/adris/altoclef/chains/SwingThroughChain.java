@@ -97,6 +97,11 @@ public class SwingThroughChain extends TaskChain {
     // 持续挖掘上限 (tick)。栅栏硬度 2.0：空手 ~3s、石斧 ~0.5s；3s 兜底防死握。
     private static final int BREAK_TARGET_MAX_TICKS = 60;
 
+    // (2026-09-28 诊断) 本轮持续挖已进行的 tick 数 + 轮内采样节流 (墙钟 1s)。
+    // 目的: 实锤"挖不动"是否由 player.isUsingItem() 造成 —— 见 logBreakProgress 注释。
+    private int _breakTicksThisRound = 0;
+    private long _breakDiagLastMs = 0;
+
     public SwingThroughChain(TaskRunner runner) {
         super(runner);
     }
@@ -146,10 +151,13 @@ public class SwingThroughChain extends TaskChain {
                 if (WorldHelper.isAir(mod, _breakTarget)
                         || WorldHelper.getTicks() >= _breakDeadlineTick
                         || !WorldHelper.canBreak(mod, _breakTarget)) {
+                    logBreakRoundEnd(mod, _breakTarget);
                     releaseSwing(mod);
                     resetWindow();
                     return;
                 }
+                _breakTicksThisRound++;
+                logBreakProgress(mod, _breakTarget);
                 // 每 tick 重新对准：baritone 的 LookBehavior 也会写朝向，会被它抢走。
                 LookHelper.lookAt(mod, _breakTarget);
                 return;
@@ -243,6 +251,9 @@ public class SwingThroughChain extends TaskChain {
         _swinging = true;
         _swingTicksLeft = SWING_HOLD_TICKS;
         _lastSwingTick = WorldHelper.getTicks();
+        // (2026-09-28 诊断) 新一轮计数归零, 并让首个 tick 就采样一次。
+        _breakTicksThisRound = 0;
+        _breakDiagLastMs = 0;
 
         String m = "[SWING-BREAK] stuck detected -> left-click swing. player=" + pos
                 + " task=" + (main == null ? "null" : main.toString())
@@ -252,6 +263,59 @@ public class SwingThroughChain extends TaskChain {
                         : " (盲挥, 未找到细方块)");
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * (2026-09-28 诊断) 持续挖"进行中"的 1s 采样 —— **只写 diag 文件, 不刷 chat**。
+     *
+     * 背景: 现场 `20260928-154619` 里 bot 在床边持续挖 **100 秒**, 一张硬度 0.2 的床
+     * (徒手 0.35s) 一点也不掉; 而对照组 `20260928-162426` 中
+     * `Picking up my placed bed (recover)` 先**打断了** `PlaceBedAndSetSpawnTask`
+     * 再挖, 同一张床 **349ms** 就掉。两组唯一差别 = "挖的同时有没有别的代码按住右键"。
+     * 假设: 右键被按住 + 主手空手 + 副手盾 ⇒ vanilla `doItemUse()` 掉进
+     * `interactItem(OFF_HAND)` ⇒ 盾牌 `use()` ⇒ `player.isUsingItem() = true`
+     * ⇒ `MinecraftClient.handleBlockBreaking` 在 `isUsingItem` 时**停止推进挖掘**
+     * ⇒ 进度恒 0 (用户看到的就是"点了就停")。
+     * 事故段没有录制 (录制器随"任务停止"收尾, 见 MEMORY.md 录制生命周期坑),
+     * 故在此补采样: **看 `usingItem=` / `useKey=` 是否与"挖不动"同现**。
+     */
+    private void logBreakProgress(AltoClef mod, BlockPos target) {
+        long now = System.currentTimeMillis();
+        if (now - _breakDiagLastMs < 1000) return;
+        _breakDiagLastMs = now;
+        Debug.logToFile("altoclef_diag.log", buildBreakDiag(mod, target, "hold"));
+    }
+
+    /**
+     * (2026-09-28 诊断) 一轮持续挖结束时的汇总。默认只写 diag 文件;
+     * **仅当命中"isUsingItem"假设时才上 chat** —— 平时静默, 不加剧刷屏治理负担。
+     */
+    private void logBreakRoundEnd(AltoClef mod, BlockPos target) {
+        String m = buildBreakDiag(mod, target, "round-end");
+        Debug.logToFile("altoclef_diag.log", m);
+        ClientPlayerEntity p = mod.getPlayer();
+        if (p != null && p.isUsingItem()) {
+            Debug.logMessage(m);
+        }
+    }
+
+    /** 组装一行"挖不动"现场快照: 目标 / 左右键 / 是否正在使用物品 / 挖掘是否推进 / 准星 / 双手。 */
+    private String buildBreakDiag(AltoClef mod, BlockPos target, String phase) {
+        ClientPlayerEntity p = mod.getPlayer();
+        MinecraftClient mc = MinecraftClient.getInstance();
+        boolean using = p != null && p.isUsingItem();
+        return "[SWING-BREAK-DIAG] " + phase
+                + " ticks=" + _breakTicksThisRound
+                + " target=" + target.toShortString()
+                + " targetAir=" + WorldHelper.isAir(mod, target)
+                + " attackKey=" + mod.getInputControls().isHeldDown(Input.CLICK_LEFT)
+                + " useKey=" + mod.getInputControls().isHeldDown(Input.CLICK_RIGHT)
+                + " usingItem=" + (using ? p.getActiveItem().getItem().toString() : "none")
+                + " breaking=" + (mc.interactionManager != null && mc.interactionManager.isBreakingBlock())
+                + " hand=" + (p == null ? "?" : (p.getMainHandStack().isEmpty() ? "empty" : p.getMainHandStack().getItem().toString()))
+                + " off=" + (p == null ? "?" : (p.getOffHandStack().isEmpty() ? "empty" : p.getOffHandStack().getItem().toString()))
+                + " crosshair=" + WorldHelper.describeCrosshair(mod)
+                + " (player=" + (p == null ? "?" : p.getBlockPos().toShortString()) + ")";
     }
 
     /**

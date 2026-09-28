@@ -19,6 +19,9 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.network.ClientConnection;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
 import net.minecraft.util.registry.RegistryEntry;
 import net.minecraft.world.World;
@@ -882,5 +885,29 @@ public interface WorldHelper {
         if (world.isThundering() && world.isRaining()) return false;
         int time = (int)(world.getTimeOfDay() % 24000);
         return time < 12542;
+    }
+
+    /**
+     * 把当前 MC 准星 (`crosshairTarget`) 指向什么渲染成一行短文本, 供诊断日志使用。
+     *
+     * (2026-09-28 提取) 原先只存在于 `PlaceBedAndSetSpawnTask` 的私有实现; 现在
+     * "卡住挥击反应" (`SwingThroughChain`) 也要用 → 提到这里**两处共用, 不留副本**。
+     *
+     * **刻意读 MC 的 `crosshairTarget` 而不是自己算射线**: 前者才是决定 vanilla
+     * `doItemUse()` 走 `BLOCK` 分支还是 `MISS` 分支的那份数据
+     * (判据同源铁律, 见 detail/03-consistency.md 第 3/4 节)。
+     */
+    static String describeCrosshair(AltoClef mod) {
+        HitResult target = MinecraftClient.getInstance().crosshairTarget;
+        if (target == null) return "null";
+        if (target instanceof EntityHitResult ehr) {
+            return "entity:" + ehr.getEntity().getType().getName().getString();
+        }
+        if (target instanceof BlockHitResult bhr) {
+            if (bhr.getType() == HitResult.Type.MISS) return "MISS";
+            return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock().getName().getString()
+                    + "@" + bhr.getBlockPos().toShortString();
+        }
+        return String.valueOf(target.getType());
     }
 }
