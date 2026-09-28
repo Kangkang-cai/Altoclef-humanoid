@@ -63,21 +63,23 @@ public final class SurfaceExitGuide {
     /**
      * 出洞后强制安全落点导航的成功次数。
      * (2026-09-27 用户拍板 3 → 2: "要求分 3 次可能多余了, 分两次"。)
+     * (2026-09-28 用户拍板 2 → 1: "改为一次 20 格"。)
      */
-    private static final int REQUIRED_ARRIVALS = 2;
-    /** 安全落点距出洞位置 (洞口) 的最小水平距离 (用户拍板 24)。 */
-    private static final double MIN_ANCHOR_DISTANCE = 24;
+    private static final int REQUIRED_ARRIVALS = 1;
+    /** 安全落点距出洞位置 (洞口) 的最小水平距离 (2026-09-28 用户拍板 24 → 20)。 */
+    private static final double MIN_ANCHOR_DISTANCE = 20;
     /** 距当前玩家的最小步长 (避免选回脚下), 基础扫描半径与连续空扫描后的扩环。 */
     private static final double MIN_PLAYER_DISTANCE = 16;
     /**
-     * (2026-09-27 收窄) 扫描半径与距离环由"放远到 64/96/128"改为以 24 为锚的近程带。
+     * (2026-09-27 收窄) 扫描半径与距离环由"放远到 64/96/128"改为近程带
+     * (2026-09-28 锚距 24 → 20)。
      *
      * <p>用户反馈"距离要求似乎远了一点" —— 旧距离环是 {@code {24,28,32,40,48,56,64}} 且
-     * 角度锥在外层、距离环在内层, 所以偏好方向上 24 不可用时它会一路试到 64 才换方向,
-     * 空扫描后还会扩到 96/128 (被读作"要走 24~72 格")。现在距离环改成 24 起步的紧邻档:
-     * 就近优先, 宁可换个方向走 24 也不在同一方向上走 64。
+     * 角度锥在外层、距离环在内层, 所以偏好方向上最近档不可用时会一路试到 64 才换方向,
+     * 空扫描后还会扩到 96/128 (被读作"要走 24~72 格")。现在距离环改成首跳起步的紧邻档:
+     * 就近优先, 宁可换个方向走首跳距离也不在同一方向上走远档。
      *
-     * <p>三段仍是**连续**的 (24→32 / 36→48 / 56→80), 所以扩大只发生在"更近的档全灭"
+     * <p>三段仍是**连续**的 (20→28 / 36→48 / 56→80), 所以扩大只发生在"更近的档全灭"
      * 之后 —— 那是"没得选", 不是"要求更远"。总上限由 128 收到
      * {@link #SCAN_RADIUS_STAGE3}, 只在连续空扫描 ~6s 后才用到。
      */
@@ -109,8 +111,8 @@ public final class SurfaceExitGuide {
             Math.toRadians(157.5), -Math.toRadians(157.5),
             Math.PI
     };
-    /** 距离环 (相对玩家, 格): 第一跳 24 (用户拍板"水平离开 24 格"), 就近兜底到 32。 */
-    private static final int[] DISTANCES = {24, 28, 32};
+    /** 距离环 (相对玩家, 格): 第一跳 20 (2026-09-28 用户拍板 24 → 20 "一次 20 格"), 就近兜底到 28。 */
+    private static final int[] DISTANCES = {20, 24, 28};
     private static final int[] DISTANCES_STAGE2 = {36, 40, 48};
     private static final int[] DISTANCES_STAGE3 = {56, 64, 80};
 
