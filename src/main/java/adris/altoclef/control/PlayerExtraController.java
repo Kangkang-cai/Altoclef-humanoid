@@ -251,9 +251,15 @@ public class PlayerExtraController {
         // 拟人优先级: 越接近身体中段的点越优先瞄 (末影人 = 越接近脚部)。
         candidates.sort(Comparator.comparingDouble(p -> p.squaredDistanceTo(sortBase)));
 
-        double reach = _mod.getModSettings().getEntityReachRange();
+        // 射线长度取"至少覆盖到目标": 目标在射程内 = 验证"这一刀真打得到"; 目标在
+        // 射程外时按真实距离延伸 —— attack() 对 reach 外的火弹也会登记诉求 (2026-09-25
+        // 火弹提前转头, 火弹 1.6 格/tick 进圈只剩 2 tick, 来不及转), 那种场合若把射线
+        // 卡在 reach 上, 全部候选都判死、退化成"瞄中心", 把提前转头的精度吃掉。
+        // 语义仍是"这个方向上准星压得住目标", 与"此刻能不能出刀"(inReach, 另判) 分开。
         Entity player = MinecraftClient.getInstance().player;
-        // 由低到高取第一个"沿该方向在攻击射程内真能命中该实体"的点:
+        double reach = Math.max(_mod.getModSettings().getEntityReachRange(),
+                Math.sqrt(entity.squaredDistanceTo(player)) + 1.0);
+        // 由低到高取第一个"沿该方向真能命中该实体"的点:
         // 既保住"尽量瞄脚"(末影人防吸旁人), 又保证选出来的点一定打得中。
         for (Vec3d p : candidates) {
             if (LookHelper.raycast(player, entity, p, reach) != null) return Optional.of(p);
