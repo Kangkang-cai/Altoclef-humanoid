@@ -223,6 +223,21 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final double REMEMBERED_CENTER_MAX_DISTANCE = 1024;
 
     // =========================================================================
+    // (2026-09-29 冻结自愈) 隐形冻结死循环: tickOutside 的"到达分支"
+    // (:915 xzDistance<=ARRIVE) 每 tick 重选目标 + _progress.reset() ⇒ 6s 距离
+    // 检查器永远新鲜、fail 计数永不增长、无任何日志。baritone 僵尸态
+    // (customGoalProcess active 但 path[present=false] calc=false exec=null,
+    // 零输入) 时整条链零日志冻结 —— 现场 20260929-134354 14:35:12→14:42:02
+    // 冻结 408s, NAV-STUCK 全程 only 盲挥, "outside step failed" 全场 0 条。
+    // 修法: tickOutside 顶部挂墙钟净位移看门狗 —— 停滞超阈值且 baritone 此刻
+    // 不在规划 (规划期最长 ~4s 属正常等待, 不惩罚) ⇒ 走一次失败路径
+    // (fail 计数 + maybeEscalateProbe 换向 + 重选目标), 打破死循环。
+    // =========================================================================
+    private static final long EXPLORE_STALL_GIVEUP_MS = 8000;
+    private BlockPos _outsideStallLastPos = null;
+    private long _outsideStallSinceMs = 0;
+
+    // =========================================================================
     // (2026-09-13 记忆分支"查讫"机制) [Expedition] 日志实锤: clue 全是 memory,
     // radius 11~48 震荡、max 卡 49 —— bot 在记忆推断区之间往返, 走不到锁定
     // 方向分支。根因: KnowledgeMemory.getCandidateAreas 每次调用都【随机重新
@@ -893,6 +908,30 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
     private Task tickOutside(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
+
+        // (2026-09-29 冻结自愈) 墙钟净位移看门狗: 停滞超阈值 + baritone 此刻
+        // 不在规划 (排除 ~4s 正常规划等待) ⇒ 强制走一次失败路径换向/换目标。
+        // 详细机制见字段区 EXPLORE_STALL_GIVEUP_MS 注释 (20260929-134354 冻结 408s)。
+        {
+            BlockPos nowPos = mod.getPlayer().getBlockPos();
+            if (_outsideStallLastPos == null
+                    || _outsideStallLastPos.getSquaredDistance(nowPos) > 1.0) {
+                // 有位移 (或首轮): 刷新停滞基线
+                _outsideStallLastPos = nowPos;
+                _outsideStallSinceMs = System.currentTimeMillis();
+            } else if (System.currentTimeMillis() - _outsideStallSinceMs > EXPLORE_STALL_GIVEUP_MS
+                    && !mod.getClientBaritone().getPathingBehavior().getInProgress().isPresent()) {
+                Debug.logMessage("[FortressExplore] frozen " + EXPLORE_STALL_GIVEUP_MS / 1000
+                        + "s+ with no movement and no path calc -> forced re-target (pos="
+                        + nowPos.toShortString() + ")");
+                _outsideStallSinceMs = System.currentTimeMillis(); // 本轮已处置, 重新计时
+                _failCounter++;
+                maybeEscalateProbe(mod);
+                _currentTarget = null;
+                _progress.reset();
+                return null;
+            }
+        }
 
         // (2026-09-19 sticky 补货) 每 tick 重派同一补货实例, 完成才释放 ——
         // 一次性 return 会在下一 tick 被 null 抢停 (见字段注释)。

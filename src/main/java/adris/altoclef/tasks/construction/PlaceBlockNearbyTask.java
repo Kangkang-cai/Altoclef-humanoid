@@ -73,6 +73,14 @@ public class PlaceBlockNearbyTask extends Task {
     // 该落点交给下面的 baritone 路径(它能对着容器侧面/顶面正常放置)。
     private BlockPos _fastBlockedCell = null;
 
+    // (2026-09-29 陈旧选点距离闸) locateClosePlacePos 的搜索半径是 7 格(对角
+    // ~12 格), 本任务实例又被 DoStuffInContainerTask 长期缓存复用 —— 上次放置
+    // 会话留下的 _tryPlace 在 bot 远走数百格后仍存活, 而 WorldHelper.canReach
+    // 是"黑名单取反"口径, 远位置没被拉黑就恒"可达" ⇒ 陈旧点位永不失效。
+    // 现场 20260929-134354: bot 在 864,107,-104 冻结, 放置任务却对着 386 格外
+    // 旧炉位 (478,118,-133) 反复 "Trying to place"。超过本闸的点位一律视为陈旧。
+    private static final double STALE_PLACE_RANGE = 16.0;
+
     // (2026-09-11) 「放不下就先上岸」用的导航任务 (缓存实例, 避免每 tick 重建丢进度)。
     private GetToLandTask _toLand = null;
     // (v3) 回岸模式的锁存位: 一旦进入就不再每 tick 重估 isTouchingWater (水面浮动会闪烁)。
@@ -123,6 +131,10 @@ public class PlaceBlockNearbyTask extends Task {
         _wanderSinceMs = 0;
         _fastAttempt = null;
         _fastBlockedCell = null;
+        // (2026-09-29 陈旧选点) onStart = 新一轮放置开始, 上次会话的选点/已放位
+        // 对本轮是陈旧状态 (bot 可能已远走数百格), 全部作废重选。
+        _tryPlace = null;
+        _justPlaced = null;
 
         mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
 
@@ -290,7 +302,11 @@ public class PlaceBlockNearbyTask extends Task {
         // (2026-09-05 传送门放置硬守卫) 复用缓存选点时补 canPlace 复查: 点位可能
         // 在选中后变成受保护位置 (如新发现门体/任务栈放置避让生效), 不复查会拿着
         // 过期点位反复重建被 [PortalGuard] 拒绝的 PlaceBlockTask 死循环。
-        if (_tryPlace == null || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
+        // (2026-09-29 陈旧选点距离闸) 超出 locate 半径的缓存点位必为陈旧
+        // (bot 已远走), 直接作废重选, 不再信任 canReach 黑名单口径。
+        if (_tryPlace == null
+                || _tryPlace.getSquaredDistance(mod.getPlayer().getPos()) > STALE_PLACE_RANGE * STALE_PLACE_RANGE
+                || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
             _tryPlace = locateClosePlacePos(mod);
         }
 

@@ -108,6 +108,19 @@ public class DoToClosestBlockTask extends AbstractDoToClosestObjectTask<BlockPos
         return mod.getPlayer().getPos();
     }
 
+    /**
+     * (2026-09-29 指令目标打破粘滞) _getClosest 非空 = 父层显式指令
+     * (DoStuffInContainerTask._cachedContainerPosition 等场景)。指令结果
+     * 直接认定为 directive, 立即取代粘滞中的旧 pursuit。
+     * 现场 20260929-134354: pursuit 停在 386 格外旧炉 (isValid 恒真 → 永久
+     * Sticking), 父层每 tick 指令脚边新炉被拦 → bot 冻结至 150s 超时。
+     */
+    @Override
+    protected boolean newTargetIsDirective(AltoClef mod, BlockPos newClosest) {
+        if (_getClosest == null) return false;
+        return Optional.of(newClosest).equals(_getClosest.apply(getOriginPos(mod)));
+    }
+
     @Override
     protected Task getGoalTask(BlockPos obj) {
         // 每 tick 重估目标 lambda — 目标 lambda 可能是状态机 (先 GetCloseToBlockTask

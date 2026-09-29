@@ -55,6 +55,22 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
     }
 
     /**
+     * (2026-09-29 指令目标打破粘滞) getClosestTo 返回的是父层的【显式指令】
+     * (override, 如 DoStuffInContainerTask 的 _cachedContainerPosition) 而非
+     * 启发式"最近"时, 新指令目标应立即取代当前 pursuit。
+     *
+     * 粘滞 (closingIn / Sticking with current pursuit) 防的是启发式最近目标
+     * 来回横跳; 但父层明确下令"去这个"时, 粘滞会拦死指令 —— 现场
+     * 20260929-134354: 缓存 _openTableTask 的 pursuit 停在 386 格外旧炉
+     * (478,118,-133, 旧炉一直存在 ⇒ isValid 恒真 ⇒ 永久 Sticking), 父层每
+     * tick 指令脚边新炉 (865,108,-104) 被拦 ⇒ bot 冻结至 150s 超时释放。
+     * 默认 false (启发式族不受影响)。
+     */
+    protected boolean newTargetIsDirective(AltoClef mod, T newClosest) {
+        return false;
+    }
+
+    /**
      * 新目标显著更近判定: 平方距离 < 当前目标的 0.85 倍。系数留余量,
      * 防两目标距离接近时来回横跳 (切过去又满足不了系数就稳定不再切)。
      */
@@ -140,6 +156,10 @@ public abstract class AbstractDoToClosestObjectTask<T> extends Task {
                     // 钩子开放的杀怪族任务, 新目标显著更近时立即切换。
                     if (closerTargetMayBreakSticky(mod) && isSignificantlyCloser(mod, newClosest)) {
                         setDebugState("Switching to significantly closer target");
+                        _currentlyPursuing = newClosest;
+                    } else if (newTargetIsDirective(mod, newClosest)) {
+                        // (2026-09-29 指令目标) 父层显式指令 > 一切粘滞
+                        setDebugState("Switching to directive target");
                         _currentlyPursuing = newClosest;
                     } else if (closingIn) {
                         // 正在接近当前目标: 保持不动, 不因新目标打断
