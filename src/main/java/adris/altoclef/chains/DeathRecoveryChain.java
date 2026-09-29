@@ -21,6 +21,8 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -71,6 +73,27 @@ public class DeathRecoveryChain extends SingleTaskChain {
     // 常见战斗(65), 仅让位给最高战斗(95)。真正防"被抢"仍需守卫不轻易让位, 见
     // activate 处的守卫收敛 —— 但数值先提高, 保证守卫通过后拾取持续压过主链。
     private static final float ACTIVE_PRIORITY = 70.0f;
+
+    /**
+     * (2026-09-29 食物救援, 用户定案) 墓碑掉落物含食物 ≥ 此阈值 (units) 时
+     * 跳过"先造石镐"前置, 直接激活 {@link DeathRecoveryTask} 导航拾取。
+     * 单位口径与 StorageHelper.calculateInventoryFoodScore 严格一致
+     * (foodComponent.hunger × count, 排除蜘蛛眼)。
+     *
+     * <p>现场 20260929-222238: 死于 mob, 掉落 468 units (熟猪排×48+熟牛肉×8
+     * +腐肉×5), 但镐闸 (Guard 3) 把空背包的 bot 派去平原造镐 —— 探索方向
+     * 反向, dist 179.7→191.3→200.7 越过 max 200, Guard 2 (TOO_FAR) 撤权,
+     * Food 链(55) 接管后朝 +Z 远征, dist 涨到 226.8, 墓到 360s TOO_OLD 才
+     * 被清。掉的食物比 Food 链要收集的 (240) 还多, 但 Food 链对墓碑掉落物
+     * 完全不感知 —— 两链信息不互通。
+     *
+     * <p>为什么捡食物可以不持镐: mob 击杀的掉落物就在尸体旁 (地表或矿道),
+     * 走过去即可拾取, 不需要挖; 导航真被堵住时, DeathRecoveryTask 内部的
+     * GOTO 失速兜底 ([PICKAXE UPGRADE START], 20s 窗口净位移 <3 格) 会自动
+     * 挂起导航补石镐, 补完回来继续 — 造镐前置的初衷 (无镐别裸奔下墓) 由
+     * 任务层失速兜底接管, 链层不再盲目前置。
+     */
+    private static final int FOOD_RESCUE_UNITS_THRESHOLD = 80;
 
     /**
      * (2026-09-29 多人首测) 复活稳定期: 收到复活包后等这么多 tick 才放行激活。
@@ -317,10 +340,27 @@ public class DeathRecoveryChain extends SingleTaskChain {
         if (getCurrentTask() instanceof DeathRecoveryTask) {
             deathRecoveryTaskUpgradingPickaxe = ((DeathRecoveryTask) getCurrentTask()).isPickaxeUpgradeActive();
         }
-        boolean pickaxeGateActive = s.shouldDeathRecoveryRequireStonePickaxe()
+        // (2026-09-29 食物救援) 只在镐闸其余条件全部命中 (即"确实要因无镐而
+        // 前置造镐") 时才扫描墓碑掉落物 —— 距离闸/弃墓分支不受影响, 避免每
+        // tick 白扫一遍实体列表。掉落物食物充足 ⇒ 无镐也能捡 (mob 掉落物在
+        // 尸体旁), 镐闸让位; 导航被堵由 DeathRecoveryTask 失速兜底自己补镐。
+        boolean pickaxeGateCandidate = s.shouldDeathRecoveryRequireStonePickaxe()
                 && !StorageHelper.miningRequirementMetInventory(mod, MiningRequirement.STONE)
                 && !deathRecoveryTaskUpgradingPickaxe
                 && DeathRecoveryTask.isGraveBuried(mod, grave.position);
+        int droppedFoodUnits = -1;
+        boolean foodRescueActive = false;
+        if (pickaxeGateCandidate) {
+            droppedFoodUnits = droppedFoodUnitsNearGrave(mod, grave.position, DeathRecoveryTask.getPickupRadius());
+            foodRescueActive = droppedFoodUnits >= FOOD_RESCUE_UNITS_THRESHOLD;
+        }
+        boolean pickaxeGateActive = pickaxeGateCandidate && !foodRescueActive;
+        if (foodRescueActive && ageTicks % 100L == 0L) {
+            Debug.logToFile("death_recovery.log", String.format(
+                    "[FOOD-RESCUE] dropped=%d units >= %d at grave=%s; skipping pickaxe gate "
+                            + "(pickup needs no pickaxe, task self-heals via GOTO stall fallback)",
+                    droppedFoodUnits, FOOD_RESCUE_UNITS_THRESHOLD, grave.position));
+        }
         if (pickaxeGateActive) {
             if (ageTicks % 100L == 0L) {
                 Debug.logToFile("death_recovery.log", String.format(
@@ -489,6 +529,30 @@ public class DeathRecoveryChain extends SingleTaskChain {
                     grave.position, dim));
         }
         return !buried;
+    }
+
+    /**
+     * 墓碑 radius 范围内掉落物的食物单位总量 (2026-09-29 食物救援)。
+     * 口径与 {@link StorageHelper#calculateInventoryFoodScore} 严格一致:
+     * foodComponent.hunger × count, 排除蜘蛛眼 (FoodChain 拒绝吃蜘蛛眼,
+     * 把它算进储备会让"只剩蜘蛛眼"误判成食物充足)。
+     * 区块未加载 / 掉落物已消失 / 离墓超半径 → 0, 不触发救援, 走原判据。
+     */
+    private static int droppedFoodUnitsNearGrave(AltoClef mod, BlockPos grave, int radius) {
+        List<ItemEntity> drops = mod.getEntityTracker().getDroppedItems();
+        if (drops.isEmpty()) return 0;
+        Vec3d centre = Vec3d.ofCenter(grave);
+        double radiusSq = (double) radius * radius;
+        int units = 0;
+        for (ItemEntity drop : drops) {
+            if (drop == null || !drop.isAlive()) continue;
+            if (drop.squaredDistanceTo(centre) > radiusSq) continue;
+            ItemStack stack = drop.getStack();
+            if (stack.isEmpty() || !stack.isFood()) continue;
+            if (stack.getItem() == Items.SPIDER_EYE) continue;
+            units += stack.getItem().getFoodComponent().getHunger() * stack.getCount();
+        }
+        return units;
     }
 
     /**

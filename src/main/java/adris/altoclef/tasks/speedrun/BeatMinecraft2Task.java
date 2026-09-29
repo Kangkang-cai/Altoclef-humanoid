@@ -2493,6 +2493,32 @@ public class BeatMinecraft2Task extends Task {
                         }
                     }
                     if ((_greedyOreCheckCooldown.elapsed() || _greedyProbeLatch) && MinecraftClient.getInstance().currentScreen == null) {
+                        // (2026-09-29 下矿前持剑闸, 用户定案"下矿前要有一把剑, 至少石剑")
+                        // 现场 20260929-222238: 铁装未齐阶段 greedy 挖矿 (y=39) 被僵尸
+                        // 围攻, 无剑徒手 KillAura 数百次攻击零击杀, 逃跑导航两度失败 →
+                        // 死亡掉 468 units 食物。既有补剑闸 (下方 swordNeedsReplace,
+                        // 铁装完成后) 覆盖不到"铁装未齐就下矿"窗口。这里复用同一判据
+                        // + 同一目标构造 (swordReplaceTarget: 材料齐备选最好档, 无铁时
+                        // 自然降级石剑) + 同一冷却/续跑语义; 只挡【新批次】: 正在跑的
+                        // greedy 批次粘性优先不被打断, 挖完本批再补剑。
+                        if (swordNeedsReplace(mod)) {
+                            boolean swordTaskAlive = _gearTask != null && shouldForce(mod, _gearTask);
+                            if (swordTaskAlive) {
+                                return _gearTask; // 续跑已派发的补剑任务
+                            }
+                            long swordGateNow = System.currentTimeMillis();
+                            if (swordGateNow - _lastSwordReplaceDispatchMs >= SWORD_REPLACE_COOLDOWN_MS) {
+                                _lastSwordReplaceDispatchMs = swordGateNow;
+                                diagIronPhase(mod, "pre-mining sword gate",
+                                        "no sword (or best durability <"
+                                                + (int) (SWORD_REPLACE_DURABILITY_RATIO * 100)
+                                                + "%) before starting a new greedy mining batch");
+                                _gearTask = TaskCatalogue.getSquashedItemTask(swordReplaceTarget(mod));
+                                _gearTaskIsDiamond = false;
+                                return _gearTask;
+                            }
+                            // 冷却期内: 不 return, 本 tick 落空往下走 (与下方补剑闸同语义)。
+                        }
                         // (2026-09-23 战后补扫) 探针实际执行, 一次性闩立即清除;
                         // 容器界面开着时本次进不来, 闩保留到下一个可执行 tick。
                         _greedyProbeLatch = false;
