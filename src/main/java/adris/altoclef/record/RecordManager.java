@@ -563,6 +563,8 @@ public final class RecordManager {
             sb.append(seed(mc));
             sb.append(", \"levelName\": ");
             Json.str(sb, levelName(mc));
+            sb.append(", \"worldId\": ");
+            Json.str(sb, worldId());
             sb.append("}");
             sb.append(",\n  \"config\": {\"cheatScanNote\": \"cheatScan=true 表示该会话的感知是透视的, ");
             sb.append("训练时不可与拟人会话语料混用\"}");
@@ -606,6 +608,24 @@ public final class RecordManager {
         try {
             if (mc == null || !mc.isInSingleplayer()) return null;
             return mc.getServer().getSaveProperties().getLevelName();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * (2026-09-29 多人服阶段一 🔴#3 联动) 世界身份串 —— 与跨会话记忆的 key 口径
+     * 完全一致（{@link adris.altoclef.util.helpers.WorldIdentity#saveDirName()}）：
+     * 单人 = 存档目录名，多人 = {@code srv:<服务器地址>}。
+     *
+     * <p>为什么新加字段而不去改 {@link #levelName}：levelName 是"存档显示名"，
+     * 语义与值域都不能覆盖多人服（客户端拿不到服务端世界名），且改名世界会与
+     * 记忆 key 不一致。worldId 保证了【训练数据 ↔ 跨会话记忆日志】可按同一口径
+     * join；seed 在多人下客户端确实拿不到，保持 "null"（不伪造）。
+     */
+    private static String worldId() {
+        try {
+            return adris.altoclef.util.helpers.WorldIdentity.saveDirName();
         } catch (Throwable t) {
             return null;
         }
