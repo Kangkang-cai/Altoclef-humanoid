@@ -60,13 +60,13 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
             return _activeCollectTask;
         }
         // (2026-09-29 放弃态识别, detail/25) 上一轮材料子任务若以"放弃"结束
-        // (hasGivenUp: isFinished=true 但材料根本没到手, 如熔炉 giveUp 弃炉),
-        // 若再直接调 getItemTask, 会命中共享活实例槽里那个僵尸实例 —— 框架按
-        // newSub.isEqual(_sub) 判"子任务没变"、继续 tick 它, 而它放弃后 onTick
-        // 恒返回 null ⇒ 整条链零动作零日志空转 (20260929-192036 场次 4305s)。
+        // (Task#hasAbandoned: 放弃后 isFinished=true 但材料根本没到手, 如熔炉
+        // giveUp 弃炉), 若再直接调 getItemTask, 会命中共享活实例槽里那个僵尸实例
+        // —— 框架按 newSub.isEqual(_sub) 判"子任务没变"、继续 tick 它, 而它放弃后
+        // onTick 恒返回 null ⇒ 整条链零动作零日志空转 (20260929-192036 场次 4305s)。
         // 对策: 改用 newDetachedItemTask 绕开活实例槽, 强制换一个真新实例重试;
         // 连续 N 轮仍放弃则打告警, 把"上游卡死"暴露到日志而非静默。
-        boolean previousGaveUp = _activeCollectTask != null && _activeCollectTask.hasGivenUp();
+        boolean previousGaveUp = _activeCollectTask != null && _activeCollectTask.hasAbandoned();
         if (previousGaveUp) {
             _consecutiveGiveUps++;
             if (_consecutiveGiveUps >= MAX_CONSECUTIVE_GIVEUPS) {

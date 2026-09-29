@@ -359,10 +359,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
      * {@code onResourceTick} 首行 {@code if (_gaveUp) return null} ⇒ 整条链零动作
      * 零日志空转 (20260929-192036 场次 20:04:17→21:16:31, 4305s)。
      * 覆写后: 上游可据此改用全新 detached 实例重试, 框架可强制把本实例从 _sub 位
-     * 换掉 (Task.hasGivenUp 默认 false, 无放弃语义的任务零影响)。
+     * 换掉 (Task.hasAbandoned 默认 false, 无放弃语义的任务零影响)。
+     *
+     * 注意不叫 hasGivenUp(): 那个既有方法 (GetToLandTask /
+     * CollectEnderPearlsInForestTask) 语义【相反】—— 放弃后 isFinished 仍为 false,
+     * 刻意不自己结束、等上层替换; 本类恰好相反 (放弃即 isFinished=true)。见
+     * Task#hasAbandoned 的命名说明。
      */
     @Override
-    public boolean hasGivenUp() {
+    public boolean hasAbandoned() {
         return _gaveUp;
     }
 

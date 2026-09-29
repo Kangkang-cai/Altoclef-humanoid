@@ -129,14 +129,19 @@ public abstract class Task {
         // We have a sub task
         if (newSub != null) {
             // (2026-09-29 弃用子任务强制替换, detail/25) 旧 _sub 已以"放弃"方式结束
-            // (hasGivenUp: isFinished=true 但目标并未达成, 如熔炉 giveUp) 时, 不能再用
-            // newSub.isEqual(_sub) 判"子任务没变"—— 语义等价的新实例会被这个判据丢弃,
-            // 框架继续 tick 那个已弃用的旧实例; 而放弃后的实例 onTick 恒返回 null
-            // (SmeltInFurnaceTask:163 `if (_gaveUp) return null`) ⇒ 整棵子树零动作、
-            // 零日志地空转 (20260929-192036 场次 4305s: 上游每 tick 重扫重派发, 却
-            // 永远换不掉实例)。hasGivenUp() 是纯字段读 (默认 false), 无放弃语义的
+            // (hasAbandoned: 放弃后 isFinished 返回 true, 如熔炉 giveUp 的短路放行) 时,
+            // 不能再用 newSub.isEqual(_sub) 判"子任务没变"—— 语义等价的新实例会被这个
+            // 判据丢弃, 框架继续 tick 那个已弃用的旧实例; 而放弃后的实例 onTick 恒返回
+            // null (SmeltInFurnaceTask:163 `if (_gaveUp) return null`) ⇒ 整棵子树零
+            // 动作、零日志地空转 (20260929-192036 场次 4305s: 上游每 tick 重扫重派发,
+            // 却永远换不掉实例)。hasAbandoned() 是纯字段读 (默认 false), 无放弃语义的
             // 任务行为与旧版逐字一致。
-            boolean subAbandoned = _sub != null && _sub.hasGivenUp();
+            //
+            // 命名说明 (勿合并): 项目里已有一个语义【相反】的 hasGivenUp()
+            // (GetToLandTask / CollectEnderPearlsInForestTask) —— 那类任务放弃后
+            // isFinished 仍为 false, 刻意"不自己结束", 等上层读标记把它换掉;
+            // 本方法则是"放弃且对外表现为已完成"。两者混用会互相破坏, 故另起名。
+            boolean subAbandoned = _sub != null && _sub.hasAbandoned();
             if (subAbandoned || !newSub.isEqual(_sub)) {
                 if (subAbandoned || canBeInterrupted(mod, _sub, newSub)) {
                     // (2026-08-22 横跳去抖) 若新子任务 == 上一次被 stop 的
@@ -291,8 +296,8 @@ public abstract class Task {
     }
 
     /**
-     * (2026-09-29 放弃态出口, detail/25) 本任务是否以"放弃"方式结束 —— 即
-     * {@link #isFinished} 会返回 true, 但那表示"我放弃了"而非"目标达成了"。
+     * (2026-09-29 放弃态出口, detail/25) 本任务是否以"放弃"方式结束, 且对外表现为
+     * {@link #isFinished} == true —— 即"我放弃了, 但标记成完成放行"。
      *
      * 为什么需要它: 少数任务用 isFinished 的"短路放行"实现放弃语义
      * (如 SmeltInFurnaceTask 的 giveUp: 弃炉后 isFinished 恒 true), 于是
@@ -302,9 +307,14 @@ public abstract class Task {
      * 叠加, 整棵子树零动作零日志空转 (20260929-192036 场次 4305s)。
      *
      * 默认 false = 无放弃语义。纯字段读, 零性能负担, 不改变任何既有行为;
-     * 只有真正需要"放弃"语义的任务覆写 (目前: SmeltInFurnaceTask)。
+     * 只有真正需要"放弃 = 放行"语义的任务覆写 (目前: SmeltInFurnaceTask)。
+     *
+     * 与 {@code hasGivenUp()} 的区别 (勿合并): 后者是既有方法 (GetToLandTask /
+     * CollectEnderPearlsInForestTask), 语义【相反】—— 那类任务放弃后 isFinished
+     * 仍为 false, 刻意不自己结束, 由上层读标记替换; 本方法专指"放弃且已完成",
+     * 供框架的弃用子任务替换与上游重试判定使用。
      */
-    public boolean hasGivenUp() {
+    public boolean hasAbandoned() {
         return false;
     }
 
