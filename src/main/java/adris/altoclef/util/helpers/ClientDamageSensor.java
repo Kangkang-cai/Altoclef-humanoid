@@ -7,7 +7,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.text.TranslatableText;
-import net.minecraft.util.registry.Registries;
+import net.minecraft.util.registry.Registry;
 
 import java.util.Locale;
 
@@ -237,7 +237,7 @@ public final class ClientDamageSensor {
                     Entity killer = mc.world.getEntityById(killerId);
                     if (killer != null) {
                         killerDesc = String.format(Locale.ROOT, "%s@%.1f name=%s",
-                                Registries.ENTITY_TYPE.getId(killer.getType()),
+                                Registry.ENTITY_TYPE.getId(killer.getType()),
                                 killer.distanceTo(mc.player),
                                 killer.getName().getString());
                     } else {

@@ -6,7 +6,7 @@ import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.util.registry.Registries;
+import net.minecraft.util.registry.Registry;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -66,7 +66,7 @@ public class PlayerDamageMixin {
         if (attacker != null) {
             String id;
             try {
-                id = Registries.ENTITY_TYPE.getId(attacker.getType()).toString();
+                id = Registry.ENTITY_TYPE.getId(attacker.getType()).toString();
             } catch (Throwable t) {
                 // 兜底: 拿不到注册名就用运行时类名 (生产环境为 intermediary, 如 class_1642)
                 id = attacker.getClass().getSimpleName();
