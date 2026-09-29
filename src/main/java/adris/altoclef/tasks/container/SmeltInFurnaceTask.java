@@ -349,6 +349,23 @@ public class SmeltInFurnaceTask extends ResourceTask {
         return targetsMet || subFinished || batchDone;
     }
 
+    /**
+     * (2026-09-29 放弃态出口, detail/25) 上游 (CollectRecipeCataloguedResourcesTask)
+     * 与框架 (Task.tickInternal) 需要区分"完成"与"放弃"。
+     *
+     * 背景: giveUp 后本实例 {@code isFinished} 恒 true (放弃=放行), 上游把它当
+     * "材料已到"直接进入下一轮重扫重派发, 而框架 tickInternal 又按
+     * {@code newSub.isEqual(_sub)} 判"子任务没变"、继续 tick 本实例 —— 本实例
+     * {@code onResourceTick} 首行 {@code if (_gaveUp) return null} ⇒ 整条链零动作
+     * 零日志空转 (20260929-192036 场次 20:04:17→21:16:31, 4305s)。
+     * 覆写后: 上游可据此改用全新 detached 实例重试, 框架可强制把本实例从 _sub 位
+     * 换掉 (Task.hasGivenUp 默认 false, 无放弃语义的任务零影响)。
+     */
+    @Override
+    public boolean hasGivenUp() {
+        return _gaveUp;
+    }
+
     // (2026-09-16 守炉死循环诊断) [SmeltGate] 节流戳。
     private long _lastGateLogMs = 0;
 
@@ -853,15 +870,30 @@ public class SmeltInFurnaceTask extends ResourceTask {
                     - (_target.getItem().matches(output.getItem()) ? output.getCount() : 0);
             // 至少保持槽里已有, 且不超 64
             neededMaterialsInSlot = Math.min(64, Math.max(neededMaterialsInSlot, materialsAlreadyIn));
+            // (2026-09-29 可搬量闸门, detail/25) 上面的公式只减"背包产物", 不减"炉内已有
+            // 料", 于是"炉里 7 生铁 + 背包 0 生铁"仍算出要再补 2 个 → 派发
+            // MoveItemToSlotFromInventoryTask(raw_iron x2), 而背包一个都没有 ⇒ 子任务
+            // 无料可搬、界面反复开合空转 (20260929-192036 场次 20:03:19-20:04:17 拖满
+            // 58s), 把 60s 零进展看门狗吃满 → giveUp 抢在"填燃料"之前, 燃料永远进不了炉
+            // (现场: 背包 coal x12 在手, 熔炉 fuel=0)。补一道"实际可搬量"闸门: 要搬的量与
+            // 背包真实持有量取小, 取小后 >0 才派发。背包没料 ⇒ 跳过本分支落到下方
+            // "Filling fuel", 先把燃料投进去让炉子烧起来 (与 _smeltedBatch"开烧后不再
+            // 凑数"协同: 已开烧 ⇒ 不派猎料, 烧完收工)。
+            int wantToMove = neededMaterialsInSlot - materialsAlreadyIn;
+            int canMove = StorageHelper.countItemsInInventoryReal(mod, materialTarget.getMatches());
             // We don't have the right material or we need more
             // (2026-09-10 x0 派发守卫) 需要补入量 <= 0 (目标已由背包/炉内满足)
             // 时不再派发 MoveItemToSlotFromInventoryTask — 旧逻辑材料槽为空
             // 就无条件进分支, 算出 x0 任务: 子任务没料可拿 → logError + return
             // null 死等 (isFinished 又要求目标槽出现材料, 永不成立)。
+            // (2026-09-29) 同理, canMove <= 0 (背包无本目标料) 时也不派发 ——
+            // "要搬 N 个"但一个都拿不出来 = 必定空转, 与 x0 派发同性质。
             if ((!_allMaterials.matches(material.getItem()) || neededMaterialsInSlot > material.getCount())
-                    && neededMaterialsInSlot - materialsAlreadyIn > 0) {
+                    && wantToMove > 0 && canMove > 0) {
                 setDebugState("Moving Materials");
-                return new MoveItemToSlotFromInventoryTask(new ItemTarget(materialTarget, neededMaterialsInSlot - materialsAlreadyIn), FurnaceSlot.INPUT_SLOT_MATERIALS);
+                return new MoveItemToSlotFromInventoryTask(
+                        new ItemTarget(materialTarget, Math.min(wantToMove, canMove)),
+                        FurnaceSlot.INPUT_SLOT_MATERIALS);
             }
 
             /*
