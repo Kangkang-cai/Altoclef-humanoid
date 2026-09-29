@@ -82,6 +82,14 @@ public class TaskCatalogue {
             mine("clay_ball", Blocks.CLAY, Items.CLAY_BALL);
             mine("ancient_debris", MiningRequirement.DIAMOND, Blocks.ANCIENT_DEBRIS, Items.ANCIENT_DEBRIS).forceDimension(Dimension.NETHER);
             mine("gilded_blackstone", MiningRequirement.STONE, Blocks.GILDED_BLACKSTONE, Items.GILDED_BLACKSTONE).forceDimension(Dimension.NETHER);
+            // (2026-09-29 崩溃修复层 ②: 补齐注册缺口) end_stone —— 上游/本仓历史
+            // 从未注册过 (git log -S "end_stone" -- TaskCatalogue.java 零命中),
+            // 但 ScaffoldBlocks.SAFE_MATERIALS 里有点名 ⇒ 末地"背包无现成建材"时
+            // PlaceBlockTask.getMaterialTask 会造出未注册目标 → getItemTask 返回 null
+            // → squasher NPE 崩客户端 (现场 20260929-18:48, 末地折返平台建造)。
+            // 末地石是末地唯一能大量自采的建材 (打龙垫柱/搭桥), 口径对齐 netherrack
+            // 那批: 木镐即可, 限末地维度, 背包里已有则不重复挖。
+            mine("end_stone", MiningRequirement.WOOD, Blocks.END_STONE, Items.END_STONE).forceDimension(Dimension.END);
             simple("sandstone", Items.SANDSTONE, CollectSandstoneTask::new).dontMineIfPresent();
             simple("red_sandstone", Items.RED_SANDSTONE, CollectRedSandstoneTask::new).dontMineIfPresent();
             simple("coarse_dirt", Items.COARSE_DIRT, CollectCoarseDirtTask::new).dontMineIfPresent();

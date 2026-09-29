@@ -1,6 +1,7 @@
 package adris.altoclef.tasks.squashed;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.ResourceTask;
@@ -31,7 +32,18 @@ public class CataloguedResourceTask extends ResourceTask {
 
         for (ItemTarget target : targets) {
             if (target != null) {
-                _tasksToComplete.add(TaskCatalogue.getItemTask(target));
+                // (2026-09-29 崩溃修复) getItemTask 在目标未注册时返回 null —— 旧代码
+                // 把 null 直接塞进 _tasksToComplete, 随后 TaskSquasher.addTask 第
+                // 129 行 t.getClass() NPE 崩客户端 (现场 20260929-18:48: PlaceBlockTask
+                // → crying_obsidian/end_stone 未注册)。这里就地跳过并点名目标, 让日志
+                // 直接给出"该注册什么", 而不是崩在两层之外。
+                ResourceTask task = TaskCatalogue.getItemTask(target);
+                if (task != null) {
+                    _tasksToComplete.add(task);
+                } else {
+                    Debug.logWarning("Skipping unregistered item target in CataloguedResourceTask: "
+                            + target + " (no TaskCatalogue entry; nothing to run for it)");
+                }
             }
         }
 
@@ -126,6 +138,13 @@ public class CataloguedResourceTask extends ResourceTask {
         }
 
         public void addTask(ResourceTask t) {
+            // (2026-09-29 崩溃修复 防御层 ①) 空任务直接跳过: 未注册目标曾让 null
+            // 一路飘到这里, t.getClass() 直接崩客户端 (现场 20260929-18:48)。
+            // 现在源头 (构造器) 与这里各拦一道, 任何调用方都不会再把 null 变崩溃。
+            if (t == null) {
+                Debug.logWarning("TaskSquasher: skipping null task (unregistered catalog target?)");
+                return;
+            }
             Class type = t.getClass();
             if (_squashMap.containsKey(type)) {
                 _squashMap.get(type).add(t);

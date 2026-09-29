@@ -25,6 +25,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3i;
 import org.apache.commons.lang3.ArrayUtils;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -113,12 +114,36 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     }
 
     public static Task getMaterialTask(int count) {
-        ItemTarget[] targets = new ItemTarget[ScaffoldBlocks.SAFE_MATERIALS.length];
-        for (int i = 0; i < targets.length; i++) {
-            targets[i] = new ItemTarget(ScaffoldBlocks.SAFE_MATERIALS[i], count);
+        // (2026-09-29 崩溃修复层 ②) ScaffoldBlocks.SAFE_MATERIALS 是"背包里有就能用"
+        // 的宽口径清单 (计数/放置), **不能**直接当成"要去收集"的目标清单: 里面有
+        // 未在 TaskCatalogue 注册的条目 (crying_obsidian 无采集/合成任务) ⇒
+        // TaskCatalogue.getItemTask 返回 null ⇒ CataloguedResourceTask 把 null 塞进
+        // squasher ⇒ t.getClass() NPE 崩客户端。
+        // 现场 20260929-18:48: @gamer 末地折返平台建造, 背包无任何现成建材 → 走到
+        // 这条收集路径 → 崩 (单人从未踩到, 只是恰好没在"建材耗尽"时搭过方块)。
+        // 现在只对【可获取】的材料发起收集; 其余按材料名各报一次 (不刷屏)。
+        List<ItemTarget> obtainable = new ArrayList<>(ScaffoldBlocks.SAFE_MATERIALS.length);
+        for (Item item : ScaffoldBlocks.SAFE_MATERIALS) {
+            if (!TaskCatalogue.taskExists(item)) {
+                if (_unregisteredMaterialLogged.add(item)) {
+                    Debug.logWarning("[PlaceBlock] structure material " + item.getTranslationKey()
+                            + " has no TaskCatalogue entry — not requesting it (still usable if already carried)");
+                }
+                continue;
+            }
+            obtainable.add(new ItemTarget(item, count));
         }
-        return TaskCatalogue.getSquashedItemTask(targets);
+        if (obtainable.isEmpty()) {
+            // 极端: 清单里一个可获取的都没有 → 不派任务 (返回 null), 绝不把 null 往下传。
+            Debug.logWarning("[PlaceBlock] no obtainable structure material at all; skipping collection request");
+            return null;
+        }
+        return TaskCatalogue.getSquashedItemTask(obtainable.toArray(new ItemTarget[0]));
     }
+
+    /** 已就"无 TaskCatalogue 条目"报过警的材料 (静态去重, 防每 tick 刷屏)。 */
+    private static final java.util.Set<Item> _unregisteredMaterialLogged =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     @Override
     protected void onStart(AltoClef mod) {
