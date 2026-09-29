@@ -11,6 +11,8 @@ import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.construction.PlaceStructureBlockTask;
+import adris.altoclef.tasks.entity.BaitCreeperDetonationTask;
+import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
@@ -36,6 +38,8 @@ import net.minecraft.client.gui.screen.SleepingChatScreen;
 import net.minecraft.client.gui.screen.ingame.MerchantScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.mob.CreeperEntity;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -152,6 +156,24 @@ public class PlaceBedAndSetSpawnTask extends Task {
     // (2026-09-28 点床判据同源) "这次到底点没点"原先零日志 —— 现场 20260928-145156
     // 卡 30s 完全无法区分"点了没生效"与"根本没点"。此日志 2s 节流补齐该盲区。
     private final TimerGame _bedClickLogTimer = new TimerGame(2);
+    // (2026-09-29 点床节流) 每次点床后静默这么久再点下一次 —— 让 useKey 真正空闲一帧,
+    // 保证 vanilla 每次都能消费到一个干净的 wasPressed() 边沿。1 = 0.4s(8 tick)。
+    private static final double BED_CLICK_THROTTLE_SECONDS = 0.4;
+    private final TimerGame _bedClickThrottleTimer = new TimerGame(BED_CLICK_THROTTLE_SECONDS);
+    // (2026-09-29 附近有怪拒睡) 清怪决策日志 3s 节流。
+    private final TimerGame _sleepBlockerLogTimer = new TimerGame(3);
+
+    // ==== (2026-09-29 距床判据与 vanilla 同源) ====
+    // 服务端 ServerPlayerEntity.isBedTooFarAway: 玩家位置到【床方块底面中心】
+    // (x+0.5, y+0.0, z+0.5) 任一轴 |Δ| > 3.0 ⇒ TOO_FAR_AWAY (且床的两半各判一次)。
+    // 留 0.4 格余量: 玩家在 tick 之间会滑动, 贴着 3.0 判定容易在临界上被服务端拒。
+    private static final double VANILLA_SLEEP_REACH = 3.0;
+    private static final double SLEEP_REACH_WITH_MARGIN = VANILLA_SLEEP_REACH - 0.4;
+    // ==== (2026-09-29 附近有怪: vanilla NOT_SAFE 判据) ====
+    // ServerPlayerEntity.trySleep: 玩家 ±8 x/z、±5 y 的盒内有存活 HostileEntity
+    // ⇒ 直接返回 NOT_SAFE, 服务端硬拒入睡 (与朝向/距离/点击无关)。
+    private static final double SLEEP_SAFE_HORIZONTAL = 8.0;
+    private static final double SLEEP_SAFE_VERTICAL = 5.0;
     // 朝向到位容差(度): 只需拦住"朝向被劫持压向正下方"(pitch 差常 >30°),
     // 不必苛求精确到位 —— baritone 逼近会留几度残差, 收太紧会永远等 → 一直换侧。
     private static final double AIM_ALIGN_TOLERANCE_DEG = 20.0;
@@ -274,6 +296,47 @@ public class PlaceBedAndSetSpawnTask extends Task {
             return false;
         }
         return mod.getWorld().getBlockState(bhr.getBlockPos()).getBlock() instanceof BedBlock;
+    }
+
+    /**
+     * (2026-09-29 修"远距离点不上") 是否已进入 vanilla 认可的"可入睡"距离。
+     *
+     * <p>判据与服务端同源: {@code ServerPlayerEntity.isBedTooFarAway} —— 玩家位置到
+     * 【床方块底面中心】(x+0.5, y+0.0, z+0.5) 的**任一轴**差 &gt; 3.0 即 TOO_FAR_AWAY。
+     * 旧口径用"脚底→床头瞄点 欧氏 ≤4.5"比它宽 1.5 格, 于是 3~4.5 格这段会出现
+     * "模组认为够近 ⇒ 点右键 ⇒ 服务端拒睡 ⇒ 反复点不上"的死带。
+     */
+    private static boolean withinVanillaSleepReach(AltoClef mod, BlockPos bedHalf) {
+        if (bedHalf == null || mod.getPlayer() == null) return false;
+        Vec3d p = mod.getPlayer().getPos();
+        return Math.abs(p.x - (bedHalf.getX() + 0.5)) <= SLEEP_REACH_WITH_MARGIN
+                && Math.abs(p.y - bedHalf.getY()) <= SLEEP_REACH_WITH_MARGIN
+                && Math.abs(p.z - (bedHalf.getZ() + 0.5)) <= SLEEP_REACH_WITH_MARGIN;
+    }
+
+    /**
+     * (2026-09-29 修"附近有怪上不去") 找出会让服务端拒睡的敌对实体 —— vanilla
+     * {@code ServerPlayerEntity.trySleep} 的 NOT_SAFE 判据同源实现: 玩家 ±8 x/z、
+     * ±5 y 盒内存在存活 {@link HostileEntity} 时, trySleep 直接失败; 此时无论怎么
+     * 点床都不会上床 (现场: 床边有骷髅, bot 连点 2s+ 零反应; 用户手动清怪后才睡着)。
+     * 返回最近的一只, 交给调用方派 {@link KillEntityTask}。
+     */
+    private static Entity findHostileBlockingSleep(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
+        Vec3d p = mod.getPlayer().getPos();
+        Box box = new Box(
+                p.x - SLEEP_SAFE_HORIZONTAL, p.y - SLEEP_SAFE_VERTICAL, p.z - SLEEP_SAFE_HORIZONTAL,
+                p.x + SLEEP_SAFE_HORIZONTAL, p.y + SLEEP_SAFE_VERTICAL, p.z + SLEEP_SAFE_HORIZONTAL);
+        Entity best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (Entity e : mod.getWorld().getEntitiesByClass(HostileEntity.class, box, Entity::isAlive)) {
+            double d = e.squaredDistanceTo(mod.getPlayer());
+            if (d < bestSq) {
+                bestSq = d;
+                best = e;
+            }
+        }
+        return best;
     }
 
     public PlaceBedAndSetSpawnTask() {
@@ -655,12 +718,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
             // ③ (2026-09-24 用户改革"上床就右键对准就好, 不需要特地站侧位") 不再按
             // 床头 FACING 挑站侧逐个试 (现场铁证: side0 3s 全耗在对齐上点击 0 次;
             // side1 yawOff 155°→179.8° 越转越偏, 天亮被主线切走)。走到床边
-            // (距床头中心 ≤ 4.5 格 = 方块手长) 即可, 任何方位都行。
-            double distSq = mod.getPlayer().getPos().squaredDistanceTo(
-                    _bedForSpawnPoint.getX() + 0.5,
-                    _bedForSpawnPoint.getY() + 0.28,
-                    _bedForSpawnPoint.getZ() + 0.5);
-            if (distSq > 4.5 * 4.5) {
+            // (vanilla 可入睡距离内) 即可, 任何方位都行。
+            // (2026-09-29 距离判据与 vanilla 同源 —— 修"远距离点不上") 旧口径是
+            // "脚底→床头瞄点 欧氏 ≤4.5 (=方块手长)"，比服务端实际判据宽 1.5 格:
+            // ServerPlayerEntity.isBedTooFarAway = 到【床方块底面中心】任一轴 |Δ|>3.0
+            // 即 TOO_FAR_AWAY (且床两半各判一次)。于是 3~4.5 格这段出现死带:
+            // 模组认为"够近"→ 点右键 → 服务端拒睡 (TOO_FAR_AWAY) → 反复点不上。
+            // 用户现场: bot 在离床几格外一直点, 人工靠近后才可能睡上。
+            if (!withinVanillaSleepReach(mod, _bedForSpawnPoint)) {
                 return new GetToBlockTask(toSleepIn);
             }
             BlockPos pp = mod.getPlayer().getBlockPos();
@@ -670,6 +735,35 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     _bedForSpawnPoint.getX() + 0.5,
                     _bedForSpawnPoint.getY() + 0.28,
                     _bedForSpawnPoint.getZ() + 0.5);
+
+            // ===== (2026-09-29 附近有怪: 与 vanilla 同源的"睡不了"前置判据) =====
+            // 用户现场: 床边有怪时 bot 反复点床就是不上床, 人工清怪后 wander 一下
+            // 就睡了。机制 (javap 取证): ServerPlayerEntity.trySleep 在
+            // "玩家 ±8 x/z, ±5 y 内存在存活 HostileEntity" 时直接返回 NOT_SAFE
+            // —— 这是服务端硬拒, 与朝向/距离/点击都无关, 点一万次也不会睡。
+            // 日志佐证: [Diag-bed] sleep right-click HELD: crosshair blocked by
+            // entity ...skeleton。故此处先把最近的那只清掉再继续睡流程。
+            Entity sleepBlocker = findHostileBlockingSleep(mod);
+            if (sleepBlocker != null) {
+                if (_sleepBlockerLogTimer.elapsed()) {
+                    _sleepBlockerLogTimer.reset();
+                    String m = "[Diag-bed] sleep blocked: "
+                            + sleepBlocker.getType().getName().getString()
+                            + " within " + (int) SLEEP_SAFE_HORIZONTAL + "x" + (int) SLEEP_SAFE_VERTICAL
+                            + " of player (vanilla NOT_SAFE); killing it before sleeping"
+                            + " (player=" + pp.toShortString() + ")";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+                setDebugState("Monster too close to sleep — clearing it first");
+                // 苦力怕例外: 近战打苦力怕 = 错误 (MobDefenseChain:1013 既有口径,
+                // 苦力怕在 KillEntitiesTask 候选类别外) ⇒ 走本模组既有的诱爆风筝。
+                if (sleepBlocker instanceof CreeperEntity) {
+                    setDebugState("Creeper too close to sleep — luring & detonating it first");
+                    return new BaitCreeperDetonationTask((CreeperEntity) sleepBlocker, null);
+                }
+                return new KillEntityTask(sleepBlocker);
+            }
 
             // ④ 已在可点距离: 停掉 Baritone 路径 → lookAt 瞄点 → 解除潜行 + 空手
             // (潜行劫持会把方块右键变"用物品"不放床/不睡, 双通道释放; 空手避免
@@ -749,7 +843,17 @@ public class PlaceBedAndSetSpawnTask extends Task {
                     // (更正: 早期版本此处曾写"EatItemTask.hold 因 SingleTaskChain
                     //  onInterrupt 不 stop 任务而残留" —— 该判断有误, onInterrupt 会调
                     //  _mainTask.interrupt → Task.interrupt 会走 onStop。见 detail/11。)
-                    mod.getInputControls().forcePress(Input.CLICK_RIGHT);
+                    // (2026-09-29 点床节流 —— 上面 2026-09-28 注释点名的"残余风险"
+                    // 就地消除) forcePress 每帧调用会让 useKey 恒 pressed, 而 vanilla
+                    // handleInputEvents 只消费 wasPressed() 的【按下边沿】⇒ 一整轮可能
+                    // 一次 doItemUse() 都没跑 (现场: 准星在床上连点 2s 毫无反应, 人工
+                    // 打断重来一次就睡了)。改为点击后安静 BED_CLICK_THROTTLE_SECONDS
+                    // 再点, 每轮都给 vanilla 一个干净边沿; 0.4s 一次对睡觉完全够
+                    // (只需一次成功交互), 顺带把"每帧点击 ⇒ 残余窗口举盾"也收掉。
+                    if (_bedClickThrottleTimer.elapsed()) {
+                        _bedClickThrottleTimer.reset();
+                        mod.getInputControls().forcePress(Input.CLICK_RIGHT);
+                    }
                     // (2026-09-28 根修) _inBedTimer 只在【首次设点成功】时 reset 一次,
                     // 不能每帧 reset —— forcePress 每帧调用 ⇒ 旧写法每帧 reset ⇒ 计时器
                     // 永不到 1s elapsed ⇒ isFinished 恒 false ⇒ 白天设完点后卡在"去睡床"
