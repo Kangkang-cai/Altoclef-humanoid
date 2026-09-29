@@ -135,31 +135,6 @@ public final class JumpStuckResolver {
     private static final int DIG_GUARD_LOG_TICKS = 100;
     private static final TimerGame _digGuardLogTimer = new TimerGame(5);
 
-    // ===== (2026-09-29) 挖掘豁免的"进度闸门" —— 用户口径:
-    //       "不是'正在挖'就算豁免, 而是'进度在推进'才豁免" =====
-    // 旧实现 (2026-09-13) 只有 isBreakingBlock() 一条判据, 于是"按住左键但破坏
-    // 进度恒 0"被当成正常挖掘而永久豁免。本次事故形态 (会话 20260929-165241):
-    // bot 从上往下砍竖直树干, 把自己掏进 1×1×5 的树心竖井, 落底 (62,61,9);
-    // 此后 DestroyBlockTask 的目标是井外上方够不到的 (62,63,11)/(63,65,12),
-    // breaking 恒非 null 而进度恒 0 ⇒ 豁免永久生效 ⇒ 每 tick resetStreak() ⇒
-    // 跳跃卡死累积器永不增长 ⇒ 处置链路 133 秒一次都没跑 (diag 里 [DigGuard]
-    // 只看得到一条 "101 ticks", 最后靠用户手动挖开挡视线方块脱困)。
-    // 同型问题已在本仓修过一次: WorldSurvivalChain.shouldBailDigToSwim (:809,
-    // "本次事故形态: DigGuard 202 tick 恒零进度") 与 SwimDiveChain (:159) 都用
-    // "进度严格递增"判定有效推进 —— 本处只是把同一口径补齐。
-    /** 上一次采样到的破坏目标 (判"是否换了目标方块")。 */
-    private static BlockPos _digGuardLastPos = null;
-    /** 上一次采样到的破坏进度 (判"同目标进度是否增长")。 */
-    private static double _digGuardLastProgress = -1.0;
-    /** 同一目标 + 进度零增长的起始 tick (0 = 无停滞)。 */
-    private static int _digGuardStallSinceTick = 0;
-    /** 停滞已打点闩锁 (边沿触发, 避免长驻状态每 tick 刷日志)。 */
-    private static boolean _digStallReported = false;
-    /** 同一目标进度零增长持续多久后放弃豁免, 交回 streak 处置管线 (5s)。
-     *  取 100 tick 与 DIG_GUARD_LOG_TICKS 同刻度: 正常的垂直下挖/挖硬块每 tick
-     *  进度都在涨, 5 秒零增长只可能出现在"根本没挖动"。 */
-    private static final int DIG_STALL_ABORT_TICKS = 100;
-
     // ===== (2026-09-14) 岩浆豁免: 在岩浆里不判"水平卡死" =====
     // 第 4 个"合法零速状态" (前三个: 挖方块中 / 下落中 / 垂直上不去)。
     //
@@ -217,10 +192,21 @@ public final class JumpStuckResolver {
     // 位置污染 (203750 会话实锤: 20:40:39 wander 到 y=74 后 _climbBestY=74,
     // 之后 20:40:34-37 垫柱 y 67→69 明明在涨却永不算"创新高", 窗口恒过期,
     // 豁免整个失效 = 修复失败)。正确语义是"最近窗口内 Y 是否增加过", 与绝对
-    // 高度无关 —— 改为只记"上次 Y 增加的 tick"。垫柱一格约 1.2s(24 tick) < 40
-    // tick 窗口, 豁免恒有效; 同格弹跳/撞头 Y 不增加, 2s 后检测恢复。
-    private static int _lastPlayerY = Integer.MIN_VALUE;
-    /** 上次脚下 Y【增加】的 tick (同格不动/下降不刷新 —— 增益才是推进证据)。 */
+    // 高度无关 —— 改为只记"上次 Y 增加的 tick"。
+    //
+    // (2026-09-29 三修: 二修的"Y 增加"会被【原地跨格弹跳】骗过) 二修注释假定的
+    // "同格弹跳 Y 不增加, 2s 后检测恢复"只在【弹跳不跨格】时成立。跳跃高度约
+    // 1.25 > 1 格, 跳到顶点时 blockPos.y 会 +1 (61→62), 落回原地只是"不刷新"
+    // 而已 —— 于是每跳都刷新一次计时器, 40t 窗口恒新鲜, 垫柱豁免每 tick 生效。
+    // 现场 20260929-165241: bot 在 62,61,9 井底原地弹跳 132.8s, 逐帧复刻本判据
+    // 得 豁免成立 90.7% / Y 新鲜 98.9% / blockPos.y 只在 61↔62 来回 /
+    // 豁免失败最长连续仅 16t < STUCK_TICKS(20) ⇒ 累积器永不达标 ⇒ 处置永不触发。
+    // 这与二修要治的"历史最高 Y 污染"是两码事, 二修本身没错, 是判据不够严。
+    // 三修语义: "净上升" —— 只有【落地时所在格严格高于起跳前所在格】才算一次
+    // 真实垂直推进 (真垫柱 tower-up / baritone 跳跃攀爬都满足; 原地上下弹跳不满足)。
+    /** 起跳前所在格 (离地时记录、落地时比对); Integer.MIN_VALUE = 当前不在跳。 */
+    private static int _jumpStartY = Integer.MIN_VALUE;
+    /** 上次【净上升】的 tick (落地格高于起跳格才刷新 —— 真垫柱/真攀爬才是推进证据)。 */
     private static int _lastYGainTick = Integer.MIN_VALUE + 1;
     /** Y 增益新鲜窗口: 垫柱一个跳跃周期约 1.2s (+1 格), 2s 容忍一个空拍周期。 */
     private static final int CLIMB_GAIN_WINDOW_TICKS = 40;
@@ -244,11 +230,19 @@ public final class JumpStuckResolver {
         // 的 Y 增益会丢失, 回到主流程时 bestY 已过期。
         int nowTick0 = WorldHelper.getTicks();
         int playerY0 = mod.getPlayer().getBlockPos().getY();
-        if (playerY0 != _lastPlayerY) {
-            if (playerY0 > _lastPlayerY) {
-                _lastYGainTick = nowTick0;
+        // (2026-09-29 三修) "净上升"判据 —— 见字段区注释。只有【落地时所在格严格
+        // 高于起跳前所在格】才刷新增益计时器。旧口径"比上一 tick 大"会把原地跨格
+        // 弹跳 (顶点 61→62、落回 61) 也认成推进, 导致垫柱豁免每 tick 生效、处置
+        // 永不触发 (现场 20260929-165241 井底原地弹跳 132.8s)。
+        if (!mod.getPlayer().isOnGround()) {
+            if (_jumpStartY == Integer.MIN_VALUE) {
+                _jumpStartY = playerY0;      // 刚离地: 记下起跳所在格
             }
-            _lastPlayerY = playerY0;
+        } else {
+            if (_jumpStartY != Integer.MIN_VALUE && playerY0 > _jumpStartY) {
+                _lastYGainTick = nowTick0;   // 落地净升一格 = 真垫柱 / 真攀爬
+            }
+            _jumpStartY = Integer.MIN_VALUE; // 落地即清, 下一跳重新记
         }
         // 0) (2026-09-12) 进行中的处置任务优先续租。处置任务必须"独占"到它自己
         //    报告结束为止 —— 否则父任务下一 tick 的 SwimUp/本体 return null 会
@@ -288,26 +282,8 @@ public final class JumpStuckResolver {
 
         // (2026-09-13) 挖掘豁免 —— 见字段区注释。必须在读 velocity 之前返回:
         // 挖掘中 hSpeed 恒 0, 走下面的 streak 累积只会把正常挖掘读成卡死。
-        //
-        // (2026-09-29 进度闸门) 见字段区 "进度闸门" 注释: 只有"进度在推进"才豁免。
-        // 停滞超 DIG_STALL_ABORT_TICKS 则不再 return, 落回下面的 streak→处置链路。
         if (mod.getControllerExtras().isBreakingBlock()) {
             int digNow = WorldHelper.getTicks();
-            BlockPos digPos0 = mod.getControllerExtras().getBreakingBlockPos();
-            double digProgress0 = mod.getControllerExtras().getBreakingBlockProgress();
-            // 有效推进证据: 换了目标方块 (已挖穿一块) 或 同一目标进度增长。
-            // 只认"同一目标 + 进度不涨"才算停滞 —— 换目标瞬间进度归零不会误判。
-            boolean digAdvanced = digPos0 == null
-                    || !digPos0.equals(_digGuardLastPos)
-                    || digProgress0 > _digGuardLastProgress;
-            if (digAdvanced) {
-                _digGuardLastPos = digPos0;
-                _digGuardLastProgress = digProgress0;
-                _digGuardStallSinceTick = 0;
-                _digStallReported = false;
-            } else if (_digGuardStallSinceTick == 0) {
-                _digGuardStallSinceTick = digNow;
-            }
             if (_digGuardSinceTick == 0) {
                 _digGuardSinceTick = digNow;
                 // TimerGame 新建即到期, 首次进入必须显式 reset。
@@ -319,34 +295,12 @@ public final class JumpStuckResolver {
                         + (digNow - _digGuardSinceTick) + " ticks, pos="
                         + mod.getPlayer().getBlockPos()
                         + " baritonePathing=" + mod.getClientBaritone().getPathingBehavior().isPathing()
-                        + " breaking=" + digPos0
-                        + " progress=" + String.format("%.3f", digProgress0)
-                        + " zeroProgressFor=" + (_digGuardStallSinceTick == 0
-                                ? 0 : digNow - _digGuardStallSinceTick));
+                        + " breaking=" + mod.getControllerExtras().getBreakingBlockPos());
             }
-            if (_digGuardStallSinceTick != 0
-                    && digNow - _digGuardStallSinceTick >= DIG_STALL_ABORT_TICKS) {
-                // 长时间"在挖"却零进度 ⇒ 放弃豁免, 让下面的 streak 累积 → 处置
-                // (DestroyBlockTask / 清场 / forceCancel / 最后强制 wander 换路)。
-                if (!_digStallReported) {
-                    _digStallReported = true;
-                    Debug.logToFile("altoclef_diag.log", "[DigStall] mining exemption expired after "
-                            + (digNow - _digGuardStallSinceTick) + "t zero progress (breaking="
-                            + digPos0 + "), releasing to stuck pipeline, player="
-                            + mod.getPlayer().getBlockPos()
-                            + " pathing=" + mod.getClientBaritone().getPathingBehavior().isPathing());
-                }
-            } else {
-                resetStreak();
-                return null;
-            }
-        } else {
-            _digGuardSinceTick = 0;
-            _digGuardStallSinceTick = 0;
-            _digGuardLastPos = null;
-            _digGuardLastProgress = -1.0;
-            _digStallReported = false;
+            resetStreak();
+            return null;
         }
+        _digGuardSinceTick = 0;
 
         // (2026-09-14) 岩浆豁免 —— 见字段区注释。必须同样在累积 streak 之前返回:
         // 在岩浆里上浮的水平零速会一路攒满 20 tick, 等离开岩浆那一刻立刻触发处置。
