@@ -418,6 +418,18 @@ public class BeatMinecraft2Task extends Task {
     private boolean _pearlCampRequireLosUntilSeen = false;
     // (2026-09-28) REOPEN-GATE 日志的独立节流戳 (不与 SCAN 日志共用, 防互相重置)。
     private long _lastReopenGateLogMs = 0;
+    // (2026-09-29 用户拍板"A: 触发闸门收紧") 脚下群系快路径不再"群系命中即通过":
+    // 还要求【近区缓存里真的有信号方块】(半径与 BlockTracker 近区扫描半径 16 同口径)。
+    // 现场 20260929-094342 实锤: bot 站在林内被挖空的基地区 (200,46,165, 合成台/
+    // 熔炉所在), 群系命中但视野里完全没有林子; 且冷启动 _pearlCampRequireLosUntilSeen
+    // =false, 0928 的重开确认闩不覆盖此场景 → 快路径直接放行, SCAN anchor=脚下
+    // dist=0 scanMs=0 立即开蹲 → 巡逻开局盘内候选为空, pickAdvanceAnchor 从远区
+    // 缓存 (X-ray 记忆, 无 FOV/LOS) 挑 76 格外的点 RETURN 拉走。真站林中时近区
+    // 5Hz 扫描几拍内填充缓存, 快路径自愈, 不会永久挡死 (trackBlockQuiet 零重扫)。
+    private long _lastBiomeNoSignalLogMs = 0;
+    private static final long PEARL_BIOME_NO_SIGNAL_LOG_INTERVAL_MS = 10_000;
+    /** 群系快路径要求的"近区有信号方块"半径 (= BlockTracker 近区扫描半径)。 */
+    private static final double PEARL_BIOME_FASTPATH_NEAR_RADIUS = 16;
     // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
 
     /** (2026-09-20 冷却 hold 拉回) 离林锚点超过该半径就走回去, 防随机 wander 漂离林子。 */
@@ -3850,6 +3862,10 @@ public class BeatMinecraft2Task extends Task {
      *                           _pearlCampRequireLosUntilSeen}) 传 false —— 群系
      *                           判定不代表看得见 (bot 站林缘空地/空洞, 视野里没有
      *                           菌岩), 2026-09-28 实锤它让冷却一到期就马上开蹲。
+     *                           (2026-09-29) 允许时也【不再无条件放行】: 还须近区
+     *                           缓存有信号方块 ({@link #nearRegionHasSignalBlocks}),
+     *                           否则照样落到 LOS 判定 —— 冷启动在基地空地误触发的
+     *                           现场 20260929-094342。
      */
     private BlockPos findPerceivedWarpedForest(AltoClef mod, boolean allowBiomeFastPath) {
         // 1) 脚下群系就是诡异森林 → "身处林中", O(1) 且零代价。
@@ -3873,8 +3889,21 @@ public class BeatMinecraft2Task extends Task {
                             + " (群系命中但要求亲眼看到林子 — 冷却后重开确认)");
                 }
                 // 注意: 仍落到下方 LOS 判定 —— 注册已在上面做过, LOS 有机会命中。
-            } else {
+            } else if (nearRegionHasSignalBlocks(mod, playerPos)) {
+                // (2026-09-29 用户拍板"A") 群系命中 + 近区缓存真有信号方块
+                // = 确实身处林中, 快路径放行。
                 return playerPos;
+            } else {
+                // (2026-09-29 用户拍板"A") 群系命中但近区缓存无信号方块 = 站在
+                // 林内空地/被挖空的基地 (现场 20260929-094342), 不给锚, 落到下方
+                // LOS 判定。近区 5Hz 扫描填充缓存后快路径自愈。
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - _lastBiomeNoSignalLogMs > PEARL_BIOME_NO_SIGNAL_LOG_INTERVAL_MS) {
+                    _lastBiomeNoSignalLogMs = nowMs;
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-NEAR]\tBIOME-NO-SIGNAL suppress biome-fastpath"
+                            + " at " + playerPos.toShortString()
+                            + " (群系命中但近区缓存无信号方块 — 非林区空地, 降级 LOS 判定)");
+                }
             }
         }
         // 2) 否则看能不能真的看见一片林子 (远处森林): 走 CollectEnderPearlsInForestTask
@@ -3909,6 +3938,23 @@ public class BeatMinecraft2Task extends Task {
             return null;
         }
         return seen;
+    }
+
+    /**
+     * (2026-09-29 用户拍板"A: 触发闸门收紧") 群系快路径的第二道闸: 脚下群系是
+     * 诡异森林之外, 还要求【近区缓存里真的有信号方块】。群系是区域属性不是视觉
+     * 属性 —— 站在林内被挖空的空地/基地 (现场 20260929-094342: 合成台/熔炉所在的
+     * 200,46,165) 群系照样命中, 但视野里根本没有林子。纯缓存查表零扫描零射线;
+     * 真站林中时近区 5Hz 扫描几拍内填充缓存, 不会永久挡死。
+     */
+    private static boolean nearRegionHasSignalBlocks(AltoClef mod, BlockPos center) {
+        double radiusSq = PEARL_BIOME_FASTPATH_NEAR_RADIUS * PEARL_BIOME_FASTPATH_NEAR_RADIUS;
+        for (Block block : CollectEnderPearlsInForestTask.WARPED_FOREST_SIGNAL_BLOCKS) {
+            for (BlockPos pos : mod.getBlockTracker().getKnownLocations(block)) {
+                if (pos.getSquaredDistance(center) <= radiusSq) return true;
+            }
+        }
+        return false;
     }
 
     private int getTargetBeds(AltoClef mod) {
