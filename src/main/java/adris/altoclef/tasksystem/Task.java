@@ -128,8 +128,17 @@ public abstract class Task {
         }
         // We have a sub task
         if (newSub != null) {
-            if (!newSub.isEqual(_sub)) {
-                if (canBeInterrupted(mod, _sub, newSub)) {
+            // (2026-09-29 弃用子任务强制替换, detail/25) 旧 _sub 已以"放弃"方式结束
+            // (hasGivenUp: isFinished=true 但目标并未达成, 如熔炉 giveUp) 时, 不能再用
+            // newSub.isEqual(_sub) 判"子任务没变"—— 语义等价的新实例会被这个判据丢弃,
+            // 框架继续 tick 那个已弃用的旧实例; 而放弃后的实例 onTick 恒返回 null
+            // (SmeltInFurnaceTask:163 `if (_gaveUp) return null`) ⇒ 整棵子树零动作、
+            // 零日志地空转 (20260929-192036 场次 4305s: 上游每 tick 重扫重派发, 却
+            // 永远换不掉实例)。hasGivenUp() 是纯字段读 (默认 false), 无放弃语义的
+            // 任务行为与旧版逐字一致。
+            boolean subAbandoned = _sub != null && _sub.hasGivenUp();
+            if (subAbandoned || !newSub.isEqual(_sub)) {
+                if (subAbandoned || canBeInterrupted(mod, _sub, newSub)) {
                     // (2026-08-22 横跳去抖) 若新子任务 == 上一次被 stop 的
                     // 子任务 (来回横跳 A→B→A→B) 且距上次切换 < 2 秒 → 拒绝
                     // 切换, 保持当前 _sub。全新目标不受影响。
@@ -137,9 +146,11 @@ public abstract class Task {
                     // (僵尸兜底任务: 掉物已消失还在 wander) 时不再占位 ——
                     // 父层边沿回切被去抖吞掉 1.55s, 期间零 interact tick,
                     // 2s barterTimeout 照样到期 → 刚成功的猪灵被误拉黑。
+                    // (2026-09-29) subAbandoned 时同样绕过去抖: 弃用实例必须立刻
+                    // 换掉, 不能被"回到上一个子任务"的去抖逻辑留下。
                     long nowMs = System.currentTimeMillis();
                     boolean subZombie = _sub != null && _sub.isFinished(mod);
-                    boolean bounceBack = !subZombie
+                    boolean bounceBack = !subZombie && !subAbandoned
                             && newSub.isEqual(_lastStoppedSub)
                             && (nowMs - _lastSwitchMs) < SWITCH_DEBOUNCE_MS;
                     if (bounceBack && subZombie) {
@@ -276,6 +287,24 @@ public abstract class Task {
 
     // Virtual
     public boolean isFinished(AltoClef mod) {
+        return false;
+    }
+
+    /**
+     * (2026-09-29 放弃态出口, detail/25) 本任务是否以"放弃"方式结束 —— 即
+     * {@link #isFinished} 会返回 true, 但那表示"我放弃了"而非"目标达成了"。
+     *
+     * 为什么需要它: 少数任务用 isFinished 的"短路放行"实现放弃语义
+     * (如 SmeltInFurnaceTask 的 giveUp: 弃炉后 isFinished 恒 true), 于是
+     * "完成"与"放弃"对上游无法区分。上游 CollectRecipeCataloguedResourcesTask
+     * 把 isFinished=true 当作"材料已到"直接进下一轮, 而框架 tickInternal 又按
+     * newSub.isEqual(_sub) 判"子任务没变"、继续 tick 那个已弃用的旧实例 —— 两者
+     * 叠加, 整棵子树零动作零日志空转 (20260929-192036 场次 4305s)。
+     *
+     * 默认 false = 无放弃语义。纯字段读, 零性能负担, 不改变任何既有行为;
+     * 只有真正需要"放弃"语义的任务覆写 (目前: SmeltInFurnaceTask)。
+     */
+    public boolean hasGivenUp() {
         return false;
     }
 
