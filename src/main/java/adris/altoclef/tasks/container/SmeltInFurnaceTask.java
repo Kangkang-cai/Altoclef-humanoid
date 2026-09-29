@@ -319,17 +319,34 @@ public class SmeltInFurnaceTask extends ResourceTask {
         boolean targetsMet = StorageHelper.itemTargetsMetInventory(mod, _itemTargets);
         boolean subFinished = _doTask.isFinished(mod);
         boolean drained = _doTask.isFurnaceDrained();
-        if (!(targetsMet || subFinished)) {
+        // (2026-09-29 开烧后收工, 用户拍板"一旦启动开烧了, 就把能烧的烧了就好")
+        // 本批已开烧 + 炉已排空 + 背包已无本目标生料 → 视为完成。
+        // 为什么需要: targetsMet 是"背包持有 targetCount 个产物"的口径, 吃掉/消耗
+        // 掉的那 1 个会让它永远差 1 → 实例永生 → 回头去猎新料 (20260929 17:00
+        // mutton 场次实锤: 吃 1 块 → 猎 6 只羊 → 弃掉仍在烧的炉)。
+        // "背包无生料"是不可省的第三项: 保证"能烧的都烧了", 否则炉一排空就收工,
+        // 会把背包里剩余的生料晾在原地不烧。
+        boolean rawLeft = false;
+        for (SmeltTarget t : _targets) {
+            if (StorageHelper.countItemsInInventoryReal(mod, t.getMaterial().getMatches()) > 0) {
+                rawLeft = true;
+                break;
+            }
+        }
+        boolean batchDone = _doTask.hasSmeltedBatch() && drained && !rawLeft;
+        if (!(targetsMet || subFinished || batchDone)) {
             long now = System.currentTimeMillis();
             if (now - _lastGateLogMs > 2000) {
                 _lastGateLogMs = now;
                 Debug.logToFile("altoclef_diag.log", "[SmeltGate]\twrapper#" + System.identityHashCode(this)
                         + " doTask#" + System.identityHashCode(_doTask)
                         + " targetsMet=" + targetsMet + " subFinished=" + subFinished + " drained=" + drained
+                        + " batchDone=" + batchDone + " smeltedBatch=" + _doTask.hasSmeltedBatch()
+                        + " rawLeft=" + rawLeft
                         + " " + _doTask.describeFurnaceCache());
             }
         }
-        return targetsMet || subFinished;
+        return targetsMet || subFinished || batchDone;
     }
 
     // (2026-09-16 守炉死循环诊断) [SmeltGate] 节流戳。
@@ -487,6 +504,31 @@ public class SmeltInFurnaceTask extends ResourceTask {
         // (2026-09-23 远离看门狗豁免, 独立审查 Medium-1) 最近一次派发的取生料
         // 任务引用; 仅在其 isActive 期间豁免, 结束后自动失效, 无需显式清空。
         private Task _materialErrand = null;
+
+        /**
+         * (2026-09-29 开烧后不再凑数, 用户拍板) 本轮是否已实际观察/投料到炉内
+         * 出现本目标的生料或产物, 即"已开烧"。
+         * <p>
+         * 语义变更: 一旦开烧, 任务目标从"凑够 targetCount"降级为"把能烧的烧完":
+         *  ① {@code onTick} 缺料分支不再派发猎料/挖料远征 (背包现有的投完即可);
+         *  ② 外层 {@code isFinished} 增加"本批已开烧且炉已排空"出口 —— 吃掉/消耗
+         *     掉的那 1 个不再要求补回。
+         * <p>
+         * 用户原话: "自己吃了一个，那就别再要求 6 个了, 其实最初派发 6 个只是因为
+         * 背包有 6 个生羊肉…一旦启动开烧了，就把能烧的烧了就好"。
+         * <p>
+         * 现场 (20260929 17:00 mutton 场次): 投 6 块生羊肉 + 4 木板, 第 1 块烧好被
+         * Food 链抢占吃掉 → {@code targetsMet} 永假 (背包只剩 5) → 实例永生 →
+         * 派发"猎 6 只羊"远征, 弃掉仍在烧 (料 x5 / 燃料 x3 / burn 21%) 的炉。
+         * <p>
+         * 置位点 = 开屏观察到炉内有本目标的料/产物 (tryUpdateOpenFurnace), 因此
+         * 跨实例复用时前序实例投下的料同样认账, 不依赖"本实例亲手投过料"。
+         */
+        private boolean _smeltedBatch = false;
+
+        boolean hasSmeltedBatch() {
+            return _smeltedBatch;
+        }
 
         /**
          * (2026-09-23 独立审查加固) bot 是否正在为这座炉执行【合法远行】子任务:
@@ -660,11 +702,19 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 _recoverTask = new RecoverFurnaceTask(orphan.pos, orphan.raw, orphan.cooked);
             }
             if (StorageHelper.countItemsInInventoryReal(mod, materialTarget.getMatches()) < materialsNeeded) {
-                setDebugState("Getting Materials");
-                // (2026-09-23 远离看门狗豁免) 持有引用供外层判断"合法远行中":
-                // 猎生料 (KillAndLoot 等) 可能合法走出 64 格且超过 90s。
-                _materialErrand = getMaterialTask(_target.getMaterial());
-                return _materialErrand;
+                // (2026-09-29 开烧后不再凑数, 用户拍板) 本轮已开烧 → 缺额不再触发
+                // 猎料/挖料远征; 直接落下方 super.onTick: 把背包现有料投完 → 收产物
+                // → 守到炉排空, 由 isFinished 的"本批已开烧且排空"出口收工。
+                // 反例 (尚未开烧, 即冷启动/炉还空着) 仍照常去凑料, 行为不变。
+                // 注意: 这里只是"不再去拿新料", 不缺"把手上已有的料投进炉" ——
+                // 那不归本分支管, 由下方 super.onTick 的 containerSubTask 负责。
+                if (!_smeltedBatch) {
+                    setDebugState("Getting Materials");
+                    // (2026-09-23 远离看门狗豁免) 持有引用供外层判断"合法远行中":
+                    // 猎生料 (KillAndLoot 等) 可能合法走出 64 格且超过 90s。
+                    _materialErrand = getMaterialTask(_target.getMaterial());
+                    return _materialErrand;
+                }
             }
 
             // We don't have enough fuel...
@@ -1008,6 +1058,12 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
                 _furnaceCache.materialSlot = newMaterial;
                 _furnaceCache.outputSlot = newOutput;
+                // (2026-09-29 开烧标记) 炉内实见本目标的生料或产物 → 本轮已开烧。
+                // 只认"真实开屏观察", 与下面的在途账同源, 不引入第二个计数口径。
+                if ((!newMaterial.isEmpty() && _target.getMaterial().matches(newMaterial.getItem()))
+                        || (!newOutput.isEmpty() && _target.getItem().matches(newOutput.getItem()))) {
+                    _smeltedBatch = true;
+                }
                 // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
                 // 的下一个实例认账。
                 // (2026-09-16 崩溃修复) openPos 为 null 时 _cachePos 保持 null
