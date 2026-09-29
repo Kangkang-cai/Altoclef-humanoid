@@ -25,7 +25,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3i;
 import org.apache.commons.lang3.ArrayUtils;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -74,6 +73,9 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // 空手跳跃手足无措。改为默认 true: 当 getMaterialCount < 1 (一块都没有)
         // 时, 自动派发 getMaterialTask(32) 去收集泥土/圆石/深板岩原石/下界岩,
         // 收集完 (count>=32) 再恢复本任务搭方块。
+        // (2026-09-29 口径修正) 上面那句"泥土/圆石/深板岩原石/下界岩"已成历史:
+        // 现在只补【当前维度那一种】, 见 getMaterialTask 注释 (旧全量清单会把
+        // "放一张床"撑成"下界远征")。
         this(target, toPlace, false, true);
     }
 
@@ -113,32 +115,36 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         return ScaffoldBlocks.isScaffoldBlock(item);
     }
 
-    public static Task getMaterialTask(int count) {
-        // (2026-09-29 崩溃修复层 ②) ScaffoldBlocks.SAFE_MATERIALS 是"背包里有就能用"
-        // 的宽口径清单 (计数/放置), **不能**直接当成"要去收集"的目标清单: 里面有
-        // 未在 TaskCatalogue 注册的条目 (crying_obsidian 无采集/合成任务) ⇒
-        // TaskCatalogue.getItemTask 返回 null ⇒ CataloguedResourceTask 把 null 塞进
-        // squasher ⇒ t.getClass() NPE 崩客户端。
-        // 现场 20260929-18:48: @gamer 末地折返平台建造, 背包无任何现成建材 → 走到
-        // 这条收集路径 → 崩 (单人从未踩到, 只是恰好没在"建材耗尽"时搭过方块)。
-        // 现在只对【可获取】的材料发起收集; 其余按材料名各报一次 (不刷屏)。
-        List<ItemTarget> obtainable = new ArrayList<>(ScaffoldBlocks.SAFE_MATERIALS.length);
-        for (Item item : ScaffoldBlocks.SAFE_MATERIALS) {
-            if (!TaskCatalogue.taskExists(item)) {
-                if (_unregisteredMaterialLogged.add(item)) {
-                    Debug.logWarning("[PlaceBlock] structure material " + item.getTranslationKey()
-                            + " has no TaskCatalogue entry — not requesting it (still usable if already carried)");
-                }
-                continue;
+    public static Task getMaterialTask(AltoClef mod, int count) {
+        // (2026-09-29 清单语义修正, 现场 logs/altoclef/20260929-192036 首帧任务栈)
+        // 旧实现把 ScaffoldBlocks.SAFE_MATERIALS **全量** (15 项 x count) 当成"要去
+        // 收集"的目标清单 —— 但那个清单是"背包【有】就能用"的【计数/放置】宽口径,
+        // 其中 netherrack/blackstone/basalt/soul_sand/soul_soil 挂 forceDimension(NETHER)、
+        // end_stone 挂 forceDimension(END)。实测后果:
+        //   L2 <Placing a bed nearby + resetting spawn point>
+        //   L3 <Place structure{} at 173,90,36> "No structure items, collecting..."
+        //   L4 <Get catalogued: {netherrack x32, ..., end_stone x32}>
+        //   L6 <Going to dimension: NETHER> → L7 <Construct Nether Portal> → 要 6 铁锭
+        // 即"放一张床过夜"被自己的建材清单撑成了"造下界传送门远征"; 而每次死亡
+        // [DeathReset] 都会整树重派发 ⇒ 一辈子在木器/铁器之间重爬 (全天进度止步铁器时代)。
+        // 现在只向【当前维度可得】的那一种补货 —— 复用 ScaffoldBlocks.preferredRestockItem
+        // 这个既有窄口径入口 (与 FortressExploreTask:1027 / CollectBlazeRodsTask:1480
+        // 同源), 不另开副本: 主世界→圆石/深板岩圆石, 下界→地狱岩/黑石/玄武岩,
+        // 末地→末地石, 三者均已注册 TaskCatalogue, 维度串门路径被彻底切断。
+        //
+        // (2026-09-29 崩溃修复层 ②, 保留) taskExists 闸门不可省: TaskCatalogue.getItemTask
+        // 返回 null 会被 CataloguedResourceTask 塞进 squasher ⇒ t.getClass() NPE 崩客户端
+        // (现场 20260929-18:48 末地折返平台建造, 背包建材耗尽时走到这条收集路径)。
+        if (mod == null || mod.getPlayer() == null) return null;
+        Item want = ScaffoldBlocks.preferredRestockItem(mod);
+        if (!TaskCatalogue.taskExists(want)) {
+            if (_unregisteredMaterialLogged.add(want)) {
+                Debug.logWarning("[PlaceBlock] structure material " + want.getTranslationKey()
+                        + " has no TaskCatalogue entry — not requesting it (still usable if already carried)");
             }
-            obtainable.add(new ItemTarget(item, count));
-        }
-        if (obtainable.isEmpty()) {
-            // 极端: 清单里一个可获取的都没有 → 不派任务 (返回 null), 绝不把 null 往下传。
-            Debug.logWarning("[PlaceBlock] no obtainable structure material at all; skipping collection request");
             return null;
         }
-        return TaskCatalogue.getSquashedItemTask(obtainable.toArray(new ItemTarget[0]));
+        return TaskCatalogue.getSquashedItemTask(new ItemTarget(want, count));
     }
 
     /** 已就"无 TaskCatalogue 条目"报过警的材料 (静态去重, 防每 tick 刷屏)。 */
@@ -212,7 +218,10 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
 
         if (_autoCollectStructureBlocks) {
             if (_materialTask != null && _materialTask.isActive() && !_materialTask.isFinished(mod)) {
-                setDebugState("No structure items, collecting cobblestone + dirt as default.");
+                // (2026-09-29) 文案改口径: 旧文案写死 "cobblestone + dirt", 而旧实现
+                // 实际上在收集 SAFE_MATERIALS 全量 15 项 —— 文案与行为早就不一致,
+                // 也是 20260929-192036 现场判读被误导的原因之一。
+                setDebugState("No structure items, collecting scaffold material for this dimension.");
                 if (getMaterialCount(mod) < PREFERRED_MATERIALS) {
                     return _materialTask;
                 } else {
@@ -223,9 +232,16 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             //Item[] items = Util.toArray(Item.class, mod.getClientBaritoneSettings().acceptableThrowawayItems.value);
             if (getMaterialCount(mod) < MIN_MATERIALS) {
                 // TODO: Mine items, extract their resource key somehow.
-                _materialTask = getMaterialTask(PREFERRED_MATERIALS);
-                _progressChecker.reset();
-                return _materialTask;
+                Task materialErrand = getMaterialTask(mod, PREFERRED_MATERIALS);
+                // (2026-09-29) 补货任务可能为 null (当前维度那一种没注册 / 玩家未就绪)。
+                // 旧写法无脑 `return _materialTask` ⇒ 每 tick 返回 null 的静默空转。
+                // 拿不到就如常往下走: baritone builder 仍能用背包里已有的垫脚方块施工。
+                if (materialErrand != null) {
+                    _materialTask = materialErrand;
+                    _progressChecker.reset();
+                    return _materialTask;
+                }
+                _materialTask = null;
             }
         }
 

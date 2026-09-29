@@ -149,7 +149,7 @@ public class TerminatorTask extends Task {
             // Get building materials if we don't have them.
             if (PlaceStructureBlockTask.getMaterialCount(mod) < MIN_BUILDING_BLOCKS) {
                 setDebugState("Collecting building materials");
-                return PlaceBlockTask.getMaterialTask(PREFERRED_BUILDING_BLOCKS);
+                return PlaceBlockTask.getMaterialTask(mod, PREFERRED_BUILDING_BLOCKS);
             }
 
             // Get some food so we can last a little longer.
