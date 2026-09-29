@@ -3,6 +3,7 @@ package adris.altoclef.util.helpers;
 import adris.altoclef.AltoClef;
 import adris.altoclef.util.Dimension;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ServerInfo;
 import net.minecraft.util.WorldSavePath;
 
 import java.nio.file.Path;
@@ -23,19 +24,31 @@ import java.nio.file.Path;
  * "w2:" 前缀 = 【目录名口径】的版本标记(沿用 PortalMemoryStore 既有约定),
  * 作用是让旧的 LevelName 格式 key 永不匹配 → 存量脏记录自动作废。
  *
- * 退化链: 集成服务器不可用(多人服 / 主菜单 / 启动早期) → 目录名取不到,
- * 回退到显示名, 再回退 "?"。多人服下所有世界共享 "?", 与旧行为一致,
- * 不在本次修复范围(当前唯一场景是单人存档)。
+ * 解析顺序 (2026-09-29 多人服纳入范围):
+ *  1. 单人 / 局域网主机: 集成服务器可用 → 存档【目录名】, 取不到再退显示名;
+ *     此时 `getCurrentServerEntry()` 为 null, 不会误判。
+ *  2. 专用服务端(多人): 集成服务器恒 null → 用 `ServerInfo.address`(或退化到
+ *     `name`), 前缀 `srv:` 标记来源。多人下所有服务器此前共享 "?", 换服不隔离,
+ *     且 `WorldStateGuard` 的切世界清档检测永不触发 —— 本次修复。
+ *  3. 都取不到(主菜单 / 启动早期) → "?"。
+ *
+ * `srv:` 前缀与单人目录名天然互斥: Windows 存档目录名不含 ':'。
  */
 public final class WorldIdentity {
+
+    /** 多人服条目标识前缀 (见类注释第 2 条)。 */
+    private static final String SERVER_TOKEN = "srv:";
 
     private WorldIdentity() {
     }
 
-    /** 存档目录名 (物理唯一)。取不到时回退显示名, 再回退 "?"。 */
+    /** 世界标识串: 单人=存档目录名, 多人=`srv:<服务器地址>`。取不到时 "?"。 */
     public static String saveDirName() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null) return "?";
+        // ---- 1) 单人 / 局域网主机: 存档目录名 ----
         try {
-            var server = MinecraftClient.getInstance().getServer();
+            var server = mc.getServer();
             if (server != null) {
                 Path root = server.getSavePath(WorldSavePath.ROOT);
                 if (root != null) {
@@ -52,6 +65,19 @@ public final class WorldIdentity {
                 if (server.getSaveProperties() != null
                         && server.getSaveProperties().getLevelName() != null) {
                     return server.getSaveProperties().getLevelName();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        // ---- 2) 专用服务端: 服务器地址 ----
+        try {
+            ServerInfo entry = mc.getCurrentServerEntry();
+            if (entry != null) {
+                if (entry.address != null && !entry.address.isEmpty()) {
+                    return SERVER_TOKEN + entry.address;
+                }
+                if (entry.name != null && !entry.name.isEmpty()) {
+                    return SERVER_TOKEN + entry.name;
                 }
             }
         } catch (Exception ignored) {
