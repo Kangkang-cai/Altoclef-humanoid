@@ -528,9 +528,10 @@ public class SmeltInFurnaceTask extends ResourceTask {
         private Task _materialErrand = null;
 
         /**
-         * (2026-09-29 开烧后不再凑数, 用户拍板) 本轮是否**真的开烧过** —— 判据见下方
-         * 置位点: 炉内正在燃烧 (burn/燃料 > 0) 或已烧出本目标产物, **不是"炉里有料"**。
-         * 投料阶段 (料已进炉但还没点火/没燃料) 不算开烧, 闸门保持打开、继续凑料。
+         * (2026-09-29 开烧后不再凑数, 用户拍板) 本轮是否**真的进入烧制阶段** —— 判据见下方
+         * 置位点（三代收紧后的最终形态）：【料已凑齐（炉内料 + 已产出 ≥ 目标量）】**且**
+         * 【炉子有燃料/在烧】。既不是"炉里刚有料"（v1 误判源：×别的实例投进同一座炉的料），
+         * 也不是"刚投了一块燃料"（v2/v3 误判源：只投 3 个就停止补料）⇒ 投料/凑料阶段闸门一直开着。
          * <p>
          * 语义变更: 一旦开烧, 任务目标从"凑够 targetCount"降级为"把能烧的烧完":
          *  ① {@code onTick} 缺料分支不再派发猎料/挖料远征 (背包现有的投完即可);
@@ -1135,11 +1136,25 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 // ⇒ 永不置位 ⇒ "吃掉 1 个产物后不再猎料"的原修复失效 (mutton 场景回归)。
                 // 补上"燃料槽非空"后, 投燃料的那一拍立刻可判 ✅；
                 // 而本次误判场景 (x3 实例投料时 fuel=air x0) 依然不会被触发 ✅。
+                // (2026-09-29 22:1x 第三次收紧: 加"料已凑齐"前提) 判据 = 【料已凑齐 且 炉子有燃料/在烧】。
+                //
+                // 为什么还要加"料已凑齐" (用户口径: "目标是 8 铁的装备, 肯定要等到有 8 个生铁
+                // 时候才派发"; 20260929-220150 实跑暴露):
+                // 上一版 (de161a5b) 只认"有燃料/在烧", 于是【只投了 3 个料 + 1 块木板】就置位
+                // (22:07:28.879 [mat=raw_iron x3][fuel=oak_planks x1]) ⇒ 闸门关闭 ⇒ 不再补料
+                // ⇒ 炉内只到 6 个 < 目标 8 ⇒ targetsMet 永假 ⇒ 每轮只烧 6 个再被上层重派, 白烧多轮。
+                // 加前提后: 投 3 个时 (3 < 8) 不置位 ⇒ 继续投/挖; 凑满 8 才置位 ⇒ 一次出 8 锭 ✅
+                //   而 mutton 原场景 (投完 6 个 = 目标 6) 依然 6 >= 6 ⇒ 立刻置位 ⇒ 原修复保持 ✅
+                //
+                // 产物计入"已达成量": 已烧出的铁锭/熟肉同样满足目标, 不必重复凑料。
+                int matInFurnace = _allMaterials.matches(newMaterial.getItem()) ? newMaterial.getCount() : 0;
+                int outInFurnace = _target.getItem().matches(newOutput.getItem()) ? newOutput.getCount() : 0;
+                int outInInventory = StorageHelper.countItemsInInventoryReal(mod, _target.getItem().getMatches());
+                boolean batchFilled = (matInFurnace + outInFurnace + outInInventory) >= _allMaterials.getTargetCount();
                 boolean furnaceHasFuel = _furnaceCache.burnPercentage > 0
                         || _furnaceCache.burningFuelCount > 0
                         || !_furnaceCache.fuelSlot.isEmpty();
-                boolean hasOurOutput = !newOutput.isEmpty() && _target.getItem().matches(newOutput.getItem());
-                if (furnaceHasFuel || hasOurOutput) {
+                if (batchFilled && furnaceHasFuel) {
                     _smeltedBatch = true;
                 }
                 // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
