@@ -588,54 +588,95 @@ public class StorageHelper {
     }
 
     public static Optional<Slot> getGarbageSlot(AltoClef mod) {
-        // Throwaway items, but keep a few for building.
-        final List<Slot> throwawayBlockItems = new ArrayList<>();
-        int totalBlockThrowaways = 0;
-        for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, mod.getModSettings().getThrowawayItems(mod))) {
-            // Our cursor slot is NOT a garbage slot
-            if (Slot.isCursor(slot))
+        // =====================================================================
+        // (2026-09-29 重构: 从"丢弃白名单准入"翻转为"保护名单+机制收口 + 统一候选池")
+        // 旧结构四层直通 (白名单→低阶工具→重复工具→兜底池) 有两条断链:
+        //   a) 候选集以 throwawayItems 为准入 — 圆石 0825 移出名单后, "合计>64 丢
+        //      最大堆"对普通圆石空转 (用户现场 7 组 64 圆石不丢);
+        //   b) 兜底池 BULK 判定 stack.getCount()>64 对单槽最大 64 恒假 (死代码),
+        //      且兜底层在有任何白名单物品时永远到不到 ⇒ 名单外物品 (花草/超量圆石) 饿死。
+        // 新结构: 全背包统一扫描, 保护统一收口 (canThrowAwayStack + isStackProtected +
+        // 弹回冷却 + 最后镐), 白名单只作排序偏好; 丢弃档位从先到后:
+        //   1 圆石家族合计超出保留量(丢最大堆)   2 白名单杂物(非方块优先)
+        //   3 名单外 BULK 大堆(≥16 丢最大)       4 名单外普通杂物(小堆优先)
+        //   5 工具淘汰(低阶→同材料重复)           6 原木垫底
+        //   7 食物最后(hunger×count 最便宜)
+        // 档 3-7 受 throwAwayUnusedItems 开关收窄; 开关 false 时只丢档 1+2。
+        // =====================================================================
+        Slot firstWhitelistNonBlock = null; // 档2: 白名单非方块 (旧口径"立即返回")
+        Slot firstWhitelistBlock = null;    // 档2: 白名单方块
+        final List<Slot> cobbleFamilySlots = new ArrayList<>(); // 档1: 圆石/深板岩圆石/黑石
+        int cobbleFamilyTotal = 0;
+        final List<Slot> genericSlots = new ArrayList<>();  // 档4
+        final List<Slot> logSlots = new ArrayList<>();      // 档6
+        final List<Slot> foodSlots = new ArrayList<>();     // 档7
+        // 档5 工具淘汰的扫描中间量 (口径与旧低阶/重复逻辑一致)
+        final HashMap<Class, Integer> bestMaterials = new HashMap<>();
+        final HashMap<Class, Slot> bestTool = new HashMap<>();
+        final HashMap<String, List<Slot>> toolGroups = new HashMap<>();
+        Slot lowTierTool = null;
+
+        for (Slot slot : getRealBackpackSlots()) {
+            ItemStack stack = getItemStackInSlot(slot);
+            if (stack == null || stack.isEmpty()) continue;
+            Item item = stack.getItem();
+            // 弹回熔断: 冷却中的物品不作任何档位候选。
+            if (ItemHelper.isThrowOnCooldown(item)) continue;
+            // 档1 候选: 圆石家族。保护只有"合计保留量"一道闸 — 不走 canThrowAwayStack
+            // (圆石不在名单, 开关语义与合计闸无关), 但任务保护 (isStackProtected) 照走。
+            if (item == Items.COBBLESTONE || item == Items.COBBLED_DEEPSLATE || item == Items.BLACKSTONE) {
+                if (ItemHelper.isStackProtected(mod, stack)) continue;
+                cobbleFamilySlots.add(slot);
+                cobbleFamilyTotal += stack.getCount();
                 continue;
-            // (2026-09-03 根因修复: 2x2 合成格被当垃圾槽, 用户"bot 往合成格塞满 tuff")
-            // PlayerScreenHandler 下 window0-4(合成输出+2x2合成格)被 isSlotInPlayerInventory
-            // 归入玩家背包槽 → 这里的候选含合成格里的物品(tuff/闪长岩等垃圾)。返回它
-            // 作为"垃圾槽"后, 调用方 clickSlot 点它 = 拿起/交换而非丢弃, tuff 在光标与
-            // 合成格间循环 → "Breaking the crafting grid" 卡死。合成格不是存储, 绝不作为
-            // 垃圾/丢出候选。
-            if (isCraftingGridAreaSlot(slot))
-                continue;
-            ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-            if (!ItemHelper.canThrowAwayStack(mod, stack))
-                continue;
-            // (2026-09-11 弹回熔断) 冷却中的物品不作垃圾候选, 打断"扔→弹回→原版
-            // 拾取→再扔"死循环 (现场 11:12:53 实锤, 见 ItemHelper 弹回熔断器)。
-            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
-                continue;
-            if (stack.getItem() instanceof BlockItem) {
-                // (2026-09-03 垃圾方块有就丢, 用户"安山岩/闪长岩/凝灰岩/树苗/泥土
-                // 不丢") 只有圆石/深板岩圆石作为建筑材料保留一组(64, 由
-                // canThrowAwayStack 的 isReservedBlockUnderLimit 兜底), 其余
-                // throwawayItems 方块(树苗/泥土/安山岩等)都是垃圾, 有就丢 — 旧
-                // 逻辑把它们的总量也塞进保留闸门, 合计 <64 时一个都不丢。
-                Item blockItem = stack.getItem();
-                // (2026-09-09) 黑石=下界的"圆石"(可做石镐/熔炉), 与圆石/深板岩圆石
-                // 同进保留闸门合计, 与 isReservedBlockUnderLimit 口径一致。
-                if (blockItem == Items.COBBLESTONE || blockItem == Items.COBBLED_DEEPSLATE || blockItem == Items.BLACKSTONE) {
-                    totalBlockThrowaways += stack.getCount();
-                    throwawayBlockItems.add(slot);
-                } else {
-                    return Optional.of(slot);
-                }
-            } else {
-                // Throw away this non-block immediately.
-                return Optional.of(slot);
             }
+            // 保护名单+机制统一收口 (importantItems/硬保护/自定义名/最后镐/任务保护)。
+            if (!ItemHelper.canThrowAwayStack(mod, stack)) continue;
+            if (mod.getModSettings().isThrowaway(item)) {
+                // 档2: 白名单 = 排序偏好, 不是准入门槛。
+                if (item instanceof BlockItem) {
+                    if (firstWhitelistBlock == null) firstWhitelistBlock = slot;
+                } else if (firstWhitelistNonBlock == null) {
+                    firstWhitelistNonBlock = slot;
+                }
+                continue;
+            }
+            if (stack.getItem().isFood()) {
+                foodSlots.add(slot); // 档7: 食物最后 (腐肉/蜘蛛眼在白名单档, 不会到这)
+                continue;
+            }
+            if (ArrayUtils.contains(ItemHelper.LOG, item)) {
+                logSlots.add(slot); // 档6: 原木垫底 (燃料/合成刚需, 别无可丢才动)
+                continue;
+            }
+            if (item instanceof ToolItem tool) {
+                // 档5: 工具淘汰 — 只丢"有更好同类"的低阶工具与同材料重复工具;
+                // 每类最好的那把绝不在这里丢 (最后镐由 canThrowAwayStack 兜底)。
+                Class c = tool.getClass();
+                int level = tool.getMaterial().getMiningLevel();
+                int prevBest = bestMaterials.getOrDefault(c, 0);
+                if (level > prevBest) {
+                    if (bestTool.containsKey(c) && lowTierTool == null) {
+                        lowTierTool = bestTool.get(c);
+                    }
+                    bestMaterials.put(c, level);
+                    bestTool.put(c, slot);
+                } else if (level < prevBest && lowTierTool == null) {
+                    lowTierTool = slot;
+                }
+                toolGroups.computeIfAbsent(c.getName() + ":" + level, k -> new ArrayList<>()).add(slot);
+                continue;
+            }
+            genericSlots.add(slot); // 档4: 名单外普通杂物 (花草等)
         }
-        if (!throwawayBlockItems.isEmpty() && totalBlockThrowaways > mod.getModSettings().getReservedBuildingBlockCount()) {
-            // (2026-08-23) 丢最大堆而非第一个槽位 — 石头偏多时优先丢大堆。
+
+        // ---- 档1: 圆石家族合计超出保留量 → 丢最大堆 (修复 7 组 64 不丢) ----
+        if (!cobbleFamilySlots.isEmpty()
+                && cobbleFamilyTotal > mod.getModSettings().getReservedBuildingBlockCount()) {
             Slot largest = null;
             int largestCount = -1;
-            for (Slot slot : throwawayBlockItems) {
-                int count = StorageHelper.getItemStackInSlot(slot).getCount();
+            for (Slot slot : cobbleFamilySlots) {
+                int count = getItemStackInSlot(slot).getCount();
                 if (count > largestCount) {
                     largestCount = count;
                     largest = slot;
@@ -643,209 +684,50 @@ public class StorageHelper {
             }
             return Optional.of(largest);
         }
+        // ---- 档2: 白名单排序偏好 (非方块优先, 与旧"非方块立即返回"口径一致) ----
+        if (firstWhitelistNonBlock != null) return Optional.of(firstWhitelistNonBlock);
+        if (firstWhitelistBlock != null) return Optional.of(firstWhitelistBlock);
 
-        // Try throwing away lower tier tools
-        final HashMap<Class, Integer> bestMaterials = new HashMap<>();
-        final HashMap<Class, Slot> bestTool = new HashMap<>();
-        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
-            // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当工具垃圾候选。
-            if (isCraftingGridAreaSlot(slot))
-                continue;
-            ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-            if (!ItemHelper.canThrowAwayStack(mod, stack))
-                continue;
-            // (2026-09-11 弹回熔断) 冷却中的低阶工具同样跳过。
-            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
-                continue;
-            Item item = stack.getItem();
-            if (item instanceof ToolItem tool) {
-                Class c = tool.getClass();
-                int level = tool.getMaterial().getMiningLevel();
-                int prevBest = bestMaterials.getOrDefault(c, 0);
-                if (level > prevBest) {
-                    // We had a WORSE tool before.
-                    if (bestTool.containsKey(c)) {
-                        return Optional.of(bestTool.get(c));
-                    }
-                    bestMaterials.put(c, level);
-                    bestTool.put(c, slot);
-                } else if (level < prevBest) {
-                    // We found something WORSE!
-                    return Optional.of(slot);
-                }
-            }
-        }
-
-        // (2026-08-23 重复工具可扔) 用户设计: 三个铁镐、三个钻石镐这种同材料
-        // 重复工具可以扔, 只保留一把。按 (工具类, 材料等级) 分组, 同组 >1 个
-        // 就丢一个多余的。低阶工具 (木镐 vs 铁镐) 已由上面逻辑处理, 这里只
-        // 处理"同材料多把"的重复。
-        final HashMap<String, List<Slot>> toolGroups = new HashMap<>();
-        for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
-            // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当工具垃圾候选。
-            if (isCraftingGridAreaSlot(slot))
-                continue;
-            ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-            if (stack.isEmpty() || !ItemHelper.canThrowAwayStack(mod, stack))
-                continue;
-            // (2026-09-11 弹回熔断) 冷却中的重复工具同样跳过。
-            if (ItemHelper.isThrowOnCooldown(stack.getItem()))
-                continue;
-            Item item = stack.getItem();
-            if (item instanceof ToolItem tool) {
-                String key = tool.getClass().getName() + ":" + tool.getMaterial().getMiningLevel();
-                toolGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(slot);
-            }
-        }
-        for (List<Slot> slots : toolGroups.values()) {
-            if (slots.size() > 1) {
-                return Optional.of(slots.get(0));
-            }
-        }
-
-        // Now we're getting desparate
+        // ---- 档3-7: 兜底, 受 throwAwayUnusedItems 开关收窄 ----
         if (mod.getModSettings().shouldThrowawayUnusedItems()) {
-
-            // Also uh calculate how much food we have.
-            int calcTotalFoodScore = 0;
-
-            // Get all non-important items. For now there is no measure of value.
-            final List<Slot> possibleSlots = new ArrayList<>();
-            for (Slot slot : PlayerSlot.getCurrentScreenSlots()) {
-                // (2026-09-03 同根因) 合成格/输出槽(window0-4)不是背包, 不当垃圾候选。
-                if (isCraftingGridAreaSlot(slot))
-                    continue;
-                ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-                // If we're an armor slot, don't count us.
-                if (slot instanceof PlayerSlot playerSlot) {
-                    if (ArrayUtils.contains(PlayerSlot.ARMOR_SLOTS, playerSlot)) {
-                        continue;
-                    }
+            // 档4: 名单外 BULK 大堆 (≥16) 丢最大 (腾位效率最高); 否则小堆优先 (损失最小)。
+            Slot bulk = null;
+            int bulkCount = 15; // 与 getBulkDisposalSlot 同口径: ≥16 才算大堆
+            Slot smallest = null;
+            for (Slot slot : genericSlots) {
+                ItemStack stack = getItemStackInSlot(slot);
+                if (isBulkDisposalItem(stack.getItem()) && stack.getCount() >= 16 && stack.getCount() > bulkCount) {
+                    bulkCount = stack.getCount();
+                    bulk = slot;
                 }
-                // (2026-08-23 别把唯一/最好的镐扔了) 满背包腾位时曾把唯一石镐
-                // 当"unused"扔掉 → 在地狱里重建要木头 → 死循环收集木头 (日志
-                // 实锤)。扔了就没镐可用的槽位不加入候选。
-                if (wouldLeaveNoPickaxe(mod, stack)) continue;
-                // Throw away-able slots are good!
-                if (ItemHelper.canThrowAwayStack(mod, stack)) {
-                    possibleSlots.add(slot);
-                }
-                if (stack.getItem().isFood()) {
-                    calcTotalFoodScore += Objects.requireNonNull(stack.getItem().getFoodComponent()).getHunger();
+                if (smallest == null || stack.getCount() < getItemStackInSlot(smallest).getCount()) {
+                    smallest = slot;
                 }
             }
-
-            final int totalFoodScore = calcTotalFoodScore;
-
-            // (2026-09-28 用户钦定: 垃圾名单不可能穷举, 只保证"不丢重要物资")
-            // 现场 20260928-171146 17:21:56: 满包腾位把热栏 5 槽的 cooked_chicken x9
-            // 整堆拿上光标抛掉 (craftclick slot=41 PICKUP -> cooked_chickenx9, 之后
-            // FOOD-DIAG 里该物品彻底消失)。当时背包里还有 moss_block x10 / white_wool x2
-            // / cocoa_beans x6 这类没人会心疼的东西 —— 只因下面"食物间比较器"写反了
-            // (return -1 * (leftCost - rightCost) 配 stream().min() = 专挑
-            // hunger×count 最大的那堆), 把最贵的熟鸡肉顶成了第一候选。
-            // 用户原则: 名单永远列不全 (草丛块/羊毛/可可豆都没在名单里), 所以不靠扩名单,
-            // 靠分层 —— 只要还存在【非食物】候选, 食物一律不动; 食物降到最后一层。
-            final List<Slot> nonFoodSlots = new ArrayList<>();
-            final List<Slot> foodSlots = new ArrayList<>();
-            for (Slot slot : possibleSlots) {
-                ItemStack s = StorageHelper.getItemStackInSlot(slot);
-                if (s.isEmpty()) continue;
-                if (s.getItem().isFood()) {
-                    foodSlots.add(slot);
-                } else {
-                    nonFoodSlots.add(slot);
-                }
+            if (bulk != null) return Optional.of(bulk);
+            if (smallest != null) return Optional.of(smallest);
+            // 档5: 工具淘汰 (低阶优先, 其次同材料重复)。
+            if (lowTierTool != null) return Optional.of(lowTierTool);
+            for (List<Slot> slots : toolGroups.values()) {
+                if (slots.size() > 1) return Optional.of(slots.get(0));
             }
-            final List<Slot> pool = nonFoodSlots.isEmpty() ? foodSlots : nonFoodSlots;
-            if (nonFoodSlots.isEmpty() && !foodSlots.isEmpty()) {
+            // 档6: 原木垫底。
+            if (!logSlots.isEmpty()) return Optional.of(logSlots.get(0));
+            // 档7: 食物最后 — 只剩食物可丢时, 丢 hunger×count 最便宜的一堆。
+            if (!foodSlots.isEmpty()) {
                 Debug.logMessage("(StorageHelper) Discard pool is all food — "
                         + "discarding the cheapest food as last resort.");
-            }
-
-            if (!pool.isEmpty()) {
-                // (2026-08-23 丢物优先级) 用户原则: 石头/杂石偏多, 满背包
-                // 时优先丢超量 (>64) 的最大石头堆; 原木绝不优先丢 (木头是
-                // 燃料/合成刚需), 只有别无可丢才轮到它。原逻辑最后按
-                // "最小数量"挑 — 原木通常是小堆, 结果木头比 64 圆石先丢。
-                Slot biggestBulk = null;
-                int biggestBulkCount = 64;
-                List<Slot> nonLogSlots = new ArrayList<>();
-                boolean sawLog = false;
-                for (Slot slot : pool) {
-                    ItemStack stack = StorageHelper.getItemStackInSlot(slot);
-                    if (stack.isEmpty()) continue;
-                    if (ArrayUtils.contains(ItemHelper.LOG, stack.getItem())) {
-                        sawLog = true;
-                        continue;
-                    }
-                    nonLogSlots.add(slot);
-                    if (isBulkDisposalItem(stack.getItem()) && stack.getCount() > biggestBulkCount) {
-                        biggestBulkCount = stack.getCount();
-                        biggestBulk = slot;
+                Slot cheapest = null;
+                int cheapestCost = Integer.MAX_VALUE;
+                for (Slot slot : foodSlots) {
+                    ItemStack s = getItemStackInSlot(slot);
+                    int cost = s.getItem().getFoodComponent().getHunger() * s.getCount();
+                    if (cost < cheapestCost) {
+                        cheapestCost = cost;
+                        cheapest = slot;
                     }
                 }
-                if (biggestBulk != null) {
-                    return Optional.of(biggestBulk);
-                }
-                // 原木垫底: 有非原木候选就只在非原木里挑。
-                List<Slot> candidates = nonLogSlots.isEmpty() && sawLog ? pool : nonLogSlots;
-                if (candidates.isEmpty()) {
-                    return Optional.empty();
-                }
-                return candidates.stream().min((leftSlot, rightSlot) -> {
-                    ItemStack left = StorageHelper.getItemStackInSlot(leftSlot),
-                            right = StorageHelper.getItemStackInSlot(rightSlot);
-                    boolean leftIsTool = left.getItem() instanceof ToolItem;
-                    boolean rightIsTool = right.getItem() instanceof ToolItem;
-                    // Prioritize tools over materials.
-                    if (rightIsTool && !leftIsTool) {
-                        return -1;
-                    } else if (leftIsTool && !rightIsTool) {
-                        return 1;
-                    }
-                    if (rightIsTool && leftIsTool) {
-                        // Prioritize material type, then durability.
-                        ToolItem leftTool = (ToolItem) left.getItem();
-                        ToolItem rightTool = (ToolItem) right.getItem();
-                        if (leftTool.getMaterial().getMiningLevel() != rightTool.getMaterial().getMiningLevel()) {
-                            return leftTool.getMaterial().getMiningLevel() - rightTool.getMaterial().getMiningLevel();
-                        }
-                        // We want less damage.
-                        return left.getDamage() - right.getDamage();
-                    }
-
-                    // Prioritize food over other things if we lack food.
-                    boolean lacksFood = totalFoodScore < 8;
-                    boolean leftIsFood = left.getItem().isFood() && left.getItem() != Items.SPIDER_EYE;
-                    boolean rightIsFood = right.getItem().isFood() && right.getItem() != Items.SPIDER_EYE;
-                    if (lacksFood) {
-                        if (rightIsFood && !leftIsFood) {
-                            return -1;
-                        } else if (leftIsFood && !rightIsFood) {
-                            return 1;
-                        }
-                    }
-                    // (2026-09-28 比较器方向修复) 两者都是食物时, min() 要挑出
-                    // "该被丢掉的那个" = hunger×count 最小的那堆。
-                    // 原式 `-1 * (leftCost - rightCost)` 与 min() 组合后方向正好相反:
-                    // a 被判定"更小"的条件变成 costA > costB ⇒ 专挑最贵的食物丢
-                    // (现场 20260928-171146: 9×6=54 的熟鸡肉打败 1×2=2 的生鸡肉被丢)。
-                    // 去掉负号后为 costA < costB ⇒ 丢最便宜的, 与本分支上方
-                    // (食物最后丢) 及下方 (丢最小堆) 的取向一致。
-                    if (leftIsFood && rightIsFood) {
-                        assert left.getItem().getFoodComponent() != null;
-                        assert right.getItem().getFoodComponent() != null;
-                        int leftCost = left.getItem().getFoodComponent().getHunger() * left.getCount(),
-                                rightCost = right.getItem().getFoodComponent().getHunger() * right.getCount();
-                        return leftCost - rightCost;
-                    }
-
-                    // Just discard the one with the smallest quantity, but this doesn't really matter.
-                    return left.getCount() - right.getCount();
-                });
-            } else {
-                Debug.logWarning("No unused items to throw away found. Every item is protected.");
+                if (cheapest != null) return Optional.of(cheapest);
             }
         }
         return Optional.empty();

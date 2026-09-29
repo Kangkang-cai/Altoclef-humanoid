@@ -259,9 +259,12 @@ public class ItemHelper {
      */
     public static boolean isDungeonJunkItem(Item item) {
         if (!s_dungeonPhaseActive || item == null) return false;
+        // (2026-09-29 用户拍板加烈焰棒) 要塞定位器跑过后末影之眼材料已凑够,
+        // 烈焰棒与金粒/金锭同样失去用途, 一并解锁。
         return item == Items.GOLD_NUGGET || item == Items.GOLD_INGOT
                 || item == Items.RAW_GOLD || item == Items.LAVA_BUCKET
-                || item == Items.FLINT_AND_STEEL;
+                || item == Items.FLINT_AND_STEEL
+                || item == Items.BLAZE_ROD;
     }
 
     public static final Item[] CARPET = new Item[]{Items.WHITE_CARPET, Items.BLACK_CARPET, Items.BLUE_CARPET, Items.BROWN_CARPET, Items.CYAN_CARPET, Items.GRAY_CARPET, Items.GREEN_CARPET, Items.LIGHT_BLUE_CARPET, Items.LIGHT_GRAY_CARPET, Items.LIME_CARPET, Items.MAGENTA_CARPET, Items.ORANGE_CARPET, Items.PINK_CARPET, Items.PURPLE_CARPET, Items.RED_CARPET, Items.YELLOW_CARPET};
