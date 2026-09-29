@@ -6,6 +6,7 @@ import adris.altoclef.util.helpers.ClientDamageSensor;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.network.packet.s2c.play.DeathMessageS2CPacket;
 import net.minecraft.network.packet.s2c.play.HealthUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlayerRespawnS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlaySoundS2CPacket;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -52,5 +53,13 @@ public final class ClientPlayNetworkHandlerMixin {
     )
     private void onDeathMessage(DeathMessageS2CPacket packet, CallbackInfo ci) {
         ClientDamageSensor.onDeathMessage(packet.getEntityId(), packet.getKillerId(), packet.getMessage());
+    }
+
+    @Inject(
+            method = "onPlayerRespawn",
+            at = @At("HEAD")
+    )
+    private void onPlayerRespawn(PlayerRespawnS2CPacket packet, CallbackInfo ci) {
+        ClientDamageSensor.onPlayerRespawn();
     }
 }

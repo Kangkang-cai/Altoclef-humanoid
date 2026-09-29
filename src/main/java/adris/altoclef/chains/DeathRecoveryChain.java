@@ -13,11 +13,13 @@ import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.trackers.WorldMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.MiningRequirement;
+import adris.altoclef.util.helpers.ClientDamageSensor;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -43,6 +45,9 @@ import java.util.Optional;
  *   3. The consecutive-death streak is below
  *      `deathRecoveryMaxConsecutiveDeaths` (otherwise the bot keeps dying on
  *      the way back; memory is cleared).
+ *   3.5 (2026-09-29) Respawn settled — 玩家已存活 且 复活包已处理且位置包已应用。
+ *      Otherwise we'd "arrive" at the grave at the corpse position on the very
+ *      death frame and clear the memory without picking anything up.
  *   4. Grave younger than `deathRecoveryForgetAfterSeconds` (otherwise the
  *      drops have already despawned; memory is cleared).
  *   5. Horizontal distance ≤ `deathRecoveryMaxDistance` (otherwise the
@@ -66,6 +71,16 @@ public class DeathRecoveryChain extends SingleTaskChain {
     // 常见战斗(65), 仅让位给最高战斗(95)。真正防"被抢"仍需守卫不轻易让位, 见
     // activate 处的守卫收敛 —— 但数值先提高, 保证守卫通过后拾取持续压过主链。
     private static final float ACTIVE_PRIORITY = 70.0f;
+
+    /**
+     * (2026-09-29 多人首测) 复活稳定期: 收到复活包后等这么多 tick 才放行激活。
+     * 位置包 (PlayerPositionLookS2CPacket) 在复活包之后同批下发, 1 tick 内即应用;
+     * 10 tick 的余量足够, 又把"激活前空等"压到 0.5s 量级。见 Guard 0.5。
+     */
+    private static final long RESPAWN_SETTLE_TICKS = 10L;
+
+    /** 已就"复活未生效"打过日志的墓(同一墓只首发一次, 之后 5s 节流)。 */
+    private BlockPos _preRespawnLoggedGrave = null;
 
     public DeathRecoveryChain(TaskRunner runner) {
         super(runner);
@@ -134,6 +149,41 @@ public class DeathRecoveryChain extends SingleTaskChain {
             Debug.logWarning(msg);
             Debug.logToFile("death_recovery.log", "[ABANDON DEATH_STREAK] " + msg);
             worldMemory.clearDeathGrave(currentDim);
+            if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+            return Float.NEGATIVE_INFINITY;
+        }
+
+        // ------------------------------------------------------------
+        // Guard 0.5 (2026-09-29 多人首测 复活时序): 复活落地前不激活。
+        //
+        // 现场 20260929-181904 (专用服首测): 墓碑记录 (18:22:13.799) 当帧链就
+        // 激活 —— 此时客户端的重生包还没到达, 玩家坐标仍是【尸体坐标】:
+        //   [ACTIVATE] dist=0.0 → [GOTO DONE] 假到达 → 抢跑扫描 (物品实体未同步/
+        //   区块刚回载) → [PICKUP EMPTY] → [FINISH CLEAR] 清碑
+        // 整链 4ms 跑完, 掉落物永久丢失且无重试。单人时代被"共享 JVM + 坐标
+        // 恰好一致"掩盖; 既有 PICKUP 阶段的 [STALE POS] 复核也拦不住 —— 到达
+        // 分支在同一 tick 内就把 phase 推到 DONE 了。
+        //
+        // 判据 (用户 2026-09-29 拍板) = 玩家已存活 且 重生传送已生效:
+        //   ① health > 0 (死亡屏期间为 0/负);
+        //   ② 客户端已处理过复活包 (PlayerRespawnS2CPacket);
+        //   ③ 距复活已过 RESPAWN_SETTLE_TICKS, 保证位置包已应用。
+        // ③ 用"时间"而非"距离≠0"来判: 重生点恰好等于死亡点时距离恒 0,
+        // 用距离会把墓永久锁死。
+        // ------------------------------------------------------------
+        if (!isRespawnSettled(mod)) {
+            boolean firstForThisGrave = !grave.position.equals(_preRespawnLoggedGrave);
+            long t = MinecraftClient.getInstance().world != null
+                    ? MinecraftClient.getInstance().world.getTime() : 0L;
+            if (firstForThisGrave || t % 100L == 0L) {
+                _preRespawnLoggedGrave = grave.position;
+                Debug.logToFile("death_recovery.log", String.format(
+                        "[DEFER PRE_RESPAWN] grave=%s dim=%s health=%s respawnSeen=%s sinceRespawn=%s; waiting for respawn teleport to apply",
+                        grave.position, currentDim,
+                        mod.getPlayer() == null ? "null" : String.format("%.1f", mod.getPlayer().getHealth()),
+                        ClientDamageSensor.respawnSeenSinceLastDeath(),
+                        ClientDamageSensor.ticksSinceLastRespawn()));
+            }
             if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
             return Float.NEGATIVE_INFINITY;
         }
@@ -384,6 +434,26 @@ public class DeathRecoveryChain extends SingleTaskChain {
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    /**
+     * (2026-09-29 多人首测 复活时序) 复活传送是否已生效 —— 死后能否激活捡尸的前置条件。
+     *
+     * <p>为什么必须有这道闸: 死亡当帧客户端的玩家坐标仍是【尸体坐标】, 而链层按
+     * 墓碑坐标 = 玩家坐标判定"已到达"; 于是整链在同一 tick 内 ACTIVATE → GOTO DONE
+     * → EMPTY → FINISH CLEAR, 掉落物连同步的机会都没有 (现场 20260929-181904)。
+     *
+     * <p>三条判据缺一不可: health>0 (死亡屏期间不放行) / 已收到复活包 /
+     * 距复活过了 {@link #RESPAWN_SETTLE_TICKS}。第三条用"时间"而不是"距离不等于 0",
+     * 是为了不把"重生点恰好就是死亡点"的墓永久锁死。
+     */
+    private static boolean isRespawnSettled(AltoClef mod) {
+        PlayerEntity player = mod.getPlayer();
+        if (player == null || player.getHealth() <= 0f) return false;
+        if (!ClientDamageSensor.respawnSeenSinceLastDeath()) return false;
+        long since = ClientDamageSensor.ticksSinceLastRespawn();
+        // -1 = 世界/tick 未知 → 按已稳定处理, 避免硬锁 (此时活着的玩家坐标已可用)。
+        return since < 0L || since >= RESPAWN_SETTLE_TICKS;
     }
 
     // ------------------------------------------------------------

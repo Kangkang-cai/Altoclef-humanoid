@@ -25,10 +25,12 @@ import net.minecraft.text.TranslatableText;
  *       血量变化，但【不含攻击者与死因】。</li>
  *   <li>{@code DeathMessageS2CPacket(entityId, killerId, message)} →
  *       {@code onDeathMessage}：死亡播报。{@code message} 是
- *       {@link TranslatableText}，key 形如 {@code death.attack.lava}，
- *       与旧路径 {@code DamageSource.getName()} 的后缀同口径
- *       （{@code DamageTracker} 就是用 "death.attack." + name 拼的）；
+ *       {@link TranslatableText}，key 形如 {@code death.attack.lava}
+ *       （摔死系是 {@code death.fell.*}，见 {@link #causeFromKey}），
  *       {@code killerId} 为 -1 表示无攻击者。</li>
+ *   <li>{@code PlayerRespawnS2CPacket} → {@code onPlayerRespawn}：复活落地。
+ *       捡尸链靠它判断"客户端坐标已从尸体位置换成重生点"（死亡当帧的
+ *       客户端玩家坐标仍是尸体位置，据此判"已到墓碑"会假到达）。</li>
  * </ul>
  * 1.18.2 **没有** {@code EntityDamageS2CPacket}（1.19.4 才有），也没有把
  * "谁打了我" 同步给受害者的包，所以【非致命近战的攻击者】在客户端无权威来源 ——
@@ -62,11 +64,52 @@ public final class ClientDamageSensor {
     /** 死亡播报中死因 key 的前缀，与 {@code DamageSource.getName()} 的原貌一致。 */
     private static final String DEATH_ATTACK_PREFIX = "death.attack.";
 
+    /** 摔死系 key 前缀（{@code death.fell.accident.* / assist(.item) / finish(.item) / killer}）。 */
+    private static final String DEATH_FELL_PREFIX = "death.fell.";
+
     /** 背包珍贵物滚动快照周期 (tick)。1s 的陈旧度对"死亡前是否带着贵重物"完全够用。 */
     private static final int CARRY_SCAN_INTERVAL_TICKS = 20;
 
     /** 距下次滚动快照还有几 tick。纯计时器，无跨世界语义，不必进 WorldStateGuard。 */
     private static int _carryScanCooldown = 0;
+
+    // =========================================================================
+    // (2026-09-29 多人首测 复活时序) 重生序列号 —— 供捡尸链判断"重生传送已生效"。
+    //
+    // 现场 20260929-181904: 死亡当帧(复活包未应用)客户端玩家仍在尸体坐标,
+    // DeathRecoveryTask 的 GOTO 算出 dist=0.0 判"已到达" → 抢跑扫描 EMPTY →
+    // 当场 FINISH CLEAR 清碑, 掉落物永久丢失(整链 4ms 跑完)。修法见
+    // DeathRecoveryChain 的"复活落地前不激活"闸门, 数据源就是这里。
+    // =========================================================================
+
+    /** 客户端处理过 {@code PlayerRespawnS2CPacket} 的次数。 */
+    private static volatile int _respawnSeq = 0;
+    /** 最近一次死亡播报到达时的 {@link #_respawnSeq}（-1 = 本会话还没死过）。 */
+    private static volatile int _respawnSeqAtLastDeath = -1;
+    /** 最近一次重生落地时的世界 tick（-1 = 未知）。 */
+    private static volatile long _lastRespawnGameTick = -1;
+
+    /** 重生包到达（{@code ClientPlayNetworkHandler#onPlayerRespawn}）。 */
+    public static void onPlayerRespawn() {
+        try {
+            _respawnSeq++;
+            MinecraftClient mc = MinecraftClient.getInstance();
+            _lastRespawnGameTick = (mc != null && mc.world != null) ? mc.world.getTime() : -1;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 自最近一次死亡以来，客户端是否已处理过复活包。 */
+    public static boolean respawnSeenSinceLastDeath() {
+        return _respawnSeqAtLastDeath >= 0 && _respawnSeq > _respawnSeqAtLastDeath;
+    }
+
+    /** 距最近一次复活经过了多少游戏 tick；未知返回 -1（调用方按"已稳定"处理，避免硬锁）。 */
+    public static long ticksSinceLastRespawn() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null || mc.world == null || _lastRespawnGameTick < 0) return -1L;
+        return mc.world.getTime() - _lastRespawnGameTick;
+    }
 
     /** 由 {@code AltoClef#onClientTick} 每客户端 tick 调用（inGame 段内）。 */
     public static void tick() {
@@ -134,15 +177,22 @@ public final class ClientDamageSensor {
             // 只关心自己: 死亡播报对所有死亡实体都会下发。
             if (entityId != mc.player.getId()) return;
 
-            // ---- 1) 死因: TranslatableText key 剥前缀 ⇒ "drown"/"lava"/"inFire"...
-            // 与旧 DamageSource.getName() 剥前缀的口径一致 (DeathRecoveryChain
-            // 只认精确小写 "drown"/"lava", 这两种 vanilla key 后缀正好相同)。
+            // 记下"本次死亡发生在第几次重生之前" —— 捡尸链据此判断复活包是否已到达。
+            _respawnSeqAtLastDeath = _respawnSeq;
+
+            // ---- 1) 死因 ----
+            // (2026-09-29 多人首测 cause=null 根因) 死因 key 不止 death.attack.* 一族:
+            // 摔死是 death.fell.*(accident/assist/finish/killer), 旧口径只认
+            // death.attack. 前缀 → 摔死不写入 → 消费端读到 null; 更糟的是
+            // 【残留】上一次的死因(实测: 18:20 虚空死写入 outOfWorld, 18:22:11
+            // 摔死未覆盖 → 18:22:13 墓碑记下 cause=outOfWorld)。
+            // 现在: 认得的族归一化, 不认得的也【必定覆盖】(解析不出就写 null),
+            // 保证"每个墓的死因只属于本次死亡"。
+            String cause = null;
             if (message instanceof TranslatableText) {
-                String key = ((TranslatableText) message).getKey();
-                if (key != null && key.startsWith(DEATH_ATTACK_PREFIX)) {
-                    PlayerDamageCauseHolder.record(key.substring(DEATH_ATTACK_PREFIX.length()));
-                }
+                cause = causeFromKey(((TranslatableText) message).getKey());
             }
+            PlayerDamageCauseHolder.record(cause);
 
             // ---- 2) 击杀者归因: 死亡瞬间唯一权威的"谁打死了我"来源, 喂 HitRegistry
             // (猪灵记仇 + _recentAttackerUntil 实锤)。killerId = -1 表示无攻击者。
@@ -155,5 +205,31 @@ public final class ClientDamageSensor {
         } catch (Throwable t) {
             Debug.logWarning("[CLIENT-DAMAGE] onDeathMessage 异常: " + t);
         }
+    }
+
+    /**
+     * 死因翻译 key → 与旧 {@code DamageSource.getName()} 剥前缀同口径的短名。
+     *
+     * <ul>
+     *   <li>{@code death.attack.lava} → {@code lava}（DeathRecoveryChain 只认精确
+     *       {@code drown}/{@code lava}，这两个 vanilla key 后缀正好相同）；</li>
+     *   <li>{@code death.fell.accident.generic} / {@code death.fell.assist...} 等
+     *       摔死系一律归一为 {@code fall}（"从高处摔了下来" 就是 fell.accident）；</li>
+     *   <li>其余 → 剥掉 {@code death.} 前缀的原样返回；完全给不出 key（例如服务端
+     *       发的是字面文本）→ {@code null}，交给调用方覆盖写入。</li>
+     * </ul>
+     */
+    private static String causeFromKey(String key) {
+        if (key == null || key.isEmpty()) return null;
+        if (key.startsWith(DEATH_ATTACK_PREFIX)) {
+            return key.substring(DEATH_ATTACK_PREFIX.length());
+        }
+        if (key.startsWith(DEATH_FELL_PREFIX)) {
+            return "fall";
+        }
+        if (key.startsWith("death.")) {
+            return key.substring("death.".length());
+        }
+        return key;
     }
 }

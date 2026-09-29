@@ -34,7 +34,10 @@ import java.util.Optional;
  *                       PICKUP_RADIUS blocks of the grave. If no drops are
  *                       found for NO_DROPS_GIVE_UP_SECONDS we assume they were
  *                       already picked up / despawned / fell into lava and
- *                       finish early.
+ *                       finish early. (2026-09-29) 到达墓碑那刻若是空手,
+ *                       先走 ARRIVAL_EMPTY_RETRY_SECONDS 的有上限重试窗口
+ *                       (站立复查, 不漫游), 过期才收工 —— 专用服下掉落实体
+ *                       同步/区块回载可能晚于到达, 旧口径当场清碑会丢光掉落物。
  *   PHASE_DONE        — onTick returns no sub-tasks and isFinished returns
  *                       true so the parent chain can clear the grave memory.
  *
@@ -66,6 +69,15 @@ public class DeathRecoveryTask extends Task {
     // 说明当前坐标不是真到了墓碑 (重生瞬间的陈旧坐标), 退回 GOTO 重新导航。
     private static final int PICKUP_POSITION_MARGIN = 4;
 
+    /**
+     * (2026-09-29 多人首测) "到达墓碑却看不到掉落物" 的重试窗口秒数。
+     * 专用服下掉落实体同步 / 区块回载可能晚于到达时刻几 tick, 而旧口径
+     * (2026-09-17 到达即判定) 当场收工并清碑 ⇒ 掉落物永久丢失。窗口内站立
+     * 复查(不漫游), 过期才收工 —— 本值即上限, keepInventory 服上"永远空"
+     * 也只是多等这么久。
+     */
+    private static final int ARRIVAL_EMPTY_RETRY_SECONDS = 3;
+
     private enum Phase { GOTO_GRAVE, PICKUP, DONE }
 
     private final BlockPos _gravePos;
@@ -85,6 +97,10 @@ public class DeathRecoveryTask extends Task {
     // (2026-09-10 降级扫描) 感知闸门始终建立不起来时的直接扫描模式。
     private boolean _degradeScanActive = false;
     private final TimerGame _degradeScanTimer = new TimerGame(DEGRADE_SCAN_GIVE_UP_SECONDS);
+    // (2026-09-29 多人首测) 到达墓碑时空手的重试窗口(见 ARRIVAL_EMPTY_RETRY_SECONDS
+    // 与 tickGoToGrave/tickPickup 的注释): true 时 giveUp 判据改用本计时器。
+    private boolean _arrivalEmpty = false;
+    private final TimerGame _arrivalEmptyTimer = new TimerGame(ARRIVAL_EMPTY_RETRY_SECONDS);
     // Track whether the first onTick has logged the header.
     private boolean _started = false;
     // (2026-09-17 进度保留) onStart 只在实例首次启动时做初始化, 恢复(抢占后 reset
@@ -166,6 +182,8 @@ public class DeathRecoveryTask extends Task {
         _everSawDropNearGrave = false;
         _degradeScanActive = false;
         _degradeScanTimer.reset();
+        _arrivalEmpty = false;
+        _arrivalEmptyTimer.reset();
         _pickaxeUpgradeActive = false;
         _pickaxeSub = null;
         _stallSamples.clear();
@@ -224,6 +242,7 @@ public class DeathRecoveryTask extends Task {
             _noDropsTimer.reset();
             _degradeScanTimer.reset();
             _degradeScanActive = false;
+            _arrivalEmpty = false;
             _currentPickupTarget = null;
             _stallSamples.clear();
             _stallSampleTimer.reset();
@@ -276,19 +295,26 @@ public class DeathRecoveryTask extends Task {
                 immediate = findClosestDropNearGrave(mod, scanLoadedDropsNearGrave(mod));
             }
             if (immediate.isEmpty()) {
-                Debug.logMessage(String.format(
-                        "No item drops around grave (%d,%d,%d) on arrival — nothing to pick up, finishing.",
-                        _gravePos.getX(), _gravePos.getY(), _gravePos.getZ()));
+                // (2026-09-29 多人首测) 旧口径是"到达即空 → 当场收工"(2026-09-17
+                // 去 wander 的配套改动), 专用服下会在掉落物实体尚未同步 / 区块刚
+                // 回载时抢跑: 现场 20260929-181904 整链 4ms 跑完 [PICKUP EMPTY] →
+                // [FINISH CLEAR] 清碑, 掉落物永久丢失、且无任何重试。
+                // 改为进入 PICKUP 并给一个有上限的重试窗口(站立复查, 不漫游),
+                // 窗口内每 tick 复查, 过期才收工(见 tickPickup 的 giveUp 分支)。
+                _phase = Phase.PICKUP;
+                _arrivalEmpty = true;
+                _arrivalEmptyTimer.reset();
                 Debug.logToFile("death_recovery.log", String.format(
-                        "[PICKUP EMPTY] grave=%s dim=%s directScan=%s radius=%d — nothing here, done without waiting/wandering",
-                        _gravePos, _graveDim, directScanUsed ? "Y" : "N", PICKUP_RADIUS));
-                _phase = Phase.DONE;
+                        "[PICKUP EMPTY-RETRY] grave=%s dim=%s directScan=%s radius=%d — nothing on arrival; retrying %ds before giving up",
+                        _gravePos, _graveDim, directScanUsed ? "Y" : "N", PICKUP_RADIUS,
+                        ARRIVAL_EMPTY_RETRY_SECONDS));
                 return null;
             }
             // 有目标: 交给 PICKUP 阶段的粘性目标逻辑继续追。
             if (!_everSawDropNearGrave) {
                 _everSawDropNearGrave = true;
             }
+            _arrivalEmpty = false;
             _currentPickupTarget = immediate.get();
             return null;
         }
@@ -392,7 +418,11 @@ public class DeathRecoveryTask extends Task {
 
         if (closest.isEmpty()) {
             boolean giveUp;
-            if (_everSawDropNearGrave) {
+            if (_arrivalEmpty) {
+                // (2026-09-29 多人首测) "到达时空手" 的有上限重试窗口 —— 见
+                // ARRIVAL_EMPTY_RETRY_SECONDS 与 tickGoToGrave 到达分支。
+                giveUp = _arrivalEmptyTimer.elapsed();
+            } else if (_everSawDropNearGrave) {
                 // 见过掉落物 (感知曾正常工作) → 现在没了 = 捡完/消失, 5s 收工。
                 giveUp = _noDropsTimer.elapsed();
             } else if (_degradeScanActive) {
@@ -403,6 +433,12 @@ public class DeathRecoveryTask extends Task {
                 giveUp = _noDropsTimer.elapsed();
             }
             if (giveUp) {
+                if (_arrivalEmpty) {
+                    Debug.logToFile("death_recovery.log", String.format(
+                            "[PICKUP EMPTY-GIVEUP] grave=%s dim=%s retried=%ss directScan=%s — still nothing, finishing",
+                            _gravePos, _graveDim, ARRIVAL_EMPTY_RETRY_SECONDS,
+                            _degradeScanActive ? "Y" : "N"));
+                }
                 Debug.logMessage(String.format(
                         "No item drops found within %d blocks of grave (%d,%d,%d) — giving up.%s",
                         PICKUP_RADIUS, _gravePos.getX(), _gravePos.getY(), _gravePos.getZ(),
@@ -416,9 +452,14 @@ public class DeathRecoveryTask extends Task {
                 return null;
             }
             double waited = Math.min(NO_DROPS_GIVE_UP_SECONDS, _noDropsTimer.getDuration());
-            setDebugState(String.format(
-                    "Near grave — waiting to see drops (%.0fs / %ds)",
-                    waited, NO_DROPS_GIVE_UP_SECONDS));
+            if (_arrivalEmpty) {
+                setDebugState("At grave but no drops — retrying up to "
+                        + ARRIVAL_EMPTY_RETRY_SECONDS + "s (standing still)");
+            } else {
+                setDebugState(String.format(
+                        "Near grave — waiting to see drops (%.0fs / %ds)",
+                        waited, NO_DROPS_GIVE_UP_SECONDS));
+            }
             // (2026-09-17 去 wander, 用户"原地打转") 旧实现在这段空窗里跑缓存的
             // TimeoutWanderTask(20) 漫游 —— 用户看到的就是"在墓碑旁来回打转"。
             // 空窗的作用只是给掉落物一个进入感知/区块的确认时间, 站在墓碑旁等
@@ -431,6 +472,7 @@ public class DeathRecoveryTask extends Task {
         // keep finding stuff we keep going.
         _noDropsTimer.reset();
         _degradeScanTimer.reset();
+        _arrivalEmpty = false;
         if (!_everSawDropNearGrave) {
             _everSawDropNearGrave = true;
         }
