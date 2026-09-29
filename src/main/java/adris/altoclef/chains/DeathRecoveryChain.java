@@ -446,6 +446,10 @@ public class DeathRecoveryChain extends SingleTaskChain {
      * <p>三条判据缺一不可: health>0 (死亡屏期间不放行) / 已收到复活包 /
      * 距复活过了 {@link #RESPAWN_SETTLE_TICKS}。第三条用"时间"而不是"距离不等于 0",
      * 是为了不把"重生点恰好就是死亡点"的墓永久锁死。
+     *
+     * <p>代价 (记录在案): 若某服务端从不回血 (重生了但 health 恒 0), 本闸会一直
+     * DEFER, 该墓最后由 Guard 1 (TOO_OLD, 5 分钟) 清掉而不是去捡 —— 这种服务端
+     * 本身已不可玩, 且 [DEFER PRE_RESPAWN] 日志会直接暴露 health=0.0/respawnSeen=true。
      */
     private static boolean isRespawnSettled(AltoClef mod) {
         PlayerEntity player = mod.getPlayer();
