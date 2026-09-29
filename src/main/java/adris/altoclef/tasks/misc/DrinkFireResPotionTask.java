@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.slots.Slot;
 import adris.altoclef.util.time.TimerGame;
 import baritone.api.utils.Rotation;
@@ -63,11 +64,26 @@ public class DrinkFireResPotionTask extends Task {
         boolean holdingPotion = ItemHelper.isFireResPotionStack(mainHand);
 
         if (!holdingPotion) {
-            // 把防火药水 SWAP 到主手 (当前选中的热栏槽)
-            Slot potionSlot = ItemHelper.getFireResPotionSlot(mod);
+            // (2026-09-29 岩浆急救分型, 用户"能喷就喷, 否则喝") 选药优先级:
+            //   脚下固体方块 + 有喷溅型 → 喷 (瞬发生效, 不用熬 1.6s 喝药动画);
+            //   否则 → 喝饮用型 (在岩浆里脚下是岩浆, 喷溅无效, 只能喝)。
+            //   只有喷溅型但脚下没固体 → 喷了打不中自己, 放弃 (链层 30s 冷却兜底)。
+            Slot potionSlot;
+            Slot splashSlot = ItemHelper.getSplashFireResPotionSlot(mod);
+            boolean solidUnderfoot = WorldHelper.isSolid(mod, mod.getPlayer().getBlockPos().down());
+            if (solidUnderfoot && splashSlot != null) {
+                potionSlot = splashSlot;
+            } else {
+                potionSlot = ItemHelper.getDrinkableFireResPotionSlot(mod);
+            }
             if (potionSlot == null) {
-                // 药水没了 (喝完/丢失), 放弃
-                Debug.logMessage("(DrinkFireResPotion) No fire resistance potion left, giving up.");
+                if (splashSlot != null) {
+                    Debug.logMessage("(DrinkFireResPotion) Only splash potion left but no solid block "
+                            + "underfoot — unusable, giving up this bottle.");
+                } else {
+                    // 药水没了 (喝完/丢失), 放弃
+                    Debug.logMessage("(DrinkFireResPotion) No fire resistance potion left, giving up.");
+                }
                 return null;
             }
             int selected = mod.getPlayer().getInventory().selectedSlot;

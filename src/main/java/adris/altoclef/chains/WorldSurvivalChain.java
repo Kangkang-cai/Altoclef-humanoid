@@ -35,6 +35,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.Optional;
 
 public class WorldSurvivalChain extends SingleTaskChain {
@@ -60,16 +62,27 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 门槛 (用户 2026-09-14 选"严一点", 只认两个时刻, 其余不浪费药):
     //   ① 补杯: 药效将尽 (≤ FIRE_RES_TOPUP_TICKS) 且身处危险 (着火或岩浆)。
     //      趁药效还在时喝 —— 此时停在岩浆里不挨任何伤害, 喝完无缝衔接。
-    //   ② 急救: 已断档 + 血 ≤ FIRE_RES_EMERGENCY_HEALTH + 只是着火 (不在岩浆里)。
-    //
-    // 【"断档 + 在岩浆里"故意不喝】停下喝药的 1.6s 里: EscapeFromLavaTask 被顶掉
-    // → 其 onStop 释放 JUMP → 身体下沉, 且边沉边挨岩浆伤 (本场实测 3.2/s), 1.6s
-    // ≈ 5~6 血; 断档 + 血 ≤10 时这几乎必死, 让位给逃岩浆链跑完更划算。
-    // 真正防的是"永远别进入这个状态", 由 ① 保证。
+    //   ② 急救: 已断档 + 身处危险。
+    //      (2026-09-29 政策反转, 用户"bot 刚刚掉进岩浆…逃离岩浆抢住了不喝, 导致死了")
+    //      旧口径"断档 + 在岩浆里故意不喝"实测致死: 逃跑要穿 3 格岩浆, 任务链让
+    //      EscapeFromLavaTask 一直抢着跑, 血被烧空。新口径 (用户定):
+    //        - 血 ≤ FIRE_RES_LAVA_EMERGENCY_HEALTH(8) → 喝 (岩浆 4/s, 8 = 喝完
+    //          1.6s 还剩 2s 余量);
+    //        - 逃跑要穿过 > FIRE_RES_LAVA_DRINK_DISTANCE(2) 格岩浆 (BFS 数岩浆格
+    //          到最近上岸格) → 直接喝。
+    //      喷溅型需要脚下固体方块才有效, 选择逻辑在 DrinkFireResPotionTask:
+    //      能喷就喷 (瞬发), 否则喝饮用的 (1.6s)。喝药 1.6s 内逃岩浆被顶掉是有意
+    //      代价 —— 换来 8 分钟防火, 比"不喝烧死"划算。真正防横跳仍靠 ① 补杯。
     /** 药效剩余低于此 tick 数 = "将尽" (15s @ 20tps)。 */
     private static final int FIRE_RES_TOPUP_TICKS = 300;
-    /** 已断档时的急救健康值门槛。 */
+    /** 已断档 + 只是着火 (不在岩浆) 时的急救健康值门槛。 */
     private static final float FIRE_RES_EMERGENCY_HEALTH = 10.0f;
+    /** (2026-09-29) 已断档 + 在岩浆里时的急救健康值门槛 (岩浆 4/s, 8 = 1.6s 喝完剩 2s)。 */
+    private static final float FIRE_RES_LAVA_EMERGENCY_HEALTH = 8.0f;
+    /** (2026-09-29) 逃跑要穿过的岩浆格数 > 此值 → 直接喝 (用户定 2)。 */
+    private static final int FIRE_RES_LAVA_DRINK_DISTANCE = 2;
+    /** (2026-09-29) 岩浆 BFS 半径上限; 超过视为"很远"→ 触发喝药。 */
+    private static final int FIRE_RES_LAVA_BFS_LIMIT = 16;
     /** 喝药任务连续占链硬顶 (8s): 喝完/喝不成都必须放行, 防 prio 105 焊死在链上。 */
     private static final long FIRE_RES_DRINK_TIMEOUT_MS = 8000;
     /** 喝不成后的静默期 (30s): 防"立刻重试 → 再喝不成"死循环。 */
@@ -1038,13 +1051,19 @@ public class WorldSurvivalChain extends SingleTaskChain {
         StatusEffectInstance eff = mod.getPlayer().getStatusEffect(StatusEffects.FIRE_RESISTANCE);
         boolean hasRes = eff != null;
         boolean want;
+        int lavaDist = -1;
         if (hasRes) {
             // ① 补杯: 药效将尽 + 身处危险。
             want = eff.getDuration() <= FIRE_RES_TOPUP_TICKS;
         } else if (inLava) {
-            // ② 断档 + 在岩浆里: 故意不喝 —— 停下这 1.6s 会被顶掉逃岩浆任务
-            //    (onStop 释放 JUMP → 下沉) 且边沉边挨岩浆伤, 见字段区注释。
-            want = false;
+            // ② 断档 + 在岩浆里 (2026-09-29 政策反转, 用户现场: 逃跑要穿 3 格岩浆,
+            //    旧口径"故意不喝"被逃岩浆任务抢住 → 烧死):
+            //    - 血 ≤ 8 → 喝 (岩浆 4/s, 喝完 1.6s 还剩 2s 余量);
+            //    - 逃跑要穿过 >2 格岩浆 → 直接喝。
+            //    短路: 血低先判, BFS 只在血还够时跑 (省 tick)。
+            lavaDist = countLavaCellsToShore(mod);
+            want = mod.getPlayer().getHealth() <= FIRE_RES_LAVA_EMERGENCY_HEALTH
+                    || lavaDist > FIRE_RES_LAVA_DRINK_DISTANCE;
         } else {
             // ③ 断档 + 只是着火 (不在岩浆): 掉血 1/s, 停 1.6s 成本低, 血低就喝。
             want = mod.getPlayer().getHealth() <= FIRE_RES_EMERGENCY_HEALTH;
@@ -1061,6 +1080,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
                     + " inLava=" + inLava + " onFire=" + onFire
                     + " health=" + String.format("%.1f", mod.getPlayer().getHealth())
                     + " hasRes=" + hasRes
+                    + " lavaDist=" + (lavaDist >= 0 ? lavaDist : "n/a")
                     + " potions=" + ItemHelper.countFireResPotions(mod) + ")");
         } else if (nowMs - _fireResDrinkSinceMs > FIRE_RES_DRINK_TIMEOUT_MS) {
             // 硬顶: 喝不下去 (槽位操作失败 / 被反复打断) 就放弃 30s,
@@ -1077,6 +1097,54 @@ public class WorldSurvivalChain extends SingleTaskChain {
 
         setTask(new DrinkFireResPotionTask());
         return 105;
+    }
+
+    /**
+     * (2026-09-29 岩浆内喝药判据) 从脚下方格起、只沿岩浆格 BFS, 数"到最近可上岸格
+     * 要穿过的岩浆格数" (当前格 = 1)。上岸格 = 非岩浆 且 (是水 或 下方是固体)。
+     *
+     * - 只在人在岩浆里时调用 (短路: 血 ≤ 8 时根本不进这里);
+     * - BFS 深度上限 {@link #FIRE_RES_LAVA_BFS_LIMIT}, 节点上限 512 双保险
+     *   (性能红线: 不做无界扫描); 超限视为"很远" → 返回 limit+1 → 触发喝药
+     *   (找不到岸 = 逃跑距离必然很远, 喝药是保守正确方向)。
+     */
+    private int countLavaCellsToShore(AltoClef mod) {
+        BlockPos start = mod.getPlayer().getBlockPos();
+        // 层序 BFS: current 层全是"离起点 depth 格的岩浆格" (起点 depth=1)。
+        ArrayDeque<BlockPos> current = new ArrayDeque<>();
+        ArrayDeque<BlockPos> next = new ArrayDeque<>();
+        HashSet<BlockPos> visited = new HashSet<>();
+        current.add(start);
+        visited.add(start);
+        int depth = 1;
+        int scanned = 0;
+        while (!current.isEmpty()) {
+            if (depth > FIRE_RES_LAVA_BFS_LIMIT || ++scanned > 512) {
+                return FIRE_RES_LAVA_BFS_LIMIT + 1;
+            }
+            for (BlockPos pos : current) {
+                for (Direction dir : Direction.values()) {
+                    BlockPos nb = pos.offset(dir);
+                    if (!visited.add(nb)) continue;
+                    if (!mod.getWorld().getBlockState(nb).getBlock().equals(Blocks.LAVA)) {
+                        // 非岩浆邻居: 是水或下方固体 = 可上岸, 岩浆格数 = 当前层 depth。
+                        if (mod.getWorld().getBlockState(nb).getBlock().equals(Blocks.WATER)
+                                || WorldHelper.isSolid(mod, nb.down())) {
+                            return depth;
+                        }
+                        // 非岩浆但既非水也无法站立 (如悬空空气) → 不算岸, 不展开。
+                        continue;
+                    }
+                    // 岩浆格 → 下一层继续。
+                    if (next.size() < 512) next.add(nb);
+                }
+            }
+            current = next;
+            next = new ArrayDeque<>();
+            depth++;
+        }
+        // 整片岩浆湖 BFS 耗尽都没找到岸 → 视为很远。
+        return FIRE_RES_LAVA_BFS_LIMIT + 1;
     }
 
     /**

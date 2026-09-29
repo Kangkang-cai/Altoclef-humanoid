@@ -72,6 +72,36 @@ public class ItemHelper {
         return null;
     }
 
+    /**
+     * (2026-09-29 岩浆急救分型) 按药水物品类型 (喷溅型 SPLASH_POTION / 饮用型 POTION)
+     * 找第一个防火药水槽位。喷溅型需要脚下固体方块才有效 (选择逻辑在
+     * DrinkFireResPotionTask: 能喷就喷, 否则喝饮用的), 所以必须能分型查找。
+     */
+    private static Slot getFireResPotionSlot(AltoClef mod, Item type) {
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return null;
+        for (int i = 0; i < mod.getPlayer().getInventory().main.size(); ++i) {
+            ItemStack stack = mod.getPlayer().getInventory().main.get(i);
+            if (isFireResPotionStack(stack) && stack.getItem() == type) {
+                return Slot.getFromCurrentScreenInventory(i);
+            }
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (isFireResPotionStack(offhand) && offhand.getItem() == type) {
+            return adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT;
+        }
+        return null;
+    }
+
+    /** (2026-09-29) 第一个喷溅型防火药水槽位 (无则 null)。 */
+    public static Slot getSplashFireResPotionSlot(AltoClef mod) {
+        return getFireResPotionSlot(mod, Items.SPLASH_POTION);
+    }
+
+    /** (2026-09-29) 第一个饮用型防火药水槽位 (无则 null)。 */
+    public static Slot getDrinkableFireResPotionSlot(AltoClef mod) {
+        return getFireResPotionSlot(mod, Items.POTION);
+    }
+
     public static String stripItemName(Item item) {
         String[] possibilities = new String[]{"item.minecraft.", "block.minecraft."};
         for (String possible : possibilities) {
