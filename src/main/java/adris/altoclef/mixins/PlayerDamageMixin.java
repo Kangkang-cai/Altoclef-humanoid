@@ -1,12 +1,11 @@
 package adris.altoclef.mixins;
 
-import adris.altoclef.util.helpers.DropValuationHelper;
+import adris.altoclef.util.helpers.ClientDamageSensor;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.ItemStack;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -21,6 +20,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * (PlayerEntity.damage) 链, HEAD 注入稳定触发; 且 DamageSource.getAttacker()
  * 在服务端拿到的攻击者实体信息最全 (UUID 与客户端实例一致, HitRegistry 按
  * UUID 记忆, 跨侧通用)。
+ *
+ * (2026-09-29 多人服阶段一 🔴#1 现状说明) 本条挂点【只在单人存档生效】——
+ * 专用服务端下本方法所在的类不在客户端 JVM 执行, 注入永不触发。客户端替代
+ * 通道见 {@link adris.altoclef.util.helpers.ClientDamageSensor}: 死因 + 死亡
+ * 击杀者 + 背包珍贵物 1Hz 滚动快照。本 Mixin 保留, 单人路径口径不变;
+ * 已知多人降级(非致命伤害的攻击者归因)见该类注释。
  *
  * 背景: 20260915-123005 场次, bot 挖金惹怒猪灵 (挖金激怒与穿金甲无关),
  * bot 全程没打过猪灵 → 正向事件记忆空; 穿着金甲 → 金甲兜底判"友好";
@@ -50,17 +55,9 @@ public class PlayerDamageMixin {
         // (MC-169113/MC-254610)。改为在伤害 HEAD (背包尚未掉落) 快照:
         // 当前背包任一槽位是否含珍贵物品。每次受伤都刷新, 致命伤时的快照
         // 即死亡掉落内容。环境伤害 (drown/lava/饥饿...) 同样走到这里。
+        // (2026-09-29) 扫描实现移到 ClientDamageSensor, 与多人通道共用同一判据。
         PlayerEntity self = (PlayerEntity) (Object) this;
-        boolean highValue = false;
-        int size = self.getInventory().size();
-        for (int i = 0; i < size; i++) {
-            ItemStack stack = self.getInventory().getStack(i);
-            if (DropValuationHelper.isHighValue(stack)) {
-                highValue = true;
-                break;
-            }
-        }
-        PlayerDamageCauseHolder.recordCarriedHighValue(highValue);
+        PlayerDamageCauseHolder.recordCarriedHighValue(ClientDamageSensor.scanCarriedHighValue(self));
         Entity attacker = source.getAttacker();
         if (attacker == null) return;
         HitRegistry.onPlayerDamagedBy(attacker);

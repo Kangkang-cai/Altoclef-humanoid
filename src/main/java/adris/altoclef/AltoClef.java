@@ -308,6 +308,10 @@ public class AltoClef implements ModInitializer {
             // → 上个世界的记忆/冷却/账本会带进新存档。此守卫比对存档目录名,
             // 变化即清空。清单见 WorldStateGuard.registerAll()。
             adris.altoclef.trackers.WorldStateGuard.tick(this);
+            // (2026-09-29 多人服 🔴#1) 专用服务端下 PlayerDamageMixin 不再触发 ⇒
+            // 客户端通道补"死亡前是否持有珍贵物品"的 1Hz 滚动快照 (死亡瞬间再扫
+            // 可能已被服务端清空背包)。见 util/helpers/ClientDamageSensor。
+            adris.altoclef.util.helpers.ClientDamageSensor.tick();
             // (2026-09-18 永久夜视) 客户端常挂夜视, 纯视觉: 录屏画面在暗处可读。
             // 用夜视而非 gamma, 是因为 gamma 在光影下会被覆盖 (详见方法注释)。
             tickPermanentNightVision();

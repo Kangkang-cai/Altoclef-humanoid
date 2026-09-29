@@ -28,6 +28,9 @@ import java.util.UUID;
  * 覆盖 bot 的攻击与玩家手动攻击;
  * 写入点 2 (20260915 反向记忆): PlayerDamageMixin (PlayerEntity#damage HEAD),
  * bot 被猪灵系实体打到 → 该实体记敌对, 覆盖"挖金/开箱激怒、bot 没打过它"的场景。
+ * (2026-09-29 多人服) 该挂点专用服务端下不触发 ⇒ 补写入点 3:
+ * ClientDamageSensor (DeathMessageS2CPacket 的 killerId), 但只覆盖【死亡瞬间】,
+ * 非致命挨打的归因在多人下无权威来源 (见 ClientDamageSensor 类注释"已知降级")。
  * 只读方: EntityHelper.isGenerallyHostileToPlayer。
  *
  * 规则 (保守取值, 宁可多防不漏防):
@@ -101,7 +104,8 @@ public final class HitRegistry {
      * 覆盖"bot 没打过猪灵、猪灵因挖金/开箱激怒正在打 bot"的场景 —— 该场景下
      * ANGRY_AT 与"金甲兜底"之外曾无任何信号 (20260915-123005 场次实锤:
      * 穿金甲 + hitReg=false + 贴脸输出, 4 秒掉 16 血全程不还手)。
-     * 调用方: PlayerDamageMixin (PlayerEntity#damage HEAD, 体内置服务端与客户端同 JVM)。
+     * 调用方: PlayerDamageMixin (PlayerEntity#damage HEAD, 体内置服务端与客户端同 JVM);
+     * 多人服下由 ClientDamageSensor (死亡播报 killerId) 补记。
      */
     public static void onPlayerDamagedBy(Entity attacker) {
         if (attacker == null || !attacker.isAlive()) return;
