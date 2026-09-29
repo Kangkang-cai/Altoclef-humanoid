@@ -135,6 +135,31 @@ public final class JumpStuckResolver {
     private static final int DIG_GUARD_LOG_TICKS = 100;
     private static final TimerGame _digGuardLogTimer = new TimerGame(5);
 
+    // ===== (2026-09-29) 挖掘豁免的"进度闸门" —— 用户口径:
+    //       "不是'正在挖'就算豁免, 而是'进度在推进'才豁免" =====
+    // 旧实现 (2026-09-13) 只有 isBreakingBlock() 一条判据, 于是"按住左键但破坏
+    // 进度恒 0"被当成正常挖掘而永久豁免。本次事故形态 (会话 20260929-165241):
+    // bot 从上往下砍竖直树干, 把自己掏进 1×1×5 的树心竖井, 落底 (62,61,9);
+    // 此后 DestroyBlockTask 的目标是井外上方够不到的 (62,63,11)/(63,65,12),
+    // breaking 恒非 null 而进度恒 0 ⇒ 豁免永久生效 ⇒ 每 tick resetStreak() ⇒
+    // 跳跃卡死累积器永不增长 ⇒ 处置链路 133 秒一次都没跑 (diag 里 [DigGuard]
+    // 只看得到一条 "101 ticks", 最后靠用户手动挖开挡视线方块脱困)。
+    // 同型问题已在本仓修过一次: WorldSurvivalChain.shouldBailDigToSwim (:809,
+    // "本次事故形态: DigGuard 202 tick 恒零进度") 与 SwimDiveChain (:159) 都用
+    // "进度严格递增"判定有效推进 —— 本处只是把同一口径补齐。
+    /** 上一次采样到的破坏目标 (判"是否换了目标方块")。 */
+    private static BlockPos _digGuardLastPos = null;
+    /** 上一次采样到的破坏进度 (判"同目标进度是否增长")。 */
+    private static double _digGuardLastProgress = -1.0;
+    /** 同一目标 + 进度零增长的起始 tick (0 = 无停滞)。 */
+    private static int _digGuardStallSinceTick = 0;
+    /** 停滞已打点闩锁 (边沿触发, 避免长驻状态每 tick 刷日志)。 */
+    private static boolean _digStallReported = false;
+    /** 同一目标进度零增长持续多久后放弃豁免, 交回 streak 处置管线 (5s)。
+     *  取 100 tick 与 DIG_GUARD_LOG_TICKS 同刻度: 正常的垂直下挖/挖硬块每 tick
+     *  进度都在涨, 5 秒零增长只可能出现在"根本没挖动"。 */
+    private static final int DIG_STALL_ABORT_TICKS = 100;
+
     // ===== (2026-09-14) 岩浆豁免: 在岩浆里不判"水平卡死" =====
     // 第 4 个"合法零速状态" (前三个: 挖方块中 / 下落中 / 垂直上不去)。
     //
@@ -263,8 +288,26 @@ public final class JumpStuckResolver {
 
         // (2026-09-13) 挖掘豁免 —— 见字段区注释。必须在读 velocity 之前返回:
         // 挖掘中 hSpeed 恒 0, 走下面的 streak 累积只会把正常挖掘读成卡死。
+        //
+        // (2026-09-29 进度闸门) 见字段区 "进度闸门" 注释: 只有"进度在推进"才豁免。
+        // 停滞超 DIG_STALL_ABORT_TICKS 则不再 return, 落回下面的 streak→处置链路。
         if (mod.getControllerExtras().isBreakingBlock()) {
             int digNow = WorldHelper.getTicks();
+            BlockPos digPos0 = mod.getControllerExtras().getBreakingBlockPos();
+            double digProgress0 = mod.getControllerExtras().getBreakingBlockProgress();
+            // 有效推进证据: 换了目标方块 (已挖穿一块) 或 同一目标进度增长。
+            // 只认"同一目标 + 进度不涨"才算停滞 —— 换目标瞬间进度归零不会误判。
+            boolean digAdvanced = digPos0 == null
+                    || !digPos0.equals(_digGuardLastPos)
+                    || digProgress0 > _digGuardLastProgress;
+            if (digAdvanced) {
+                _digGuardLastPos = digPos0;
+                _digGuardLastProgress = digProgress0;
+                _digGuardStallSinceTick = 0;
+                _digStallReported = false;
+            } else if (_digGuardStallSinceTick == 0) {
+                _digGuardStallSinceTick = digNow;
+            }
             if (_digGuardSinceTick == 0) {
                 _digGuardSinceTick = digNow;
                 // TimerGame 新建即到期, 首次进入必须显式 reset。
@@ -276,12 +319,34 @@ public final class JumpStuckResolver {
                         + (digNow - _digGuardSinceTick) + " ticks, pos="
                         + mod.getPlayer().getBlockPos()
                         + " baritonePathing=" + mod.getClientBaritone().getPathingBehavior().isPathing()
-                        + " breaking=" + mod.getControllerExtras().getBreakingBlockPos());
+                        + " breaking=" + digPos0
+                        + " progress=" + String.format("%.3f", digProgress0)
+                        + " zeroProgressFor=" + (_digGuardStallSinceTick == 0
+                                ? 0 : digNow - _digGuardStallSinceTick));
             }
-            resetStreak();
-            return null;
+            if (_digGuardStallSinceTick != 0
+                    && digNow - _digGuardStallSinceTick >= DIG_STALL_ABORT_TICKS) {
+                // 长时间"在挖"却零进度 ⇒ 放弃豁免, 让下面的 streak 累积 → 处置
+                // (DestroyBlockTask / 清场 / forceCancel / 最后强制 wander 换路)。
+                if (!_digStallReported) {
+                    _digStallReported = true;
+                    Debug.logToFile("altoclef_diag.log", "[DigStall] mining exemption expired after "
+                            + (digNow - _digGuardStallSinceTick) + "t zero progress (breaking="
+                            + digPos0 + "), releasing to stuck pipeline, player="
+                            + mod.getPlayer().getBlockPos()
+                            + " pathing=" + mod.getClientBaritone().getPathingBehavior().isPathing());
+                }
+            } else {
+                resetStreak();
+                return null;
+            }
+        } else {
+            _digGuardSinceTick = 0;
+            _digGuardStallSinceTick = 0;
+            _digGuardLastPos = null;
+            _digGuardLastProgress = -1.0;
+            _digStallReported = false;
         }
-        _digGuardSinceTick = 0;
 
         // (2026-09-14) 岩浆豁免 —— 见字段区注释。必须同样在累积 streak 之前返回:
         // 在岩浆里上浮的水平零速会一路攒满 20 tick, 等离开岩浆那一刻立刻触发处置。
