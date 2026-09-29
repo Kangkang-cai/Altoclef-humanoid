@@ -6,10 +6,13 @@ import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.registry.Registries;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.Locale;
 
 /**
  * (20260915 挖金激怒盲区修复) 玩家受伤事件监听: 玩家被猪灵系实体打 → 喂给
@@ -51,14 +54,33 @@ public class PlayerDamageMixin {
             name = name.substring("death.attack.".length());
         }
         PlayerDamageCauseHolder.record(name);
+        // (2026-09-29 死因取证升级) source.getName() 只到 "mob"/"drown" 这种粗类, 现场真正
+        // 需要的是"谁打的、贴多近、这一下掉多少血"。把这三样串成一条留档 (环形 12 条),
+        // 死亡瞬间由 DeathMenuChain 一次性导出到日志。
+        // 现场依据 20260929-222238: grave 记录只有 `cause=mob`, 而录制里有
+        // [MOB-DIAG] nearestThreat=class_1642@hz=1.3 (僵尸贴脸) + 连续 8 次 -2.5 ⇒
+        // 日志粒度不足以定位, 只能回头挖录制。补这一条后日志自身即可自证。
+        PlayerEntity self = (PlayerEntity) (Object) this;
+        Entity attacker = source.getAttacker();
+        String attackerDesc = "none";
+        if (attacker != null) {
+            String id;
+            try {
+                id = Registries.ENTITY_TYPE.getId(attacker.getType()).toString();
+            } catch (Throwable t) {
+                // 兜底: 拿不到注册名就用运行时类名 (生产环境为 intermediary, 如 class_1642)
+                id = attacker.getClass().getSimpleName();
+            }
+            attackerDesc = String.format(Locale.ROOT, "%s@%.1f", id, attacker.distanceTo(self));
+        }
+        PlayerDamageCauseHolder.recordDamageTrail(String.format(Locale.ROOT,
+                "hp%.1f -%.1f %s by %s", self.getHealth(), amount, name, attackerDesc));
         // (2026-09-23) 死亡屏上客户端实体/区块被卸载, 无法扫描掉落物
         // (MC-169113/MC-254610)。改为在伤害 HEAD (背包尚未掉落) 快照:
         // 当前背包任一槽位是否含珍贵物品。每次受伤都刷新, 致命伤时的快照
         // 即死亡掉落内容。环境伤害 (drown/lava/饥饿...) 同样走到这里。
         // (2026-09-29) 扫描实现移到 ClientDamageSensor, 与多人通道共用同一判据。
-        PlayerEntity self = (PlayerEntity) (Object) this;
         PlayerDamageCauseHolder.recordCarriedHighValue(ClientDamageSensor.scanCarriedHighValue(self));
-        Entity attacker = source.getAttacker();
         if (attacker == null) return;
         HitRegistry.onPlayerDamagedBy(attacker);
     }

@@ -17,6 +17,8 @@ import net.minecraft.client.network.ServerInfo;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.Locale;
+
 public class DeathMenuChain extends TaskChain {
 
     // Sometimes we fuck up, so we might want to retry considering the death screen.
@@ -95,6 +97,16 @@ public class DeathMenuChain extends TaskChain {
                         // (holder 放普通类而非 Mixin 类: Mixin 会把非 private 方法合并进
                         // 目标类, public static 辅助方法被拒应用 → 19:06 启动崩溃实锤。)
                         String deathCause = PlayerDamageCauseHolder.consumeLastDeathCause();
+                        // (2026-09-29 死因取证升级) 最近伤害流水, 与死因同行落档。
+                        // 单一 `cause=mob` 分不出僵尸/骷髅/玩家/环境伤害 —— 现场
+                        // 20260929-222238 的墓碑行只有 cause=mob, 只能回头挖录制才确认是
+                        // 僵尸贴身连击 8 次 ×2.5。多人服由 ClientDamageSensor 从血量变化包
+                        // 还原 (攻击者无权威来源, 故只记血量), 单人由 PlayerDamageMixin 记录。
+                        String damageTrail = PlayerDamageCauseHolder.consumeRecentDamageTrail();
+                        Debug.logToFile("altoclef_diag.log", String.format(Locale.ROOT,
+                                "[DEATH-GRAVE] dim=%s pos=(%d,%d,%d) tick=%d death#%d cause=%s recentDamages=[%s]",
+                                deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
+                                deathTick, _deathCount + 1, deathCause, damageTrail));
 
                         // (2026-09-23 评估改用死亡前持有快照) 旧实现"死亡屏等 2s
                         // 扫描掉落物实体"从根上不成立: 死亡屏上服务端停止向客户端
@@ -109,9 +121,9 @@ public class DeathMenuChain extends TaskChain {
                         if (carriedHighValue) {
                             mod.getWorldMemory().rememberDeathGrave(deathDim, deathPos, deathTick, deathCause);
                             String msg = String.format(
-                                    "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=Y]",
+                                    "DEATH GRAVE remembered: dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=Y] recentDamages=[%s]",
                                     deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                    deathTick, _deathCount + 1, deathCause);
+                                    deathTick, _deathCount + 1, deathCause, damageTrail);
                             Debug.logMessage(msg);
                             Debug.logToFile("death_recovery.log", "[RECORD] " + msg);
                         } else {
@@ -121,9 +133,9 @@ public class DeathMenuChain extends TaskChain {
                             // 不打断主任务。
                             mod.getWorldMemory().noteDeathWithoutGrave(deathTick);
                             String msg = String.format(
-                                    "DEATH GRAVE skipped (no high-value carried): dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=N]",
+                                    "DEATH GRAVE skipped (no high-value carried): dim=%s pos=(%d,%d,%d) tick=%d (death #%d) cause=%s carried[highValue=N] recentDamages=[%s]",
                                     deathDim, deathPos.getX(), deathPos.getY(), deathPos.getZ(),
-                                    deathTick, _deathCount + 1, deathCause);
+                                    deathTick, _deathCount + 1, deathCause, damageTrail);
                             Debug.logMessage(msg);
                             Debug.logToFile("death_recovery.log", "[SKIP GRAVE] " + msg);
                         }

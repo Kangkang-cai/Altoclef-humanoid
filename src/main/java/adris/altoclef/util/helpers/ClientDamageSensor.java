@@ -7,6 +7,9 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.text.TranslatableText;
+import net.minecraft.util.registry.Registries;
+
+import java.util.Locale;
 
 /**
  * (2026-09-29 多人服阶段一 🔴#1) 玩家伤害/死亡信号的【客户端替代通道】。
@@ -160,6 +163,13 @@ public final class ClientDamageSensor {
             float prev = player.getHealth();
             if (newHealth <= 0f || newHealth >= prev) return;
             PlayerDamageCauseHolder.recordCarriedHighValue(scanCarriedHighValue(player));
+            // (2026-09-29 死因取证升级) 多人服下 PlayerDamageMixin 永不触发, 掉血节奏
+            // 只能从血量变化包还原 (1.18.2 没有 EntityDamageS2CPacket, 攻击者无权威
+            // 来源 ⇒ 只记血量, 不猜归因)。当前拍 player.getHealth() 仍是旧值, 故差值可信。
+            // 现场 20260929-222238: 20 血被僵尸连击 8 次 ×2.5, 日志里只留 `cause=mob`
+            // 一行, 掉血序列只能靠录制反推 —— 补这一条后 diag 自身即可自证。
+            PlayerDamageCauseHolder.recordDamageTrail(String.format(Locale.ROOT,
+                    "hp%.1f -%.1f (client, attacker-unattributed)", prev, prev - newHealth));
         } catch (Throwable ignored) {
         }
     }
@@ -201,6 +211,47 @@ public final class ClientDamageSensor {
                 if (killer != null) {
                     HitRegistry.onPlayerDamagedBy(killer);
                 }
+            }
+
+            // ---- 3) (2026-09-29 死因取证升级) 一行汇总, 落到主分析面 diag ----
+            // 为什么在这里: 本类是全环境唯一同时握有【死因 key + killerId + 死亡播报原文 +
+            // 掉血流水】的地方; 而多人服下 PlayerDamageMixin 永不触发, 且现有诊断分散在
+            // death_recovery.log(只有 `cause=mob` 的粗类) 与 diag.log(1Hz 的 MOB-DIAG /
+            // FOOD-DIAG) 两处 —— 20260929-222238 首轮分析就因为"死因不在 diag"而漏读,
+            // 最后只能回头挖录制才确认是僵尸连击致死。补这一行后日志自身即可自证。
+            // 只写诊断, 不改任何判据。
+            try {
+                StringBuilder msgArgs = new StringBuilder();
+                if (message instanceof TranslatableText) {
+                    for (Object arg : ((TranslatableText) message).getArgs()) {
+                        if (arg instanceof Text) {
+                            if (msgArgs.length() > 0) {
+                                msgArgs.append(",");
+                            }
+                            msgArgs.append(((Text) arg).getString());
+                        }
+                    }
+                }
+                String killerDesc = "none";
+                if (killerId >= 0) {
+                    Entity killer = mc.world.getEntityById(killerId);
+                    if (killer != null) {
+                        killerDesc = String.format(Locale.ROOT, "%s@%.1f name=%s",
+                                Registries.ENTITY_TYPE.getId(killer.getType()),
+                                killer.distanceTo(mc.player),
+                                killer.getName().getString());
+                    } else {
+                        killerDesc = "id=" + killerId + "(notLoaded)";
+                    }
+                }
+                Debug.logToFile("altoclef_diag.log", String.format(Locale.ROOT,
+                        "[DEATH] dim=%s pos=%d,%d,%d cause=%s killer=%s killerId=%d msg=\"%s\" args=[%s] recentDamages=[%s]",
+                        mc.world.getRegistryKey().getValue(),
+                        mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
+                        cause, killerDesc, killerId, message.getString(), msgArgs,
+                        PlayerDamageCauseHolder.peekRecentDamageTrail()));
+            } catch (Throwable t) {
+                Debug.logWarning("[CLIENT-DAMAGE] [DEATH] 汇总写出失败: " + t);
             }
         } catch (Throwable t) {
             Debug.logWarning("[CLIENT-DAMAGE] onDeathMessage 异常: " + t);

@@ -28,12 +28,85 @@ public final class PlayerDamageCauseHolder {
     private static volatile String lastDamageCauseName = null;
     private static volatile boolean lastCarriedHighValue = false;
 
+    // ---------- (2026-09-29 死因取证升级) 近期伤害流水 ----------
+    // 为什么需要: 现场 20260929-222238 的死亡在日志里只留下一行 `cause=mob` —— 没有
+    // 怪物种类、没有掉血序列、没有"死前想吃吃不了"。而录制数据里这些信息全都有
+    // ([MOB-DIAG] nearbyHostiles=class_1642@hz=1.3 贴身 / 8 次 -2.5 / 1Hz 的
+    // [FOOD-DIAG] needEat=true blocked=airborne) —— 说明采集到了却没进日志, 只能靠
+    // 录制反推。这里把最近 N 次伤害留档, 死亡瞬间一次性导出, 让日志自身就能说明死因。
+    // 纯新增字段 + 只读/一次性导出方法, 不参与任何既有判据 (与 hasGivenUp 撞名不同的
+    // 是: 方法名带 DamageTrail 后缀, 不会与既有成员混淆)。
+    private static final int MAX_DAMAGE_TRAIL = 12;
+    private static final String[] damageTrail = new String[MAX_DAMAGE_TRAIL];
+    private static int damageTrailCount = 0;
+    private static int damageTrailHead = 0;
+
     private PlayerDamageCauseHolder() {
     }
 
     /** 由 PlayerDamageMixin 在每次 damage HEAD 时调用 (覆盖旧值)。 */
     public static void record(String causeName) {
         lastDamageCauseName = causeName;
+    }
+
+    /** 每次受伤追加一条 "hp前值 -扣量 来源名 by 攻击者@距离"; 满 12 条环形覆盖最旧的。 */
+    public static synchronized void recordDamageTrail(String entry) {
+        damageTrail[damageTrailHead] = entry;
+        damageTrailHead = (damageTrailHead + 1) % MAX_DAMAGE_TRAIL;
+        if (damageTrailCount < MAX_DAMAGE_TRAIL) {
+            damageTrailCount++;
+        }
+    }
+
+    /**
+     * 只读导出 (不清空): 供"死亡播报到达"时先写一条 [DEATH] 汇总行,
+     * 随后仍由 {@link #consumeRecentDamageTrail()} 在墓碑记录里正式取样。
+     */
+    public static synchronized String peekRecentDamageTrail() {
+        if (damageTrailCount == 0) {
+            return "none";
+        }
+        StringBuilder sb = new StringBuilder();
+        int start = (damageTrailHead - damageTrailCount + MAX_DAMAGE_TRAIL) % MAX_DAMAGE_TRAIL;
+        for (int i = 0; i < damageTrailCount; i++) {
+            String entry = damageTrail[(start + i) % MAX_DAMAGE_TRAIL];
+            if (entry == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" -> ");
+            }
+            sb.append(entry);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 死亡瞬间取样一次: 按时间顺序导出最近伤害流水并清空。
+     * 清空是为了"每个墓只导出一次", 避免下一次死亡的记录里混进上一场的旧伤害。
+     */
+    public static synchronized String consumeRecentDamageTrail() {
+        if (damageTrailCount == 0) {
+            return "none";
+        }
+        StringBuilder sb = new StringBuilder();
+        int start = (damageTrailHead - damageTrailCount + MAX_DAMAGE_TRAIL) % MAX_DAMAGE_TRAIL;
+        for (int i = 0; i < damageTrailCount; i++) {
+            String entry = damageTrail[(start + i) % MAX_DAMAGE_TRAIL];
+            if (entry == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" -> ");
+            }
+            sb.append(entry);
+        }
+        damageTrailCount = 0;
+        damageTrailHead = 0;
+        for (int i = 0; i < MAX_DAMAGE_TRAIL; i++) {
+            damageTrail[i] = null;
+        }
+        return sb.toString();
     }
 
     /**
