@@ -1121,10 +1121,25 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 // 只有【正在烧】才 > 0, 纯投料阶段恒 0 ⇒ 闸门保持打开、继续凑料。
                 // 闩锁语义不变 (置位后不回退), 保证"烧到一半产物被吃掉"的原场景
                 // (20260929 17:00 mutton: 料 x5/燃料 x3/burn 21%) 仍能走 batchDone 出口。
-                boolean furnaceActuallyBurning = _furnaceCache.burnPercentage > 0
-                        || _furnaceCache.burningFuelCount > 0;
+                // 判据三选一 (合起来同时覆盖两个场景, 缺一不可):
+                //  ① burnPercentage > 0 / burningFuelCount > 0 —— 火正在烧;
+                //  ② fuelSlot 非空 —— 燃料已进槽 (点火前一拍也能读到, 见下方"窗口");
+                //  ③ 已烧出本目标产物 —— 烧过的铁证, 即使火已熄也认。
+                //
+                // ⚠️ 为什么必须补 ② (2026-09-29 21:5x 加固, 防 e07ee96a 原场景回归):
+                // 本判据只在 tryUpdateOpenFurnace (= 熔炉界面开着) 时求值, 而投完燃料后
+                // containerSubTask 会把界面立刻交给 FurnaceSmeltGuardTask (守卫第一拍
+                // 就 closeScreen, 见 [ScreenClose] caller=FurnaceSmeltGuardTask.onTick)
+                // ⇒ 能读到炉况的窗口只有投完燃料后的那一两拍。若只认 burn, 而服务端
+                // property 同步尚未到达 (点火滞后 1~2 tick), 这唯一的一拍读到 burn=0
+                // ⇒ 永不置位 ⇒ "吃掉 1 个产物后不再猎料"的原修复失效 (mutton 场景回归)。
+                // 补上"燃料槽非空"后, 投燃料的那一拍立刻可判 ✅；
+                // 而本次误判场景 (x3 实例投料时 fuel=air x0) 依然不会被触发 ✅。
+                boolean furnaceHasFuel = _furnaceCache.burnPercentage > 0
+                        || _furnaceCache.burningFuelCount > 0
+                        || !_furnaceCache.fuelSlot.isEmpty();
                 boolean hasOurOutput = !newOutput.isEmpty() && _target.getItem().matches(newOutput.getItem());
-                if (furnaceActuallyBurning || hasOurOutput) {
+                if (furnaceHasFuel || hasOurOutput) {
                     _smeltedBatch = true;
                 }
                 // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
