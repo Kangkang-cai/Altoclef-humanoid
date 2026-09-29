@@ -597,17 +597,23 @@ public class StorageHelper {
         //      且兜底层在有任何白名单物品时永远到不到 ⇒ 名单外物品 (花草/超量圆石) 饿死。
         // 新结构: 全背包统一扫描, 保护统一收口 (canThrowAwayStack + isStackProtected +
         // 弹回冷却 + 最后镐), 白名单只作排序偏好; 丢弃档位从先到后:
-        //   1 圆石家族合计超出保留量(丢最大堆)   2 白名单杂物(非方块优先)
-        //   3 名单外 BULK 大堆(≥16 丢最大)       4 名单外普通杂物(小堆优先)
+        //   1 白名单杂物(非方块优先)             2 名单外 BULK 大堆(≥16 丢最大)
+        //   3 名单外普通杂物(小堆优先)           4 圆石家族超量(严格保留闸, 见下)
         //   5 工具淘汰(低阶→同材料重复)           6 原木垫底
         //   7 食物最后(hunger×count 最便宜)
-        // 档 3-7 受 throwAwayUnusedItems 开关收窄; 开关 false 时只丢档 1+2。
+        // (2026-09-29 下午修, 用户"把所有圆石都丢了, 地狱岩反倒优先级更低"):
+        //   首版把超量圆石放档1 且只判"合计>64 就丢最大堆" — 两个洞:
+        //   a) 保留闸穿透: 65=64+1 会丢掉 64 那组只剩 1, 连续腾位逐组穿到底;
+        //   b) 抢占白名单: 超量圆石压过地狱岩先丢, 与"圆石仍有建材价值"相悖。
+        //   修法 = 超量档下移到真垃圾之后, 且只丢"丢掉后合计仍 ≥ 保留量"的堆
+        //   (65=64+1 会丢 1 那个小堆; 优先选满足条件的最大堆)。
+        // 档 2-7 受 throwAwayUnusedItems 开关收窄; 开关 false 时只丢档 1。
         // =====================================================================
-        Slot firstWhitelistNonBlock = null; // 档2: 白名单非方块 (旧口径"立即返回")
-        Slot firstWhitelistBlock = null;    // 档2: 白名单方块
-        final List<Slot> cobbleFamilySlots = new ArrayList<>(); // 档1: 圆石/深板岩圆石/黑石
+        Slot firstWhitelistNonBlock = null; // 档1: 白名单非方块 (旧口径"立即返回")
+        Slot firstWhitelistBlock = null;    // 档1: 白名单方块
+        final List<Slot> cobbleFamilySlots = new ArrayList<>(); // 档4: 圆石/深板岩圆石/黑石
         int cobbleFamilyTotal = 0;
-        final List<Slot> genericSlots = new ArrayList<>();  // 档4
+        final List<Slot> genericSlots = new ArrayList<>();  // 档3
         final List<Slot> logSlots = new ArrayList<>();      // 档6
         final List<Slot> foodSlots = new ArrayList<>();     // 档7
         // 档5 工具淘汰的扫描中间量 (口径与旧低阶/重复逻辑一致)
@@ -622,7 +628,7 @@ public class StorageHelper {
             Item item = stack.getItem();
             // 弹回熔断: 冷却中的物品不作任何档位候选。
             if (ItemHelper.isThrowOnCooldown(item)) continue;
-            // 档1 候选: 圆石家族。保护只有"合计保留量"一道闸 — 不走 canThrowAwayStack
+            // 档4 候选: 圆石家族。保护只有"合计保留量"一道闸 — 不走 canThrowAwayStack
             // (圆石不在名单, 开关语义与合计闸无关), 但任务保护 (isStackProtected) 照走。
             if (item == Items.COBBLESTONE || item == Items.COBBLED_DEEPSLATE || item == Items.BLACKSTONE) {
                 if (ItemHelper.isStackProtected(mod, stack)) continue;
@@ -633,7 +639,7 @@ public class StorageHelper {
             // 保护名单+机制统一收口 (importantItems/硬保护/自定义名/最后镐/任务保护)。
             if (!ItemHelper.canThrowAwayStack(mod, stack)) continue;
             if (mod.getModSettings().isThrowaway(item)) {
-                // 档2: 白名单 = 排序偏好, 不是准入门槛。
+                // 档1: 白名单 = 排序偏好, 不是准入门槛。
                 if (item instanceof BlockItem) {
                     if (firstWhitelistBlock == null) firstWhitelistBlock = slot;
                 } else if (firstWhitelistNonBlock == null) {
@@ -667,30 +673,16 @@ public class StorageHelper {
                 toolGroups.computeIfAbsent(c.getName() + ":" + level, k -> new ArrayList<>()).add(slot);
                 continue;
             }
-            genericSlots.add(slot); // 档4: 名单外普通杂物 (花草等)
+            genericSlots.add(slot); // 档3: 名单外普通杂物 (花草等)
         }
 
-        // ---- 档1: 圆石家族合计超出保留量 → 丢最大堆 (修复 7 组 64 不丢) ----
-        if (!cobbleFamilySlots.isEmpty()
-                && cobbleFamilyTotal > mod.getModSettings().getReservedBuildingBlockCount()) {
-            Slot largest = null;
-            int largestCount = -1;
-            for (Slot slot : cobbleFamilySlots) {
-                int count = getItemStackInSlot(slot).getCount();
-                if (count > largestCount) {
-                    largestCount = count;
-                    largest = slot;
-                }
-            }
-            return Optional.of(largest);
-        }
-        // ---- 档2: 白名单排序偏好 (非方块优先, 与旧"非方块立即返回"口径一致) ----
+        // ---- 档1: 白名单排序偏好 (非方块优先, 与旧"非方块立即返回"口径一致) ----
         if (firstWhitelistNonBlock != null) return Optional.of(firstWhitelistNonBlock);
         if (firstWhitelistBlock != null) return Optional.of(firstWhitelistBlock);
 
-        // ---- 档3-7: 兜底, 受 throwAwayUnusedItems 开关收窄 ----
+        // ---- 档2-7: 兜底, 受 throwAwayUnusedItems 开关收窄 ----
         if (mod.getModSettings().shouldThrowawayUnusedItems()) {
-            // 档4: 名单外 BULK 大堆 (≥16) 丢最大 (腾位效率最高); 否则小堆优先 (损失最小)。
+            // 档2: 名单外 BULK 大堆 (≥16) 丢最大 (腾位效率最高); 否则小堆优先 (损失最小)。
             Slot bulk = null;
             int bulkCount = 15; // 与 getBulkDisposalSlot 同口径: ≥16 才算大堆
             Slot smallest = null;
@@ -706,6 +698,23 @@ public class StorageHelper {
             }
             if (bulk != null) return Optional.of(bulk);
             if (smallest != null) return Optional.of(smallest);
+            // 档4: 圆石家族超量 — 严格"至少留一组": 只丢"丢掉后合计仍 ≥ 保留量"的堆,
+            // 优先选满足条件的最大堆 (腾位最多)。65=64+1 时丢 1 的小堆, 绝不穿到 64 的大堆。
+            // (首版"合计>64 丢最大堆"会穿透保留量, 且抢占白名单档把圆石丢穿、地狱岩反而不丢。)
+            if (!cobbleFamilySlots.isEmpty()
+                    && cobbleFamilyTotal > mod.getModSettings().getReservedBuildingBlockCount()) {
+                int reserved = mod.getModSettings().getReservedBuildingBlockCount();
+                Slot best = null;
+                int bestCount = -1;
+                for (Slot slot : cobbleFamilySlots) {
+                    int count = getItemStackInSlot(slot).getCount();
+                    if (cobbleFamilyTotal - count >= reserved && count > bestCount) {
+                        bestCount = count;
+                        best = slot;
+                    }
+                }
+                if (best != null) return Optional.of(best);
+            }
             // 档5: 工具淘汰 (低阶优先, 其次同材料重复)。
             if (lowTierTool != null) return Optional.of(lowTierTool);
             for (List<Slot> slots : toolGroups.values()) {
