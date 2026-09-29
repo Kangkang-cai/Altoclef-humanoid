@@ -59,7 +59,9 @@ public class ReplaceBlocksTask extends Task {
 
         //_forceReplace.clear();
         _blockBrokenSubscription = EventBus.subscribe(BlockBrokenEvent.class, evt -> {
-            if (evt.player.equals(MinecraftClient.getInstance().player)) {
+            // (2026-09-29) BlockBrokenEvent 已迁到客户端通道: evt.player 恒 null
+            // (归因不可得, 见事件类注释) ⇒ null 视为"本站未知来源, 按本机事件处理"。
+            if (evt.player == null || evt.player.equals(MinecraftClient.getInstance().player)) {
                 if (isWithinRange(evt.blockPos)) {
                     boolean wasAReplacable = ArrayUtils.contains(_toFind, evt.blockState.getBlock());
                     if (wasAReplacable) {
