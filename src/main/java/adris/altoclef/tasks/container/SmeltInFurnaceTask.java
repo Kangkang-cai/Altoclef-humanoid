@@ -528,8 +528,9 @@ public class SmeltInFurnaceTask extends ResourceTask {
         private Task _materialErrand = null;
 
         /**
-         * (2026-09-29 开烧后不再凑数, 用户拍板) 本轮是否已实际观察/投料到炉内
-         * 出现本目标的生料或产物, 即"已开烧"。
+         * (2026-09-29 开烧后不再凑数, 用户拍板) 本轮是否**真的开烧过** —— 判据见下方
+         * 置位点: 炉内正在燃烧 (burn/燃料 > 0) 或已烧出本目标产物, **不是"炉里有料"**。
+         * 投料阶段 (料已进炉但还没点火/没燃料) 不算开烧, 闸门保持打开、继续凑料。
          * <p>
          * 语义变更: 一旦开烧, 任务目标从"凑够 targetCount"降级为"把能烧的烧完":
          *  ① {@code onTick} 缺料分支不再派发猎料/挖料远征 (背包现有的投完即可);
@@ -543,8 +544,15 @@ public class SmeltInFurnaceTask extends ResourceTask {
          * Food 链抢占吃掉 → {@code targetsMet} 永假 (背包只剩 5) → 实例永生 →
          * 派发"猎 6 只羊"远征, 弃掉仍在烧 (料 x5 / 燃料 x3 / burn 21%) 的炉。
          * <p>
-         * 置位点 = 开屏观察到炉内有本目标的料/产物 (tryUpdateOpenFurnace), 因此
-         * 跨实例复用时前序实例投下的料同样认账, 不依赖"本实例亲手投过料"。
+         * 置位点 = 开屏观察到【炉子在烧】(burn/燃料 > 0) 或已烧出本目标产物
+         * (tryUpdateOpenFurnace)。跨实例复用时前序实例烧起的炉同样认账, 不依赖
+         * "本实例亲手点过火"。
+         * <p>
+         * (2026-09-29 21:5x 收紧) 原判据是"炉内有本目标的料/产物" —— 实测被
+         * 【别的冶炼实例投进同一座炉的料】误触发: x9 实例 (gear 的 9 锭) 看到 x3
+         * 实例 (给 iron_pickaxe 的 3 锭) 投进同一座炉的 3 个生铁即判"自己已开烧"
+         * ⇒ 不再去凑缺的 2 个 ⇒ 投完手上 7 个便卡死 (detail/25 §10)。用户口径
+         * "等凑够料再开烧"要求投料阶段不算开烧, 故判据改为"真在烧"。
          */
         private boolean _smeltedBatch = false;
 
@@ -1095,10 +1103,28 @@ public class SmeltInFurnaceTask extends ResourceTask {
                 }
                 _furnaceCache.materialSlot = newMaterial;
                 _furnaceCache.outputSlot = newOutput;
-                // (2026-09-29 开烧标记) 炉内实见本目标的生料或产物 → 本轮已开烧。
-                // 只认"真实开屏观察", 与下面的在途账同源, 不引入第二个计数口径。
-                if ((!newMaterial.isEmpty() && _target.getMaterial().matches(newMaterial.getItem()))
-                        || (!newOutput.isEmpty() && _target.getItem().matches(newOutput.getItem()))) {
+                // (2026-09-29 开烧标记) 判据 = 【炉子真的在烧】, 不是"炉里有料"。
+                //
+                // 为什么必须收紧 (2026-09-29 21:4x 现场 20260929-192036 实锤):
+                // 原判据是"实见炉内有本目标的生料/产物", 但那些料可能是【别的冶炼
+                // 实例】投的 —— 现场 x9 实例 (`iron_ingot x9`, 给 gear) 开屏看到
+                // x3 实例 (`iron_ingot x3`, 给 iron_pickaxe) 投进同一座炉的 3 个生铁
+                // (20:03:11.608 [SmeltGate] smeltedBatch false->true, [mat=raw_iron x3])
+                // 即判"自己已开烧" ⇒ onTick 的 `if (!_smeltedBatch)` 闸门关闭 ⇒
+                // 不再去挖缺的 2 个生铁 ⇒ 只把背包剩的 4 个投完(炉内 7)便派
+                // `Moving raw_iron x2` 而背包已空 ⇒ 空转 58s ⇒ 20:04:17 giveUp ⇒
+                // 上游 CollectRecipeCataloguedResources 静默死锁 4305s (detail/25)。
+                // 而该炉全程 fuel=0 / burn=0.00, 根本没烧起来。
+                //
+                // 新判据对齐用户口径"等凑够料 (9 个) 再开烧": burnPercentage
+                // (cookProgress/24) 与 burningFuelCount (当前燃料剩余燃烧时间/200)
+                // 只有【正在烧】才 > 0, 纯投料阶段恒 0 ⇒ 闸门保持打开、继续凑料。
+                // 闩锁语义不变 (置位后不回退), 保证"烧到一半产物被吃掉"的原场景
+                // (20260929 17:00 mutton: 料 x5/燃料 x3/burn 21%) 仍能走 batchDone 出口。
+                boolean furnaceActuallyBurning = _furnaceCache.burnPercentage > 0
+                        || _furnaceCache.burningFuelCount > 0;
+                boolean hasOurOutput = !newOutput.isEmpty() && _target.getItem().matches(newOutput.getItem());
+                if (furnaceActuallyBurning || hasOurOutput) {
                     _smeltedBatch = true;
                 }
                 // (2026-09-15 在途炉账) 真实观察同步进账本 (双零即销账), 供冷启动
