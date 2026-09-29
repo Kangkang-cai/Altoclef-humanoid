@@ -23,6 +23,11 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
     // 不命中共享活实例槽 (盾牌看门狗: 自己烧 1 铁, 不挂 gear 的 x9 炉子)。
     private final boolean _detached;
     private boolean _finished = false;
+    // (2026-09-29 放弃态重试, detail/25) 材料子任务连续以"放弃"结束的轮数。
+    // 达到 MAX_CONSECUTIVE_GIVEUPS 打一次告警并归零 —— 把"上游任务卡死"暴露到
+    // 日志, 而不是像 20260929-192036 场次那样零日志静默空转 4305s。
+    private int _consecutiveGiveUps = 0;
+    private static final int MAX_CONSECUTIVE_GIVEUPS = 3;
     // (2026-08-31 材料收集粘滞) 缓存"当前正在收集的某个材料子任务"实例。
     // 一旦派发了 getItemTask(某材料) 且未完成, 就持续返回同一实例, 不因每 tick
     // 重扫材料表而换个材料叉开 —— 否则做熔炉时"采石→造台→(下一tick)又切采石",
@@ -44,6 +49,8 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
     protected void onStart(AltoClef mod) {
         _finished = false;
         _activeCollectTask = null;
+        // (2026-09-29) 新实例/重入即重置放弃计数, 不跨生命周期累积。
+        _consecutiveGiveUps = 0;
     }
 
     @Override
@@ -51,6 +58,24 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
         // (2026-08-31 粘滞) 正在收集的某个材料子任务完成前, 持续复用, 不重扫换材料。
         if (_activeCollectTask != null && !_activeCollectTask.isFinished(mod)) {
             return _activeCollectTask;
+        }
+        // (2026-09-29 放弃态识别, detail/25) 上一轮材料子任务若以"放弃"结束
+        // (hasGivenUp: isFinished=true 但材料根本没到手, 如熔炉 giveUp 弃炉),
+        // 若再直接调 getItemTask, 会命中共享活实例槽里那个僵尸实例 —— 框架按
+        // newSub.isEqual(_sub) 判"子任务没变"、继续 tick 它, 而它放弃后 onTick
+        // 恒返回 null ⇒ 整条链零动作零日志空转 (20260929-192036 场次 4305s)。
+        // 对策: 改用 newDetachedItemTask 绕开活实例槽, 强制换一个真新实例重试;
+        // 连续 N 轮仍放弃则打告警, 把"上游卡死"暴露到日志而非静默。
+        boolean previousGaveUp = _activeCollectTask != null && _activeCollectTask.hasGivenUp();
+        if (previousGaveUp) {
+            _consecutiveGiveUps++;
+            if (_consecutiveGiveUps >= MAX_CONSECUTIVE_GIVEUPS) {
+                Debug.logWarning("[CraftMaterials] 材料子任务连续 " + _consecutiveGiveUps
+                        + " 轮以放弃结束, 仍在换新实例重试 (上游疑似卡死, 见 detail/25)");
+                _consecutiveGiveUps = 0;
+            }
+        } else {
+            _consecutiveGiveUps = 0;
         }
         _activeCollectTask = null;
 
@@ -126,7 +151,7 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 if (!StorageHelper.itemTargetOwnedIncludingCraftGrid(mod, StorageHelper.Ownership.POSSESS, itemTarget)) {
                     setDebugState("Getting " + itemTarget);
                     // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
-                    _activeCollectTask = _detached
+                    _activeCollectTask = (_detached || previousGaveUp)
                             ? TaskCatalogue.newDetachedItemTask(catalogueMaterialName, count)
                             : TaskCatalogue.getItemTask(catalogueMaterialName, count);
                     Debug.logTrace("craft-material", "派发收集材料 " + catalogueMaterialName + " x" + count
@@ -144,7 +169,7 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 if (mod.getItemStorage().getItemCountReal(item) + StorageHelper.countItemsInCraftGrid(mod, item) < count) {
                     setDebugState("Getting " + item.getTranslationKey());
                     // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
-                    _activeCollectTask = _detached
+                    _activeCollectTask = (_detached || previousGaveUp)
                             ? TaskCatalogue.newDetachedItemTask(item, count)
                             : TaskCatalogue.getItemTask(item, count);
                     return _activeCollectTask;
