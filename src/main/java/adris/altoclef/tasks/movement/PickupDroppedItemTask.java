@@ -675,11 +675,16 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
             }
         }
         if (riding || WorldHelper.isLargeWaterCrossing(_mod, _mod.getPlayer().getBlockPos(), target, 30)) {
+            // (2026-09-30) 落回开船/正常导航时同步刷新状态：旧实例的 setDebugState
+            // 会跨重派发残留（20260930-142545 实锤：14:30:23 dive 一次后状态恒显
+            // "Diving to grab dropped item."，实际已走 GetToBlockTask，误导现场判读）。
+            setDebugState("Boat crossing to dropped item.");
             return new BoatCrossingTask(
                     new BlockPos(target.getX(), 0, target.getZ()),
                     false,
                     itemInOpenWater ? targetPos : null);
         }
+        setDebugState("Navigating to dropped item.");
         return new GetToBlockTask(target);
     }
 

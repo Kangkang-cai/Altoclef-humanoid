@@ -85,6 +85,10 @@ public class SwimDiveChain extends TaskChain {
     private static final long PLACE_STAND_MEM_TICKS = 300;
     // 卡住判定：窗口内玩家水平位移 < 1 格即视为原地。
     private static final double STUCK_MIN_MOVE_SQR = 1.0 * 1.0;
+    // (2026-09-30) 浅水站底判据：卡住窗口内 Y 波幅低于此值 = 站稳水底（非 bobbing）。
+    // bobbing 实测波幅 1-2 格（0912 现场 y7↔9 每 0.5s 振荡）；站底波幅 ~0
+    // （20260930-142545 现场 y=86.0 恒定 44s）。
+    private static final double SHALLOW_STAND_Y_SPREAD = 0.5;
     // 空气充足阈值（剩余空气百分比），低于则不触发下潜以免溺水。
     private static final double MIN_AIR_FRACTION = 0.5;
     // 导航（movement）任务包名前缀。
@@ -109,6 +113,9 @@ public class SwimDiveChain extends TaskChain {
     // 卡住检测窗口起点（游戏 tick + 起点位置）。
     private long _windowStartTick = -1;
     private Vec3d _windowStartPos = null;
+    // (2026-09-30) 卡住窗口内的 Y 包络：区分"站稳水底"（波幅~0）与"bobbing"（波幅 1-2 格）。
+    private double _windowMinY = Double.MAX_VALUE;
+    private double _windowMaxY = -Double.MAX_VALUE;
     // 下潜状态。
     private boolean _diving = false;
     private int _diveTicksLeft = 0;
@@ -314,9 +321,14 @@ public class SwimDiveChain extends TaskChain {
         if (_windowStartTick < 0 || _windowStartPos == null) {
             _windowStartTick = nowTick;
             _windowStartPos = pos;
+            _windowMinY = pos.y;
+            _windowMaxY = pos.y;
             diagGate(mod, "WINDOW_START");
             return;
         }
+        // (2026-09-30) 每 tick 更新窗口 Y 包络（浅水站底判据的数据源）。
+        _windowMinY = Math.min(_windowMinY, pos.y);
+        _windowMaxY = Math.max(_windowMaxY, pos.y);
 
         // 窗口内水平位移 >= 1 格 => 在移动，没卡住，重置窗口。
         double dx = pos.x - _windowStartPos.x;
@@ -340,6 +352,19 @@ public class SwimDiveChain extends TaskChain {
                 writeDiag(mod, "ACCUMULATING streak=" + stuckForTicks
                         + "/" + SWIM_STUCK_WINDOW_TICKS);
             }
+        } else if (mod.getPlayer().isOnGround()
+                && (_windowMaxY - _windowMinY) < SHALLOW_STAND_Y_SPREAD) {
+            // (2026-09-30 B' 浅水站底不接管) onGround+水中+整窗 Y 稳定 = bot 站在
+            // 浅水（如农田灌溉渠）底部，不是本反应针对的"bobbing/原地划水"：
+            //   垫档必然空转（目标格被 bot 自己占住 → PLACE_WAIT_PLAYER_BOX 循环，
+            //   20260930-142545 实锤 3 轮 PLACE_TIMEOUT placed=0 last=JUMPED）；
+            //   下潜档=原地走 3s 无增益。而每次接管→归还的代价依旧：BeatMinecraft2
+            //   回卷（SESSION START）+ baritone 从零重规划（3s 窗口内路径算不完，
+            //   录制帧 pathLen=0），44s 净位移 0，bot 永远走不出 1 格深水渠。
+            //   不接管，交给导航与 NAV-STUCK/JumpStuck 等既有看门狗；resetWindow
+            //   让本探针每 3s 复查（bot 离水/真 bobbing 时自然恢复接管能力）。
+            resetWindow();
+            diagGate(mod, "SHALLOW_STANDING");
         } else if (nowTick < _standGraceUntilTick) {
             // (2026-09-12) 刚垫方块站稳：给导航 6s 自己走起来, 期间不注入。
             diagGate(mod, "STAND_GRACE");
@@ -463,7 +488,12 @@ public class SwimDiveChain extends TaskChain {
         }
         WaterStandHelper.Spot spot = WaterStandHelper.probe(mod, mod.getPlayer());
         if (spot.status == WaterStandHelper.Status.SUPPORTED) {
-            if (nowTick - _lastPlacedTick > PLACE_STAND_MEM_TICKS) {
+            // (2026-09-30 哨兵下溢修复) _lastPlacedTick=MIN_VALUE 时 long 减法下溢
+            // 为负 → "刚垫过"恒成立 → 永远走 riseTick 而非让位 —— 与 2026-09-10
+            // _lastDiveTick 同款 bug（见触发处注释），当时漏改了本处。20260930-
+            // 142545 实锤：本会话 0 次 PLACE_PLACED 却 3 轮窗口 last=JUMPED 空转。
+            if (_lastPlacedTick == Long.MIN_VALUE
+                    || nowTick - _lastPlacedTick > PLACE_STAND_MEM_TICKS) {
                 // 没垫过东西也"站稳" = 本来就站在浅水底, 垫方块帮不上
                 // → 垫档让位, 冷却期内走下潜档（防阶梯死结）
                 _skipPlaceUntilTick = nowTick + RE_DIVE_COOLDOWN_TICKS;
