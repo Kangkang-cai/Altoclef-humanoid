@@ -242,10 +242,57 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
             _bearingDeg = Math.random() * 360.0;
         }
         Vec3d p = mod.getPlayer().getPos();
+        // (2026-09-30 逃跑 wander 避险, 用户拍板 C) 方位角此前零避险 —— 0930 会话
+        // death#5: 逃逸 wander 沿锁定方向走出高空崖沿, 摔进岩浆致死 (MLG 无水桶
+        // 兜不住)。方向沿线 (≤16 格, 步长 1) 采样: 玩家 y-4..y+2 窗口内有岩浆 →
+        // 该方向视为危险, 重新掷向 (至多 8 次); 全方向都危险 (下界岩浆海常见) 时
+        // 保持原方向, 行为同旧版。只拦岩浆不拦水: 涉水已有 RIVER-CAP 闸门管。
+        if (bearingHazardous(mod, p, Math.toRadians(_bearingDeg), distance)) {
+            double alt = pickHazardFreeBearing(mod, p, distance);
+            if (!Double.isNaN(alt)) {
+                String m = String.format("[WANDER-HAZARD] bearing %.0f has lava on path, reroute -> %.0f player=%s",
+                        _bearingDeg, alt, mod.getPlayer().getBlockPos().toShortString());
+                Debug.logToFile("altoclef_diag.log", m);
+                _bearingDeg = alt;
+            } else {
+                String m = String.format("[WANDER-HAZARD] bearing %.0f has lava but all 8 rerolls hazardous, keeping course player=%s",
+                        _bearingDeg, mod.getPlayer().getBlockPos().toShortString());
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+        }
         double rad = Math.toRadians(_bearingDeg);
         return new GoalXZ(
                 (int) Math.floor(p.x + Math.cos(rad) * distance),
                 (int) Math.floor(p.z + Math.sin(rad) * distance));
+    }
+
+    /**
+     * (2026-09-30 避险) 沿方位角从当前位置起逐格采样 (最远 {@code min(distance,16)}),
+     * 玩家 y-4..y+2 窗口内命中岩浆即危险。区块未加载按安全处理 (未知不拦, 与
+     * isTargetInWater 同口径)。static 纯函数, 不改实例状态。
+     */
+    private static boolean bearingHazardous(AltoClef mod, Vec3d p, double rad, double distance) {
+        int py = (int) Math.floor(p.y);
+        int maxD = (int) Math.min(distance, 16);
+        for (int d = 1; d <= maxD; ++d) {
+            int x = (int) Math.floor(p.x + Math.cos(rad) * d);
+            int z = (int) Math.floor(p.z + Math.sin(rad) * d);
+            for (int y = py + 2; y >= py - 4; --y) {
+                BlockPos pos = new BlockPos(x, y, z);
+                if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
+                if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.LAVA) return true;
+            }
+        }
+        return false;
+    }
+
+    /** (2026-09-30 避险) 掷一个无岩浆的替代方位角; 8 次全危险返回 NaN (保持原向)。 */
+    private static double pickHazardFreeBearing(AltoClef mod, Vec3d p, double distance) {
+        for (int i = 0; i < 8; ++i) {
+            double cand = Math.random() * 360.0;
+            if (!bearingHazardous(mod, p, Math.toRadians(cand), distance)) return cand;
+        }
+        return Double.NaN;
     }
 
     @Override

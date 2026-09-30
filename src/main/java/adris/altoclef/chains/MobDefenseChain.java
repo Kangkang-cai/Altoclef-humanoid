@@ -220,6 +220,13 @@ public class MobDefenseChain extends SingleTaskChain {
     // must-kill 实锤通道 (24 格), 未开火的只在近距离+它看见我们时才计时清场。
     private static final int SKELETON_KILL_TRIGGER_RANGE = 12;
 
+    // (2026-09-30 主动索敌, 用户拍板"不要被打一下后才锁定") 骷髅【亲眼可见且敌对】
+    // 即触发 must-kill 的接敌半径。1.18.2 客户端无攻击者包 ⇒ HitRegistry 箭伤
+    // 归因恒缺 (0930 会话五连死实锤: mustKill=true 全场 0 次), 0924 的
+    // "hit-confirmed 才锁定"根修在本版本恒死。半径取 16: 与小白触发口径同数量级
+    // (箭程 15, 16 内的可见骷髅下一拍就在射我们), 听见墙后怪仍不算 (反透视结论保住)。
+    private static final double SKELETON_PROACTIVE_ENGAGE_RANGE = 16;
+
     public MobDefenseChain(TaskRunner runner) {
         super(runner);
     }
@@ -651,6 +658,37 @@ public class MobDefenseChain extends SingleTaskChain {
         return 65.0f;
     }
 
+    /**
+     * (2026-09-30 B: 逃跑前先清贴脸, 用户拍板"战斗中优先打近的怪") 决定 RUN 之前
+     * 的最后闸门: 批次里有【贴脸(攻击距离内)+已敌对】的近战怪时, 先杀掉再跑 ——
+     * 0930 会话五连死实锤 (death#1 铁剑+盾 / death#4 石剑+盾 仍全程 RETREAT 到死):
+     * shouldRetreatMelee 的 anyRanged 判据让"10 格外有只骷髅"就把贴脸僵尸也一起
+     * 逃掉, 背对着贴脸怪跑 = 白挨刀, 且逃逸 maxDist=45 对箭程 15 的骷髅本来就
+     * 逃不掉。这不是新索敌 (贴脸立即杀 L1038 / addCloseMeleeTargets 最近优先
+     * 早就存在), 是把被整批撤退吃掉的那条既有拍板放行。
+     * 门槛照旧: 有剑 (08-30"没剑不硬杀") + 血量 > 6 (09-18"残血无条件撤",
+     * 末影人豁免口径不变)。只清贴脸的, 批次其余成员不动 —— 杀完回 EVALUATE
+     * 重新判, 骷髅还够得着就由 must-kill (A: 亲眼可见主动索敌) 接管。
+     */
+    private boolean tryClearAdjacentBeforeRetreat(AltoClef mod, long nowTick, List<Entity> candidates) {
+        if (!hasWeaponToFight(mod)) return false;
+        if (mod.getPlayer().getHealth() <= LOW_HEALTH_FORCE_RETREAT) return false;
+        List<Entity> adjacent = new ArrayList<>(candidates.size());
+        for (Entity h : candidates) {
+            if (h == null || !h.isAlive()) continue;
+            if (h instanceof CreeperEntity) continue;   // 苦力怕走举盾接爆/诱爆分支
+            if (isRangedThreat(h)) continue;            // 远程怪不是"贴脸啃"的来源
+            if (!h.isInRange(mod.getPlayer(), MELEE_ATTACK_RANGE)) continue;
+            if (!EntityHelper.isAngryAtPlayer(mod, h)) continue;
+            adjacent.add(h);
+        }
+        if (adjacent.isEmpty()) return false;
+        Debug.logMessage("Combat decision: CLEAR-ADJACENT-BEFORE-RUN (point-blank melee, enemies="
+                + adjacent.size() + ") — kill them first, then re-evaluate retreat");
+        commitMeleeFight(mod, nowTick, adjacent);
+        return true;
+    }
+
     /** 16 格内存活敌对怪列表 (自信战斗的感知口径)。 */
     private static List<Entity> getNearbyHostiles(AltoClef mod) {
         List<Entity> hostiles;
@@ -1005,6 +1043,10 @@ public class MobDefenseChain extends SingleTaskChain {
                 if (!nearMelee.isEmpty() && hasWeaponToFight(mod) && !shouldRetreatMelee(mod, nearMelee)) {
                     return commitMeleeFight(mod, nowTick, nearMelee);
                 }
+                // (2026-09-30 B) 整批判逃前, 贴脸近战怪先清掉再跑 (0930 五连死缺口)。
+                if (tryClearAdjacentBeforeRetreat(mod, nowTick, nearMelee)) {
+                    return 65.0f;
+                }
                 _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
                 setTask(_runAwayTask);
                 _defenseState = DefenseState.RETREAT;
@@ -1132,6 +1174,10 @@ public class MobDefenseChain extends SingleTaskChain {
                             return commitMeleeFight(mod, nowTick, toDealWith);
                         }
                         // Not worth it: run.
+                        // (2026-09-30 B) 整批判逃前, 贴脸近战怪先清掉再跑 (0930 五连死缺口)。
+                        if (tryClearAdjacentBeforeRetreat(mod, nowTick, toDealWith)) {
+                            return 65.0f;
+                        }
                         Debug.logMessage("Combat decision: RUN (threat=%.1f, our=%.1f, enemies=%d)", totalThreat, ourStrength, numberOfProblematicEntities);
                         _inCombat = false;
                         _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
@@ -1428,10 +1474,14 @@ public class MobDefenseChain extends SingleTaskChain {
      * (2026-09-24 根修, 事故 20260924-230344) 旧实现只认 "hostile+已感知",
      * 但骷髅对玩家恒 hostile, 感知又含【听觉】(vanilla 音效穿墙) —— 地下
      * 9 格、从未被看见也从未开火的骷髅走两步就触发 MUST-KILL (prio 95),
-     * bot 直接钻洞猎杀 = "无缘无故锁敌看不见的敌人"。现必须持有
-     * {@link HitRegistry} 的"实际伤害过 bot"实锤 (箭伤 attacker=骷髅本体,
-     * 服务端权威) 才算 active shooter; 只是听见/看见但还没开火的交给常规
-     * 威胁评估 (近距离+它看见我们才计时)。
+     * bot 直接钻洞猎杀 = "无缘无故锁敌看不见的敌人"。
+     * (2026-09-30 主动索敌, 用户拍板) 1.18.2 客户端无攻击者包 ⇒ 箭伤永远归因
+     * 不到骷髅 (0930 会话五连死实锤: mustKill=true 全场 0 次, 骷髅贴脸 0.3 格
+     * 仍在 RETREAT) —— "被打实锤才锁定"在本版本恒死, 用户明确【不要】
+     * "被打一下后才锁定"。改为主动索敌: 【亲眼可见】且已敌对、在
+     * {@link #SKELETON_PROACTIVE_ENGAGE_RANGE} 内的骷髅即算 active shooter,
+     * 不等挨打。亲眼可见门槛保住 09-24 反透视结论: 听见墙后怪照样不算。
+     * 被打实锤 (HitRegistry, 60s 窗口) 仍保留 —— 有实锤时范围放宽到 24 格。
      */
     private Entity getActiveRangedAttacker(AltoClef mod) {
         Entity best = null;
@@ -1442,14 +1492,20 @@ public class MobDefenseChain extends SingleTaskChain {
                 if (e == null || !e.isAlive()) continue;
                 if (!(e instanceof AbstractSkeletonEntity)) continue;
                 if (!EntityHelper.isAngryAtPlayer(mod, e)) continue;
-                // (2026-09-24 根修) 必须实际打到过 bot (60s 窗口)。只是被听见/
-                // 看见但从未命中的骷髅不进 must-kill。
-                if (!HitRegistry.hasRecentlyDamagedPlayer(e)) {
+                // (2026-09-30 主动索敌) 两条证据任一即入围:
+                // ① 亲眼可见 + 在主动接敌半径内 (不等挨打, 用户拍板);
+                // ② HitRegistry 实锤打到过 bot (60s 窗口, 范围 24 格)。
+                // 都没有 (只是听见/记忆里的骷髅) 不进 must-kill。
+                boolean hitConfirmed = HitRegistry.hasRecentlyDamagedPlayer(e);
+                boolean visible = VisibilityHelper.isEntityVisible(mod, e)
+                        && e.isInRange(mod.getPlayer(), SKELETON_PROACTIVE_ENGAGE_RANGE);
+                if (!hitConfirmed && !visible) {
                     logUnprovenShooterDiag(mod, e);
                     continue;
                 }
                 double d = e.squaredDistanceTo(mod.getPlayer());
-                if (d <= RANGE * RANGE && d < bestDist) {
+                double range = hitConfirmed ? RANGE : SKELETON_PROACTIVE_ENGAGE_RANGE;
+                if (d <= range * range && d < bestDist) {
                     bestDist = d;
                     best = e;
                 }
