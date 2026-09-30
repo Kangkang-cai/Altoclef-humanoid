@@ -1181,7 +1181,12 @@ public class MobDefenseChain extends SingleTaskChain {
                 // (2026-09-24 派发证据门) 只对"亲眼可见或实际打过我们"的怪近战直打,
                 // 听见墙后怪不猎杀; 全无证据 → 落到下方逃跑兜底 (危险时可先躲)。
                 List<Entity> nearMelee = filterEngagementEvidence(mod, getNearbyHostiles(mod));
-                if (!nearMelee.isEmpty() && hasWeaponToFight(mod) && !shouldRetreatMelee(mod, nearMelee)) {
+                // (2026-09-30 血量下限, 180851 18:11:47 实锤) 6.1 血先 commitMeleeFight
+                // 进 FIGHT, 47ms 后 stateFight 中盘 "RUN mid-confident-fight (health
+                // low)" (<40%) 踢去逃跑 —— 入场与中盘两道闸不同线, 自我打架。入场
+                // 就用同一条 40% 线: 血量不够近战直打 → 直接落到下方逃跑, 不演 FIGHT。
+                boolean meleeHpOk = mod.getPlayer().getHealth() >= mod.getPlayer().getMaxHealth() * 0.4f;
+                if (!nearMelee.isEmpty() && meleeHpOk && hasWeaponToFight(mod) && !shouldRetreatMelee(mod, nearMelee)) {
                     return commitMeleeFight(mod, nowTick, nearMelee);
                 }
                 // (2026-09-30 B) 整批判逃前, 贴脸近战怪先清掉再跑 (0930 五连死缺口)。
@@ -1620,8 +1625,12 @@ public class MobDefenseChain extends SingleTaskChain {
      * 无望击杀只会站着/转圈被射死。按 isConfidentFight 同款剑判定。
      */
     private static boolean hasWeaponToFight(AltoClef mod) {
+        // (2026-09-30 用户"斧子也是武器对吧") 斧子同阶伤害≥剑, 纳入近战武器判定
+        // —— 旧口径只有剑族, 只有斧子时 hasWeaponToFight=false → 有武器也一律逃。
         return mod.getItemStorage().hasItem(Items.WOODEN_SWORD, Items.STONE_SWORD, Items.IRON_SWORD,
-                Items.GOLDEN_SWORD, Items.DIAMOND_SWORD, Items.NETHERITE_SWORD);
+                Items.GOLDEN_SWORD, Items.DIAMOND_SWORD, Items.NETHERITE_SWORD,
+                Items.WOODEN_AXE, Items.STONE_AXE, Items.IRON_AXE,
+                Items.GOLDEN_AXE, Items.DIAMOND_AXE, Items.NETHERITE_AXE);
     }
 
     /**
@@ -2208,19 +2217,37 @@ public class MobDefenseChain extends SingleTaskChain {
         }
 
         // ① 保证盾牌在副手 (不在的话用 SWAP 装过去)
+        // (2026-09-30 光标恢复, 180851 双杀实锤) 进食装备链 startEat→parkShieldOffHands
+        // 会把副手盾【捡到光标】(CraftClick slot=45 PICKUP) 腾出右键 —— 光标不在
+        // getSlotsWithItemScreen 结果里, 本分支查不到盾就不装 → 空手举盾接爆
+        // (18:10:11 一炸 0.07HP、18:10:20 二炸死亡)。光标持盾时直接 PICKUP 进副手。
         if (mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD) {
             List<adris.altoclef.util.slots.Slot> shieldSlots = mod.getItemStorage().getSlotsWithItemScreen(Items.SHIELD);
             if (!shieldSlots.isEmpty()) {
                 mod.getSlotHandler().clickSlot(adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT,
                         shieldSlots.get(0).getInventorySlot(),
                         net.minecraft.screen.slot.SlotActionType.SWAP);
+            } else if (StorageHelper.getItemStackInCursorSlot().getItem() == Items.SHIELD) {
+                mod.getSlotHandler().clickSlot(adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT, 0,
+                        net.minecraft.screen.slot.SlotActionType.PICKUP);
             }
         }
 
         // ② 面朝苦力怕 (脚位置即可，爆炸来自脚下)
         // (2026-09-07 防御朝向优先) 走准心仲裁的防御槽, tick 尾统一 lookAt 且
         // 压过攻击瞄准 —— 旧直写会被 applyCombatAim 覆盖, 盾面朝错方向白举。
-        mod.getControllerExtras().requestDefenseAim(creeper.getPos());
+        // (2026-09-30 举盾误开容器, 用户"举盾时意外点到工作台") 举盾=按住右键,
+        // 准心落在工作台/熔炉等可交互方块上会打开容器界面而不是举盾。检测到准心
+        // 方块可交互时防御瞄准改指脚前地面 (低头落空), 让右键不落在容器上;
+        // 苦力怕在数格外、低头 ~50° 仍在盾牌格挡锥内, 不影响接爆。
+        if (LookHelper.isFacingInteractable(mod)) {
+            Vec3d playerPos = mod.getPlayer().getPos();
+            Vec3d flat = Vec3d.fromPolar(0, mod.getPlayer().getYaw()).multiply(2.0);
+            mod.getControllerExtras().requestDefenseAim(
+                    new Vec3d(playerPos.x + flat.x, playerPos.y - 1.2, playerPos.z + flat.z));
+        } else {
+            mod.getControllerExtras().requestDefenseAim(creeper.getPos());
+        }
 
         // ③ 持续举盾（hold 保证每 tick 不下压）
         // (避免每 tick 刷屏: 只在首次启动和爆炸瞬间各打一条日志)
@@ -2265,12 +2292,16 @@ public class MobDefenseChain extends SingleTaskChain {
             return false;
         }
         // 副手没装盾先换过来 (SWAP 一次)
+        // (2026-09-30 光标恢复) 同 doShieldNuke ①: 进食链把盾停在光标时这里要能捡回。
         if (mod.getPlayer().getOffHandStack().getItem() != Items.SHIELD) {
             List<adris.altoclef.util.slots.Slot> shieldSlots = mod.getItemStorage().getSlotsWithItemScreen(Items.SHIELD);
             if (!shieldSlots.isEmpty()) {
                 mod.getSlotHandler().clickSlot(adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT,
                         shieldSlots.get(0).getInventorySlot(),
                         net.minecraft.screen.slot.SlotActionType.SWAP);
+            } else if (StorageHelper.getItemStackInCursorSlot().getItem() == Items.SHIELD) {
+                mod.getSlotHandler().clickSlot(adris.altoclef.util.slots.PlayerSlot.OFFHAND_SLOT, 0,
+                        net.minecraft.screen.slot.SlotActionType.PICKUP);
             }
         }
         CachedProjectile nearest = getNearestProjectile(mod);
@@ -2281,7 +2312,15 @@ public class MobDefenseChain extends SingleTaskChain {
         }
         // 面朝弹射物 + 举盾 + 取消寻路 (原地格挡, 不躲)
         // (2026-09-07 防御朝向优先) 同盾牌核弹, 走防御槽不被攻击瞄准覆盖。
-        mod.getControllerExtras().requestDefenseAim(nearest.position);
+        // (2026-09-30 举盾误开容器) 同 doShieldNuke ②: 准心在可交互方块上改低头。
+        if (LookHelper.isFacingInteractable(mod)) {
+            Vec3d playerPos = mod.getPlayer().getPos();
+            Vec3d flat = Vec3d.fromPolar(0, mod.getPlayer().getYaw()).multiply(2.0);
+            mod.getControllerExtras().requestDefenseAim(
+                    new Vec3d(playerPos.x + flat.x, playerPos.y - 1.2, playerPos.z + flat.z));
+        } else {
+            mod.getControllerExtras().requestDefenseAim(nearest.position);
+        }
         mod.getInputControls().hold(Input.CLICK_RIGHT);
         if (BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().isPathing()) {
             // (2026-09-14 搭路中断取证, 用户) 用户观察到"空中搭路没搭好掉进岩浆",
@@ -2583,6 +2622,18 @@ public class MobDefenseChain extends SingleTaskChain {
     /** (2026-08-30) 是否正处在已承诺的战斗 (集中击杀/加急击杀) 中。 */
     public boolean isInCombat() {
         return _inCombat;
+    }
+
+    /**
+     * (2026-09-30 盾核弹禁食, 180851 双杀实锤) 盾牌防御动作（盾核弹/弹射物格挡）
+     * 是否正在进行。FoodChain 据此无条件禁食 —— 吃与举盾都按右键: 进食装备链
+     * startEat→parkShieldOffHands 会把副手盾捡到光标腾右键, 盾核弹装不回盾
+     * (光标不在 getSlotsWithItemScreen 里) → 空手接爆; 且旧口径 isInCombat
+     * 不含盾核弹, "战斗中禁食"闸对它不生效 (18:10:07 needEat 在核弹启动前
+     * 2.6s 抢跑吃完装填, 18:10:18 二次进食撞上第二只苦力怕点火 → 死亡)。
+     */
+    public boolean isShieldBlockingActive() {
+        return _shieldNukeStartTick >= 0 || _projectileBlocking;
     }
 
     public void setForceFieldRange(double range) {

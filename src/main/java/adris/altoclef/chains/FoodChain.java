@@ -232,6 +232,18 @@ public class FoodChain extends SingleTaskChain {
             return Float.NEGATIVE_INFINITY;
         }
 
+        // (2026-09-30 盾核弹禁食, 180851 双杀实锤) 盾核弹/弹射物格挡期间【无条件】
+        // 禁食, 低血豁免也不放行 —— 旧口径 isInCombat 不含盾核弹, 苦力怕点火中
+        // needEat 抢跑: startEat→parkShieldOffHands 把副手盾捡到光标 (CraftClick
+        // slot=45 PICKUP), 盾核弹 getSlotsWithItemScreen 看不见光标上的盾装不回
+        // → 空手接爆 (18:10:11 一炸 0.07HP、18:10:20 二炸死亡)。右键冲突是物理
+        // 事实, 与血量无关, 不设豁免。
+        if (mod.getMobDefenseChain().isShieldBlockingActive()) {
+            stopEat(mod);
+            logFoodDiag(mod, "idle", "shield-blocking");
+            return Float.NEGATIVE_INFINITY;
+        }
+
         // If we requested a fillup but we're full, stop.
         if (_requestFillup && mod.getPlayer().getHungerManager().getFoodLevel() == 20) {
             _requestFillup = false;
