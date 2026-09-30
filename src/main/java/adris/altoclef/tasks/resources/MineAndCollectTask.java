@@ -1712,7 +1712,17 @@ public class MineAndCollectTask extends ResourceTask {
                     continue;
                 }
                 if (_blacklist.contains(p)) continue;
-                if (!WorldHelper.canBreak(mod, p)) continue;
+                // (2026-09-30 导航口径≠开挖口径) 原来这里用 canBreak 整体把关,
+                // 但 canBreak 内含 canReach/plausibleToBreak (baritone 此刻可达性
+                // 快照) —— 目标在岩石后面时该快照瞬态翻 false ⇒ chooser 某一拍
+                // 突然为空 → wander 分支的 Look-around/探索把【在途的记忆位导航】
+                // 枪毙 (20260930 18:38 现场: Destroy block@-241,32,252 走到 24s
+                // 被 Look around 顶掉, 之后再没回去)。记忆回溯的语义本来就是
+                // "人类式走回去再看", 到点才由正常感知/挖掘接手, 硬岩遮挡不影响
+                // 导航合法性。这里只挡: 不可破坏(基岩) + 保护方块 + 液体邻接;
+                // 真到不了时既有失败路径 (requestBlockUnreachable + _blacklist,
+                // 见 onTick "Still failed to mine") 仍会淘汰, 不会死循环扑空。
+                if (!canNavigateToMemoryOre(mod, p)) continue;
                 // (2026-09-05 冻结真因) 记忆导航此前不校验方块还在不在 —— canBreak
                 // 对空气(硬度0)照样通过, 已挖掉的空气位被当"记忆中的矿"反复选中;
                 // 以前靠 DestroyBlockTask 挖 6 秒超时进黑名单才能逃出, 自空气早退
@@ -1755,15 +1765,17 @@ public class MineAndCollectTask extends ResourceTask {
             //   不透视 —— WorldMemory 只记 isBlockVisible 通过的矿, 没看过的不会出现;
             //   舍近求远不可取 (2026-08-21 用户原则) —— 这里仅在实例记忆为空、挖隧道
             //   之前的最后兜底 (原记忆兜底语义不变), 不参与主目标竞争。
-            // 护栏与实例记忆路径同口径: 距离 ≤MEMORY_NAV_RANGE / 黑名单 / canBreak /
-            // chunk 已加载时必须仍是目标块 (已挖掉的空位直接跳过, 不扑空位)。
+            // 护栏与实例记忆路径同口径: 距离 ≤MEMORY_NAV_RANGE / 黑名单 /
+            // 导航口径过滤 (canNavigateToMemoryOre, 不含瞬态 canReach —
+            // 2026-09-30 同上述"导航口径≠开挖口径") / chunk 已加载时必须仍是
+            // 目标块 (已挖掉的空位直接跳过, 不扑空位)。
             // 只读不改 WorldMemory (结构不归本任务管, 过期位由其自身机制维护)。
             {
                 BlockPos gBest = null;
                 double gBestSq = Double.POSITIVE_INFINITY;
                 for (BlockPos p : mod.getWorldMemory().getOreLocations(_blocks)) {
                     if (_blacklist.contains(p)) continue;
-                    if (!WorldHelper.canBreak(mod, p)) continue;
+                    if (!canNavigateToMemoryOre(mod, p)) continue;
                     if (mod.getChunkTracker().isChunkLoaded(p)) {
                         Block actual = mod.getWorld().getBlockState(p).getBlock();
                         boolean matches = false;
@@ -1787,6 +1799,32 @@ public class MineAndCollectTask extends ResourceTask {
             // 做决策, 违反防透视原则, 已撤销。记忆导航只认【真看见过】的两层
             // (_seenOreTick / WorldMemory); 重启后记忆为空就诚实 wander, 看见什么记什么。
             return Optional.empty();
+        }
+
+        /**
+         * (2026-09-30) 记忆导航目标的过滤口径 (与 canBreak 的"现在就开挖"口径分离)。
+         *
+         * <p>canBreak 回答的是"此刻够不够得着、能不能挖" —— 内含
+         * {@code canReach}/{@code plausibleToBreak} 两个 baritone 可达性【瞬时快照】,
+         * 目标隔岩石/寻路未收敛时随时翻 false。拿它当记忆导航的选目标硬门, 后果是
+         * chooser 某一拍突然为空 → wander 分支 (Look-around/挖隧道探索) 把在途的
+         * 记忆位导航顶掉 (20260930 18:38 实锤)。记忆回溯的语义本来就是"人类式走回去
+         * 再看" (2026-09-02 注释原文), 到点才由正常感知/挖掘接手, 岩石遮挡不影响导航
+         * 合法性 —— 与防透视不冲突: 能进这里的位都经 LOS 真看见过。
+         *
+         * <p>这里只挡三类 (与 canBreak 的静态部分一致 + 液体护栏):
+         * ① 硬度 <0 (基岩等不可破坏 — 走过去也挖不开, 不值得专程跑);
+         * ② shouldAvoidBreaking (黑曜石门框等受保护方块);
+         * ③ 邻接液体 (岩浆隔断位: 导航会反复撞 CANT_REACH 且有安全风险,
+         *    与 {@code findFovRejectedOre} 的液体过滤同口径)。
+         *
+         * <p>真到不了的目标仍有淘汰出口: 挖掘失败路径 requestBlockUnreachable +
+         * {@code _blacklist} (见 onTick "Still failed to mine"), 不会死循环扑空。
+         */
+        private boolean canNavigateToMemoryOre(AltoClef mod, BlockPos p) {
+            return mod.getWorld().getBlockState(p).getHardness(mod.getWorld(), p) >= 0
+                    && !mod.getExtraBaritoneSettings().shouldAvoidBreaking(p)
+                    && !WorldHelper.isAdjacentToLiquid(mod, p);
         }
 
         /**
