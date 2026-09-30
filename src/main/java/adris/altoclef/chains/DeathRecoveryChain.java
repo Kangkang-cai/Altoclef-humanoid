@@ -74,6 +74,17 @@ public class DeathRecoveryChain extends SingleTaskChain {
     // activate 处的守卫收敛 —— 但数值先提高, 保证守卫通过后拾取持续压过主链。
     private static final float ACTIVE_PRIORITY = 70.0f;
 
+    // (2026-09-30 Guard-2 滞回宽度) 任务运行中时撤权线 = maxDist + 本值。
+    // 20260930-084411 实锤 dist=199.97 压线 200 → 优先级 70↔-∞ 逐 tick 翻转,
+    // Food(55) 每秒垫场 → 食物/木头任务反复横跳 40s。
+    private static final int GUARD2_HYSTERESIS = 16;
+
+    // (2026-09-30 同墓实例复用) 缓存最近一次激活的 DeathRecoveryTask:
+    // Guard-3 镐闸把 _mainTask 换成造镐任务后, 恢复时 getCurrentTask() 不再是
+    // DR 实例, 旧逻辑每次 new → 270s 计时器归零 (超时兜底失效)。同一墓坐标
+    // 且任务未完结时直接复用; Guard 1/弃墓分支会清空。
+    private DeathRecoveryTask _cachedTask = null;
+
     /**
      * (2026-09-29 食物救援, 用户定案) 墓碑掉落物含食物 ≥ 此阈值 (units) 时
      * 跳过"先造石镐"前置, 直接激活 {@link DeathRecoveryTask} 导航拾取。
@@ -173,6 +184,7 @@ public class DeathRecoveryChain extends SingleTaskChain {
             Debug.logToFile("death_recovery.log", "[ABANDON DEATH_STREAK] " + msg);
             worldMemory.clearDeathGrave(currentDim);
             if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+            _cachedTask = null;
             return Float.NEGATIVE_INFINITY;
         }
 
@@ -299,6 +311,7 @@ public class DeathRecoveryChain extends SingleTaskChain {
             Debug.logToFile("death_recovery.log", "[ABANDON TOO_OLD] " + msg);
             worldMemory.clearDeathGrave(currentDim);
             if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+            _cachedTask = null;
             return Float.NEGATIVE_INFINITY;
         }
 
@@ -312,14 +325,22 @@ public class DeathRecoveryChain extends SingleTaskChain {
         // ------------------------------------------------------------
         int maxDist = s.getDeathRecoveryMaxDistance();
         double distXZ = horizontalDistanceXZ(playerPos, grave.position);
-        if (maxDist > 0 && distXZ > maxDist) {
+        // (2026-09-30 滞回) 任务在跑时放宽撤权线 +16: 造镐 errand 可能短暂把 bot
+        // 带出激活半径。20260930-084411 实锤 dist=199.97 压线 200 → 优先级 70↔-∞
+        // 逐 tick 翻转 × Food(55) 恒垫场 → DR/Food 每秒互抢 40s (食物/木头任务
+        // 反复横跳同根)。无任务时仍按 maxDist 激活。
+        boolean taskRunning = getCurrentTask() instanceof DeathRecoveryTask;
+        int deferDist = taskRunning ? maxDist + GUARD2_HYSTERESIS : maxDist;
+        if (maxDist > 0 && distXZ > deferDist) {
             if (ageTicks % 100L == 0L) {
                 Debug.logToFile("death_recovery.log", String.format(
-                        "[GRAVE-FIX][DEFER TOO_FAR] grave=%s dim=%s dist=%.1f > max %d age=%ds; keeping memory (will trigger when in range)",
-                        grave.position, currentDim, distXZ, maxDist, ageSeconds));
+                        "[GRAVE-FIX][DEFER TOO_FAR] grave=%s dim=%s dist=%.1f > defer %d (max %d%s) age=%ds; keeping memory (will trigger when in range)",
+                        grave.position, currentDim, distXZ, deferDist, maxDist,
+                        taskRunning ? ", hysteresis" : "", ageSeconds));
             }
-            // 遗失镐中途退出的任务同样停掉(不等它), 但不碰 memory。
-            if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+            // (2026-09-30 DEFER 不拆任务) 旧 setTask(null) 每次撤权都毁掉实例 →
+            // 回到范围内只能 new 新实例 → 270s 计时器归零 + 整树重建。保留实例,
+            // 回到范围内走下方 matches() 复用续跑 (Guard 1 弃墓时仍会清)。
             return Float.NEGATIVE_INFINITY;
         }
 
@@ -396,7 +417,18 @@ public class DeathRecoveryChain extends SingleTaskChain {
                     grave.position, currentDim, distXZ, ageSeconds, timeoutSeconds,
                     s.shouldDeathRecoveryRequireStonePickaxe() ? "Y" : "N",
                     pickaxeGateActive ? "GATED" : "pass"));
-            setTask(new DeathRecoveryTask(grave.position, currentDim, timeoutSeconds));
+            // (2026-09-30 同墓实例复用) Guard-3 镐闸会把 _mainTask 换成造镐任务,
+            // Guard-2 DEFER 期间链让权 —— 恢复后 getCurrentTask() 不再是 DR 实例,
+            // 旧逻辑每次 new → 270s 计时器归零, 超时兜底形同虚设 (20260930-084411:
+            // 3 次 ACTIVATE 3 个实例实锤)。同一墓坐标且未完结时复用缓存实例,
+            // 让"每次死亡总预算"真正跨抢占累计。
+            DeathRecoveryTask reuse = _cachedTask;
+            if (reuse == null || reuse.stopped() || reuse.isFinished(mod)
+                    || !matches(reuse, grave, s)) {
+                reuse = new DeathRecoveryTask(grave.position, currentDim, timeoutSeconds);
+            }
+            _cachedTask = reuse;
+            setTask(reuse);
         }
 
         return ACTIVE_PRIORITY;

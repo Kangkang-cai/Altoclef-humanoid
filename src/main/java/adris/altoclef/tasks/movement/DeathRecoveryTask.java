@@ -140,12 +140,16 @@ public class DeathRecoveryTask extends Task {
 
     /**
      * (2026-09-12 动态镐门槛) 墓地是否深埋在地下: heightmap 地表 y 与墓 y
-     * 之差超过 {@link #BURIED_DEPTH_THRESHOLD}。区块未加载时 heightmap 不可信,
-     * 返回 false — 链层跳过镐门槛直接导航, 由 GOTO 中途失速升级兜底。
+     * 之差超过 {@link #BURIED_DEPTH_THRESHOLD}。
+     *
+     * <p>(2026-09-30 消抖) 区块未加载时旧返回 false → 链层镐闸在 pass/GATED
+     * 间随区块加载边界抖动 (20260930-084411: dist≈200 压线, 墓区块恰在加载
+     * 边缘), 且 GOTO 失速兜底 (:355 同判据) 对远墓恒失效。改保守按"已埋":
+     * 无镐先造镐本就是"没镐不裸捡"的正确优先级, 远墓恰恰是最可能需要挖的场景。
      */
     public static boolean isGraveBuried(AltoClef mod, BlockPos grave) {
         if (mod.getWorld().getChunk(grave.getX() >> 4, grave.getZ() >> 4) instanceof EmptyChunk) {
-            return false;
+            return true;
         }
         int surfaceY = mod.getWorld().getTopPosition(Heightmap.Type.MOTION_BLOCKING, grave).getY();
         return surfaceY - grave.getY() > BURIED_DEPTH_THRESHOLD;

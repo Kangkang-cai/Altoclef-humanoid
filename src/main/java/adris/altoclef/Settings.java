@@ -431,7 +431,7 @@ public class Settings implements IFailableConfigFile {
      *
      * Set to 0 to disable the distance check entirely (not recommended).
      */
-    private int deathRecoveryMaxDistance = 200; // (2026-09-03 1000→200: 用户实测远距离(424格)回收太久/风险大, 缩短到200格内才回收)
+    private int deathRecoveryMaxDistance = 250; // (2026-09-03 1000→200: 用户实测远距离(424格)回收太久/风险大; 2026-09-30 200→250: 用户定, 配合 Guard-2 滞回防压线抖动)
 
     /**
      * If true, refuse to start recovery until the bot has at least a stone

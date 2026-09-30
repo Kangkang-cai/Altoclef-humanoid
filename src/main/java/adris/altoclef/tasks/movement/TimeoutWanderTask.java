@@ -94,6 +94,13 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         _forceExplore = forceExplore;
     }
 
+    // (2026-09-30 方向注入) 供"目标在未加载区块"类任务 (GetToChunkTask) 把 wander
+    // 朝向锁到目标方向, 替代默认随机朝向。onStart 的 "null 才随机" 判据让注入值
+    // 生效; resetForReuse 的 ±5° 抖动照常叠加, 不影响方向纪律。
+    public void setBearingDeg(double deg) {
+        _bearingDeg = deg;
+    }
+
     private static BlockPos[] generateSides(BlockPos pos) {
         return new BlockPos[]{
                 pos.add(1, 0, 0),

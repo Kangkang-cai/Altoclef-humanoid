@@ -26,7 +26,9 @@ import net.minecraft.util.math.Vec3d;
 public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequiresGrounded {
 
     private final boolean _wander;
-    private final Task _wanderTask = new TimeoutWanderTask(10);
+    // (2026-09-30) private → protected: 子类 (GetToChunkTask) 需在 onWander 里
+    // 对 wander 实例注入朝向 (setBearingDeg), 实现"目标在未加载区块时朝目标直进"。
+    protected final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(10);
     protected Goal _cachedGoal = null;
     // (2026-08-27 确定性导航超时) 挖方块开路不在此判定:MovementProgressChecker 挖块时
     // 走单独的"挖掘进度"检查(0.5 秒内挖块进度>0.001, 破块即重置距离计时器), 不会

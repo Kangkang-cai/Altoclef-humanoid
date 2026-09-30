@@ -445,19 +445,17 @@ public class ConstructNetherPortalBucketTask extends Task {
         // (2026-09-23 岩浆湖记忆兜底) 脚边字面扫描和 BlockTracker 临时缓存都没
         // 命中时, 用 KnowledgeMemory 里亲眼见过/跨会话记住的岩浆湖锚点 (记忆锚点
         // 入账时已过"成片 ≥12"判据, 直接取最近)。
-        // (2026-09-27 用户口径修正) 旧版对记忆锚点也套"|Δy| ≤ 16", 于是**地上很高的
-        // 岩浆湖永远用不上** (用户"这点估计还没实现")。现改: 只丢掉"在玩家下方 >16 格"
-        // 的 (深洞绕远老问题, 2026-09-04 实测 420,17,341); 在玩家**上方**的保留,
-        // 由 onTick 决定"先回地表再导航过去"。
+        // (2026-09-30 用户定案: 16 格条件直接去掉, 不需要) 旧 0927 口径"只丢掉在
+        // 玩家下方 >16 格的"是治"bot 在地表、湖在深洞绕远"(420,17,341), 但 bot
+        // 自身就在地下时 (20260930-084411: 熔炉 y=-12, 记忆湖 y=-55 差 43 格、
+        // xz 才差 60) 把唯一正确目标丢了 → 走"找不到湖先回地表"分支送死。现在
+        // 记忆锚点一律按距离取最近, 直接导航。
         if (nearestLake == null) {
             for (BlockPos pos : mod.getKnowledgeMemory().getRememberedCenters(
                     adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
                     new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
                             playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
                     MAX_SEARCH_DISTANCE)) {
-                if (playerPos.getY() - pos.getY() > 16) {
-                    continue;
-                }
                 double sqDist = playerPos.getSquaredDistance(pos);
                 if (sqDist < nearestSqDistance) {
                     nearestSqDistance = sqDist;
