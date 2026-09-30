@@ -114,7 +114,9 @@ public interface WorldHelper {
         return inRangeXZ(entity, to.getPos(), range);
     }
 
-    static Dimension getCurrentDimension() {
+    // (2026-09-30 提升为 public: 供跨包 bridge 层 SummaryGenerator / BotSnapshot
+    // 复用同一维度判据，避免在 bridge 包内复制 isUltrawarm/isNatural 逻辑造成口径分叉)
+    public static Dimension getCurrentDimension() {
         ClientWorld world = MinecraftClient.getInstance().world;
         if (world == null) return Dimension.OVERWORLD;
         if (world.getDimension().isUltrawarm()) return Dimension.NETHER;
