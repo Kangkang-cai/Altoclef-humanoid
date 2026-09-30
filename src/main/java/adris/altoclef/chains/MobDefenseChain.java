@@ -2,6 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.entity.BaitCreeperDetonationTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.movement.*;
@@ -20,6 +21,7 @@ import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.baritone.CachedProjectile;
+import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 
 import java.util.UUID;
@@ -45,6 +47,7 @@ import net.minecraft.entity.projectile.DragonFireballEntity;
 import net.minecraft.entity.projectile.FireballEntity;
 import net.minecraft.entity.projectile.SmallFireballEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -190,6 +193,20 @@ public class MobDefenseChain extends SingleTaskChain {
 
     private static final int COMBAT_TIMEOUT_TICKS = 20 * 60;      // 60s of fighting without progress
     private static final int RETREAT_FAIL_LIMIT = 8;              // retreat stuck this many times -> escalate (2026-08-31 3->8: 逃跑被追易误判卡住,fail3就放弃→跑不远被杀)
+    // (2026-09-30 C 掠夺者/卫道士死战, 用户拍板) 没剑先做剑: 材料全在背包才派
+    // (squash 链只补合成, 不外出挖料), 15s 做不出来就空手战, 不无限等。
+    private static final long RAID_SWORD_CRAFT_TIMEOUT_TICKS = 15 * 20;
+    private Task _swordCraftTask = null;
+    private long _swordCraftStartTick = 0;
+    private boolean _raidSwordCraftFailed = false;
+    private static final Item[] RAID_LOG_ITEMS = {
+            Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG,
+            Items.JUNGLE_LOG, Items.ACACIA_LOG, Items.DARK_OAK_LOG
+    };
+    private static final Item[] RAID_PLANK_ITEMS = {
+            Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
+            Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS
+    };
     private static final int COOLDOWN_TICKS = 20 * 5;             // rest 5s after an escalation
     private static final double LONG_RETREAT_DISTANCE = 100;
     private static final double ESCAPE_STEP = 8;          // normal escape ratchets 8 -> 16 -> ... -> 45
@@ -659,6 +676,114 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /**
+     * (2026-09-30 C, 用户拍板) 掠夺者/卫道士死战覆盖 —— 修复"追了一路却被证据门
+     * 过滤成不存在"的缺口 (20260930-120804 实锤: 掠夺者 4.5 格 angry 正追, bot
+     * 背包有石剑, 但全程零伤害事件 + 目标不在 FOV 内 → filterEngagementEvidence
+     * 过滤后清单为空 → 跳过 shouldRetreatMelee 直落无条件逃跑, 全程 0 条
+     * [RETREAT-DEC])。激怒状态的掠夺者/卫道士【本身就是交战证据】, 直接进战斗,
+     * 不再经证据门; 不限数量 (0930 拍板), 未点燃苦力怕不拦死战 (点燃中的苦力怕
+     * 由 stateEvaluate 前置诱爆/举盾分支处理)。
+     * 没剑时: 材料齐 (全在背包) → 先做剑 (15s 超时兜底); 材料不够或做剑失败
+     * → 空手也必须战 (用户"跑不过, 跑也没用")。
+     *
+     * @return 非 null = 已接管 (FIGHT / 做剑), 调用方直接返回该优先级;
+     *         null = 本覆盖不适用 (附近没有激怒掠夺者/卫道士), 走原逻辑。
+     */
+    private Float tryRaidIllagerOverride(AltoClef mod, long nowTick, List<Entity> hostiles) {
+        List<Entity> raid = null;
+        for (Entity h : hostiles) {
+            if (h == null || !h.isAlive()) continue;
+            if (h instanceof PillagerEntity || h instanceof VindicatorEntity) {
+                if (raid == null) raid = new ArrayList<>();
+                raid.add(h);
+            }
+        }
+        if (raid == null) {
+            // 掠夺者/卫道士清空后重置做剑尝试标记, 下次遇袭允许重新尝试做剑。
+            _raidSwordCraftFailed = false;
+            _swordCraftTask = null;
+            return null;
+        }
+        if (hasWeaponToFight(mod)) {
+            return commitRaidIllagerFight(mod, nowTick, raid, "armed");
+        }
+        // 没剑: 材料够 (全在背包, squash 链只补合成不外出挖料) 且本波还没失败过 → 先做剑。
+        if (!_raidSwordCraftFailed) {
+            if (_swordCraftTask == null) {
+                Task craft = makeSwordCraftTaskIfMaterials(mod);
+                if (craft != null) {
+                    _swordCraftTask = craft;
+                    _swordCraftStartTick = nowTick;
+                    Debug.logMessage("[RAID-ILLAGER] no sword but materials ready -> crafting sword first");
+                } else {
+                    _raidSwordCraftFailed = true;
+                    Debug.logMessage("[RAID-ILLAGER] no sword, no materials -> bare-handed fight");
+                }
+            }
+            if (_swordCraftTask != null) {
+                boolean timedOut = nowTick - _swordCraftStartTick > RAID_SWORD_CRAFT_TIMEOUT_TICKS;
+                // isFinished 需要任务至少跑过一 tick (先 start 再查完成)。
+                boolean finished = nowTick > _swordCraftStartTick && _swordCraftTask.isFinished(mod);
+                if (finished || timedOut) {
+                    boolean gotSword = finished && hasWeaponToFight(mod);
+                    _raidSwordCraftFailed = true;
+                    _swordCraftTask = null;
+                    Debug.logMessage("[RAID-ILLAGER] sword craft "
+                            + (gotSword ? "done" : (timedOut ? "timed out" : "failed"))
+                            + " -> fight");
+                    return commitRaidIllagerFight(mod, nowTick, raid, gotSword ? "sword crafted" : "bare-handed");
+                }
+                setTask(_swordCraftTask);
+                return 60.0f;
+            }
+        }
+        return commitRaidIllagerFight(mod, nowTick, raid, "bare-handed");
+    }
+
+    /**
+     * (2026-09-30 C) 做剑目标: 材料【全在背包内】才派 (squash 链只补合成步骤
+     * —— 木棍/木板, 不外出挖料; 追击场景外出挖料 = 白给)。档位: 圆石 ≥2 → 石剑
+     * (0929 补剑闸同款 "材料齐备才选该档"), 否则木剑; 1 根原木可出 4 木板
+     * (2 板 + 棍足够)。都凑不齐返回 null (空手战)。
+     */
+    private static Task makeSwordCraftTaskIfMaterials(AltoClef mod) {
+        int cobble = StorageHelper.countItemInInventoryReal(mod, Items.COBBLESTONE);
+        int stick = StorageHelper.countItemInInventoryReal(mod, Items.STICK);
+        int logs = 0;
+        for (Item l : RAID_LOG_ITEMS) logs += StorageHelper.countItemInInventoryReal(mod, l);
+        int planks = 0;
+        for (Item p : RAID_PLANK_ITEMS) planks += StorageHelper.countItemInInventoryReal(mod, p);
+        boolean woodBase = logs >= 1 || (planks >= 2 && stick >= 1);
+        if (cobble >= 2 && (stick >= 1 || woodBase)) {
+            return TaskCatalogue.getSquashedItemTask(new ItemTarget(Items.STONE_SWORD, 1));
+        }
+        if (woodBase) {
+            return TaskCatalogue.getSquashedItemTask(new ItemTarget(Items.WOODEN_SWORD, 1));
+        }
+        return null;
+    }
+
+    /**
+     * (2026-09-30 C) 掠夺者/卫道士死战提交: 与 commitMeleeFight 同构, 但战斗
+     * 名单只收掠夺者/卫道士 + 贴脸近战怪 (苦力怕不进名单, 交给诱爆/举盾分支)。
+     * _confidentFight=true = 死战 (中途不因威胁公式撤退), 0930 拍板"不限数量"。
+     */
+    private float commitRaidIllagerFight(AltoClef mod, long nowTick, List<Entity> raid, String note) {
+        Debug.logMessage("Combat decision: FIGHT (raid-illager must-kill, " + note + ", raid=" + raid.size() + ")");
+        _confidentFight = true;
+        _inCombat = true;
+        _combatStartTick = nowTick;
+        _runAwayTask = null;
+        for (Entity h : raid) {
+            if (h != null && h.isAlive() && !_fightTargets.contains(h)) _fightTargets.add(h);
+        }
+        addCloseMeleeTargets(mod);
+        _swordCraftTask = null;
+        _defenseState = DefenseState.FIGHT;
+        return 65.0f;
+    }
+
+    /**
      * (2026-09-30 B: 逃跑前先清贴脸, 用户拍板"战斗中优先打近的怪") 决定 RUN 之前
      * 的最后闸门: 批次里有【贴脸(攻击距离内)+已敌对】的近战怪时, 先杀掉再跑 ——
      * 0930 会话五连死实锤 (death#1 铁剑+盾 / death#4 石剑+盾 仍全程 RETREAT 到死):
@@ -1035,6 +1160,11 @@ public class MobDefenseChain extends SingleTaskChain {
                 if (tryConfidentFight(mod, nowTick)) {
                     return 65;
                 }
+                // (2026-09-30 C 掠夺者/卫道士死战覆盖) 激怒的掠夺者/卫道士本身就
+                // 是交战证据, 直接进战斗/先做剑, 不再被下方证据门过滤成"无证据"
+                // (120804 实锤: 追了一路的掠夺者被过滤 → 无条件逃跑, 判决 0 条)。
+                Float raidOverride = tryRaidIllagerOverride(mod, nowTick, getNearbyHostiles(mod));
+                if (raidOverride != null) return raidOverride;
                 // (2026-09-01 用户) 纯近战少怪(1~2, 无远程/无苦力怕)直接打, 不逃。
                 // 保留有剑门槛: 手无寸铁硬顶也没用, 交给下方逃跑兜底。
                 // (2026-09-24 派发证据门) 只对"亲眼可见或实际打过我们"的怪近战直打,
@@ -1136,6 +1266,11 @@ public class MobDefenseChain extends SingleTaskChain {
                     if (tryConfidentFight(mod, nowTick)) {
                         return 65;
                     }
+
+                    // (2026-09-30 C 掠夺者/卫道士死战覆盖) 同款: 公式判输也不逃
+                    // (跑不过), 死战/先做剑。苦力怕在上方已被剔出 toDealWith。
+                    Float raidOverride = tryRaidIllagerOverride(mod, nowTick, toDealWith);
+                    if (raidOverride != null) return raidOverride;
 
                     // Fight or flight: estimate the combined threat and our own strength.
                     double totalThreat = 0;
