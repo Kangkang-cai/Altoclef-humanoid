@@ -593,7 +593,15 @@ public class MobDefenseChain extends SingleTaskChain {
             }
             meleeCount++;
         }
-        boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged || anyCreeper
+        // (2026-09-30 用户拍板"碰到苦力怕不应该逃跑, 不管有没有盾") 苦力怕不再
+        // 参与 retreat 触发: anyCreeper 原先是硬触发项, 但两个专用机制 (盾核弹
+        // /诱爆) 都只在 stateEvaluate 更早的分支里 —— 未点火苦力怕两者都不接
+        // (核弹要 fuse>0.001, 诱爆要 !canShieldNuke), 全部落到本判据无脑逃
+        // (20260930-174725 实锤: 17:58:35 [RETREAT-DEC] isCreeper=true
+        // decide=retreat health=16.6, 全场 0 条 [Diag-creeper]/[BAIT])。逃跑
+        // 又导致苦力怕永远凑不近 3 格点火 → 核弹永远等不到 → 死循环逃。
+        // 未点火 = 不理会 (走近点火后由前置分支接管: 有盾举盾接爆 / 没盾诱爆)。
+        boolean retreat = piglinSwarm > 2 || bruteCount > 0 || anyRanged
                 || meleeCount >= RETREAT_MELEE_THRESHOLD;
         // (2026-09-21) 末影人不再参与 retreat 触发: 原判据 endermanCount>=2 已删,
         // 理由见上方 endermanCount 声明处注释。
@@ -948,9 +956,6 @@ public class MobDefenseChain extends SingleTaskChain {
         // 听见墙后怪不猎杀 (见 filterEngagementEvidence 注释)。
         List<Entity> near = filterEngagementEvidence(mod, getNearbyHostiles(mod));
         if (!isConfidentFight(mod, near)) return false;
-        Debug.logMessage("Combat decision: CONFIDENT FIGHT (health=%.0f%%, shield+sword, enemies=%d)",
-                100.0 * mod.getPlayer().getHealth() / Math.max(1, mod.getPlayer().getMaxHealth()),
-                near.size());
         _confidentFight = true;
         _inCombat = true;
         _combatStartTick = nowTick;
@@ -962,11 +967,17 @@ public class MobDefenseChain extends SingleTaskChain {
         }
         if (_fightTargets.isEmpty()) {
             // 批次全是未点火苦力怕 → 不开战, 交回 EVALUATE (用户任务继续)。
+            // (2026-09-30) 日志移到本检查之后: 原先"CONFIDENT FIGHT"先打、
+            // 空批次再返回 false, 同一秒打出逃跑判决 (174725 实锤 17:58:35),
+            // 日志自相矛盾误导取证。
             _confidentFight = false;
             _inCombat = false;
             _combatStartTick = 0;
             return false;
         }
+        Debug.logMessage("Combat decision: CONFIDENT FIGHT (health=%.0f%%, shield+sword, enemies=%d)",
+                100.0 * mod.getPlayer().getHealth() / Math.max(1, mod.getPlayer().getMaxHealth()),
+                near.size());
         _defenseState = DefenseState.FIGHT;
         return true;
     }
@@ -2534,6 +2545,13 @@ public class MobDefenseChain extends SingleTaskChain {
                 for (Entity entity : hostiles) {
                     // Ignore skeletons
                     if (entity instanceof SkeletonEntity) continue;
+                    // (2026-09-30 用户拍板"碰到苦力怕不应该逃跑, 不管有没有盾")
+                    // 未点火苦力怕不构成"危险": isInDanger 是证据门滤空后逃跑
+                    // 兜底 (20260930-174725 17:59:04/45 两轮 RETREAT 无判决日志,
+                    // nearestThreat 全是苦力怕) 的危险源, 不摘掉会绕过 shouldRetreatMelee
+                    // 的苦力怕豁免继续逃。点火苦力怕到不了这里 (stateEvaluate
+                    // 更早的核弹/诱爆/避爆分支已接管)。
+                    if (isUnfusingCreeper(entity)) continue;
                     if (yieldBlazes && entity instanceof BlazeEntity) continue;
                     if (entity.isInRange(player, SAFE_KEEP_DISTANCE) && !mod.getBehaviour().shouldExcludeFromForcefield(entity) && EntityHelper.isAngryAtPlayer(mod, entity)) {
                         return true;
