@@ -22,6 +22,8 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3i;
 import org.apache.commons.lang3.ArrayUtils;
 
@@ -204,12 +206,18 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // (11:27:16 `[PlaceStuck] placement progress failed at -399, 7, 175 (failCount=1)`)
         // 用户现场: "他自己站在那一个, 刚要跳起来放方块结果任务就跳了" —— 就是这条判负
         // 把刚要起跳放置的动作腰斩。修 = 先认身位占格, 让位后再交给 baritone。
-        BlockPos playerCell = mod.getPlayer().getBlockPos();
-        if (playerCell.equals(_target) || playerCell.up().equals(_target)) {
+        // (2026-09-30 方案B) 身位占格判据从"脚格/头格 == 目标 (精确坐标 floor)"
+        // 升级为"玩家碰撞箱与目标格相交": bot 贴着格边界站时 floor 会在占格/
+        // 不占格之间抖动 (20260930-192728 实锤), 而 vanilla 禁止把方块放进与
+        // 玩家碰撞箱相交的格子 —— 碰撞箱求交才是与放置成败同口径的判据。
+        // 玩家箱 0.6x1.8, 至多跨 2x2x2=8 格, 逐格比对开销可忽略。
+        // (方案A 配套) 让位目标用严格到达 GetToBlockTask: 旧版 bot 在 1.4 格外
+        // 被"≤2 格 holding"豁免停走, 让位永不完成 (同场 50.4s 死锁)。
+        if (playerOccupiesTargetCell(mod)) {
             BlockPos stepOut = pickStepOutPos(mod);
             if (stepOut != null) {
                 setDebugState("Standing in/under target cell, stepping out first");
-                return new GetToBlockTask(stepOut, false);
+                return new GetToBlockTask(stepOut, false, true);
             }
             setDebugState("Standing in/under target cell, no walkable neighbor, wandering");
             _progressChecker.reset();
@@ -382,6 +390,26 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             return p;
         }
         return null;
+    }
+
+    /**
+     * (2026-09-30 方案B) 玩家碰撞箱是否与目标格相交。
+     *
+     * <p>旧判据 {@code getBlockPos()}(精确坐标 floor) == 目标 的缺陷: bot 贴着
+     * 格边界站时, 坐标微动就让脚格在"目标格/邻格"之间抖动 (现场
+     * 20260930-192728 19:44:08~19:44:57, 搭下界门 (-148,53,253) 时 bot 冻在
+     * (-148,53,254) 边缘 50.4s, 让位要求每拍重触发)。而 vanilla 能不能把方块
+     * 放进一格, 真正取决于【玩家碰撞箱与该格是否相交】—— 用它作判据才能与
+     * 放置成败同口径, 且天然涵盖旧判据的"脚格/头格"两种情况 (箱高 1.8 含头)。
+     */
+    private boolean playerOccupiesTargetCell(AltoClef mod) {
+        Box box = mod.getPlayer().getBoundingBox();
+        BlockPos min = new BlockPos(MathHelper.floor(box.minX), MathHelper.floor(box.minY), MathHelper.floor(box.minZ));
+        BlockPos max = new BlockPos(MathHelper.floor(box.maxX), MathHelper.floor(box.maxY), MathHelper.floor(box.maxZ));
+        for (BlockPos p : BlockPos.iterate(min, max)) {
+            if (p.equals(_target)) return true;
+        }
+        return false;
     }
 
     private class PlaceStructureSchematic extends AbstractSchematic {

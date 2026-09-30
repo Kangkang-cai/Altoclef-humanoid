@@ -15,6 +15,9 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
     private final BlockPos _position;
     private final boolean _preferStairs;
     private final Dimension _dimension;
+    // (2026-09-30 方案A) 严格到达: 必须真正站进目标格 (禁用父类"≤2 格 holding"
+    // 豁免)。step-out 让位场景必开, 否则 1.4 格外停走会让位永不完成。
+    private final boolean _strictCellArrivalFlag;
 
     public GetToBlockTask(BlockPos position, boolean preferStairs) {
         this(position, preferStairs, null);
@@ -24,9 +27,20 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
     }
 
     public GetToBlockTask(BlockPos position, boolean preferStairs, Dimension dimension) {
+        this(position, preferStairs, dimension, false);
+    }
+
+    /** (2026-09-30 方案A) strictCellArrival=true 时启用严格到达 (见字段注释)。 */
+    public GetToBlockTask(BlockPos position, boolean preferStairs, boolean strictCellArrival) {
+        this(position, preferStairs, null, strictCellArrival);
+    }
+
+    public GetToBlockTask(BlockPos position, boolean preferStairs, Dimension dimension, boolean strictCellArrival) {
         _dimension = dimension;
         _position = position;
         _preferStairs = preferStairs;
+        _strictCellArrivalFlag = strictCellArrival;
+        _strictCellArrival = strictCellArrival; // 父类开关
     }
 
     public GetToBlockTask(BlockPos position) {
@@ -71,7 +85,8 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
     @Override
     protected boolean isEqual(Task other) {
         if (other instanceof GetToBlockTask task) {
-            return task._position.equals(_position) && task._preferStairs == _preferStairs && task._dimension == _dimension;
+            return task._position.equals(_position) && task._preferStairs == _preferStairs
+                    && task._dimension == _dimension && task._strictCellArrivalFlag == _strictCellArrivalFlag;
         }
         return false;
     }

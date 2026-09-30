@@ -135,6 +135,18 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     private final TimerGame _staleActiveTimer = new TimerGame(4);
     private boolean _staleActiveArmed = false;
 
+    // ===== (2026-09-30 方案A: step-out 严格到达) =====
+    // 调用方置 true 时, "距目标 ≤2 格即 holding" 豁免不生效 —— 必须真正走进目标格。
+    // 现场 20260930-192728: 搭下界门时 PlaceBlockTask 判 bot 贴边占着目标格, 要求
+    // 让位到 (-149,53,253); 本类却因 1.4 格 < 2 直接 "At goal vicinity, holding",
+    // 让位永不完成, 50.4s 死锁 (baritone 对该格还 8 次算不出路径)。严格模式下
+    // ≤2 格改为【直走补完最后一步】(视野对准目标格中心 + 按前进), 带 4s 失速
+    // 退回 wander 的出口, 不会引入新的死锁。
+    protected boolean _strictCellArrival = false;
+    private boolean _strictWalkControl = false;
+    private double _strictWalkBestDist = Double.MAX_VALUE;
+    private final TimerGame _strictWalkStallTimer = new TimerGame(4);
+
     public CustomBaritoneGoalTask(boolean wander) {
         _wander = wander;
     }
@@ -159,6 +171,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         _climbWatchBestY = Integer.MIN_VALUE;
         _directSwimControl = false;
         _directSwimUpMode = false;
+        _strictWalkControl = false;
+        _strictWalkBestDist = Double.MAX_VALUE;
         _wasInWater = mod.getPlayer().isTouchingWater();
         // (2026-08-26 游泳疾跑) 上/下水状态统一由 onTick 切换 allowSprint。
         mod.getClientBaritoneSettings().allowSprint.value = !_wasInWater;
@@ -194,6 +208,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                 _checker.reset();
                 _failCount = 0;
                 if (_directSwimControl) releaseDirectSwim(mod);
+                if (_strictWalkControl) releaseDirectWalk(mod);
             } else {
                 if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
                     setDebugState("Wandering...");
@@ -286,6 +301,32 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                         }
                     }
                 }
+                // (2026-09-30 方案A) 严格到达直走状态机: 一旦进入就持续控键走到
+                // 目标格, 不交还 baritone (它对该格常无路径, 重寻路只会和直走抢键)。
+                if (_strictWalkControl) {
+                    BlockPos target = goalXZ();
+                    if (target == null) {
+                        releaseDirectWalk(mod);
+                    } else {
+                        double dist = horizontalDist(mod, target);
+                        if (dist < _strictWalkBestDist - 0.2) {
+                            _strictWalkBestDist = dist;
+                            _strictWalkStallTimer.reset();
+                        }
+                        if (_strictWalkStallTimer.elapsed()) {
+                            Debug.logMessage("[StrictArrival] direct walk stalled at "
+                                    + String.format("%.1f", dist) + " blocks from goal, wandering to unstick.");
+                            releaseDirectWalk(mod);
+                            _failCount++;
+                            onWander(mod);
+                            return _wanderTask;
+                        }
+                        holdDirectWalk(mod, target);
+                        setDebugState("Strict arrival: walking the last "
+                                + String.format("%.1f", dist) + " blocks directly");
+                        return null;
+                    }
+                }
                 if (!_checker.check(mod)) {
                     // 水中无进展 → 直游绕过 baritone 贴墙寻路循环 (不再 wander)。
                     if (mod.getPlayer().isTouchingWater() && goalXZ() != null) {
@@ -338,6 +379,17 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
                     }
                     BlockPos nearGoal = goalXZ();
                     if (nearGoal != null && mod.getPlayer().getBlockPos().isWithinDistance(nearGoal, 2)) {
+                        if (_strictCellArrival) {
+                            // (2026-09-30 方案A) 严格到达: ≤2 格不算到, 进入直走
+                            // 状态机补完最后一步 (现场 20260930-192728: 此处旧
+                            // "holding" 与父任务让位要求互等 50.4s 死锁)。
+                            _strictWalkBestDist = horizontalDist(mod, nearGoal);
+                            _strictWalkStallTimer.reset();
+                            holdDirectWalk(mod, nearGoal);
+                            setDebugState("Strict arrival: walking the last "
+                                    + String.format("%.1f", _strictWalkBestDist) + " blocks directly");
+                            return null;
+                        }
                         _checker.reset();
                         setDebugState("At goal vicinity, holding (skip wander)");
                         return null;
@@ -404,6 +456,7 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
         if (_directSwimControl) releaseDirectSwim(mod);
+        if (_strictWalkControl) releaseDirectWalk(mod);
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // (2026-08-26 游泳疾跑) 恢复 baritone 疾跑 (防停在水中时 allowSprint
         // 停留在 false, 上岸后不能疾跑)。
@@ -474,6 +527,33 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         _breaching = false;
         _breathJumpPhase = true;
         _breathPaceTimer.reset();
+        _checker.reset();
+    }
+
+    /**
+     * (2026-09-30 方案A) 严格到达直走: 停 baritone, 视角对准目标格中心 (保持
+     * 当前视线俯仰为 0, 只走水平), 按前进; 目标比脚高一格时按跳 (vanilla 无
+     * auto-jump)。与 holdDirectSwim 平行的陆地版。
+     */
+    private void holdDirectWalk(AltoClef mod, BlockPos target) {
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        LookHelper.lookAt(mod, new Vec3d(target.getX() + 0.5, mod.getPlayer().getY(), target.getZ() + 0.5));
+        mod.getInputControls().hold(Input.MOVE_FORWARD);
+        mod.getInputControls().release(Input.SNEAK);
+        if (target.getY() > mod.getPlayer().getBlockPos().getY()) {
+            mod.getInputControls().hold(Input.JUMP);
+        } else {
+            mod.getInputControls().release(Input.JUMP);
+        }
+        _strictWalkControl = true;
+    }
+
+    private void releaseDirectWalk(AltoClef mod) {
+        mod.getInputControls().release(Input.MOVE_FORWARD);
+        mod.getInputControls().release(Input.JUMP);
+        mod.getInputControls().release(Input.SNEAK);
+        _strictWalkControl = false;
+        _strictWalkBestDist = Double.MAX_VALUE;
         _checker.reset();
     }
 
