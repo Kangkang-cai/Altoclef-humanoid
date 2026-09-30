@@ -565,7 +565,11 @@ public class Settings implements IFailableConfigFile {
             Items.RAIL,
             Items.IRON_HELMET, Items.IRON_CHESTPLATE, Items.IRON_LEGGINGS, Items.IRON_BOOTS,
             Items.WOODEN_PICKAXE, Items.WOODEN_AXE, Items.WOODEN_SHOVEL, Items.WOODEN_SWORD, Items.WOODEN_HOE,
-            Items.STONE_PICKAXE, Items.STONE_AXE, Items.STONE_SHOVEL, Items.STONE_SWORD, Items.STONE_HOE,
+            // (2026-09-30 用户拍板) STONE_AXE 移出名单 — 白名单工具绕过档5 工具淘汰
+            // 判据("有更好同类才丢"), 0930 19:34 现场: 背包有 wheat_seeds x64/砂土等
+            // 杂物, 唯一的石斧因在热栏(档1 按背包下标顺序取第一个命中)被先丢。移出后
+            // 石斧走档5: 无更好斧子/重复石斧不丢, 杂物(种子等)优先。
+            Items.STONE_PICKAXE, Items.STONE_SHOVEL, Items.STONE_SWORD, Items.STONE_HOE,
             // (2026-09-29 用户拍板) 金质装备/工具进白名单: 猪灵谈判用完即丢,
             // 不占背包。金锭本身在 importantItems 里, 不受影响。
             Items.GOLDEN_HELMET, Items.GOLDEN_CHESTPLATE, Items.GOLDEN_LEGGINGS, Items.GOLDEN_BOOTS,
