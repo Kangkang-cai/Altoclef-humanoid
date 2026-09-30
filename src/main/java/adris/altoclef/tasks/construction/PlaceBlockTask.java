@@ -8,12 +8,14 @@ import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.schematic.AbstractSchematic;
 import baritone.api.schematic.ISchematic;
 import baritone.api.utils.BlockOptionalMeta;
+import baritone.api.utils.input.Input;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -24,6 +26,7 @@ import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 import org.apache.commons.lang3.ArrayUtils;
 
@@ -59,6 +62,12 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     private long _wanderSinceMs = 0;
     private Task _materialTask;
     private int _failCount = 0;
+    // (2026-09-30 擦边微位移) true = 正在按前进脱离目标格擦边。脱离/任务结束必须释放。
+    private boolean _nudgeActive = false;
+    /** 本轮 nudge 起始 tick; 0 = 未在 nudge。 */
+    private int _nudgeSinceTick = 0;
+    /** nudge 硬上限: 1.5s (30 tick) 仍未脱离 → 判定方向被堵, 松键落 wander 兜底。 */
+    private static final int NUDGE_MAX_TICKS = 30;
     // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
     private boolean _protectedRefusalLogged = false;
 
@@ -157,6 +166,7 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     protected void onStart(AltoClef mod) {
         _progressChecker.reset();
         _wanderSinceMs = 0;
+        _nudgeSinceTick = 0;
         // If we get interrupted by another task, this might cause problems...
         //_wanderTask.resetWander();
     }
@@ -214,6 +224,18 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // (方案A 配套) 让位目标用严格到达 GetToBlockTask: 旧版 bot 在 1.4 格外
         // 被"≤2 格 holding"豁免停走, 让位永不完成 (同场 50.4s 死锁)。
         if (playerOccupiesTargetCell(mod)) {
+            // (2026-09-30 擦边微位移, 方案B 补丁) 21:26 现场: bot 已站进让位格
+            // (-254,73,172), 但身体箱 minX=-254.01 擦进目标格 (-255,73,172)
+            // 0.01 格 (脱出需中心 x≥-253.70, bot 在 -253.71, 差 1cm)。此时
+            // GetToBlockTask 的格口径 isFinished 已为 true (floor 格 == 让位格),
+            // 派导航它永远不再动; 而本任务箱口径恒判占格 → 每拍互等死锁 4m42s。
+            // 处置: floor 格已在目标格之外 (只是擦边) 时, 不派导航, 直接朝
+            // 远离目标格中心的方向微位移, 每拍复查, 脱离即松键。
+            BlockPos playerCellNow = mod.getPlayer().getBlockPos();
+            if (!playerCellNow.equals(_target) && !playerCellNow.up().equals(_target)) {
+                setDebugState("Brushing target cell edge, nudging away");
+                return nudgeAwayFromTarget(mod);
+            }
             BlockPos stepOut = pickStepOutPos(mod);
             if (stepOut != null) {
                 setDebugState("Standing in/under target cell, stepping out first");
@@ -223,6 +245,8 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             _progressChecker.reset();
             return _wanderTask;
         }
+        // (擦边补丁收尾) 已脱离目标格 → 任何残留的 nudge 按键必须释放。
+        releaseNudge(mod);
 
         if (_autoCollectStructureBlocks) {
             if (_materialTask != null && _materialTask.isActive() && !_materialTask.isFinished(mod)) {
@@ -295,6 +319,8 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        // (2026-09-30 擦边微位移) 任务被打断时 nudge 前进键可能还按着, 必须释放。
+        releaseNudge(mod);
         mod.getClientBaritone().getBuilderProcess().onLostControl();
     }
 
@@ -390,6 +416,41 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             return p;
         }
         return null;
+    }
+
+    /**
+     * (2026-09-30 擦边微位移) 朝远离目标格中心的水平方向按前进, 侧移 1~2cm 脱离
+     * 擦边重叠。进入时记起始 tick; 脱离由 onTick 的占格复查收口 (releaseNudge);
+     * {@link #NUDGE_MAX_TICKS} 内未脱离 → 方向被堵, 松键落 wander 兜底 (防按死)。
+     */
+    private Task nudgeAwayFromTarget(AltoClef mod) {
+        if (_nudgeSinceTick == 0) {
+            _nudgeSinceTick = WorldHelper.getTicks();
+        } else if (WorldHelper.getTicks() - _nudgeSinceTick > NUDGE_MAX_TICKS) {
+            Debug.logMessage("[PlaceNudge] 擦边脱离 1.5s 未成功 (方向疑似被堵), 松键落 wander");
+            releaseNudge(mod);
+            _progressChecker.reset();
+            return _wanderTask;
+        }
+        _nudgeActive = true;
+        Vec3d p = mod.getPlayer().getPos();
+        double dx = p.x - (_target.getX() + 0.5);
+        double dz = p.z - (_target.getZ() + 0.5);
+        // dx/dz 至少一个非零: floor 格 != 目标格时玩家中心必在别的格, 不可能与
+        // 目标格中心完全重合。lookAt 只改 yaw (y 取玩家当前 y, 不抬头/低头)。
+        LookHelper.lookAt(mod, new Vec3d(p.x + dx, p.y, p.z + dz));
+        mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+        mod.getInputControls().hold(Input.MOVE_FORWARD);
+        mod.getInputControls().release(Input.SNEAK);
+        return null;
+    }
+
+    /** (擦边微位移) 释放 nudge 按键, 复位状态。幂等。 */
+    private void releaseNudge(AltoClef mod) {
+        if (!_nudgeActive) return;
+        mod.getInputControls().release(Input.MOVE_FORWARD);
+        _nudgeActive = false;
+        _nudgeSinceTick = 0;
     }
 
     /**
