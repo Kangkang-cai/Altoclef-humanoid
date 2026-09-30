@@ -346,6 +346,22 @@ public class SwimDiveChain extends TaskChain {
         } else if (_lastDiveTick != Long.MIN_VALUE
                 && (nowTick - _lastDiveTick) < RE_DIVE_COOLDOWN_TICKS) {
             diagGate(mod, "COOLDOWN_BLOCKING");
+        } else if (WaterStandHelper.probe(mod, mod.getPlayer()).status
+                == WaterStandHelper.Status.NONE) {
+            // (2026-09-30 B 闸门) 深水无立足点 → 两档接管都无收益, 不接管:
+            //   垫档 probe 不到 spot 必败 (PLACE_NO_SPOT); 下潜档 3s 强制前游与
+            //   baritone 自身导航重复。而每次接管→归还的代价远超收益: 归还时
+            //   SingleTaskChain.onTick 无条件 _mainTask.reset() → onStart 重跑 →
+            //   BeatMinecraft2Task 整个通关流程回卷到 (start) (20260929-225212
+            //   场次 23:24:26/23:24:44 两次实证: [SWIM-DIVE] → 归还 → SESSION
+            //   START → portal 子链从零重建, 73s 净位移 5 格; baritone 算出的
+            //   下钻路径 dest=(44,29,122) 活了不到 2s 就被下一轮接管掐断)。
+            //   空气不足在条件(2)已 reset 走不到这里, 无需重复判空气。
+            //   已知取舍: 20260922-224740 型"深水柱贴壁"场景失去 dive 兜底,
+            //   交给 NAV-STUCK/JumpStuck 等既有看门狗; resetWindow 让本探针每
+            //   3s 复查一次, bob 到有立足点处自然恢复垫档能力。
+            resetWindow();
+            diagGate(mod, "DEEP_WATER_NO_FOOTING");
         } else if (!PillarJumpHelper.hasMaterials(mod, PillarJumpHelper.allMaterials())) {
             // 无建材 → 旧路径：直接下潜。
             triggerDive(mod, stuckForTicks);
