@@ -393,6 +393,18 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         // DiveToGrabItemTask 下潜处理, 这里只管"落地/在洞穴/在树顶"等陆地情况。
         if (obj.isOnGround()) {
             BlockPos ib = obj.getBlockPos();
+            // (2026-09-30 农田内嵌掉落物) farmland/泥土路等方块碰撞面只有 15/16 格,
+            // 落在其上的物品脚底 y≈89.94 <90 → floor 后 blockpos 落在【农田块内部】
+            // (20260930-150356 实锤: 本场全部 wheat 目标 itemBlock=farmland)。
+            // 非空气目标块 baritone 无法"站入" → A* 穷举爆炸(8.8M movements 算不
+            // 出路径) → PickupStall 4s 拉黑换下一颗麦子再爆算, 农田上散落的每颗
+            // 掉落麦子都要烧一轮, 外观即"永远在导航去捡麦子、任务永不超时"。
+            // 物品所在格非空气 → 目标改其上一格 (空气/作物, 无碰撞可站), 站上去
+            // 即与物品同格碰撞拾取。同族: 泥土路/灵魂沙上的掉落物 (14/16 碰撞)。
+            if (!mod.getWorld().getBlockState(ib).isAir()
+                    && !WorldHelper.isSolid(mod, ib.up())) {
+                return new Vec3d(ib.getX() + 0.5, ib.getY() + 1, ib.getZ() + 0.5);
+            }
             // (2026-09-19 洞沿掉落物) 物品"落地"但其坐标列下方 2 格内无实心 —
             // 卡在洞沿/方块棱边上 (支撑在邻列, 坐标列读空气) → GoalBlock 站不
             // 进去, baritone active-stale 每 4s 强制重寻路 + 触发全图重扫, bot
