@@ -88,7 +88,10 @@ public class MobDefenseChain extends SingleTaskChain {
     // 逃离怪物的目标距离 (2026-08-21 用户要求从 30 提到 45): 30 格时怪物
     // (尤其骷髅弓箭手 15 格射程 + 追击) 很快重新进入威胁范围, 反复触发
     // "逃离→刚停下→又逃离" 的抖动; 45 格一次跑出真实安全区。
-    private static final double DANGER_KEEP_DISTANCE = 15 * 3;
+    // (2026-09-30 用户拍板, 推翻 08-21 的 45) 逃跑距离最多【直线 24 格】:
+    // 180851 现场死亡恢复期"反复逃跑 32/45 格"骚扰拾取与进食, 跑太远纯损耗。
+    // 棘轮步进不变 (8→16→24 封顶)。LONG_RETREAT(弃区 100 格) 是另一机制, 未动。
+    private static final double DANGER_KEEP_DISTANCE = 24;
 
     private static final double SAFE_KEEP_DISTANCE = 8;
     // (2026-09-01 用户) 纯近战怪数量达到此值才逃跑(被围殴), 1~2 只直接打。
