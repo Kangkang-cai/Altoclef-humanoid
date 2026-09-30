@@ -57,7 +57,12 @@ public final class KnowledgeMemory {
 
     public enum StructureType {
         VILLAGE(
-                new Block[]{Blocks.DIRT_PATH, Blocks.OAK_LOG, Blocks.FARMLAND},
+                // (2026-09-30 去掉 OAK_LOG) OAK_LOG 是森林通用方块: 橡树林/山地里
+                // 任意一根过了真视线的橡木都被记成村庄中心 (20260930 实锤 4 连报,
+                // knowledge.log 积累 459 条假 VILLAGE, 全在无村庄的橡树地形)。
+                // 曾考虑"橡木须与土径/耕地共现"的守卫, 用户拍板直接删 —— 只留
+                // 村庄专属的 DIRT_PATH/FARMLAND。
+                new Block[]{Blocks.DIRT_PATH, Blocks.FARMLAND},
                 8, 32, 4, true),
         RUINED_PORTAL(
                 new Block[]{Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN},
