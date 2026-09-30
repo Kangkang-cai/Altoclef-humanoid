@@ -763,6 +763,13 @@ public class BeatMinecraft2Task extends Task {
     // 地表食物门跳过阈值: 夜晚(canSleep) + 无床(hasBedRegard=false) + 食物分
     // 严格大于该值 → 不派 CollectFoodTask, 落到铁装/钻石挖矿分支下矿熬夜。
     private static final int NIGHT_NO_BED_SKIP_FOOD_MIN_UNITS = 20;
+    // (2026-09-30 远征食物闸, 用户拍板 A) 峰值锁存后, 从地表派发新下矿远征的
+    // 最低食物分。锁存后食物闸唯一触发线是危险线 minFoodUnits=10 —— 那是
+    // "别饿死"线, 不是"够撑一次下矿远征"线。100039 场实锤: 11:16:55 food=12
+    // (腐肉x2+苹果x1) 放行 raw_iron x9 深挖远征, 4.5 分钟烧到 0, 饥饿危机
+    // 抢断 → 从 y≈28 爬回地表收 120 units, 下去+回爬 ≈5 分钟纯浪费。
+    // 40 ≈ 15 分钟余量, 覆盖一次 9 铁往返; 只闸新远征派发, 不拦续跑。
+    private static final int EXPEDITION_MIN_FOOD_UNITS = 40;
     // 上述"跳过地表收食物"状态的边沿闩锁 (长驻状态分支必须边沿触发): 进出各打一条
     // [NIGHT-MINE] 诊断, 状态翻转才落盘, 不逐 tick 刷屏。
     private boolean _nightNoBedFoodSkipActive = false;
@@ -2816,6 +2823,30 @@ public class BeatMinecraft2Task extends Task {
                 boolean gearMinMet = ironGearMinMet(mod);
                 logShieldDiagIfNotMet(mod, gearMinMet);
                 if (!gearMinMet && !eyeGearSatisfied) {
+                    // (2026-09-30 远征食物闸, 用户拍板 A) 锁存后从地表派发新铁装
+                    // 远征前要求 foodScore ≥ EXPEDITION_MIN_FOOD_UNITS, 不满足时
+                    // 同 tick 改派收食物。旁路: ① 地下/坑内 (进行中任务不拦,
+                    // 不回卷, 与 0901"地下 ≤10 才回地表"口径一致); ② 夜间无床
+                    // (0925 口径: food>20 直接下矿熬夜, 不动)。未锁存时本闸不生效
+                    // —— 未锁存时食物闸 (:2728 起) 本身就要求 food ≥ 120 才会
+                    // 走到这里。
+                    boolean surfaceNow = !isUndergroundDebounced(mod) && !isInPit(mod);
+                    boolean nightNoBedBypass = WorldHelper.canSleep()
+                            && !hasBedRegard(mod)
+                            && foodScore > NIGHT_NO_BED_SKIP_FOOD_MIN_UNITS;
+                    if (surfaceNow && FoodChain.s_foodPeakReached
+                            && !nightNoBedBypass
+                            && foodScore < EXPEDITION_MIN_FOOD_UNITS) {
+                        diagIronPhase(mod, "expedition food gate",
+                                "food=" + foodScore + " < " + EXPEDITION_MIN_FOOD_UNITS
+                                        + " -> collect food first (peakLatched=true)");
+                        Debug.logToFile("altoclef_diag.log",
+                                "[MAIN-FIX]\t[ExpeditionFoodGate]\tblock iron-gear dispatch food="
+                                        + foodScore + "/" + EXPEDITION_MIN_FOOD_UNITS
+                                        + " -> CollectFoodTask before mining");
+                        _foodTask = new CollectFoodTask(collectTargetUnits);
+                        return _foodTask;
+                    }
                     // (2026-08-28 已有盾则剔除 SHIELD 目标) 避免副手/主手已有
                     // 盾却还在铁装备阶段重复做盾、缺材料卡死。
                     diagIronPhase(mod, "advance iron gear",
