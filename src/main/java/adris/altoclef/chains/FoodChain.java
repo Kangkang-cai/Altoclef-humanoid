@@ -208,7 +208,15 @@ public class FoodChain extends SingleTaskChain {
         boolean combatEatExempt = updateLowHealthEatLatch(mod, hasFood, needEat);
 
         // We're in danger, don't eat now!!
-        if (mod.getMobDefenseChain().isDoingAcrobatics() || mod.getMLGBucketChain().isFallingOhNo(mod)) {
+        // (2026-09-30 C 用户"离挺远了还不触发吃东西恢复") 低血豁免期【放行防御链
+        // "杂技"闸】: _doingFunkyStuff 在逃跑分支置位且整个 RETREAT 期间不清
+        // (stateRetreat 只清盾牌相关), 撤退全程 isDoingAcrobatics=true —— 而撤退
+        // 恰是用户设计里"拉开距离然后吃东西"的执行段。130452 实锤: hp 2.5、
+        // exempt=true、背包 70 食物分, 被 blocked=acrobatics 挡 30s+ → 回打 →
+        // 死亡 #1。豁免锁存自带 6 格贴脸中止, 敞开时间可控。MLG 坠落是物理安全
+        // 闸, 照旧无条件挡。
+        if ((mod.getMobDefenseChain().isDoingAcrobatics() && !combatEatExempt)
+                || mod.getMLGBucketChain().isFallingOhNo(mod)) {
             stopEat(mod);
             logFoodDiag(mod, "idle", "acrobatics-or-falling");
             return Float.NEGATIVE_INFINITY;
