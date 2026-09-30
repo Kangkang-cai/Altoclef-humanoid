@@ -8,6 +8,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -76,13 +77,20 @@ public class BotBehaviour {
         if (_mod.getWorldMemory().getLostPortalLocations().contains(pos)) {
             return true;
         }
-        Block block = _mod.getWorld().getBlockState(pos).getBlock();
+        // (2026-09-30 停机竞态) 退服/关服时 world 先于 baritone 线程卸载, 本谓词
+        // 由 baritone 侧线程消费 → getWorld()==null NPE (14:31:48 停服实锤)。
+        // world 已卸载则无破坏/放置决策可言, 视为非门体放行。
+        ClientWorld world = _mod.getWorld();
+        if (world == null) {
+            return false;
+        }
+        Block block = world.getBlockState(pos).getBlock();
         if (block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_PORTAL_FRAME) {
             return true;
         }
         if (block == Blocks.OBSIDIAN || block == Blocks.CRYING_OBSIDIAN) {
             for (Direction dir : Direction.values()) {
-                if (_mod.getWorld().getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
+                if (world.getBlockState(pos.offset(dir)).getBlock() == Blocks.NETHER_PORTAL) {
                     return true;
                 }
             }
