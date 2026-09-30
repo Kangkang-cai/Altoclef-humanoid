@@ -15,6 +15,7 @@ import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.CreeperBaitSignal;
 import adris.altoclef.util.helpers.HitRegistry;
 import adris.altoclef.util.helpers.PathReachabilityHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -511,11 +512,18 @@ public class MobDefenseChain extends SingleTaskChain {
      * 逃跑仅保留给三类: (a) 存在远程攻击者(能射); (b) 存在苦力怕(爆炸需举盾/
      * 远离); (c) 纯近战怪数量 ≥ RETREAT_MELEE_THRESHOLD(被围殴)。
      * 其余 (近战怪 1~2 只) → 返回 false, 走"直接战斗"。
+     * (2026-09-30 用户拍板) 掠夺者(弩)/卫道士(斧)跑不掉, 不逃: 卫道士会冲刺,
+     * 掠夺者边追边射, 被追时逃跑 = 边逃边挨打只延长挨打时间 —— 与末影人 0921
+     * 同口径, 全数量级死战 (单目标锁保证一次接战一只)。唤魔者明确不在内 (本体
+     * 不追人, 尖牙/恼鬼另算)。低血量逃生豁免见下方 LOW_HEALTH_FORCE_RETREAT 闸。
      * 附带 [RETREAT-DEC] 判决日志 (0.5s 节流)。
      */
     private boolean shouldRetreatMelee(AltoClef mod, List<Entity> hostiles) {
         boolean anyRanged = false, anyCreeper = false;
         int meleeCount = 0;
+        // (2026-09-30 用户拍板) 掠夺者/卫道士"跑不掉"计数: 不参与 anyRanged /
+        // meleeCount, 因此不再触发任何逃跑分支 (含 ≥3 围殴门槛)。
+        int raidIllagerCount = 0;
         // (2026-09-15 用户) 激怒猪灵围殴实测打不过 3 只(持剑): 感知到的猪灵系
         // 超过 2 只直接跑, 不进 melee-few 判定硬打。只数"看得见"的 (模仿人类,
         // 墙后/没看见的不算, 与 GOLD-GATE 挖金闸同口径)。激怒猪灵已在敌对
@@ -544,6 +552,12 @@ public class MobDefenseChain extends SingleTaskChain {
             if (CreeperBaitSignal.isBaiting(h)) continue;
             if (h instanceof EndermanEntity) { endermanCount++; continue; }
             if (h instanceof CreeperEntity) { anyCreeper = true; continue; }
+            // (2026-09-30 用户拍板) 掠夺者/卫道士 → 死战名单, 先于 isRangedThreat
+            // (掠夺者弩在远程名单里, 不截走会照旧触发必逃)。
+            if (h instanceof PillagerEntity || h instanceof VindicatorEntity) {
+                raidIllagerCount++;
+                continue;
+            }
             if (isRangedThreat(h)) { anyRanged = true; continue; }
             if (h instanceof PiglinBruteEntity) {
                 bruteCount++;
@@ -565,7 +579,12 @@ public class MobDefenseChain extends SingleTaskChain {
         // (2026-09-21) 末影人已全数量级不触发 retreat, 本行 endermanCount==0 的
         // 豁免保留语义不变: 场上有末影人时不因低血量强制撤 (撤也撤不掉)。
         if (!retreat && endermanCount == 0 && mod.getPlayer().getHealth() <= LOW_HEALTH_FORCE_RETREAT) {
-            retreat = true;
+            // (2026-09-30 用户拍板) 掠夺者/卫道士在场时, 低血量逃生改为"有食物才撤":
+            // 撤退目的 = 拉开距离吃一口回血再回来打 (撤退结束 → EVALUATE → 进食链
+            // 接管回血, 恢复后下一轮接战即 FIGHT); 没食物撤了也是白挨打 → 必须击杀。
+            if (raidIllagerCount == 0 || StorageHelper.calculateInventoryFoodScore(mod) > 0) {
+                retreat = true;
+            }
         }
         // (2026-09-19 18:55 用户"有药水效果还逃跑应该避免"/"墙完工坚守到8分钟") 安全
         // 屋豁免: 威胁只有烈焰人时 (火伤被防火效果免疫 / 被围场墙挡), 人在自己的围场
@@ -600,6 +619,7 @@ public class MobDefenseChain extends SingleTaskChain {
             _lastRetreatDecLogMs = nowMs;
             String m = "[RETREAT-DEC] meleeCount=" + meleeCount
                     + " endermanCount=" + endermanCount
+                    + " raidIllagerCount=" + raidIllagerCount
                     + " piglinSwarm=" + piglinSwarm
                     + " bruteCount=" + bruteCount
                     + " isRanged=" + anyRanged
