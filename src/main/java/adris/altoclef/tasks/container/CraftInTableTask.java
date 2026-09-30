@@ -439,6 +439,22 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
             // (它内部读到空 → "Output slot empty" return) → 来回 4-5 次 (日志做石剑时 5 次
             // 反复实锤)。加 isNotEmpty() 保证只有真看到成品才收。
             if (!outSlot.isEmpty() && outSlot.getItem() == target.getOutputItem()) {
+                // (2026-09-30 收货互踩修复) 输出格就绪时, 若子树里已有【本目标的活配方书
+                // 合成任务】且不在放弃冷却期, 保持原子树不翻面 (return null = 框架续 tick
+                // 当前 _sub): 配方书任务自己内部就有收货分支 (onTick 输出格非空 → 返回
+                // ReceiveCraftingOutputSlotTask), 翻面重派独立收货会 STOP 它正在等 slot
+                // 延迟窗的 ClickSlotTask → 点击永不落地; 下一拍输出格被重建实例的
+                // 重填充清掉 → "Output slot empty ↔ Waiting for recipe book click" 每 tick
+                // 互踩死循环 (20260930-151714 15:22:05-29 实锤: syncId 9→17→33→49→97
+                // 界面 4 次/秒重开, gridwar 零 [SlotClick], 5 个重建实例 5 次 CraftFill)。
+                // 无活合成任务或其在冷却期时, 仍走独立收货 — 保住 2026-08-28"成品先收"
+                // 修复的原始目的 (合成任务不在场/哑火时的收货路径)。
+                if (thisOrChildSatisfies(task -> task instanceof CraftGenericWithRecipeBooksTask craftTask
+                        && craftTask.getTarget().getOutputItem() == target.getOutputItem()
+                        && !craftTask.isInGiveUpCooldown())) {
+                    setDebugState("Getting output (held by live craft task)");
+                    return null;
+                }
                 setDebugState("Getting output");
                 return new ReceiveCraftingOutputSlotTask(outputSlot, target.getTargetCount());
             }

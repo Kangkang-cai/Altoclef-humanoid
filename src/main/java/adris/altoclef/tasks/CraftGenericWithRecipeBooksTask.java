@@ -398,6 +398,17 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         return false;
     }
 
+    /** (2026-09-30 收货互踩修复) 供父任务判断"子树里的合成任务是谁的"。 */
+    public RecipeTarget getTarget() {
+        return _target;
+    }
+
+    /** (2026-09-30 收货互踩修复) 本配方是否处于放弃冷却期 (与 onTick:123 同口径)。
+     *  冷却期中本任务不会收货/填充, 父任务不应因此保持原子树, 需另派独立收货。 */
+    public boolean isInGiveUpCooldown() {
+        return _giveUpOutputItem == _target.getOutputItem() && System.currentTimeMillis() < _giveUpUntilMs;
+    }
+
     @Override
     protected String toDebugString() {
         return "Crafting (w/ RECIPE): " + _target;
