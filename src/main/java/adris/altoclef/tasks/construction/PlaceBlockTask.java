@@ -25,6 +25,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
@@ -71,11 +72,33 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
     private boolean _protectedRefusalLogged = false;
 
+    // (2026-09-30 方案A 悬空垫脚) 放置的物理前提 = 目标格至少有一个实心邻格提供
+    // 可点击依附面。废墟门悬空缺框场景 (20260930-221044): 模具格 (-255,73,172)
+    // 六邻全空气 (placeFaces=NONE), baritone builder 不自主搭脚手架, 放置必然失败
+    // → [PlaceStuck] 无限重试 (failCount=1..4 + wander 循环, 31.5s 零进展)。
+    // 处置: 目标悬空时 one-shot 先垫下方一格 —— 垫脚格自身必须有依附面, 否则继续
+    // 下探 (总深度上限 _scaffoldMaxDepth, 子任务递减继承); 垫好后目标获得顶面,
+    // 回到正常放置。垫不上 (垫脚任务结束仍未就位) 或探底无面 → _scaffoldGaveUp,
+    // 落回原有 wander/alternative 失败处理, 不无限重试。
+    private static final int SCAFFOLD_MAX_DEPTH = 3;
+    /** 本任务实例还允许的垫脚下探深度 (子任务递减继承, 防无界递归)。 */
+    private final int _scaffoldMaxDepth;
+    private Task _scaffoldTask;
+    /** 当前正在垫的格子 (一定在 _target 正下方链上)。 */
+    private BlockPos _scaffoldCell;
+    /** one-shot 放弃标记: 垫脚失败/探底无面后本实例不再尝试。 */
+    private boolean _scaffoldGaveUp = false;
+
     public PlaceBlockTask(BlockPos target, Block[] toPlace, boolean useThrowaways, boolean autoCollectStructureBlocks) {
+        this(target, toPlace, useThrowaways, autoCollectStructureBlocks, SCAFFOLD_MAX_DEPTH);
+    }
+
+    protected PlaceBlockTask(BlockPos target, Block[] toPlace, boolean useThrowaways, boolean autoCollectStructureBlocks, int scaffoldMaxDepth) {
         _target = target;
         _toPlace = toPlace;
         _useThrowaways = useThrowaways;
         _autoCollectStructureBlocks = autoCollectStructureBlocks;
+        _scaffoldMaxDepth = scaffoldMaxDepth;
     }
 
     public PlaceBlockTask(BlockPos target, Block... toPlace) {
@@ -167,6 +190,11 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         _progressChecker.reset();
         _wanderSinceMs = 0;
         _nudgeSinceTick = 0;
+        // (2026-09-30 悬空垫脚) 每次启动重置垫脚 one-shot 状态 (任务被父链重建
+        // 后应允许重新尝试垫脚; 垫脚任务实例本身不保留, 防跨重启引用失效)。
+        _scaffoldTask = null;
+        _scaffoldCell = null;
+        _scaffoldGaveUp = false;
         // If we get interrupted by another task, this might cause problems...
         //_wanderTask.resetWander();
     }
@@ -247,6 +275,55 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         }
         // (擦边补丁收尾) 已脱离目标格 → 任何残留的 nudge 按键必须释放。
         releaseNudge(mod);
+
+        // (2026-09-30 方案A 悬空垫脚) 无依附面 = 放置物理不可能, 不用烧 progress
+        // 失败次数, 确定性判据直接垫。见字段区注释。
+        if (hasAttachFace(mod, _target)) {
+            // 有依附面 (含垫脚完成后的情况): 清理垫脚状态, 走正常放置。
+            if (_scaffoldTask != null) {
+                Debug.logMessage("[PlaceScaffold] 垫脚格 " + _scaffoldCell.toShortString()
+                        + " 已就位, 继续放置 " + _target.toShortString());
+                _scaffoldTask = null;
+                _scaffoldCell = null;
+            }
+        } else if (!_scaffoldGaveUp && _scaffoldMaxDepth > 0) {
+            if (_scaffoldTask != null) {
+                if (WorldHelper.isSolid(mod, _scaffoldCell)) {
+                    Debug.logMessage("[PlaceScaffold] 垫脚格 " + _scaffoldCell.toShortString()
+                            + " 已就位, 继续放置 " + _target.toShortString());
+                    _scaffoldTask = null;
+                    _scaffoldCell = null;
+                } else if (_scaffoldTask.isActive() && !_scaffoldTask.isFinished(mod)) {
+                    setDebugState("Scaffolding support below at " + _scaffoldCell.toShortString());
+                    _progressChecker.reset();
+                    return _scaffoldTask;
+                } else {
+                    Debug.logMessage("[PlaceScaffold] 垫脚任务结束仍未垫上 " + _scaffoldCell.toShortString()
+                            + " (one-shot 放弃, 落回 wander/alternative)");
+                    _scaffoldTask = null;
+                    _scaffoldCell = null;
+                    _scaffoldGaveUp = true;
+                }
+            } else {
+                BlockPos cell = _target;
+                int depth = 0;
+                while (!hasAttachFace(mod, cell) && depth < _scaffoldMaxDepth) {
+                    cell = cell.down();
+                    depth++;
+                }
+                if (!cell.equals(_target) && hasAttachFace(mod, cell)) {
+                    Debug.logMessage("[PlaceScaffold] 目标 " + _target.toShortString()
+                            + " 悬空无依附面, 先垫 " + cell.toShortString() + " (下探 " + depth + " 格)");
+                    _scaffoldCell = cell;
+                    _scaffoldTask = new PlaceStructureBlockTask(cell, _scaffoldMaxDepth - depth);
+                    _progressChecker.reset();
+                    return _scaffoldTask;
+                }
+                Debug.logMessage("[PlaceScaffold] 目标 " + _target.toShortString() + " 悬空且下探 "
+                        + _scaffoldMaxDepth + " 格仍无依附面 (one-shot 放弃)");
+                _scaffoldGaveUp = true;
+            }
+        }
 
         if (_autoCollectStructureBlocks) {
             if (_materialTask != null && _materialTask.isActive() && !_materialTask.isFinished(mod)) {
@@ -469,6 +546,20 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         BlockPos max = new BlockPos(MathHelper.floor(box.maxX), MathHelper.floor(box.maxY), MathHelper.floor(box.maxZ));
         for (BlockPos p : BlockPos.iterate(min, max)) {
             if (p.equals(_target)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * (2026-09-30 方案A 悬空垫脚) 目标格六邻是否至少有一个实心方块 —— 即 vanilla
+     * 放置是否存在可点击的依附面。液体/空气都算无面。悬空无面时放置物理不可能,
+     * baritone builder 也不会自主搭脚手架 (20260930-221044 实证), 由垫脚逻辑收口。
+     */
+    private static boolean hasAttachFace(AltoClef mod, BlockPos pos) {
+        for (Direction dir : Direction.values()) {
+            if (WorldHelper.isSolid(mod, pos.offset(dir))) {
+                return true;
+            }
         }
         return false;
     }
