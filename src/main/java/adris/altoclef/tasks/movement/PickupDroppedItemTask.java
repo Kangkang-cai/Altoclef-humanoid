@@ -86,6 +86,8 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
     private final TimerGame _stallTimer = new TimerGame(4);
     // 封闭水体贴近直抓的诊断节流。
     private long _lastDiveDiagMs = 0;
+    // (2026-09-30) 直抓被 bot 不在水中闸门拦下的诊断节流。
+    private long _lastDiveSkipDiagMs = 0;
 
     // (2026-08-22) 做镐子切换的被困前置: 用户原则"感知目标 = 承诺目标,
     // 不论多远不设时限; 超时/上限仅限探索"。捡不到掉落物的常见原因是
@@ -627,9 +629,35 @@ public class PickupDroppedItemTask extends AbstractDoToClosestObjectTask<ItemEnt
         // 分支 = 直接走/游过去 (含从岸边踏入浅水); 真沉底的深水物品有潜行下沉
         // + 打掉脚下块兜底。远距离大水面开船逻辑不变 (grabItemPos 只在敞开
         // 水体传入, 船驶过吸不到深水物品的旧行为保留)。
+        // (2026-09-30 用户口径: 直抓只对 bot 已在水中的情况生效) 本分支原本为
+        // "海上末影之眼"设计, 前提是 bot 已经在水里。20260930-6 场次 13:10:20-52
+        // 实锤: bot 站在岸边泥土上 (y=87), 橡木原木漂在水面 (-272,89,237,
+        // openWater=false), 旧闸门只查 itemInWater + h<=8 就直派 dive →
+        // DiveToGrabItemTask 在岸上 dy>1.5 只会 JUMP+前进 → bot 原地反复起跳
+        // 32s 不进水, 连锁触发 PickupStall 拉黑/Stuck-break 连挖/SWING-BREAK 盲挥。
+        // 修复: 加 bot isTouchingWater 闸门。bot 不在水中 → 走下面的正常导航
+        // (GetToBlockTask 到掉落物位置, 靠近碰撞拾取); 导航不到由 PickupStall
+        // 4s 停滞拉黑 (Try 1/3) 超时兜底, 不再派 dive。
         boolean itemInWater = itemEntity.isTouchingWater();
         boolean itemInOpenWater = itemInWater && isOpenWaterColumn(_mod, itemEntity);
-        if (itemInWater && !riding) {
+        boolean botInWater = _mod.getPlayer().isTouchingWater();
+        if (itemInWater && !botInWater && !riding) {
+            double h = Math.sqrt(
+                    (targetPos.x - _mod.getPlayer().getX()) * (targetPos.x - _mod.getPlayer().getX())
+                            + (targetPos.z - _mod.getPlayer().getZ()) * (targetPos.z - _mod.getPlayer().getZ()));
+            if (h <= 8) {
+                // (2026-09-30) 闸门外诊断: 旧版在这里直派 dive, 现在改正常导航。
+                // 独立 5s 节流, 验证判据 = 日志出现 SKIP 且任务状态是导航而非
+                // "Diving to grab dropped item."
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - _lastDiveSkipDiagMs > 5000) {
+                    _lastDiveSkipDiagMs = nowMs;
+                    Debug.logMessage("[PickupDive] SKIP: bot 不在水中, 正常导航靠近碰撞拾取 (旧版此处直派 dive): item="
+                            + target.toShortString() + " h=" + String.format("%.1f", h));
+                }
+            }
+        }
+        if (itemInWater && botInWater && !riding) {
             double h = Math.sqrt(
                     (targetPos.x - _mod.getPlayer().getX()) * (targetPos.x - _mod.getPlayer().getX())
                             + (targetPos.z - _mod.getPlayer().getZ()) * (targetPos.z - _mod.getPlayer().getZ()));
