@@ -1522,7 +1522,16 @@ public class MobDefenseChain extends SingleTaskChain {
                 // (2026-08-23) 自信战斗中途不走威胁公式/护甲脆弱判定 (无甲时
                 // 公式必判必输 → 刚开打就被踢去逃跑, 用户实测 "打 5 秒就跑")。
                 // 唯一撤退条件: 血量跌破 40% (苦力怕/超时保护仍然生效)。
-                if (!allEndermen && mod.getPlayer().getHealth() < mod.getPlayer().getMaxHealth() * 0.4f) {
+                // (2026-09-30 C 用户拍板) 掠夺者/卫道士死战批次低血量豁免:
+                // 有食物才撤 (撤 → 拉开距离吃回血 → 再回来打, 恢复链 124638
+                // 已验证: 逃跑结束后 Food 链 prio 85 接管); 没食物必须击杀
+                // (跑不过, 撤只是拖长挨打)。末影人 0921 同口径先例。
+                boolean anyRaidIllager = _fightTargets.stream()
+                        .anyMatch(t -> t instanceof PillagerEntity || t instanceof VindicatorEntity);
+                boolean raidNoFood = anyRaidIllager
+                        && StorageHelper.calculateInventoryFoodScore(mod) <= 0;
+                if (!allEndermen && !raidNoFood
+                        && mod.getPlayer().getHealth() < mod.getPlayer().getMaxHealth() * 0.4f) {
                     Debug.logMessage("Combat decision: RUN mid-confident-fight (health low, enemies=%d)", _fightTargets.size());
                     exitFightState();
                     _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);

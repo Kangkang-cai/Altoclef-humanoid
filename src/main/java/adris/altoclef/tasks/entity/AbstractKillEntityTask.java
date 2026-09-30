@@ -25,6 +25,7 @@ import net.minecraft.entity.mob.AbstractSkeletonEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.EndermanEntity;
+import net.minecraft.entity.mob.PillagerEntity;
 import net.minecraft.entity.mob.SkeletonEntity;
 import net.minecraft.entity.mob.WitherSkeletonEntity;
 import net.minecraft.entity.passive.PassiveEntity;
@@ -200,6 +201,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 攻击射程 (4.0 > 3.2 恒不可命中, 只能等 FULLY-CLOSE 兜底救场)。
         // 维持 MELEE_HUG_DISTANCE 贴身: 落在 reach 内, 停靠即可出手。
         if (entity instanceof EndermanEntity) {
+            return MELEE_HUG_DISTANCE;
+        }
+        // (2026-09-30 用户"面对掠夺者靠近距离需要-1, 不然容易打不到") 掠夺者不
+        // 适用下方 "+1 格" —— 该规则前提"怪会主动贴上来补满最后一段距离"对它
+        // 不成立: 掠夺者换弹/拉扯时会后退走位, bot 停 4.0 (reach 3.2 之外) 经常
+        // 一刀不出。单独收紧到 MELEE_HUG_DISTANCE (4.0 - 1 = 3.0)。
+        // (用户"面对卫道士就不要变了") 卫道士是真近战冲刺怪, 会主动贴上来,
+        // 维持默认 +1 不动。
+        if (entity instanceof PillagerEntity) {
             return MELEE_HUG_DISTANCE;
         }
         // 其余会主动靠近的近战敌怪 (僵尸/蜘蛛/苦力怕/等): +1 格远离。
