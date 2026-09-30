@@ -261,6 +261,10 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
             // 那是本任务自己的放料流程, 粘住会反过来掐断正常合成。
             if (thisOrChildSatisfies(task -> {
                 if (!(task instanceof MoveItemToSlotFromInventoryTask move)) return false;
+                // (2026-09-30 detail/31 补活动性检查) 搬运 3s 无进度 = 卡死/物品
+                // 消失, 继续 hold 会把本任务永久钉死在死路上 —— 放行轮换让上层
+                // 救援 (与"进度在推进才豁免"口径一致, detail/24)。
+                if (!move.isRecentlyActive()) return false;
                 Slot dest = move.getDestination();
                 return !(dest instanceof CraftingTableSlot);
             })) {

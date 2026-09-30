@@ -67,7 +67,16 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
     // 换子任务, 不挡整棵树被上层替换, 无死锁面), 并带 3s 保险丝防搬运异常
     // 卡死时永久不可救。
     private static final long MOVE_FORCE_FUSE_MS = 3000;
-    private long _startedMs = 0;
+    // (2026-09-30 保险丝按进度续期, detail/31) 进度 = 光标快照或目标槽快照变化。
+    // 旧版 3s 保险丝从 onStart 一刀切, 且保护窗口只覆盖"光标持目标物∥拾取宽限":
+    // 腾位穿甲的第一拍还在槽位冷却/同步等待时(光标仍空、宽限 500ms 已过)完全裸奔,
+    // 父链翻面即拆树 → 胸甲穿戴 12 次/55s 零完成 (20260930-183102 实锤)。
+    // 改两点: ① 保险丝从"最后一次真实进度"起算, 进度在推进就持续保护, 无进度 3s
+    // 后照旧放行上层救援(与 detail/24 跳跃卡死"进度在推进才豁免"同口径);
+    // ② shouldForce 增加"点击在途"窗口(_lastClickTask 未完成 = 点击已派发等执行)。
+    private long _lastProgressMs = 0;
+    private ItemStack _lastCursorSnapshot = null;
+    private ItemStack _lastTargetSnapshot = null;
 
     // (2026-08-24 拿起放下反复修复) PICKUP 源槽后客户端光标状态有同步延迟
     // (约 4-5 tick), 旧逻辑下一 tick 若光标仍读到空就再次 PICKUP → 把光标
@@ -118,7 +127,7 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
 
     @Override
     protected void onStart(AltoClef mod) {
-        _startedMs = System.currentTimeMillis();
+        _lastProgressMs = System.currentTimeMillis();
         // (2026-09-17 在途登记时机前移) 旧版只在"光标已持有目标物"分支 mark,
         // 但竞争链 (EnsureFree) 上位后 Moving 不再被 tick → mark 永不执行 →
         // 在途表空 → 双层防御查不到 → 光标上的 raw_iron 被扔 (092555+100000
@@ -131,6 +140,29 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         for (Item it : _toMove.getMatches()) {
             markInFlight(it);
         }
+    }
+
+    /**
+     * (2026-09-30 进度跟踪, detail/31) 光标或目标槽快照变化 = 搬运有真实进展,
+     * 续期保险丝。放 onTick 顶部: 冷却期也要跟踪, 否则两拍之间保护脱落。
+     */
+    private void trackProgress(AltoClef mod) {
+        ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+        ItemStack atTarget = StorageHelper.getItemStackInSlot(_destination);
+        boolean changed = _lastCursorSnapshot == null || _lastTargetSnapshot == null
+                || !ItemStack.areEqual(cursor, _lastCursorSnapshot)
+                || !ItemStack.areEqual(atTarget, _lastTargetSnapshot);
+        if (changed) {
+            _lastProgressMs = System.currentTimeMillis();
+            _lastCursorSnapshot = cursor.copy();
+            _lastTargetSnapshot = atTarget.copy();
+        }
+    }
+
+    /** (2026-09-30) 保险丝窗口内是否有真实进度。供父级 hold 判据使用: 无进度的
+     *  搬运(卡死/物品消失)不得把父级钉死, 3s 后放行翻面救援。 */
+    public boolean isRecentlyActive() {
+        return System.currentTimeMillis() - _lastProgressMs <= MOVE_FORCE_FUSE_MS;
     }
 
     /**
@@ -153,13 +185,20 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         // 重开炉的接管被挡满 3s 保险丝)。
         if (!isDestinationScreenOpen()) return false;
         if (isFinished(mod)) return false;
-        if (System.currentTimeMillis() - _startedMs > MOVE_FORCE_FUSE_MS) return false;
+        // (2026-09-30 进度续期保险丝, detail/31) 从"最后一次真实进度"起算,
+        // 替代旧 onStart 一刀切; 无进度 3s 后放行上层救援。
+        if (System.currentTimeMillis() - _lastProgressMs > MOVE_FORCE_FUSE_MS) return false;
         ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
         boolean cursorHoldsTarget = !cursor.isEmpty()
                 && Arrays.asList(_toMove.getMatches()).contains(cursor.getItem());
         boolean pickupInGrace = _pendingPickup != null
                 && System.currentTimeMillis() - _pendingPickupSinceMs < PICKUP_SYNC_GRACE_MS;
-        return cursorHoldsTarget || pickupInGrace;
+        // (2026-09-30 点击在途窗口, detail/31) 第一拍 PICKUP 已派发但还在槽位
+        // 冷却/同步等待(光标仍空、500ms 宽限已过) —— 旧版此处零保护, 父链此刻
+        // 翻面必拆 (18:44:53 胸甲穿戴被拆 12 次全是这个窗口)。点击在途但从未
+        // 产生进度(哑火点击)时保险丝 3s 兜底放行, 不改变卡死自救语义。
+        boolean clickInFlight = _lastClickTask != null && !_lastClickTask.isFinished(mod);
+        return cursorHoldsTarget || pickupInGrace || clickInFlight;
     }
 
     @Override
@@ -168,6 +207,9 @@ public class MoveItemToSlotTask extends Task implements ITaskCanForce {
         // 也要续期, 保证 Moving 存活期间在途表持续命中 (100000 场: 竞争链上位
         // 后 Moving 停 tick, 旧时机 mark 永不执行导致防御落空)。
         markAllTargetsInFlight();
+        // (2026-09-30 进度跟踪, detail/31) 同理放闸门之前: 冷却期快照不变但有
+        // 点击在途, 状态一变即续期保险丝。
+        trackProgress(mod);
         // (2026-09-17 屏幕漂移即放行) 目标屏幕不在前台 = 本任务点击必然哑火
         // (window 0 会套到合成产物格上), 且 isFinished 永假 → "达标即放行"
         // 救不了"永远不达标"的场景。立即放弃保护并停手, 让父级切去重开屏幕

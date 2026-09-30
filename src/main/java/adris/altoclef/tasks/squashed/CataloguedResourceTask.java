@@ -6,10 +6,12 @@ import adris.altoclef.TaskCatalogue;
 import adris.altoclef.tasks.container.CraftInTableTask;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.container.UpgradeInSmithingTableTask;
+import adris.altoclef.tasks.slot.MoveItemToSlotFromInventoryTask;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask.TaskSquasher;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.StorageHelper;
+import adris.altoclef.util.slots.PlayerSlot;
 import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.*;
@@ -63,6 +65,20 @@ public class CataloguedResourceTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+        // (2026-09-30 腾位穿甲防拆, detail/31) 子树里有活跃的穿甲腾位两拍搬运
+        // (MoveItemToSlotFromInventoryTask → PlayerSlot 槽) 且仍在进度窗口内时,
+        // 保持当前子树不轮换 —— 20260930-183102 场: 胸甲做完后腾位穿甲两拍被
+        // 本任务在"收材料↔合成"间轮换反复拆树, 12 次/55s 零完成, 手动停机。
+        // 同 0906 CraftInTableTask "Child slot-move in flight" hold 模式;
+        // 卡死自救: 搬运 3s 无进度 (isRecentlyActive=false) 即放行轮换, 不会
+        // 把本任务永久钉死在一条死路上。
+        if (thisOrChildSatisfies(task -> task instanceof MoveItemToSlotFromInventoryTask move
+                && move.getDestination() instanceof PlayerSlot
+                && !move.isFinished(mod)
+                && move.isRecentlyActive())) {
+            setDebugState("Armor equip move in flight, holding current subtree...");
+            return null;
+        }
         // [2026-08-22 ping-pong 修复] 旧逻辑每 tick 重选"第一个目标未满足"的
         // 子任务: iron_sword 工作台合成 ↔ 2x2 木板/工作台/熔炉合成轮流上场,
         // 互相清对方的光标/合成格、关对方的界面, 形成大横跳 (tasks.log
