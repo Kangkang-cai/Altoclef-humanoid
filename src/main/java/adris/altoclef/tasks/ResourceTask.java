@@ -5,6 +5,7 @@ import adris.altoclef.tasks.container.PickupFromContainerTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.resources.MineAndCollectTask;
+import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.tasks.slot.*;
 import adris.altoclef.tasksystem.ITaskCanForce;
 import adris.altoclef.tasksystem.ITaskUsesCraftingGrid;
@@ -163,7 +164,18 @@ public abstract class ResourceTask extends Task implements ITaskCanForce {
             if (pickupTaskActive || mod.getEntityTracker().itemDropped(_itemTargets)) {
 
                 // If we're picking up a pickaxe (we can't go far underground or mine much)
-                if (PickupDroppedItemTask.isIsGettingPickaxeFirst(mod)) {
+                // (2026-09-30 死亡恢复"造镐变捡镐"死锁) 判据扩到镐链活跃期: 现场
+                // 20260930-170953, 墓在地下 y=30 且被埋, 死亡掉落物里恰好有一把
+                // stone_pickaxe (40+ 格外)。DeathRecoveryTask GOTO 失速 → 派
+                // SatisfyMiningRequirementTask(STONE) 造镐 → CraftInTableTask(ResourceTask)
+                // 发现地上有石镐掉落物 → resourcePickupDropRange 默认 -1 (不限距离)
+                // → 直接进 "Picking up" 追那个没镐根本到不了的墓 → 鸡生蛋死锁
+                // (pickupTaskActive 粘住分支不看距离, 死循环 84s)。
+                // 旧 flag isGettingPickaxeFirstFlag 只在 PickupDroppedItemTask 自己的
+                // stuck 流程置位, 该路径从未经过 → 闸门旁路。复用 _activeToolChains
+                // (SatisfyMiningReq onStart/onStop 配对计数, 见该类 2026-09-25 注释):
+                // 镐链活跃期间本闸门同样生效 — 最近同类掉落物 >10 格一律回合成路线。
+                if (PickupDroppedItemTask.isIsGettingPickaxeFirst(mod) || SatisfyMiningRequirementTask.isToolChainActive()) {
                     if (_pickupTask.isCollectingPickaxeForThis()) {
                         setDebugState("Picking up (pickaxe first!)");
                         // Our pickup task is the one collecting the pickaxe, keep it going.
