@@ -268,6 +268,11 @@ public class AltoClef implements ModInitializer {
 
         // External mod initialization
         runEnqueuedPostInits();
+
+        // (2026-09-30 阶段二 bridge) 模组内置 HTTP 桥：localhost 只读感知 + 命令入口。
+        // 放在最后：_commandExecutor / 命令注册 / settings 都已就绪。端口/botId 从
+        // altoclef/configs/bridge.json 读，port<=0 时不启动。仅绑 127.0.0.1。
+        adris.altoclef.bridge.BridgeHttpServer.start(this);
     }
 
     // [JankDebug] 整帧耗时检测 (2026-08-23): 记录本帧起始 nanoTime 与上一帧
