@@ -240,6 +240,15 @@ public class MobDefenseChain extends SingleTaskChain {
     // must-kill 实锤通道 (24 格), 未开火的只在近距离+它看见我们时才计时清场。
     private static final int SKELETON_KILL_TRIGGER_RANGE = 12;
 
+    // (20261001 激怒猪灵接战触发窗, 20261001-185104 场次实锤) 挖金惹怒猪灵后,
+    // 猪灵 6-10 格追击而 bot 不还手 24s (19:03:46-19:04:10): 激怒猪灵此前吃
+    // 通用 5 格默认触发窗, 追击距离够不着; isInDanger 又被 isVulnurable 挡。
+    // 激怒猪灵 (HitRegistry 被打记忆 / ANGRY_AT 记忆指向 bot, 见
+    // EntityHelper.isPiglinProvoked 单一判定源) 已有明确攻击意图, 接战窗抬到
+    // 12 格 (与小白 SKELETON_KILL_TRIGGER_RANGE 同档)。中性猪灵照旧 5 格,
+    // 不会主动引战。
+    private static final int PIGLIN_ANGRY_KILL_TRIGGER_RANGE = 12;
+
     // (2026-09-30 主动索敌, 用户拍板"不要被打一下后才锁定") 骷髅【亲眼可见且敌对】
     // 即触发 must-kill 的接敌半径。1.18.2 客户端无攻击者包 ⇒ HitRegistry 箭伤
     // 归因恒缺 (0930 会话五连死实锤: mustKill=true 全场 0 次), 0924 的
@@ -826,6 +835,18 @@ public class MobDefenseChain extends SingleTaskChain {
     }
 
     /** 16 格内存活敌对怪列表 (自信战斗的感知口径)。 */
+    // (20261001) "烦人怪进击杀清单"的触发半径, 单一判定源: stateEvaluate 派发段
+    // 与 stateFight 吸收段共用 (此前两处各写一份三元表达式, 已统一)。
+    // 激怒猪灵走 12 格 (PIGLIN_ANGRY_KILL_TRIGGER_RANGE), 其余近战怪 5 格。
+    private static int annoyingKillTriggerRange(Entity hostile) {
+        if (hostile instanceof SkeletonEntity) return SKELETON_KILL_TRIGGER_RANGE;
+        if (hostile instanceof WitchEntity) return 18;
+        if (hostile instanceof PiglinEntity && EntityHelper.isPiglinProvoked(hostile)) {
+            return PIGLIN_ANGRY_KILL_TRIGGER_RANGE;
+        }
+        return 5;
+    }
+
     private static List<Entity> getNearbyHostiles(AltoClef mod) {
         List<Entity> hostiles;
         synchronized (BaritoneHelper.MINECRAFT_LOCK) {
@@ -1231,9 +1252,8 @@ public class MobDefenseChain extends SingleTaskChain {
                         continue;
                     }
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
-                    int annoyingRange = hostile instanceof SkeletonEntity
-                            ? SKELETON_KILL_TRIGGER_RANGE
-                            : (hostile instanceof WitchEntity ? 18 : 5);
+                    // (20261001) 触发半径统一走 annoyingKillTriggerRange (激怒猪灵 12 格)。
+                    int annoyingRange = annoyingKillTriggerRange(hostile);
                     boolean isClose = hostile.isInRange(mod.getPlayer(), annoyingRange);
 
                     if (isClose) {
@@ -1246,9 +1266,14 @@ public class MobDefenseChain extends SingleTaskChain {
                         // 近战怪贴脸(攻击距离内)且正在攻击我们 → 立即进击杀清单, 不等 12s 计时
                         // —— 否则 bot 满血硬吃僵尸 12 秒(日志实锤 19:04 僵尸 0.9 格贴脸, 直到
                         // 血量跌进 isVulnurable 才 FIGHT, 差点死)。只有远处烦人怪才走计时。
+                        // (20261001) 激怒猪灵 (EntityHelper.isPiglinProvoked 单一判定源:
+                        // HitRegistry 被打记忆 / ANGRY_AT 记忆指向 bot) 同样跳过 12s 计时:
+                        // 它已在主动攻击, "不猎杀偶然靠近的怪"的计时目的对它不适用;
+                        // 中性猪灵 (无金甲兜底激怒) 仍走 5 格 + 计时口径, 不主动引战。
                         if (!isRangedThreat(hostile)
-                                && hostile.isInRange(mod.getPlayer(), MELEE_ATTACK_RANGE)
-                                && EntityHelper.isAngryAtPlayer(mod, hostile)) {
+                                && (EntityHelper.isPiglinProvoked(hostile)
+                                        || (hostile.isInRange(mod.getPlayer(), MELEE_ATTACK_RANGE)
+                                                && EntityHelper.isAngryAtPlayer(mod, hostile)))) {
                             toDealWith.add(hostile);
                             _closeAnnoyingEntities.remove(hostile);
                         } else {
@@ -1482,9 +1507,8 @@ public class MobDefenseChain extends SingleTaskChain {
                         continue;
                     }
                     // (2026-09-19 用户) 小白触发距离 18 → 16 (刚好触发小白的距离), 见 SKELETON_KILL_TRIGGER_RANGE。
-                    int annoyingRange = hostile instanceof SkeletonEntity
-                            ? SKELETON_KILL_TRIGGER_RANGE
-                            : (hostile instanceof WitchEntity ? 18 : 5);
+                    // (20261001) 触发半径统一走 annoyingKillTriggerRange (激怒猪灵 12 格)。
+                    int annoyingRange = annoyingKillTriggerRange(hostile);
                     if (hostile.isInRange(mod.getPlayer(), annoyingRange)
                             && LookHelper.seesPlayer(hostile, mod.getPlayer(), annoyingRange)) {
                         _fightTargets.add(hostile);

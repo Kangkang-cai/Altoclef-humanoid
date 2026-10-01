@@ -46,6 +46,25 @@ public class EntityHelper {
         return hostile;
     }
 
+    /**
+     * (20261001 激怒猪灵接战触发窗) 猪灵【真实激怒】判定, 不含金甲兜底:
+     * ① 被打事件记忆 (HitRegistry, 被打过或 16 格内同伴被打过, 记仇 30s);
+     * ② 客户端 ANGRY_AT 记忆指向 bot 本人 (挖金块/开金箱激怒, 客户端同步实测成立
+     * —— 20260915-123005 场次 angryAtMem=true 实锤, 推翻 Phase 0 "恒 false" 结论;
+     * 限定激怒目标=bot 本人, 防误伤)。
+     * 与 {@link #isGenerallyHostileToPlayer} 的 piglin 分支共用此判定源;
+     * 返回 true 的猪灵已对 bot 有明确攻击意图, 防御链按激怒口径 (12 格接战窗 +
+     * 跳过 12s 烦人怪计时) 处理。中性猪灵 (未激怒) 不走此口径。
+     */
+    public static boolean isPiglinProvoked(Entity entity) {
+        if (!(entity instanceof PiglinEntity pig)) return false;
+        if (HitRegistry.isPiglinAngered(pig)) return true;
+        ClientPlayerEntity clientPlayer = MinecraftClient.getInstance().player;
+        return clientPlayer != null
+                && pig.getBrain().getOptionalMemory(MemoryModuleType.ANGRY_AT)
+                        .map(uuid -> uuid.equals(clientPlayer.getUuid())).orElse(false);
+    }
+
     public static boolean isGenerallyHostileToPlayer(AltoClef mod, Entity hostile) {
         // TODO: Ignore on Peaceful difficulty.
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
@@ -57,17 +76,9 @@ public class EntityHelper {
             // (2026-09-06 Phase 1) 事件记忆判激怒: 被打过(或 16 格内同伴被打过)的猪灵
             // 记仇 30s, 穿金甲也照样算敌对 —— 修复"金甲=免疫激怒"的方向性错误
             // (11:56 实测: 玩家手动打的激怒猪灵贴脸输出, 防御链因金甲全程失明)。
-            if (HitRegistry.isPiglinAngered(pig)) {
-                return true;
-            }
-            // (20260915 挖金激怒盲区修复) 客户端 ANGRY_AT 记忆同步实测成立
-            // (20260915-123005 场次 angryAtMem=true 实锤, 推翻 Phase 0 "恒 false"
-            // 结论 —— 当时测量场景没有猪灵处于激怒态): 挖金块/开金箱激怒与穿
-            // 金甲无关, 必须读 brain 记忆。限定激怒目标=bot 本人, 防误伤。
-            ClientPlayerEntity clientPlayer = MinecraftClient.getInstance().player;
-            if (clientPlayer != null
-                    && pig.getBrain().getOptionalMemory(MemoryModuleType.ANGRY_AT)
-                            .map(uuid -> uuid.equals(clientPlayer.getUuid())).orElse(false)) {
+            // (20261001) 两路真实激怒判定抽出为 {@link #isPiglinProvoked},
+            // 与防御链"激怒猪灵接战触发窗"共用单一判定源 (判定源单一化)。
+            if (isPiglinProvoked(pig)) {
                 return true;
             }
             // (20260915) 金甲兜底收窄: 只覆盖"靠近/开箱/无甲"类激怒; "挖金激怒"
