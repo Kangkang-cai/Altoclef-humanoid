@@ -77,7 +77,7 @@
 | 暂停主线（听人说话/先帮队友） | 不支持：`@stop` 杀停不可恢复，其余命令顶掉主线不恢复 | **需要窄接口** |
 | 恢复主线 | 不支持：只能重新 `@gamer`（被 C 档禁了） | **需要窄接口** |
 | 降低主线激进程度 | 不支持：激进度散在 Settings 十几个阈值里 | **刻意不做**（§5） |
-| "先做队友的事再回主线" | `@follow` 顶掉主线后不回来 | 由暂停/恢复组合覆盖：pause → follow → resume |
+| "先做队友的事再回主线" | `@follow` 顶掉主线后不回来 | **已解决（B'，1001 拍板）**：goto/follow/give 完成自动回主线；idle/pause_main 归按住侧 |
 
 ### 2.2 核心设计决策：恢复主线用"令牌重建"，不复用任务实例
 
@@ -108,6 +108,11 @@
 - 不做事件驱动的令牌自清：pause 的 cancel 会同步触发 TaskFinishedEvent（见 §6.1 实测），
   按事件自清必然把令牌当场清掉 → resume 必失败。改为"resume 时查已在跑主线"这一处判定，
   无需区分"主动 cancel"与"自然结束"。
+- **完成即回主线（B' 口径，1001 对端拍板）**：在 TaskFinishedEvent 关联到 pending action 时，
+  若该 action 的 token ∈ {goto, follow, give} → 调 resumeMainline()（重建主线），
+  action_done 文本附「已自动回主线」。idle / pause_main 不在其列——前者无终点、后者的语义
+  就是"立正等到下一条指令"，自动续跑会违背语义。此处在 UserTaskChain.onTaskFinish 的
+  publish 回调内重入 runUserTask 是安全的（此时 _mainTask 已置 null，setTask 走 null 分支）。
 ```
 
 **新增 2：bridge.json 三个字段**（`BridgeConfig`，ConfigHelper 范式照旧）
