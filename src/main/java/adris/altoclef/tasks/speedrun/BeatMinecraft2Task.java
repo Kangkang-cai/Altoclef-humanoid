@@ -245,6 +245,18 @@ public class BeatMinecraft2Task extends Task {
     private static final Item[] SWORD_ITEMS = new Item[] {
             Items.NETHERITE_SWORD, Items.DIAMOND_SWORD, Items.IRON_SWORD, Items.STONE_SWORD, Items.WOODEN_SWORD
     };
+
+    // (2026-10-01 补剑木剑兜底档) 木料判据用, 与 MobDefenseChain.RAID_LOG_ITEMS
+    // 同集 (六种主世界原木/木板)。下界扭曲菌柄不算: TaskCatalogue 的木板/木棍
+    // 配方按主世界木种注册, 菌柄不出对应的板, 派了也白派。
+    private static final Item[] WOOD_LOG_ITEMS = new Item[] {
+            Items.OAK_LOG, Items.BIRCH_LOG, Items.SPRUCE_LOG,
+            Items.JUNGLE_LOG, Items.ACACIA_LOG, Items.DARK_OAK_LOG
+    };
+    private static final Item[] WOOD_PLANK_ITEMS = new Item[] {
+            Items.OAK_PLANKS, Items.BIRCH_PLANKS, Items.SPRUCE_PLANKS,
+            Items.JUNGLE_PLANKS, Items.ACACIA_PLANKS, Items.DARK_OAK_PLANKS
+    };
     private static final double SWORD_REPLACE_DURABILITY_RATIO = 0.15;
 
     private static boolean swordNeedsReplace(AltoClef mod) {
@@ -291,10 +303,16 @@ public class BeatMinecraft2Task extends Task {
      * 木棍, 背包只有 1 钻 → 展开成挖钻 → 挖钻需镐但镐也全爆 → 级联做木镐/木棍/
      * 木板, 超长链每被打断就重置, 2 分钟做不出剑, death#2 死在空窗期。
      * 改为: 只有材料【齐备】才选那个档位, 否则降级。剑配方需 1 根木棍(所有剑
-     * 通用) + N 块材料锭/宝石。木剑价值太低不主动造。
+     * 通用) + N 块材料锭/宝石。
      *   - 钻石 ≥2 且木棍 ≥1 → 钻石剑
      *   - 否则 铁锭 ≥2 且木棍 ≥1 → 铁剑 (铁剑优先, 材料通常足)
-     *   - 否则 → 石剑 (圆石通常足, 木棍不足时 squash 链自动补)
+     *   - 否则 圆石 ≥2 → 石剑 (木棍不足时 squash 链自动补)
+     *   - 否则 背包有木料 (原木 ≥1 或 木板 ≥2) → 木剑
+     *     (2026-10-01 用户口径反转 0928 的"木剑价值太低不主动造": 剑爆了就算
+     *     只能出木剑也要补, 斧子不收货 — 剑的挥速/扫割是用户要的语义, 接受
+     *     对石斧的 DPS 取舍。木料必须在背包内才派, 防止下界派"砍树链"野跑
+     *     (0929 放床派发下界石同款坑); 木棍仍由 squash 链自动补。)
+     *   - 否则 → 石剑 (圆石/木料都没有: 链自动收集圆石, 主世界语义不变)
      */
     private static ItemTarget[] swordReplaceTarget(AltoClef mod) {
         int stick = StorageHelper.countItemInInventoryReal(mod, Items.STICK);
@@ -305,6 +323,21 @@ public class BeatMinecraft2Task extends Task {
         }
         if (ironIngot >= 2 && stick >= 1) {
             return toItemTargets(Items.IRON_SWORD);
+        }
+        int cobble = StorageHelper.countItemInInventoryReal(mod, Items.COBBLESTONE);
+        if (cobble >= 2) {
+            return toItemTargets(Items.STONE_SWORD);
+        }
+        int logs = 0;
+        for (Item l : WOOD_LOG_ITEMS) {
+            logs += StorageHelper.countItemInInventoryReal(mod, l);
+        }
+        int planks = 0;
+        for (Item p : WOOD_PLANK_ITEMS) {
+            planks += StorageHelper.countItemInInventoryReal(mod, p);
+        }
+        if (logs >= 1 || planks >= 2) {
+            return toItemTargets(Items.WOODEN_SWORD);
         }
         return toItemTargets(Items.STONE_SWORD);
     }
@@ -3106,6 +3139,35 @@ public class BeatMinecraft2Task extends Task {
                 Task netherBoots = getNetherGoldenBootsTask(mod);
                 if (netherBoots != null) {
                     return netherBoots;
+                }
+                // (2026-10-01 补剑闸扩展到下界阶段, 用户"剑爆了要补剑, 就算只能
+                // 木剑也要木剑, 斧子不收货") 现场 20261001-171028: 铁剑打末影人
+                // 爆掉后, 蹲扭曲森林收珍珠整条链无补剑检查 (0928 补剑闸只挂主世界
+                // 铁装后与 greedy 挖矿前), KillEntityTask 武器表
+                // (AbstractKillEntityTask.WEAPON_ITEMS 剑>斧) 自动拿石斧连打 20 分钟。
+                // 录制数据 t=2400 实锤背包 cobblestone=514 + oak_log=9 — 石剑材料
+                // 齐备却无人派发。挂点: 金靴之后 (猪灵交易硬前置不让位), 烈焰棒/
+                // 珍珠/蹲守派发之前 — 剑是战斗刚需, 与主世界闸同序语义。
+                // 判据 (swordNeedsReplace) / 目标 (swordReplaceTarget) / 冷却
+                // (SWORD_REPLACE_COOLDOWN_MS) / 续跑 (_gearTask+shouldForce) 四件
+                // 全复用主世界闸, 零新状态 (硬规矩: 判定源单一化)。
+                if (swordNeedsReplace(mod)) {
+                    boolean swordTaskAlive = _gearTask != null && shouldForce(mod, _gearTask);
+                    if (swordTaskAlive) {
+                        return _gearTask; // 续跑已派发的补剑任务
+                    }
+                    long netherSwordNow = System.currentTimeMillis();
+                    if (netherSwordNow - _lastSwordReplaceDispatchMs >= SWORD_REPLACE_COOLDOWN_MS) {
+                        _lastSwordReplaceDispatchMs = netherSwordNow;
+                        diagIronPhase(mod, "nether sword gate",
+                                "no sword (or best durability <"
+                                        + (int) (SWORD_REPLACE_DURABILITY_RATIO * 100)
+                                        + "%) during blaze/pearl phases -> craft replacement");
+                        _gearTask = TaskCatalogue.getSquashedItemTask(swordReplaceTarget(mod));
+                        _gearTaskIsDiamond = false;
+                        return _gearTask;
+                    }
+                    // 冷却期内任务失效: 落空往下走, 等冷却到期再补 (与主世界闸同语义)。
                 }
                 if (needsBlazeRods) {
                     // (2026-09-18 顺手收珍珠, 用户拍板) 末影珍珠不需要任何前置
