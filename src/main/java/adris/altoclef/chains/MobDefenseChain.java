@@ -1562,7 +1562,14 @@ public class MobDefenseChain extends SingleTaskChain {
                     totalThreat += ThreatEvaluator.evaluate(mod, hostile);
                 }
                 double ourStrength = ThreatEvaluator.estimatePlayerStrength(mod);
-                if (!allEndermen && (!ThreatEvaluator.canWin(totalThreat, ourStrength) || isInDanger(mod))) {
+                // (2026-10-01 中盘复评降为 1.0 系数, 预先存在的边缘带问题) 中盘不再走
+                // canWin 的 1.5 安全系数 —— 进场已按保守口径判过一次, 中盘 1.5 边缘带
+                // 把"半血+单只贴脸蜘蛛"判输逃跑 (185104 场 19:19:21 实锤: hp 52%
+                // 甲16点+盾, our=54.3 < 37.5×1.5=56.25 → RUN, 用户观感"健康还逃")。
+                // 中盘只在真打不过(threat>our)或 isInDanger 时撤; 超时(第4步)/无武器
+                // 闸/自信战斗血量闸均不受影响。进场闸 shouldRetreatMelee 仍用 canWin
+                // 全额系数不变。
+                if (!allEndermen && (totalThreat > ourStrength || isInDanger(mod))) {
                     Debug.logMessage("Combat decision: RUN mid-fight (threat=%.1f, our=%.1f, enemies=%d)", totalThreat, ourStrength, _fightTargets.size());
                     exitFightState();
                     _runAwayTask = new ProgressiveRunAwayTask(DANGER_KEEP_DISTANCE, ESCAPE_STEP, true);
@@ -1628,10 +1635,24 @@ public class MobDefenseChain extends SingleTaskChain {
     private static boolean hasWeaponToFight(AltoClef mod) {
         // (2026-09-30 用户"斧子也是武器对吧") 斧子同阶伤害≥剑, 纳入近战武器判定
         // —— 旧口径只有剑族, 只有斧子时 hasWeaponToFight=false → 有武器也一律逃。
+        // (2026-10-01 主手直查, 预先存在的快照滞后) ItemStorage 快照在受击/物品栏
+        // 抖动瞬间可能读到中间态 (185104 场 18:51:55 实锤: 手持石剑+背包有斧剑,
+        // 判决却报 "no weapon mid-fight") → 主手/副手直查兜底, 武器在手就是有武器。
+        if (isMeleeWeapon(mod.getPlayer().getMainHandStack().getItem())
+                || isMeleeWeapon(mod.getPlayer().getOffHandStack().getItem())) {
+            return true;
+        }
         return mod.getItemStorage().hasItem(Items.WOODEN_SWORD, Items.STONE_SWORD, Items.IRON_SWORD,
                 Items.GOLDEN_SWORD, Items.DIAMOND_SWORD, Items.NETHERITE_SWORD,
                 Items.WOODEN_AXE, Items.STONE_AXE, Items.IRON_AXE,
                 Items.GOLDEN_AXE, Items.DIAMOND_AXE, Items.NETHERITE_AXE);
+    }
+
+    private static boolean isMeleeWeapon(Item item) {
+        return item == Items.WOODEN_SWORD || item == Items.STONE_SWORD || item == Items.IRON_SWORD
+                || item == Items.GOLDEN_SWORD || item == Items.DIAMOND_SWORD || item == Items.NETHERITE_SWORD
+                || item == Items.WOODEN_AXE || item == Items.STONE_AXE || item == Items.IRON_AXE
+                || item == Items.GOLDEN_AXE || item == Items.DIAMOND_AXE || item == Items.NETHERITE_AXE;
     }
 
     /**
