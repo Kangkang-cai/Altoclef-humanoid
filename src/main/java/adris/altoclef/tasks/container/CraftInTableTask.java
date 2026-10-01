@@ -549,6 +549,18 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         return 100;
     }
 
+    @Override
+    protected double getMaxWalkDistance(AltoClef mod) {
+        // (2026-10-01 远工作台该现做而非远走, 用户"做石镐用了特别远的一个工作台")
+        // 现场 20261001-160058: 16:05:16 bot 在 (21,80,-94), tracker 记忆的工作台在
+        // (-167,72,-116) 约 190 格外 → "Walking to container" 走回老台子。基类默认
+        // Double.MAX_VALUE 无上限, 本类从未覆写; 熔炉同族问题 2026-09-03 已修
+        // (SmeltInFurnaceTask 现为 64)。工作台仅 4 木板成本 (有原木时 getCostToMakeNew
+        // =10), 比熔炉更该就地现做, 上限收紧到 32: 32 格内复用旧台, 超距按
+        // 基类 2026-09-03 机制视同"无可用近容器" → 现做一张就近放。
+        return 32;
+    }
+
     private Item[] getMaterialsArray() {
         List<Item> result = new ArrayList<>();
         for (RecipeTarget target : _targets) {
