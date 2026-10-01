@@ -863,6 +863,20 @@ public class BeatMinecraft2Task extends Task {
         if (mod.getItemStorage().getItemCount(Items.ENDER_PEARL) >= pearlDeficit) return null;
         Optional<Entity> enderman = mod.getEntityTracker().getClosestEntity(EndermanEntity.class);
         if (enderman.isEmpty() || !enderman.get().isInRange(mod.getPlayer(), GREEDY_ENDERMAN_RANGE)) {
+            // (2026-10-01 15:28 现场) 末影人死亡当拍本判据即失效 (没有"活的"末影人
+            // 可感知), 贪婪 KillAndLootTask 的拾取收尾被父级同拍切换截断 —— 现场
+            // 20261001-152105: Mob Defense 15:28:26.855 击杀末影人, 同拍 User Tasks
+            // 恢复后判据返 null, 直接落 "Getting Blaze Rods" (棒 <8 恒优先于珍珠
+            // 阶段), 掉在地上的珍珠 0/16 被晾死。补掉落珍珠兜底: 感知到地上有珍珠
+            // 且仍缺 → 继续返回同款 KillAndLootTask (ResourceTask.onTick 基类先捡
+            // 目标掉落物再进 onResourceTick, 无活末影人时击杀子任务空转; 捡完或
+            // 珍珠失去感知 → 下一拍本判据自然返 null 回主阶段链, 出口天然收敛)。
+            // 与 getEnderPearlTask 的 itemDropped 分支同款构造; 放共享静态里,
+            // 三处调用方 (主线/收药/交易黑曜石) 同口径受益。不违反"同时只打一只"
+            // —— 捡珍珠不攻击第二只, 且蹲守锁激活时外层守卫早已 return null。
+            if (mod.getEntityTracker().itemDropped(Items.ENDER_PEARL)) {
+                return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, pearlDeficit));
+            }
             return null;
         }
         return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, pearlDeficit));
