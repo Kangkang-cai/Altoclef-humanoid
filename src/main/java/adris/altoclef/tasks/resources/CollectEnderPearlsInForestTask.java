@@ -269,6 +269,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     // 被推进为锚点 → 站桩死循环)。盲走 = 侦察: 到位没发现林子就回拉旧锚。
     private String _dryExpeditionKind = null;
 
+    // (2026-10-01 推进被重锚掐死修正, 现场 173507: 17:37:33.217 anchor-advance 推进到
+    // -272,88,6, 50ms 后 17:37:33.269 RETURN-REANCHOR 打回脚边 -217,78,24 dist=1)
+    // 巡逻 anchor-advance【在飞】标记: pickAdvanceAnchor 派发推进目标后、bot 走到之前,
+    // bot 距新锚必然 > CAMP_RADIUS —— 这是"锚点沿走廊推进"的合法出界, 不是走丢。
+    // 在飞期间 updateReturningLatch 整体跳过 (不上闩不重锚), 否则上闩边沿的就近重锚
+    // 每次都把锚拽回 bot 脚边, 推进被 100% 掐死, 方位角走廊失效 = 无方向偏好来回走。
+    // 生命周期: pickNextTarget 开头清零 (目标重选 = 上一段已到/超时), 推进派发置位,
+    // NyliumPatrolTask.onStop (接战/拉回分支接管) 与 onResourceStart (实例重建) 清零。
+    private boolean _advanceInFlight = false;
+
     /**
      * (2026-09-20 打完末影人回头修复) 巡逻会话状态: 蹲守实例被上层重建时
      * ({@code BeatMinecraft2Task} 每次接战结束都 {@code new}), 锚点重找 + visited
@@ -361,6 +371,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         _dryExpeditionWalk = null;
         _dryExpeditionTarget = null;
         _dryExpeditionKind = null;
+        // (2026-10-01) 巡逻推进在飞标记同清 (实例重建后由新巡逻重新派发)。
+        _advanceInFlight = false;
         // (2026-09-28) 锚点跨实例延续: 构造参数 anchor 是上层扫描锚 (旧值), 会把
         // 远走/advance 的推进成果拉回旧盘 (现场 20260928-084126: 远走 step=40 被
         // 合成链打断, 2s 后重建实例 anchor 回退, bot 回小盘蹭步)。会话里存最近
@@ -563,6 +575,12 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
      */
     private void updateReturningLatch(AltoClef mod) {
         if (_anchor == null) return;
+        // (2026-10-01 推进被重锚掐死修正) 巡逻 anchor-advance 在飞: bot 朝新锚走
+        // 本来就 > CAMP_RADIUS, 合法出界不上闩不重锚 —— 否则上闩边沿的就近重锚把
+        // 锚拽回脚边, 推进 100% 被掐死 (现场 173507: 两次 advance 均在 50ms 内被打回,
+        // bearing 走廊失效 = 来回走无方向偏好)。f7ec231c 只排除了远走/失联两档,
+        // 本档是第三条在飞路径, 此处补齐。
+        if (_advanceInFlight) return;
         // (2026-09-21 现场 230958 实锤 28.6s 站桩) 判据必须与回锚任务的 baritone
         // GoalNear 同口径 —— GoalNear.isInGoal 用【整数方块坐标】平方距离 (bot 方块
         // (1215,55,-1334) 到锚 (1223,55,-1334) 恰 dx=8 → 64≤64 已到, baritone 不再
@@ -1127,6 +1145,9 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         protected void onStop(AltoClef mod, Task interruptTask) {
             // 交战/拉回/放弃时把寻路进程交还给下家 (TimeoutWanderTask.onStop 同款)。
             mod.getClientBaritone().getCustomGoalProcess().onLostControl();
+            // (2026-10-01) 巡逻停了 = 推进行程终止, 在飞标记随之失效 —— 下一拍
+            // updateReturningLatch 恢复正常守卫 (接战被打出界时重锚照常接管)。
+            _advanceInFlight = false;
         }
 
         @Override
@@ -1177,6 +1198,10 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
          * 语义与"停在菌岩上"等价 (寻路目标: 菌岩用 y+1, 植物用其所在格 y)。
          */
         private void pickNextTarget(AltoClef mod) {
+            // (2026-10-01) 目标重选 = 上一段 (到点/target-timeout) 已结束, 在飞标记
+            // 先清零; 下面若派发推进则重新置位 —— 标记严格只覆盖"当前派发目标是
+            // 推进锚"这一段行程 (见 _advanceInFlight 注释)。
+            _advanceInFlight = false;
             // (2026-09-20 现场 20260920-201533 实锤) "取最近的合格候选"不限方向 =
             // 每步都转向最近的未访问点, 东西向来回蹦 (1284→1273→1285→1275...),
             // 净位移≈0, 用户观感"角度转向接近回头"。
@@ -1198,6 +1223,8 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     _patrolSession.lastAnchor = next;
                     _returning = false;
                     _goToAnchor = null;
+                    // (2026-10-01) 推进在飞: 到位/超时前拉回闩整体跳过 (不重锚)。
+                    _advanceInFlight = true;
                     Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tPATROL anchor-advance old="
                             + (old == null ? "none" : old.toShortString())
                             + " new=" + next.toShortString()
