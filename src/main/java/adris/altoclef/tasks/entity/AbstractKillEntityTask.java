@@ -615,7 +615,13 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // (2026-09-13 草挡准心) 准心被软植物挡住时先清草 —— 这一 tick 不出刀
         // (草一碰即碎, 下一 tick 准心自然落到目标)。清草与攻击冷却无关, 放冷却
         // 判断之前, 不浪费攻击冷却窗口。
-        if (inReach && clearPlantBlockingCrosshair(mod)) {
+        // (2026-10-01 用户拍板"守卫期间禁用清障左键") 扫溅守卫期本就不许出刀,
+        // 清草走的 hold(CLICK_LEFT) 是输入层直按攻击键, 不受 isCrosshairOn 拦刀
+        // 守卫约束 —— 守卫期按左键等于绕过守卫。改为守卫期不按清障左键, 并松掉
+        // 可能残留在按的键 (上一拍清草中途进入守卫 → 不松会持续按住左键)。
+        if (sweepGuarded) {
+            releasePlantClearIfHeld(mod);
+        } else if (inReach && clearPlantBlockingCrosshair(mod)) {
             return move;
         }
         float hitProg = mod.getPlayer().getAttackCooldownProgress(0);
@@ -638,11 +644,30 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         return move;
     }
 
-    /** (2026-09-20) 目标末影人附近是否贴着另一只末影人 (挥剑扫溅会波及 → 不出刀)。 */
+    /**
+     * (2026-09-20) 目标末影人附近是否贴着另一只【未愤怒】的末影人 (挥剑扫溅会
+     * 多激怒一只 → 本 tick 不出刀)。
+     *
+     * <p>(2026-10-01 现场 20261001-185104 铁证修正) 原实现只判距离、不判愤怒
+     * —— 两只【都已愤怒】(都在攻击我们) 时, "别因为扫溅多激怒一只"的原目的
+     * 已不存在, 守卫却继续 hold, bot 全程一刀未出被围死。现场时间线:
+     * 18:51:45.179 EVALUATE→FIGHT, 45.477 起 nearbyHostiles=2 且两只均
+     * angry=true sees=true; 43.4~52.9 SWEEP-GUARD 连 hold 7 次 (一刀未出);
+     * 血量 18.17→16.23→…→0; 18:51:55.135 DEATH killer=enderman; 55.178 死亡
+     * 后才 FIGHT→RETREAT。守卫成了无出口 wait 分支 —— 唯一隐含出口是"两只
+     * 拉开", 而末影人瞬移贴脸 + 两只同时追 bot, 实测 10s 全程间距 ≤2.25 格,
+     * 出口永不满足。
+     *
+     * <p>激怒判据复用 {@link EntityHelper#isGenerallyHostileToPlayer} (1.18.2
+     * 客户端 ANGRY 同步, 与 KillEntitiesTask 单目标锁 / 蹲守任务同口径,
+     * 不新写激怒判定源 —— 项目铁律: 同一判据只留一份)。
+     */
     private boolean hasAdjacentEnderman(AltoClef mod, Entity target) {
         double sq = ENDERMAN_SWEEP_GUARD_RANGE * ENDERMAN_SWEEP_GUARD_RANGE;
         for (EndermanEntity e : mod.getEntityTracker().getTrackedEntities(EndermanEntity.class)) {
             if (e == target || !e.isAlive()) continue;
+            // 已愤怒的邻只不算"会被扫溅多激怒": 它本来就在打我们, 扫溅它不构成新激怒。
+            if (EntityHelper.isGenerallyHostileToPlayer(mod, e)) continue;
             if (e.squaredDistanceTo(target) <= sq) return true;
         }
         return false;
@@ -679,11 +704,7 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
 
         if (plant == null) {
             // 准心已离开植物 (清完了 / 目标挪开了) → 松开自己按的那次左键。
-            if (_plantClickHeld) {
-                _plantClickHeld = false;
-                _plantClearTicks = 0;
-                mod.getInputControls().release(Input.CLICK_LEFT);
-            }
+            releasePlantClearIfHeld(mod);
             return false;
         }
 
@@ -712,6 +733,19 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
                     + blockName(mod, plant) + " at " + plant.toShortString() + ", left-click swinging");
         }
         return true;
+    }
+
+    /**
+     * (2026-10-01 用户拍板"守卫期间禁用清障左键") 只松开【本任务自己按下的】清障
+     * 左键, 不碰别的模块 (挖矿 / InstantBreakTask) 持有的左键 —— 与
+     * {@link #clearPlantBlockingCrosshair} 纪律② 同一条。两处共用: 准心离开植物时、
+     * 扫溅守卫期进入时 (含上一拍清草中途转守卫的残留按住)。松开逻辑单一化。
+     */
+    private void releasePlantClearIfHeld(AltoClef mod) {
+        if (!_plantClickHeld) return;
+        _plantClickHeld = false;
+        _plantClearTicks = 0;
+        mod.getInputControls().release(Input.CLICK_LEFT);
     }
 
     /**
