@@ -621,7 +621,13 @@ public class Settings implements IFailableConfigFile {
             // (2026-08-25 重要物资保护, 用户指定) 末影珍珠/烈焰棒(末影之眼材料)、
             // 金锭(猪灵交易)/铁锭、床(末地打龙)、原木/木板(木头) — 这些都不参与
             // 丢物, 背包满腾位只丢杂物/垃圾。
-            Stream.of(Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GOLD_INGOT, Items.IRON_INGOT),
+            Stream.of(Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GOLD_INGOT, Items.IRON_INGOT,
+                    // (2026-10-01 生铁保护, 用户现场) 1001-113217 会话实锤: 腾位搜刮
+                    // (LootContainerTask→StoreGarbageInContainerTask) 把 raw_iron x4
+                    // 当垃圾塞进废墟宝箱, 随后 GreedyOre 又去箱子里取回 — 往返空跑。
+                    // 生铁是冶炼铁锭的直接原料, 与铁锭同级保护。生金不在其列
+                    // (2026-09-21 用户拍板: 地牢阶段生金可丢)。
+                    Items.RAW_IRON),
             // (2026-08-25 用户指定) 打火石(点火刚需) 不可丢; 圆石/深板岩圆石
             // 走"至少保留一组(64)"逻辑 (见 ItemHelper.canThrowAwayStack), 超出的
             // 可丢, 不放在这里完全保护。
