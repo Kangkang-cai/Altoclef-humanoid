@@ -15,7 +15,6 @@ import adris.altoclef.control.KillAura;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.helpers.CreeperBaitSignal;
 import adris.altoclef.util.helpers.HitRegistry;
-import adris.altoclef.util.helpers.PathReachabilityHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.ThreatEvaluator;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -151,7 +150,7 @@ public class MobDefenseChain extends SingleTaskChain {
     // in FIGHT until the whole batch is dead (or timeout / threat flips) —
     // this fixes the "hit once then ping-pong back to the user task" behavior.
     private enum DefenseState {
-        EVALUATE, FIGHT, RETREAT, SHELTER, DIG_ESCAPE, LONG_RETREAT, BLOCK_PATH, COOLDOWN,
+        EVALUATE, FIGHT, RETREAT, SHELTER, DIG_ESCAPE, LONG_RETREAT, COOLDOWN,
         // (2026-09-07 塔式逃生) 逃跑失败升级时, 纯近战围殴场景优先"逃到空旷搭塔"。
         TOWER_ESCAPE
     }
@@ -160,23 +159,11 @@ public class MobDefenseChain extends SingleTaskChain {
     private long _cooldownEndTick = 0;
     private long _combatStartTick = 0;
     private boolean _inCombat = false;
-    private Entity _blockThreat = null;
-    private long _lastReachabilityCheckTick = 0;
-    private long _blockPathCooldownTick = 0;
-    // Escape snapshot: saved right before we switch to BLOCK_PATH so that
-    // after blocking we can resume the SAME kind of escape (RETREAT vs
-    // LONG_RETREAT) with the original parameters. Otherwise a 100-block long
-    // retreat would silently get demoted to a 30-block escape.
-    private DefenseState _escapeStateBeforeBlock = DefenseState.EVALUATE;
-    private double _savedEscapeMaxDistance;
-    private double _savedEscapeStep;
-    private boolean _savedEscapeIncludeSkeletons;
     // The currently running defensive tasks. We keep these around so the state
     // machine checks completion on the REAL running instance (created once) and
     // not on a freshly constructed one that never got to start.
     private ShelterAndRecoverTask _shelterTask;
     private DigOutEscapeTask _digTask;
-    private BlockOffPathTask _blockTask;
     // (2026-09-07 塔式逃生) 塔逃任务实例 (同 shelter/dig: 持有真实运行实例判完成)。
     private TowerEscapeTask _towerTask;
 
@@ -214,10 +201,6 @@ public class MobDefenseChain extends SingleTaskChain {
     private static final double LONG_RETREAT_DISTANCE = 100;
     private static final double ESCAPE_STEP = 8;          // normal escape ratchets 8 -> 16 -> ... -> 45
     private static final double LONG_RETREAT_STEP = 20;   // long retreat ratchets 20 -> 40 -> ... -> 100
-    private static final int REACHABILITY_CHECK_INTERVAL = 20 * 2; // every 2s
-    private static final int BLOCK_PATH_COOLDOWN_TICKS = 20 * 30;  // don't re-block the same path for 30s
-    private static final double REACHABILITY_MIN_THREAT = 50;
-    private static final int REACHABILITY_MIN_DISTANCE = 8;
     // (2026-08-30 已开火骷髅必须杀, 用户) 已经开始攻击 bot 的骷髅: 逃跑不是
     // 选项(被追击+射击, 尤其血量低时), 直接锁定击杀, 优先级最高, 不被基础
     // 任务抢占。95 高于普通战斗(65)/障碍封路(90), 但低于致命级 (岩浆/MLG 100)。
@@ -345,8 +328,6 @@ public class MobDefenseChain extends SingleTaskChain {
                 return stateTowerEscape(mod);
             case LONG_RETREAT:
                 return stateLongRetreat(mod);
-            case BLOCK_PATH:
-                return stateBlockPath(mod);
             case COOLDOWN:
                 if (nowTick >= _cooldownEndTick) {
                     _defenseState = DefenseState.EVALUATE;
@@ -1371,13 +1352,6 @@ public class MobDefenseChain extends SingleTaskChain {
             }
         }
 
-        // Continuous reachability awareness: while not fighting, if a
-        // remembered high-threat mob can still walk to us, wall off its path.
-        handleReachabilityThreats(mod, nowTick);
-        if (_defenseState == DefenseState.BLOCK_PATH) {
-            return 90;
-        }
-
         // By default if we aren't "immediately" in danger but were running away, keep running away until we're good.
         if (_runAwayTask != null && !_runAwayTask.isFinished(mod)) {
             // (2026-09-25 苦力怕诱爆) 诱爆进行中, 苦力怕逃跑任务失效:
@@ -1787,12 +1761,6 @@ public class MobDefenseChain extends SingleTaskChain {
             }
             return 0;
         }
-        // While escaping, keep an eye out for a choke point we can wall off:
-        // if one shows up, block it immediately instead of just running.
-        handleReachabilityThreats(mod, WorldHelper.getTicks());
-        if (_defenseState == DefenseState.BLOCK_PATH) {
-            return 90;
-        }
         // Retreat is hopeless (stuck / no path): escalate to shelter / dig / long retreat.
         if (_runAwayTask.getFailCount() >= RETREAT_FAIL_LIMIT) {
             Debug.logMessage("Retreat failed repeatedly, escalating defense.");
@@ -1894,12 +1862,6 @@ public class MobDefenseChain extends SingleTaskChain {
             _runAwayTask = new ProgressiveRunAwayTask(LONG_RETREAT_DISTANCE, LONG_RETREAT_STEP, true);
             setTask(_runAwayTask);
         }
-        // Same as RETREAT: while escaping long-distance, still check for
-        // choke points we can wall off immediately.
-        handleReachabilityThreats(mod, WorldHelper.getTicks());
-        if (_defenseState == DefenseState.BLOCK_PATH) {
-            return 90;
-        }
         if (_runAwayTask.isFinished(mod)) {
             _runAwayTask = null;
             enterCooldown(mod);
@@ -1916,41 +1878,6 @@ public class MobDefenseChain extends SingleTaskChain {
         // [MOB-DIAG] #2 只读: 长距离逃跑实测 (0.5s 节流)。
         logEscapeDiag(mod);
         setTask(_runAwayTask);
-        return 90;
-    }
-
-    private float stateBlockPath(AltoClef mod) {
-        if (_blockThreat == null) {
-            _blockTask = null;
-            _defenseState = (_runAwayTask != null) ? DefenseState.RETREAT : DefenseState.EVALUATE;
-            return 0;
-        }
-        if (_blockTask == null) {
-            _blockTask = new BlockOffPathTask(_blockThreat);
-            setTask(_blockTask);
-        }
-        if (_blockTask.isFinished(mod)) {
-            _blockTask = null;
-            _blockThreat = null;
-            _blockPathCooldownTick = WorldHelper.getTicks() + BLOCK_PATH_COOLDOWN_TICKS;
-            // Resume the interrupted escape with a fresh run task (the old one
-            // was stopped, so it can't be reused to judge "escape finished").
-            // Restore the EXACT escape state + parameters we saved before the
-            // interruption, so a long retreat (100) doesn't silently become a
-            // short escape (30) and includeSkeletons stays consistent.
-            if (_escapeStateBeforeBlock == DefenseState.LONG_RETREAT
-                    || _escapeStateBeforeBlock == DefenseState.RETREAT) {
-                _runAwayTask = new ProgressiveRunAwayTask(
-                        _savedEscapeMaxDistance,
-                        _savedEscapeStep,
-                        _savedEscapeIncludeSkeletons);
-                setTask(_runAwayTask);
-                _defenseState = _escapeStateBeforeBlock;
-            } else {
-                _runAwayTask = null;
-                _defenseState = DefenseState.EVALUATE;
-            }
-        }
         return 90;
     }
 
@@ -2037,53 +1964,6 @@ public class MobDefenseChain extends SingleTaskChain {
         }
         if (sum.lengthSquared() < 1e-4) return new Vec3d(1, 0, 0);
         return sum.normalize().multiply(-1);
-    }
-
-    /**
-     * Reachability awareness: while not fighting (including while we're running
-     * away), check whether a high-threat mob can still walk to us within 30
-     * blocks and, if so, wall off its path. Throttled to every 2 seconds with a
-     * long re-block cooldown.
-     */
-    private void handleReachabilityThreats(AltoClef mod, long nowTick) {
-        if (_inCombat) return;
-        if (nowTick - _lastReachabilityCheckTick < REACHABILITY_CHECK_INTERVAL) return;
-        if (nowTick < _blockPathCooldownTick) return;
-        _lastReachabilityCheckTick = nowTick;
-
-        Entity best = null;
-        double bestScore = REACHABILITY_MIN_THREAT;
-        Vec3d playerPos = mod.getPlayer().getPos();
-        for (Entity e : mod.getEntityTracker().getHostiles()) {
-            if (e == null || !e.isAlive()) continue;
-            double threat = ThreatEvaluator.evaluate(mod, e);
-            if (threat < bestScore) continue;
-            double dist = Math.sqrt(e.squaredDistanceTo(mod.getPlayer()));
-            if (dist < REACHABILITY_MIN_DISTANCE) continue;
-            if (dist > 64) continue;
-            if (PathReachabilityHelper.isReachableWithin(mod.getWorld(), playerPos, e.getPos(), 30)) {
-                bestScore = threat;
-                best = e;
-            }
-        }
-        if (best != null) {
-            Debug.logMessage("Reachable high-threat mob detected, blocking its path.");
-            // Snapshot the current escape context before we interrupt it so
-            // we can resume the exact same escape (distance / step / state)
-            // once the wall is up.
-            if ((_defenseState == DefenseState.RETREAT || _defenseState == DefenseState.LONG_RETREAT)
-                    && _runAwayTask instanceof ProgressiveRunAwayTask progressive) {
-                _escapeStateBeforeBlock = _defenseState;
-                _savedEscapeMaxDistance = progressive.getMaxDistance();
-                _savedEscapeStep = progressive.getStep();
-                _savedEscapeIncludeSkeletons = progressive.isIncludeSkeletons();
-            } else {
-                _escapeStateBeforeBlock = DefenseState.EVALUATE;
-            }
-            _blockThreat = best;
-            _blockTask = null;
-            _defenseState = DefenseState.BLOCK_PATH;
-        }
     }
 
     private BlockPos isInsideFireAndOnFire(AltoClef mod) {
