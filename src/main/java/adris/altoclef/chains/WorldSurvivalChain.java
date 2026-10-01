@@ -75,8 +75,14 @@ public class WorldSurvivalChain extends SingleTaskChain {
     //      代价 —— 换来 8 分钟防火, 比"不喝烧死"划算。真正防横跳仍靠 ① 补杯。
     /** 药效剩余低于此 tick 数 = "将尽" (15s @ 20tps)。 */
     private static final int FIRE_RES_TOPUP_TICKS = 300;
-    /** 已断档 + 只是着火 (不在岩浆) 时的急救健康值门槛。 */
-    private static final float FIRE_RES_EMERGENCY_HEALTH = 10.0f;
+    /**
+     * 已断档 + 只是着火 (不在岩浆) 时的急救健康值门槛。
+     * (2026-10-01 由 10 降为 6, 用户定) 1001 16:46 现场: 蹲珍珠路过沾火掉 1 HP
+     * (10.9→9.9) 即触发, 火 ~0.5s 后自熄, 药 0.45s 被打断没喝成还白重建了一拍
+     * BeatMinecraft2Task —— 普通火 1/s 且会自熄, 与岩浆 4/s 不同档, 阈值须更低。
+     * 6 = 6s 站火余量, 且远低于 autoEat 回血线, 路过沾火基本不再触发。
+     */
+    private static final float FIRE_RES_EMERGENCY_HEALTH = 6.0f;
     /** (2026-09-29) 已断档 + 在岩浆里时的急救健康值门槛 (岩浆 4/s, 8 = 1.6s 喝完剩 2s)。 */
     private static final float FIRE_RES_LAVA_EMERGENCY_HEALTH = 8.0f;
     /** (2026-09-29) 逃跑要穿过的岩浆格数 > 此值 → 直接喝 (用户定 2)。 */
