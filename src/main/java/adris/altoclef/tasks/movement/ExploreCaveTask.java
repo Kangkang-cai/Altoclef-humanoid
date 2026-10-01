@@ -41,6 +41,19 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     // 在小空间里反复选回刚离开的位置。
     private static final int VISITED_RADIUS = 3;
 
+    // (2026-10-01 空室放弃, 用户"来回走早就该算走完了, 就应该放弃探索")
+    // 真实到达点按【区域】豁免选点: 水平 8 / 垂直 4 内的候选一律视为已探索。
+    // 旧口径只有目标点 ±3 立方(343 块), 而空室连通空气动辄上千块 —— 1001
+    // 14:52-14:53 实锤: 跨度 ~20 的空室里 42 秒重选 18 次, "离起点最远"
+    // 的目标在房间两端反复翻转(-18,59,8 → -12,63,4 → -8,64,4 → -17,64,4 →
+    // -6,64,8 → -21,64,7 → ...), 永不收敛。区域豁免后, 小空间走 2-4 个
+    // 到达点即候选剔空 → done, 与持久化标记口径(EXPLORED_CAVE_RADIUS=16
+    // 每点覆盖圆柱)同一价值取向: 走过的地方就算探完。
+    // 垂直只取 ±4: 洞穴层高通常 3-6, 水平蔓延才代表"区域"; 上/下层间隔大时
+    // 不被误封(选点本身仍有 NAV_STEP_MAX_DY_UP/DOWN 逐步约束)。
+    private static final int REACHED_AREA_RADIUS_XZ = 8;
+    private static final int REACHED_AREA_RADIUS_Y = 4;
+
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     // 已到达/已探索的天然空气, 绝不回头。
     private final Set<BlockPos> _visited = new HashSet<>();
@@ -169,6 +182,19 @@ public class ExploreCaveTask extends Task implements ITaskRequiresGrounded {
     private BlockPos pickNext(AltoClef mod, BlockPos center) {
         Set<BlockPos> exclude = new HashSet<>(_visited);
         exclude.addAll(_failedTargets);
+        // (2026-10-01 空室放弃) 真实到达过的点按区域豁免(见常量注释): 椭圆柱
+        // 水平 r8 / 垂直 ±4。注意与 _visited(块级精确)并行使用 —— 区域豁免管
+        // "这片空间走完了", 块级豁免管"这个点绝不回头", 两者粒度不同。
+        for (BlockPos reached : _reachedTargets) {
+            for (int dy = -REACHED_AREA_RADIUS_Y; dy <= REACHED_AREA_RADIUS_Y; dy++) {
+                for (int dz = -REACHED_AREA_RADIUS_XZ; dz <= REACHED_AREA_RADIUS_XZ; dz++) {
+                    for (int dx = -REACHED_AREA_RADIUS_XZ; dx <= REACHED_AREA_RADIUS_XZ; dx++) {
+                        if (dx * dx + dz * dz > REACHED_AREA_RADIUS_XZ * REACHED_AREA_RADIUS_XZ) continue;
+                        exclude.add(reached.add(dx, dy, dz));
+                    }
+                }
+            }
+        }
         // (2026-09-07 FIRE 时标记配套) 本任务只由 FIRE 创建, 而 FIRE 已把本洞标记为
         // 已探索区域 → 选点必须豁免区域记忆, 否则自己的目标被剔空, 探索立即结束。
         return MineDownExploreTask.pickFarthestNaturalCaveAir(mod, center, _exploreStart, exclude,

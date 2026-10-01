@@ -224,8 +224,8 @@ public final class NavStuckWatchdog {
                     } else {
                         int pos = (Integer) exec.getClass().getMethod("getPosition").invoke(exec);
                         Object pathObj = exec.getClass().getMethod("getPath").invoke(exec);
-                        java.util.List<?> mvs = (java.util.List<?>) pathObj.getClass()
-                                .getMethod("movements").invoke(pathObj);
+                        // (2026-10-01 探针修复) Path 为包私有类, 必须 setAccessible, 见 invokeAccessible 注释。
+                        java.util.List<?> mvs = (java.util.List<?>) invokeAccessible(pathObj, "movements");
                         StringBuilder sb = new StringBuilder("exec[pos=").append(pos)
                                 .append("/").append(mvs == null ? "?" : mvs.size()).append("]");
                         if (mvs != null && !mvs.isEmpty()) {
@@ -236,7 +236,7 @@ public final class NavStuckWatchdog {
                             // 执行器视角"这段要挖的方块" (PathExecutor.toBreak() 公共方法) —
                             // prepared() 持续 false (PREPPING 循环) 时这就是要瞄/要挖的目标。
                             try {
-                                Object tbSet = exec.getClass().getMethod("toBreak").invoke(exec);
+                                Object tbSet = invokeAccessible(exec, "toBreak");
                                 sb.append(" tb=").append(tbSet);
                             } catch (Throwable ignored) {
                             }
@@ -353,7 +353,9 @@ public final class NavStuckWatchdog {
     /** 反射安全调用: 失败返回 "err"。 */
     private static String safeInvoke(Object obj, String method) {
         try {
-            return String.valueOf(obj.getClass().getMethod(method).invoke(obj));
+            java.lang.reflect.Method m = obj.getClass().getMethod(method);
+            m.setAccessible(true);
+            return String.valueOf(m.invoke(obj));
         } catch (Throwable t) {
             return "err";
         }
@@ -362,7 +364,29 @@ public final class NavStuckWatchdog {
     /** 反射安全调用: 失败返回 null。 */
     private static Object safeInvokeObj(Object obj, String method) {
         try {
-            return obj.getClass().getMethod(method).invoke(obj);
+            java.lang.reflect.Method m = obj.getClass().getMethod(method);
+            m.setAccessible(true);
+            return m.invoke(obj);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * (2026-10-01 探针修复) 反射调用并 setAccessible(true), 失败返回 null。
+     * 必要性: baritone.pathing.calc.Path 是【包私有】类, 从 adris.altoclef 包
+     * 反射调它的 public 方法会被访问检查拦成 IllegalAccessException ——
+     * 0926 加的 exec 深挖探针(pos/movements/status/bRot/tb)在实机上因此
+     * 整段失效(exec[err:...]), "有路径但零输入"的两大根因分支(②shouldPause
+     * backtrack / ③MovementTraverse 早退)始终无法区分, 冻结修复两度盲改失败。
+     * setAccessible(true) 压掉访问检查后, 下次冻结即可拿到
+     * exec[pos=/mv=/status=/bRot=/tb=] 决定性指纹。
+     */
+    private static Object invokeAccessible(Object obj, String method) {
+        try {
+            java.lang.reflect.Method m = obj.getClass().getMethod(method);
+            m.setAccessible(true);
+            return m.invoke(obj);
         } catch (Throwable t) {
             return null;
         }
