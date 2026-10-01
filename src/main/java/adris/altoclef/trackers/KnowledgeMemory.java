@@ -62,11 +62,19 @@ public final class KnowledgeMemory {
                 // knowledge.log 积累 459 条假 VILLAGE, 全在无村庄的橡树地形)。
                 // 曾考虑"橡木须与土径/耕地共现"的守卫, 用户拍板直接删 —— 只留
                 // 村庄专属的 DIRT_PATH/FARMLAND。
+                // (2026-10-01 mergeDistance 8→64) 村庄是成片大结构 (实锤: 一个村
+                // xz 跨度 85×60, DIRT_PATH/FARMLAND 散布全村), 8 格合并 = 沿路每
+                // 走 8 格记一个中心, 直到 maxCenters=20 灌满 —— knowledge.log 20
+                // 条 VILLAGE 全是同一个村。与 WARPED_FOREST 同款处理 (大片结构用
+                // 大合并距离, 该枚举注释早写过这条教训)。
                 new Block[]{Blocks.DIRT_PATH, Blocks.FARMLAND},
-                8, 32, 4, true),
+                8, 32, 4, true, 64),
         RUINED_PORTAL(
                 new Block[]{Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN},
-                4, 16, 3, true),
+                // (2026-10-01 mergeDistance 8→16) 废墟门框黑曜石对角散布可超 8 格
+                // (实锤: 一个门 6 条 RUINED_PORTAL, -251~-254,71-75,172), 16 格
+                // = 一个门一个中心。
+                4, 16, 3, true, 16),
         NETHER_FORTRESS(
                 new Block[]{Blocks.NETHER_BRICKS, Blocks.NETHER_BRICK_FENCE},
                 16, 48, 5, true),
@@ -534,6 +542,21 @@ public final class KnowledgeMemory {
         for (BlockPos existing : centers) {
             if (existing.isWithinDistance(pos, type.mergeDistance)) {
                 return;
+            }
+        }
+        // (2026-10-01 跨会话合并缺口, 预先存在: 0916 落盘机制起) 合并只查内存
+        // set —— 每次重启内存清零, 同一个村庄/门每会话再记几个新角落盘
+        // (persistCenter 只查精确坐标), 多会话累计灌满 maxCenters=20 (实锤:
+        // knowledge.log 20 条 VILLAGE 全是同一个村; 一个废墟门 6 条)。
+        // 合并检查同样覆盖跨会话持久化中心, 同款 mergeDistance。
+        ensureCentersLoaded();
+        Map<StructureType, LinkedHashSet<BlockPos>> persistedByKey =
+                _centersByKey.get(worldKey());
+        if (persistedByKey != null) {
+            for (BlockPos existing : persistedByKey.getOrDefault(type, new LinkedHashSet<>())) {
+                if (existing.isWithinDistance(pos, type.mergeDistance)) {
+                    return;
+                }
             }
         }
         if (centers.size() >= type.maxCenters) {
