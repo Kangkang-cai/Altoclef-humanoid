@@ -176,10 +176,18 @@ public class PlaceObsidianBucketTask extends Task {
 
             // Don't place lava at our position!
             // Would lead to an embarrassing death.
+            //
+            // (2026-10-01 通用就位口径, 录制 20261001-110643 实证) 站位必须是
+            // **严格到达**: 旧版非严格 GetToBlockTask "≤2 格即到位" —— bot 被
+            // 模具让位逻辑送进浇铸坑/爬上模具环顶后, 距站位 (-255,74,172) 不足
+            // 2 格即判"已就位", 岩浆/水从浇铸格正上方或格内倒出 (t=2140 脚格 =
+            // _pos 正上方时 "Placing lava" 触发; 水直接倒进自己脚格)。严格口径
+            // = 脚格必须真等于设计站位 (模具环外侧墙顶) 才动手, 站错就一直在
+            // 等, 不硬倒。
             BlockPos targetPos = _pos.add(-1, 1, 0);
             if (!mod.getPlayer().getBlockPos().equals(targetPos) && mod.getItemStorage().hasItem(Items.LAVA_BUCKET)) {
                 setDebugState("Positioning player before lava");
-                return new GetToBlockTask(targetPos, false);
+                return new GetToBlockTask(targetPos, false, true);
             }
 
             setDebugState("Placing lava for cast");
@@ -229,10 +237,12 @@ public class PlaceObsidianBucketTask extends Task {
             }
 
             // Get to position to avoid weird stuck scenario
+            // (2026-10-01) 同倒岩浆: 严格到达口径, 见上方 lava 分支注释 ——
+            // 录制实证水曾倒进 bot 自己脚所在格 (-254,74,172)。
             BlockPos targetPos = _pos.add(-1, 1, 0);
             if (!mod.getPlayer().getBlockPos().equals(targetPos) && mod.getItemStorage().hasItem(Items.WATER_BUCKET)) {
                 setDebugState("Positioning player before water");
-                return new GetToBlockTask(targetPos, false);
+                return new GetToBlockTask(targetPos, false, true);
             }
 
             return new InteractWithBlockTask(new ItemTarget(Items.WATER_BUCKET, 1), Direction.WEST, _pos.add(1, 1, 0), true);
