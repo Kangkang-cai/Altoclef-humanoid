@@ -180,6 +180,13 @@ public final class BridgeHttpServer {
               .append(","); BridgeJson.str(sb, "dim"); sb.append(':'); BridgeJson.str(sb, s.dim);
             sb.append('}');
             sb.append(','); BridgeJson.str(sb, "health"); sb.append(':'); sb.append(BridgeJson.f1(s.health));
+            // ---- 契约扩展字段（顺序对齐对端解析样例）：hunger/level/equipment/food/foodCount/keyItems ----
+            sb.append(','); BridgeJson.str(sb, "hunger"); sb.append(':').append(BridgeJson.i(s.hunger));
+            sb.append(','); BridgeJson.str(sb, "level"); sb.append(':').append(BridgeJson.i(s.level));
+            sb.append(','); BridgeJson.str(sb, "equipment"); sb.append(':'); BridgeJson.str(sb, s.equipment);
+            sb.append(','); BridgeJson.str(sb, "food"); sb.append(':'); BridgeJson.str(sb, s.food);
+            sb.append(','); BridgeJson.str(sb, "foodCount"); sb.append(':').append(BridgeJson.i(s.foodCount));
+            sb.append(','); BridgeJson.str(sb, "keyItems"); sb.append(':'); BridgeJson.str(sb, s.keyItems);
             sb.append(','); BridgeJson.str(sb, "online"); sb.append(':'); sb.append(Boolean.toString(s.online));
             sb.append('}');
             sendJson(ex, 200, sb.toString());

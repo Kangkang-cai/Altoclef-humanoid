@@ -38,9 +38,24 @@ final class BotSnapshot {
     final double x, y, z;
     final String dim;
     final double health;
+    // ---- /status 契约扩展字段（对端按结构化字段算变化键，语义必须稳定）----
+    /** 饥饿值 0~20 原始数值（档位对端算）。 */
+    final int hunger;
+    /** 经验等级原始数值。 */
+    final int level;
+    /** 护甲+主手工具签名（"铁套+石镐"），裸装空串。 */
+    final String equipment;
+    /** 背包食物种类概述（"面包x5、生牛肉x3"），无食物空串。 */
+    final String food;
+    /** 背包食物总数。 */
+    final int foodCount;
+    /** 稀有+有用级持有（"钻石x2、铁锭x5"），无则空串。 */
+    final String keyItems;
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
-                        double x, double y, double z, String dim, double health) {
+                        double x, double y, double z, String dim, double health,
+                        int hunger, int level, String equipment,
+                        String food, int foodCount, String keyItems) {
         this.botId = botId;
         this.ts = ts;
         this.online = online;
@@ -51,12 +66,18 @@ final class BotSnapshot {
         this.z = z;
         this.dim = dim;
         this.health = health;
+        this.hunger = hunger;
+        this.level = level;
+        this.equipment = equipment;
+        this.food = food;
+        this.foodCount = foodCount;
+        this.keyItems = keyItems;
     }
 
     /** 离线时的占位快照（player 为 null / 未进世界）。 */
     static BotSnapshot offline(String botId) {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
-                0, 0, 0, "overworld", 0);
+                0, 0, 0, "overworld", 0, 0, 0, "", "", 0, "");
     }
 
     /**
@@ -71,7 +92,9 @@ final class BotSnapshot {
         if (p == null) {
             return offline(botId);
         }
-        SummaryGenerator.Result r = gen.generate(mod, botId);
+        // 背包摘要先算：summary 的装备/食物/持有子句从 digest 取，保证口径一致
+        InventoryDigest digest = InventoryDigest.of(p);
+        SummaryGenerator.Result r = gen.generate(mod, botId, digest);
 
         Vec3d pos = p.getPos();
         double x = pos.x, y = pos.y, z = pos.z;
@@ -84,7 +107,9 @@ final class BotSnapshot {
         }
         String dimTok = SummaryGenerator.dimToken(dim);
 
-        return new BotSnapshot(botId, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp);
+        return new BotSnapshot(botId, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
+                digest.hunger, digest.level, digest.equipment,
+                digest.food, digest.foodCount, digest.keyItems);
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */

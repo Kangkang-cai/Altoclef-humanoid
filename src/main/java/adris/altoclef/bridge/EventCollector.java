@@ -95,6 +95,42 @@ final class EventCollector {
         watch(Items.GHAST_TEAR, "恶魂之泪", "捡到", "rare_item", true);
         watch(Items.WITHER_SKELETON_SKULL, "凋灵骷髅头", "捡到", "rare_item", true);
         watch(Items.NETHER_STAR, "下界之星", "捡到", "rare_item", true);
+        // ---- 食物（值得说的；腐肉/蜘蛛眼/毒马铃薯刻意不进，捡了别刷屏）----
+        watch(Items.BREAD, "面包", "捡到", "collected", false);
+        watch(Items.APPLE, "苹果", "捡到", "collected", false);
+        watch(Items.GOLDEN_CARROT, "金胡萝卜", "捡到", "collected", false);
+        watch(Items.GOLDEN_APPLE, "金苹果", "捡到", "rare_item", true);
+        watch(Items.ENCHANTED_GOLDEN_APPLE, "附魔金苹果", "捡到", "rare_item", true);
+        watch(Items.COOKED_BEEF, "牛排", "捡到", "collected", false);
+        watch(Items.COOKED_PORKCHOP, "熟猪排", "捡到", "collected", false);
+        watch(Items.COOKED_CHICKEN, "熟鸡肉", "捡到", "collected", false);
+        watch(Items.COOKED_MUTTON, "熟羊肉", "捡到", "collected", false);
+        watch(Items.COOKED_COD, "熟鳕鱼", "捡到", "collected", false);
+        watch(Items.COOKED_SALMON, "熟鲑鱼", "捡到", "collected", false);
+        watch(Items.BAKED_POTATO, "烤马铃薯", "捡到", "collected", false);
+        watch(Items.PUMPKIN_PIE, "南瓜派", "捡到", "collected", false);
+        // ---- 工具/护甲/武器：铁系及以上（木/石随手可造不进事件；钻石系经 keyItems 同口径）----
+        watch(Items.IRON_PICKAXE, "铁镐", "捡到", "collected", false);
+        watch(Items.IRON_AXE, "铁斧", "捡到", "collected", false);
+        watch(Items.IRON_SHOVEL, "铁铲", "捡到", "collected", false);
+        watch(Items.IRON_HOE, "铁锄", "捡到", "collected", false);
+        watch(Items.IRON_SWORD, "铁剑", "捡到", "collected", false);
+        watch(Items.IRON_HELMET, "铁头盔", "捡到", "collected", false);
+        watch(Items.IRON_CHESTPLATE, "铁胸甲", "捡到", "collected", false);
+        watch(Items.IRON_LEGGINGS, "铁护腿", "捡到", "collected", false);
+        watch(Items.IRON_BOOTS, "铁靴子", "捡到", "collected", false);
+        watch(Items.DIAMOND_PICKAXE, "钻石镐", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_AXE, "钻石斧", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_SHOVEL, "钻石铲", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_HOE, "钻石锄", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_SWORD, "钻石剑", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_HELMET, "钻石头盔", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_CHESTPLATE, "钻石胸甲", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_LEGGINGS, "钻石护腿", "捡到", "rare_item", true);
+        watch(Items.DIAMOND_BOOTS, "钻石靴子", "捡到", "rare_item", true);
+        watch(Items.SHIELD, "盾牌", "捡到", "collected", false);
+        watch(Items.BOW, "弓", "捡到", "collected", false);
+        watch(Items.CROSSBOW, "弩", "捡到", "collected", false);
     }
 
     private void watch(Item item, String zh, String verb, String type, boolean rare) {

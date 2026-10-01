@@ -92,11 +92,16 @@ final class SummaryGenerator {
     /**
      * 生成一句中文摘要 + 短任务标签。
      *
+     * <p>长度契约：≤{@value #SUMMARY_MAX_CHARS} 字，超长按优先级裁剪——
+     * 任务+坐标+血量（恒在）&gt; 装备 &gt; 食物 &gt; keyItems。裁剪是确定性的
+     * （同状态同句），随机措辞池只影响动词前缀，不影响信息位。
+     *
      * @param mod      AltoClef 实例（客户端线程调用，安全）
      * @param botId    本 bot 的身份标识（写入摘要不必要，但调试可见）
+     * @param digest   背包摘要（装备/食物/持有子句数据源，与快照字段同口径）
      * @return 同时含 summary 与 task 的结果对象
      */
-    Result generate(AltoClef mod, String botId) {
+    Result generate(AltoClef mod, String botId, InventoryDigest digest) {
         ClientPlayerEntity p = mod.getPlayer();
         if (p == null || !AltoClef.inGame()) {
             return new Result("不在游戏里", "离线");
@@ -152,11 +157,27 @@ final class SummaryGenerator {
                 ? "，在" + (dim == Dimension.NETHER ? "下界" : "末地")
                 : "";
 
-        // 拼装：正在挖矿，坐标(120,64,-40)，血量18，有点饿，在下界
-        String summary = verb + "，坐标(" + x + "," + y + "," + z + ")" + hpClause + hungerClause + dimSuffix;
+        // 拼装（确定性裁剪）：
+        // 基座=任务+坐标+血量+饥饿档+维度，恒保留；之后按 装备>食物>持有 依次
+        // 尝试追加，超 {@value #SUMMARY_MAX_CHARS} 字即停（定点截断，同状态同句）。
+        String base = verb + "，坐标(" + x + "," + y + "," + z + ")" + hpClause + hungerClause + dimSuffix;
+        StringBuilder summary = new StringBuilder(base);
+        String[] extras = {
+                digest.equipment.isEmpty() ? null : "，装备" + digest.equipment,
+                digest.food.isEmpty() ? null : "，食物" + digest.food,
+                digest.keyItems.isEmpty() ? null : "，持有" + digest.keyItems
+        };
+        for (String extra : extras) {
+            if (extra == null) continue;
+            if (summary.length() + extra.length() > SUMMARY_MAX_CHARS) break;
+            summary.append(extra);
+        }
 
-        return new Result(summary, taskLabel);
+        return new Result(summary.toString(), taskLabel);
     }
+
+    /** summary 长度上限（契约：≤80 字）。 */
+    private static final int SUMMARY_MAX_CHARS = 80;
 
     /** 生成结果：摘要句 + 短任务标签。 */
     static final class Result {
