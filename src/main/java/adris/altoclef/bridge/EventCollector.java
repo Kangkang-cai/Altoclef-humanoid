@@ -39,6 +39,8 @@ final class EventCollector {
     private final AltoClef _mod;
     private final EventBuffer _buffer;
     private final String _botId;
+    /** 背包读失败防抖（传送门/维度切换瞬零），冻结窗口内不产生事件、不动基线。 */
+    private final InventoryGuard _invGuard;
 
     /** 白名单：Item → (中文名, 动词, type, rare)。只这些物品的增量会变成事件。 */
     private final Map<Item, ItemInfo> _watched = new IdentityHashMap<>();
@@ -46,6 +48,8 @@ final class EventCollector {
     /** 上一次背包计数快照（仅白名单物品）。 */
     private final Map<Item, Integer> _lastCounts = new IdentityHashMap<>();
     private boolean _hasLastCounts = false;
+    /** 冻结窗口结束后，首个有效采样先静默重建基线（跳过窗口内增量）。 */
+    private boolean _pendingRebaseline = false;
 
     private boolean _wasDead = false;
     private int _tickCounter = 0;
@@ -56,10 +60,11 @@ final class EventCollector {
     private Subscription<ChatMessageEvent> _subChat;
     private Subscription<ClientTickEvent> _subTick;
 
-    EventCollector(AltoClef mod, EventBuffer buffer, String botId) {
+    EventCollector(AltoClef mod, EventBuffer buffer, String botId, InventoryGuard invGuard) {
         this._mod = mod;
         this._buffer = buffer;
         this._botId = botId;
+        this._invGuard = invGuard;
         registerWatchedItems();
     }
 
@@ -220,10 +225,23 @@ final class EventCollector {
         _tickCounter = 0;
 
         Map<Item, Integer> now = scanInventory(player);
+        // 读失败防抖：总量骤降/归零（传送门/维度切换瞬零）→ 冻结窗口，跳过增量与基线
+        boolean valid = _invGuard.onSample(inventoryTotal(player), System.currentTimeMillis());
+        if (!valid) {
+            _pendingRebaseline = true;
+            return;
+        }
         if (!_hasLastCounts) {
             _lastCounts.clear();
             _lastCounts.putAll(now);
             _hasLastCounts = true;
+            return;
+        }
+        // 冻结窗口刚结束：静默重建基线，窗口内的增量（含伪拾取）全部跳过
+        if (_pendingRebaseline) {
+            _pendingRebaseline = false;
+            _lastCounts.clear();
+            _lastCounts.putAll(now);
             return;
         }
         // 增量：now > last 的白名单物品
@@ -256,6 +274,25 @@ final class EventCollector {
         // 只保留白名单的，省内存（removeIf 走 keySet 的活视图，原地删）
         counts.keySet().removeIf(k -> !_watched.containsKey(k));
         return counts;
+    }
+
+    /** 背包全量物品计数和（所有非空栈，不限白名单）——防抖骤降判定的输入。 */
+    private static int inventoryTotal(net.minecraft.client.network.ClientPlayerEntity player) {
+        var inv = player.getInventory();
+        if (inv == null) return 0;
+        int total = 0;
+        total += countStacks(inv.main);
+        total += countStacks(inv.armor);
+        total += countStacks(inv.offHand);
+        return total;
+    }
+
+    private static int countStacks(java.util.List<ItemStack> stacks) {
+        int n = 0;
+        for (ItemStack s : stacks) {
+            if (s != null && !s.isEmpty()) n += s.getCount();
+        }
+        return n;
     }
 
     private void addInto(Map<Item, Integer> counts, java.util.List<ItemStack> stacks) {

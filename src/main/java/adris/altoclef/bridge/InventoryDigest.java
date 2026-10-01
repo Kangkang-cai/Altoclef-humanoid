@@ -72,6 +72,32 @@ final class InventoryDigest {
         return new InventoryDigest(0, 0, "", "", 0, "");
     }
 
+    /**
+     * 采样入口（带读失败防抖）：冻结窗口内沿用上一个有效摘要的背包派生字段，
+     * hunger/level 是玩家状态照常实时。仅客户端线程调用（静态缓存单线程读写）。
+     */
+    static InventoryDigest sample(ClientPlayerEntity p, InventoryGuard guard) {
+        long now = System.currentTimeMillis();
+        InventoryDigest d = of(p);
+        if (guard != null && guard.isFrozen(now)) {
+            if (_lastGood != null) {
+                return withPrevInventory(d.hunger, d.level, _lastGood);
+            }
+            return d; // 首次尚无有效摘要，暂时直出（瞬时态，5s 内自愈）
+        }
+        _lastGood = d;
+        return d;
+    }
+
+    /** hunger/level 用新值，背包派生四字段沿用上一个有效摘要。 */
+    static InventoryDigest withPrevInventory(int hunger, int level, InventoryDigest prev) {
+        return new InventoryDigest(hunger, level,
+                prev.equipment, prev.food, prev.foodCount, prev.keyItems);
+    }
+
+    /** 上一个有效摘要（冻结窗口时快照沿用）。仅客户端线程读写。 */
+    private static InventoryDigest _lastGood = null;
+
     /** 在客户端线程采样。仅由 BotSnapshot.snapshot 调用。 */
     static InventoryDigest of(ClientPlayerEntity p) {
         int hunger = p.getHungerManager().getFoodLevel();

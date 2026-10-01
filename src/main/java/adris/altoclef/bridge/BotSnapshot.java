@@ -83,8 +83,10 @@ final class BotSnapshot {
     /**
      * 在客户端线程采样当前状态构造快照。仅由 {@link BridgeHttpServer} 的
      * ClientTickEvent 订阅调用（保证客户端线程）。
+     *
+     * @param guard 背包读失败防抖（可 null；null 时防抖旁路，摘要直出）
      */
-    static BotSnapshot snapshot(AltoClef mod, SummaryGenerator gen, String botId) {
+    static BotSnapshot snapshot(AltoClef mod, SummaryGenerator gen, String botId, InventoryGuard guard) {
         if (mod == null || !AltoClef.inGame()) {
             return offline(botId);
         }
@@ -92,8 +94,9 @@ final class BotSnapshot {
         if (p == null) {
             return offline(botId);
         }
-        // 背包摘要先算：summary 的装备/食物/持有子句从 digest 取，保证口径一致
-        InventoryDigest digest = InventoryDigest.of(p);
+        // 背包摘要先算（带读失败防抖：冻结窗口内沿用上一个有效的背包派生字段），
+        // summary 的装备/食物/持有子句从 digest 取，保证口径一致
+        InventoryDigest digest = InventoryDigest.sample(p, guard);
         SummaryGenerator.Result r = gen.generate(mod, botId, digest);
 
         Vec3d pos = p.getPos();

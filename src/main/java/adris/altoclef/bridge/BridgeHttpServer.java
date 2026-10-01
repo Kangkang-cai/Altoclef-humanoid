@@ -56,6 +56,8 @@ public final class BridgeHttpServer {
     private final SummaryGenerator _gen = new SummaryGenerator();
     private final EventBuffer _buffer;
     private final EventCollector _collector;
+    /** 背包读失败防抖：EventCollector 采样判定 + 快照沿用，两处共用同一实例。 */
+    private final InventoryGuard _invGuard = new InventoryGuard();
 
     /** 客户端线程定期写入，HTTP 线程只读。 */
     private volatile BotSnapshot _snapshot;
@@ -69,7 +71,7 @@ public final class BridgeHttpServer {
         this._port = cfg.port;
         this._botId = cfg.botId;
         this._buffer = new EventBuffer(cfg.botId);
-        this._collector = new EventCollector(mod, _buffer, cfg.botId);
+        this._collector = new EventCollector(mod, _buffer, cfg.botId, this._invGuard);
         // 初始快照：离线占位，避免 /status 在首次 tick 前返回 null
         this._snapshot = BotSnapshot.offline(cfg.botId);
     }
@@ -154,7 +156,7 @@ public final class BridgeHttpServer {
         }
         if (now - _lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
             _lastSnapshotMs = now;
-            _snapshot = BotSnapshot.snapshot(_mod, _gen, _botId);
+            _snapshot = BotSnapshot.snapshot(_mod, _gen, _botId, _invGuard);
         }
     }
 

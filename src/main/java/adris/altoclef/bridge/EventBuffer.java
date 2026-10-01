@@ -27,17 +27,27 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  * 实现为单调递增的 long id：空 cursor → cursor = 当前最大 id（= 对齐到 now），
  * 返回空；下次带这个 cursor 来轮询即可拿到之后到达的事件。
+ *
+ * <p>游标跨会话单调（1001 缺陷②）：id 以 epoch millis 为基底
+ * （{@code id = max(上次id+1, 当前墙钟ms)}），bot 重启后新 id 必然大于上一会话
+ * 全部 id，旧游标不会吞掉新会话事件。对"游标大于本会话最大值"的异常请求，
+ * poll 返回对齐后的 nextCursor（= 当前最大 id），不会返回越界游标。
  */
 final class EventBuffer {
 
     /** 同类聚合窗口（契约 §3.4 "3s 窗口内同类事件合并"）。 */
     private static final long AGGREGATE_WINDOW_MS = 3000;
+    /** 同 (type,itemKey) 事件冷却窗：期内再次到期不落定，计数合并延后（1001 缺陷③）。 */
+    private static final long SAME_KEY_COOLDOWN_MS = 60_000;
     /** deque 容量上限，防无界增长；超过则从最旧端裁剪。 */
     private static final int MAX_BUFFERED = 500;
 
     private final ConcurrentLinkedDeque<BridgeEvent> _events = new ConcurrentLinkedDeque<>();
     private final ConcurrentHashMap<String, Pending> _pending = new ConcurrentHashMap<>();
-    private final AtomicLong _nextId = new AtomicLong(0);
+    /** 最近一次落定的墙钟（按 aggKey），冷却窗判定用。 */
+    private final ConcurrentHashMap<String, Long> _lastEmitMs = new ConcurrentHashMap<>();
+    /** 全局单调 id 计数器：基底 epoch millis（跨重启单调）。 */
+    private final AtomicLong _idCounter = new AtomicLong(0);
     private final String _botId;
 
     EventBuffer(String botId) {
@@ -77,7 +87,7 @@ final class EventBuffer {
      * chat/help 由 EventCollector 自身做请求识别后才调用。
      */
     void emitImmediate(String type, String text, boolean strong) {
-        long id = _nextId.incrementAndGet();
+        long id = allocId();
         BridgeEvent e = new BridgeEvent(id, _botId, BotSnapshot.nowIso(), type, text, strong);
         _events.addLast(e);
         trim();
@@ -97,13 +107,31 @@ final class EventBuffer {
             // removeIf 等价：用 compute 保证只移除我们这把（万一期间又被更新）
             _pending.computeIfPresent(p.aggKey, (k, cur) -> cur == p ? null : cur);
             if (p.count <= 0) continue;
+            // 同类冷却窗（缺陷③）：60s 内同 (type,itemKey) 不落定，计数合并、
+            // 延后到冷却期满再发 —— 盾牌"造→掉→捡"循环不再刷 35 条。
+            Long last = _lastEmitMs.get(p.aggKey);
+            if (last != null && now - last < SAME_KEY_COOLDOWN_MS) {
+                _pending.put(p.aggKey, new Pending(p.type, p.itemKey, p.chineseName, p.verb,
+                        p.count, now, last + SAME_KEY_COOLDOWN_MS, p.strong));
+                continue;
+            }
+            _lastEmitMs.put(p.aggKey, now);
             String text = (p.count == 1)
                     ? p.verb + "了" + p.chineseName
                     : p.verb + "了 " + p.count + " 个" + p.chineseName;
-            long id = _nextId.incrementAndGet();
+            long id = allocId();
             _events.addLast(new BridgeEvent(id, _botId, BotSnapshot.nowIso(), p.type, text, p.strong));
         }
         if (!expired.isEmpty()) trim();
+    }
+
+    /**
+     * 分配严格单调的下一事件 id：max(上次+1, 当前墙钟ms)。
+     * 同毫秒多次调用也严格递增（+1 保底）；跨重启以墙钟为基底，新会话 id
+     * 必然大于旧会话全部 id。
+     */
+    private long allocId() {
+        return _idCounter.updateAndGet(cur -> Math.max(cur + 1, System.currentTimeMillis()));
     }
 
     /**
@@ -149,7 +177,7 @@ final class EventBuffer {
     }
 
     private long currentMaxId() {
-        return _nextId.get();
+        return _idCounter.get();
     }
 
     private void trim() {
