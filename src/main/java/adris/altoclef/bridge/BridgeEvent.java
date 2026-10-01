@@ -12,6 +12,9 @@ package adris.altoclef.bridge;
  *   <li>{@link #type} —— {@code task_done|collected|rare_item|death|chat|help|...}；</li>
  *   <li>{@link #text} —— 中文短句；</li>
  *   <li>{@link #strong} —— 是否强制开轮。仅死亡、对方给物/求助类为 true。</li>
+ *   <li>{@link #detail} —— 可选结构化附加字段（**已是 JSON 片段**，如
+ *       {@code {"actionId":"a-1","cmd":"follow"}}），无则 null。目前仅
+ *       action_accepted / action_done 使用（阶段三行动回执）。</li>
  * </ul>
  */
 final class BridgeEvent {
@@ -22,13 +25,19 @@ final class BridgeEvent {
     final String type;
     final String text;
     final boolean strong;
+    final String detail;
 
     BridgeEvent(long id, String botId, String ts, String type, String text, boolean strong) {
+        this(id, botId, ts, type, text, strong, null);
+    }
+
+    BridgeEvent(long id, String botId, String ts, String type, String text, boolean strong, String detail) {
         this.id = id;
         this.botId = botId;
         this.ts = ts;
         this.type = type;
         this.text = text;
         this.strong = strong;
+        this.detail = detail;
     }
 }

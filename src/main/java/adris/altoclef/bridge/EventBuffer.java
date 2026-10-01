@@ -87,8 +87,13 @@ final class EventBuffer {
      * chat/help 由 EventCollector 自身做请求识别后才调用。
      */
     void emitImmediate(String type, String text, boolean strong) {
+        emitImmediate(type, text, strong, null);
+    }
+
+    /** 带结构化 detail（已是 JSON 片段）的立即事件，用于行动回执。 */
+    void emitImmediate(String type, String text, boolean strong, String detail) {
         long id = allocId();
-        BridgeEvent e = new BridgeEvent(id, _botId, BotSnapshot.nowIso(), type, text, strong);
+        BridgeEvent e = new BridgeEvent(id, _botId, BotSnapshot.nowIso(), type, text, strong, detail);
         _events.addLast(e);
         trim();
     }

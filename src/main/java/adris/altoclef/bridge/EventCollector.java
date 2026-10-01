@@ -41,6 +41,8 @@ final class EventCollector {
     private final String _botId;
     /** 背包读失败防抖（传送门/维度切换瞬零），冻结窗口内不产生事件、不动基线。 */
     private final InventoryGuard _invGuard;
+    /** 行动派发器：pause 主动 cancel 的同步窗口内不发 task_done（防"完成"误导）。 */
+    private final ActionDispatcher _dispatcher;
 
     /** 白名单：Item → (中文名, 动词, type, rare)。只这些物品的增量会变成事件。 */
     private final Map<Item, ItemInfo> _watched = new IdentityHashMap<>();
@@ -60,11 +62,13 @@ final class EventCollector {
     private Subscription<ChatMessageEvent> _subChat;
     private Subscription<ClientTickEvent> _subTick;
 
-    EventCollector(AltoClef mod, EventBuffer buffer, String botId, InventoryGuard invGuard) {
+    EventCollector(AltoClef mod, EventBuffer buffer, String botId, InventoryGuard invGuard,
+                   ActionDispatcher dispatcher) {
         this._mod = mod;
         this._buffer = buffer;
         this._botId = botId;
         this._invGuard = invGuard;
+        this._dispatcher = dispatcher;
         registerWatchedItems();
     }
 
@@ -160,6 +164,11 @@ final class EventCollector {
     }
 
     private void onTaskFinished(TaskFinishedEvent evt) {
+        // pause 的 cancel 会同步触发本回调 —— 那是"被干预打断"，不是"任务完成"，
+        // 发 task_done 会让 LLM 看到误导性完成信号（见 DESIGN_action_api.md §6.1）。
+        if (_dispatcher != null && _dispatcher.isInterrupting()) {
+            return;
+        }
         Task t = evt.lastTaskRan;
         String label;
         if (t == null) {

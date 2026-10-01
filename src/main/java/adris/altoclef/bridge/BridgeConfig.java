@@ -43,4 +43,23 @@ public class BridgeConfig {
      * 必须改成不同的值（bot_a / bot_b / ...），与 chat_and_play 侧代理路由对齐。
      */
     public String botId = "bot_a";
+
+    /**
+     * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
+     * 其余一律 403。默认 7 条（4 行动 + 3 只读），见 DESIGN_action_api.md §1.2 A 档。
+     * 显式置空数组 = 不允许任何行动命令（关闭行动通道）；字段缺省 = 用默认 7 条。
+     */
+    public java.util.List<String> allowedCommands = new java.util.ArrayList<>(java.util.Arrays.asList(
+            "goto", "follow", "give", "idle", "coords", "status", "inventory"));
+
+    /**
+     * 行动类命令限流（条/分钟，滑动窗口）。只读命令（coords/status/inventory）不占额度。
+     * {@code <=0} = 不限流。
+     */
+    public int actionRatePerMinute = 6;
+
+    /**
+     * 是否允许主线干预伪命令 {@code @pause_main} / {@code @resume_main}（阶段三 ActionDispatcher）。
+     */
+    public boolean enablePauseResume = true;
 }

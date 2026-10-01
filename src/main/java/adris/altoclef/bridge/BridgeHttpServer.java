@@ -56,6 +56,8 @@ public final class BridgeHttpServer {
     private final SummaryGenerator _gen = new SummaryGenerator();
     private final EventBuffer _buffer;
     private final EventCollector _collector;
+    /** 阶段三行动派发器：白名单/限流/回执/主线干预。 */
+    private final ActionDispatcher _dispatcher;
     /** 背包读失败防抖：EventCollector 采样判定 + 快照沿用，两处共用同一实例。 */
     private final InventoryGuard _invGuard = new InventoryGuard();
 
@@ -71,7 +73,8 @@ public final class BridgeHttpServer {
         this._port = cfg.port;
         this._botId = cfg.botId;
         this._buffer = new EventBuffer(cfg.botId);
-        this._collector = new EventCollector(mod, _buffer, cfg.botId, this._invGuard);
+        this._dispatcher = new ActionDispatcher(mod, _buffer);
+        this._collector = new EventCollector(mod, _buffer, cfg.botId, this._invGuard, this._dispatcher);
         // 初始快照：离线占位，避免 /status 在首次 tick 前返回 null
         this._snapshot = BotSnapshot.offline(cfg.botId);
     }
@@ -124,6 +127,8 @@ public final class BridgeHttpServer {
         _tickSub = EventBus.subscribe(ClientTickEvent.class, e -> onClientTick());
         // 事件采集订阅（TaskFinishedEvent / ChatMessageEvent + 背包增量）
         _collector.subscribe();
+        // 行动回执订阅（action_done 关联顶层任务结束）
+        _dispatcher.subscribe();
 
         Debug.logMessage("[Bridge] 已启动: 127.0.0.1:" + _port + " botId=" + _botId
                 + " (endpoints: GET /status, GET /events?cursor=, POST /command)");
@@ -136,6 +141,9 @@ public final class BridgeHttpServer {
         }
         if (_collector != null) {
             _collector.dispose();
+        }
+        if (_dispatcher != null) {
+            _dispatcher.dispose();
         }
         if (_server != null) {
             _server.stop(0); // 立即停（0s 等待）
@@ -216,6 +224,10 @@ public final class BridgeHttpServer {
                 sb.append(','); BridgeJson.str(sb, "type"); sb.append(':'); BridgeJson.str(sb, e.type);
                 sb.append(','); BridgeJson.str(sb, "text"); sb.append(':'); BridgeJson.str(sb, e.text);
                 sb.append(','); BridgeJson.str(sb, "strong"); sb.append(':'); sb.append(Boolean.toString(e.strong));
+                if (e.detail != null) {
+                    // detail 已是 JSON 片段（ActionDispatcher.detailJson 内部走 BridgeJson 转义）
+                    sb.append(','); BridgeJson.str(sb, "detail"); sb.append(':').append(e.detail);
+                }
                 sb.append('}');
             }
             sb.append("],");
@@ -225,11 +237,14 @@ public final class BridgeHttpServer {
         }
     }
 
-    /** POST /command {"cmd":"@goto 100 64 100"} → 转交 CommandExecutor 执行。 */
+    /** POST /command {"cmd":"@goto 100 64 100","actionId":"a-1"} → 白名单+限流+派发。 */
     private final class CommandHandler implements HttpHandler {
         // 容忍空格的 cmd 提取正则；匹配 "cmd":"<value>"，value 支持 \" \\ 等转义。
         private final Pattern CMD_RE =
                 Pattern.compile("\"cmd\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+        /** 可选的 actionId（对端生成，用于回执关联）。 */
+        private final Pattern ACTION_ID_RE =
+                Pattern.compile("\"actionId\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
 
         @Override
         public void handle(HttpExchange ex) throws IOException {
@@ -261,7 +276,7 @@ public final class BridgeHttpServer {
                 return;
             }
 
-            // 校验（HTTP 线程安全：只读 _commandSheet + prefix 字符串，不碰游戏状态）
+            // 校验链（HTTP 线程安全：只读 _commandSheet + prefix + 配置，不碰游戏状态）
             CommandExecutor executor = AltoClef.getCommandExecutor();
             if (executor == null) {
                 sendJson(ex, 503, "{\"ok\":false,\"error\":\"command executor not ready\"}");
@@ -272,7 +287,14 @@ public final class BridgeHttpServer {
                 return;
             }
             String firstToken = firstToken(cmd);
-            if (firstToken != null) {
+            if (firstToken == null) {
+                sendJson(ex, 400, "{\"ok\":false,\"error\":\"empty cmd\"}");
+                return;
+            }
+            // 主线干预伪命令不在 CommandExecutor 注册，由 ActionDispatcher 分流，跳过 404 检查。
+            boolean pseudo = ActionDispatcher.PAUSE.equals(firstToken)
+                    || ActionDispatcher.RESUME.equals(firstToken);
+            if (!pseudo) {
                 Command registered = executor.get(firstToken);
                 if (registered == null) {
                     sendJson(ex, 404, "{\"ok\":false,\"error\":\"unknown command: "
@@ -281,15 +303,38 @@ public final class BridgeHttpServer {
                 }
             }
 
+            // AI 行动白名单（阶段三）：白名单外的命令一律 403
+            ActionDispatcher dispatcher = _dispatcher;
+            if (!dispatcher.isAllowedToken(firstToken)) {
+                sendJson(ex, 403, "{\"ok\":false,\"error\":\"not allowed\",\"reason\":"
+                        + jsonEscape("command '" + firstToken + "' is not in the AI action whitelist") + "}");
+                return;
+            }
+            // 限流（只读命令不占额度）
+            if (!dispatcher.isReadOnlyToken(firstToken)) {
+                int retryAfterSec = dispatcher.rateCheckAndRecord();
+                if (retryAfterSec > 0) {
+                    sendJson(ex, 429, "{\"ok\":false,\"error\":\"rate limited\",\"retryAfterSec\":"
+                            + retryAfterSec + "}");
+                    return;
+                }
+            }
+
+            // 记账 + 同步受理回执（action_accepted 进事件流，让 LLM 下一轮知道话递到了）
+            Matcher am = ACTION_ID_RE.matcher(bodyStr);
+            String givenActionId = am.find() ? unescape(am.group(1)) : null;
+            String actionId = dispatcher.allocateActionId(givenActionId);
+            dispatcher.accept(actionId, firstToken, cmd);
+
             // 派发回客户端线程执行（不在 HTTP 线程碰游戏状态）
             MinecraftClient.getInstance().execute(() -> {
                 try {
-                    executor.execute(cmd);
+                    dispatcher.runOnClientThread(cmd, firstToken, actionId);
                 } catch (Throwable t) {
                     Debug.logWarning("[Bridge] command dispatch threw: " + t);
                 }
             });
-            sendJson(ex, 200, "{\"ok\":true}");
+            sendJson(ex, 200, "{\"ok\":true,\"actionId\":" + jsonEscape(actionId) + ",\"accepted\":true}");
         }
 
         /** 取去掉 prefix 后的第一个 token（命令名）。prefix 取自 mod settings（跨包可见）。 */
