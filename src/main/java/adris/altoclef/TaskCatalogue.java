@@ -212,7 +212,12 @@ public class TaskCatalogue {
             smelt("smooth_quartz", Items.SMOOTH_QUARTZ, "quartz_block");
             smelt("smooth_basalt", Items.SMOOTH_BASALT, "basalt");
             smelt("glass", Items.GLASS, "sand").dontMineIfPresent();
-            smelt("iron_ingot", Items.IRON_INGOT, "raw_iron", Items.IRON_ORE);
+            // (2026-10-01 铁锭复合源, 用户"铁粒也不要丢, 保证 bot 知道把所有铁粒
+            // 做成铁锭") 金锭同款结构 CollectIronIngotTask: 铁粒(9:1)优先就地折算,
+            // 生铁熔炼为主源。anyDimension: 下界背包有铁粒/生铁时直接就地出锭
+            // (补剑闸/盾牌链的下界铁需求), 免去为挖主世界铁矿专门开门;
+            // 都没有时任务内部自行回主世界。
+            simple("iron_ingot", Items.IRON_INGOT, CollectIronIngotTask::new).anyDimension();
             smelt("copper_ingot", Items.COPPER_INGOT, "raw_copper", Items.COPPER_ORE);
             smelt("charcoal", Items.CHARCOAL, "log");
             smelt("brick", Items.BRICK, "clay_ball");

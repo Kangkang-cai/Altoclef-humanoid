@@ -621,13 +621,13 @@ public class Settings implements IFailableConfigFile {
             // (2026-08-25 重要物资保护, 用户指定) 末影珍珠/烈焰棒(末影之眼材料)、
             // 金锭(猪灵交易)/铁锭、床(末地打龙)、原木/木板(木头) — 这些都不参与
             // 丢物, 背包满腾位只丢杂物/垃圾。
-            Stream.of(Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GOLD_INGOT, Items.IRON_INGOT,
-                    // (2026-10-01 生铁保护, 用户现场) 1001-113217 会话实锤: 腾位搜刮
-                    // (LootContainerTask→StoreGarbageInContainerTask) 把 raw_iron x4
-                    // 当垃圾塞进废墟宝箱, 随后 GreedyOre 又去箱子里取回 — 往返空跑。
-                    // 生铁是冶炼铁锭的直接原料, 与铁锭同级保护。生金不在其列
-                    // (2026-09-21 用户拍板: 地牢阶段生金可丢)。
-                    Items.RAW_IRON),
+            // (2026-10-01 生铁/铁粒移至 CODE_PROTECTED_BASELINE) 本字段是 Gson
+            // 序列化字段: altoclef_settings.json 加载时【整体替换】这里的默认值,
+            // 往默认值加成员对已存在的配置文件不生效 (1001 两场实锤: 12:08 加
+            // RAW_IRON 进默认值, 18:58:47 腾位照样把 raw_iron x2 当垃圾丢掉,
+            // craftclick/fix_diag 铁证 cursor=raw_iron garbageSlot=slot9)。
+            // 代码级保护一律放 CODE_PROTECTED_BASELINE, 配置文件只能增不能删。
+            Stream.of(Items.ENDER_PEARL, Items.BLAZE_ROD, Items.GOLD_INGOT, Items.IRON_INGOT),
             // (2026-08-25 用户指定) 打火石(点火刚需) 不可丢; 圆石/深板岩圆石
             // 走"至少保留一组(64)"逻辑 (见 ItemHelper.canThrowAwayStack), 超出的
             // 可丢, 不放在这里完全保护。
@@ -636,6 +636,23 @@ public class Settings implements IFailableConfigFile {
             Stream.of(ItemHelper.LOG),
             Stream.of(ItemHelper.PLANKS)
     ).toList();
+
+    /**
+     * (2026-10-01 机制级保护基线, 用户现场) 不参与 Gson 序列化的代码级保护 —
+     * {@link #importantItems} 是序列化字段, 磁盘配置加载时整体替换代码默认值,
+     * 所以"往默认值里加物品"救不了已存在的配置文件 (生铁 1001 两场被丢实锤)。
+     * 这里的条目永远生效, altoclef_settings.json 只能增保护、不能删保护。
+     * <ul>
+     *   <li>RAW_IRON: 生铁=冶炼铁锭的直接原料, 与铁锭同级保护
+     *       (1001-113217 搜刮塞箱往返空跑 / 185104 18:58:47 腾位丢 raw_iron x2)。</li>
+     *   <li>IRON_NUGGET: 铁粒=铁锭原料 (9 粒合 1 锭), 绝不丢弃, 由
+     *       CollectIronIngotTask 统一折算成锭 (2026-10-01 用户指定)。</li>
+     * </ul>
+     */
+    private static final List<Item> CODE_PROTECTED_BASELINE = List.of(
+            Items.RAW_IRON,
+            Items.IRON_NUGGET
+    );
 
     /**
      * If true, will only accept items found in `supportedFuels` as fuel when smelting.
@@ -1185,7 +1202,8 @@ public class Settings implements IFailableConfigFile {
     }
 
     public boolean isImportant(Item item) {
-        return importantItems.contains(item);
+        // (2026-10-01) 并入代码级基线: 磁盘配置覆盖不了这里的保护 (见 CODE_PROTECTED_BASELINE 注释)。
+        return importantItems.contains(item) || CODE_PROTECTED_BASELINE.contains(item);
     }
 
     public boolean shouldThrowawayUnusedItems() {
