@@ -379,6 +379,15 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         // 只认镐, 找不到适用镐就返回 DIAMOND) —— 闸门若放行就会"为挖雪合成钻石镐"。
         // 首个适用工具是铲的方块不触发闸门: 挖雪徒手 0.2s/块, 本来就不需要镐。
         if (Items.WOODEN_SHOVEL.isSuitableFor(st)) return null;
+        // (2026-10-01 用户拍板) 拆除语义不需要掉落档位 —— 闸门档位封顶 IRON。
+        // vanilla 里钻石档方块 (哭泣黑曜石/黑曜石) 用石/铁镐照样能砸掉, 只是慢
+        // (铁镐 ~42s/块) 且无掉落; 本任务是拆除, 不要掉落物。旧口径对哭黑要求
+        // DIAMOND → 合成钻石镐 → 挖已宣布放弃的钻石 → 整链每 tick 重建死锁
+        // (113143 现场: 废墟门原生哭黑格挡住浇铸清场)。封顶后: 有铁镐直接挖,
+        // 没有则做铁镐 (铁链无钻石依赖)。
+        if (req.ordinal() > MiningRequirement.IRON.ordinal()) {
+            req = MiningRequirement.IRON;
+        }
         if (StorageHelper.miningRequirementMetInventory(mod, req)) return null;
         return req;
     }
