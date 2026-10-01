@@ -205,6 +205,17 @@ public class SatisfyMiningRequirementTask extends Task {
                     return TaskCatalogue.getItemTask(Items.IRON_PICKAXE, 1);
                 }
                 if (_requirement == MiningRequirement.WOOD) {
+                    // (2026-10-01 断镐做木镐修复, 用户"他不做石头镐子反而做木镐, 错")
+                    // 现场 20261001-155158: 15:54:47 [Pickaxe-Watchdog] 派 WOOD 档,
+                    // 背包圆石 14+64x9+深板岩圆石 135, 铁锭 0 钻石 0 → 无条件做木镐。
+                    // 木镐唯一存在意义是"挖到圆石", 圆石已够时直接做石镐 (合成不需要
+                    // 镐, 石镐更快/耐久 131 vs 59, 同样满足 WOOD 档) — 与上方
+                    // "钻石优先/铁镐优先"同族的跳档判定。口径用含打开容器可达计数,
+                    // 与 shouldPreferIronPickaxe 一致 (防配方中间态翻假)。
+                    if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE) >= 3) {
+                        setDebugState("Preferring STONE pickaxe (cobblestone at hand, skip wooden tier)");
+                        return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
+                    }
                     return TaskCatalogue.getItemTask(Items.WOODEN_PICKAXE, 1);
                 }
                 return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
@@ -224,6 +235,13 @@ public class SatisfyMiningRequirementTask extends Task {
                 // _currentMiningReq≥WOOD → baritone 可破石清障, 循环打破;
                 // 成本≈1 原木, 且"永远随身有镐"本就是拟人行为。
                 if (needsAnyPickaxeFallback(mod)) {
+                    // (2026-10-01 同根因修正) 圆石 ≥3 时直接石镐: 木镐的意义是"挖到
+                    // 圆石", 圆石已够则石镐严格更优 (更快/更耐久), 同样解锁石头挖掘。
+                    // 石镐不满足 IRON 档 → 拿到后本任务继续走铁镐链, 此时破石已解锁。
+                    if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE) >= 3) {
+                        setDebugState("No pickaxe at all — crafting STONE pickaxe first (cobblestone at hand)");
+                        return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
+                    }
                     setDebugState("No pickaxe at all — crafting WOODEN pickaxe first (unblocks stone breaking for furnace route)");
                     return TaskCatalogue.getItemTask(Items.WOODEN_PICKAXE, 1);
                 }
