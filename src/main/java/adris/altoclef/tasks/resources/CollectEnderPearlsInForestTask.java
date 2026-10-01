@@ -21,6 +21,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.world.World;
+import net.minecraft.world.biome.BiomeKeys;
 
 import java.util.HashSet;
 import java.util.List;
@@ -262,6 +263,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     // Task 框架铁律; 接战会重置 dry 计时自然退出本档, 残留段下次进档时续走或重建)。
     private Task _dryExpeditionWalk = null;
     private BlockPos _dryExpeditionTarget = null;
+    // (2026-10-01 站桩事故修正) 本段远走落点的性质: forest-cache / blind-fallback。
+    // 盲走落点到位【不推进锚点】—— 盲点多半在林外, 推进过去 = 把锚点钉在非林地,
+    // 巡逻在那里永远 "no candidates" 站桩 (现场 164512: 16:48:51 盲点 -109,45,9
+    // 被推进为锚点 → 站桩死循环)。盲走 = 侦察: 到位没发现林子就回拉旧锚。
+    private String _dryExpeditionKind = null;
 
     /**
      * (2026-09-20 打完末影人回头修复) 巡逻会话状态: 蹲守实例被上层重建时
@@ -354,6 +360,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // (2026-09-28) 枯竭远走段一并清零 (同一条铁律)。
         _dryExpeditionWalk = null;
         _dryExpeditionTarget = null;
+        _dryExpeditionKind = null;
         // (2026-09-28) 锚点跨实例延续: 构造参数 anchor 是上层扫描锚 (旧值), 会把
         // 远走/advance 的推进成果拉回旧盘 (现场 20260928-084126: 远走 step=40 被
         // 合成链打断, 2s 后重建实例 anchor 回退, bot 回小盘蹭步)。会话里存最近
@@ -486,6 +493,19 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             return null;
         }
 
+        // 3.2) (2026-10-01 站桩事故修正) 非林地站桩保险: 脚下不是诡异森林群系、
+        //      且 32 格缓存里连一个可站立森林点都没有 → 巡逻的 "waiting for scans"
+        //      在这里【永远等不到候选】(非林地扫描不会产出菌岩), 站到 dry 线毫无
+        //      意义 → 立刻放弃交还上层, 冷却期记忆直航/远征去真林子。
+        //      现场实锤见 detail 20261001: 盲走锚点 -109,45,9 上站桩 30s×N 轮,
+        //      每轮被进食/合成抢占重建清 dry 计时, 永远到不了枯竭线。
+        //      在森林群系里缓存短暂为空时本判据不触发 (群系守卫), 照常等扫描填充。
+        if (!isBotInWarpedForestBiome(mod)
+                && findNearestStandableForestNear(mod, REANCHOR_MAX_DIST) == null) {
+            giveUp(mod, "no-forest-here");
+            return null;
+        }
+
         // 3.5) (2026-09-27 用户拍板"放大行走距离, 尽量朝一个方向") dry 过半 →
         //      定向远走档: 沿方位角走廊连走 24~48 格找新林盘。拉回闩照常置位但
         //      本档【不消费】(与失联远走同款先例, 否则走一步被拽回来一步);
@@ -556,7 +576,10 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             // 只在边沿做一次 (false→true), 闩住期间不逐拍重锚; 缓存近处无森林点
             // 则沿用旧锚 (旧锚至少曾是有林子的地方)。失联远走/战斗拉出/巡逻探新盘
             // 三条出界路径由此统一覆盖: 解锁后落回巡逻线, 拉回判据用新锚点。
-            if (!_returning) {
+            // (2026-10-01 站桩事故修正) 远走/失联段【在飞时不重锚】: 那两档自己
+            // 管锚点记账 (到位 anchor-advance), 中途重锚会把锚点拽回身后、与推进
+            // 记录互相覆盖 (现场 164512: 16:48:39 远走途中重锚回身后 21 格)。
+            if (!_returning && _dryExpeditionWalk == null && _lostWalk == null) {
                 tryReanchorNearForest(mod);
             }
             _returning = true;
@@ -580,8 +603,34 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
      * WART_BLOCK 是实心块刻意不入候选 (同 scanCandidates 口径)。
      */
     private void tryReanchorNearForest(AltoClef mod) {
+        BlockPos best = findNearestStandableForestNear(mod, REANCHOR_MAX_DIST);
+        if (best == null) {
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR-MISS anchor="
+                    + _anchor.toShortString()
+                    + " (附近 " + (int) REANCHOR_MAX_DIST + " 格缓存无森林点, 沿用旧锚拉回)");
+            return;
+        }
+        BlockPos old = _anchor;
+        _anchor = best;
+        _patrolSession.lastAnchor = best;
+        _goToAnchor = null;
+        Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR old="
+                + old.toShortString() + " new=" + best.toShortString()
+                + " dist=" + String.format("%.0f",
+                        Math.sqrt(best.getSquaredDistance(mod.getPlayer().getBlockPos())))
+                + " (出界上闩边沿就近重锚 — 拉回目标=最近森林, 不再回最初位置)");
+    }
+
+    /**
+     * (2026-10-01) 信号方块缓存中找距 bot 最近的【可站立森林点】(≤maxDist)。
+     * 重锚与"非林地站桩判据"共用的单一判定源。选点约束: 距 bot ≤ maxDist
+     * (超出视为缓存陈旧) + Y 带宽 (防菌菇顶/洞里) + 可站立 + 无流体;
+     * 与巡逻/远走同口径: NYLIUM(站其上) + FUNGUS/ROOTS(站进所在格),
+     * WART_BLOCK 是实心块刻意不入候选。
+     */
+    private BlockPos findNearestStandableForestNear(AltoClef mod, double maxDist) {
         BlockPos bot = mod.getPlayer().getBlockPos();
-        double maxDistSq = REANCHOR_MAX_DIST * REANCHOR_MAX_DIST;
+        double maxDistSq = maxDist * maxDist;
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
         for (int yOff = 1; yOff >= 0; yOff--) {
@@ -608,20 +657,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                 }
             }
         }
-        if (best == null) {
-            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR-MISS anchor="
-                    + _anchor.toShortString()
-                    + " (附近 " + (int) REANCHOR_MAX_DIST + " 格缓存无森林点, 沿用旧锚拉回)");
-            return;
-        }
-        BlockPos old = _anchor;
-        _anchor = best;
-        _patrolSession.lastAnchor = best;
-        _goToAnchor = null;
-        Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR old="
-                + old.toShortString() + " new=" + best.toShortString()
-                + " dist=" + String.format("%.0f", Math.sqrt(bestDistSq))
-                + " (出界上闩边沿就近重锚 — 拉回目标=最近森林, 不再回最初位置)");
+        return best;
+    }
+
+    /** bot 脚下是否处于诡异森林群系 (与记忆中心群系校验同口径, 未加载判 false)。 */
+    private boolean isBotInWarpedForestBiome(AltoClef mod) {
+        var biome = mod.getWorld().getBiome(mod.getPlayer().getBlockPos());
+        return biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST);
     }
 
     /** 外层用的流体判定 (与巡逻内部 {@code hasFluid} 同口径, 见 InteractWithBlockTask:813)。 */
@@ -679,9 +721,11 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         if (_dryExpeditionWalk != null) {
             if (_dryExpeditionWalk.isFinished(mod)) {
                 BlockPos arrived = _dryExpeditionTarget;
+                String arrivedKind = _dryExpeditionKind;
                 _dryExpeditionWalk = null;
                 _dryExpeditionTarget = null;
-                if (arrived != null) {
+                _dryExpeditionKind = null;
+                if (arrived != null && "forest-cache".equals(arrivedKind)) {
                     BlockPos old = _anchor;
                     _anchor = arrived;
                     _patrolSession.lastAnchor = arrived;
@@ -699,6 +743,16 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                             + " dryFor=" + (int) dryFor + "s/" + (int) dryLine + "s"
                             + " pearls=" + mod.getItemStorage().getItemCount(Items.ENDER_PEARL)
                             + "/" + _count + " (枯竭远走到位, 锚点推进, 回巡逻)");
+                } else if (arrived != null) {
+                    // (2026-10-01 站桩事故修正) 盲走落点 = 侦察失败: 不推进锚点,
+                    // 拉回闩保持置位, 下一 tick 拉回最近森林锚。锚点绝不能落到
+                    // 非林地点 —— 巡逻在非林地永远等不到候选, 只会站桩。
+                    touchVisited(arrived);
+                    Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tDRY-EXPEDITION-ARRIVED"
+                            + " kind=" + arrivedKind + " target=" + arrived.toShortString()
+                            + " anchor-kept=" + (_anchor == null ? "none" : _anchor.toShortString())
+                            + " dryFor=" + (int) dryFor + "s/" + (int) dryLine + "s"
+                            + " (盲走侦察失败, 不推进锚点 — 拉回最近森林)");
                 }
                 return null; // 空一拍, 下一 tick 回巡逻
             }
@@ -726,6 +780,7 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
             targetKind = "blind-fallback";
         }
         _dryExpeditionTarget = walkTarget;
+        _dryExpeditionKind = targetKind;
         _dryExpeditionWalk = new GetWithinRangeOfBlockTask(walkTarget, DRY_EXPEDITION_ARRIVE_RADIUS);
         Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tDRY-EXPEDITION-START"
                 + " dryFor=" + (int) dryFor + "s/" + (int) dryLine + "s"
