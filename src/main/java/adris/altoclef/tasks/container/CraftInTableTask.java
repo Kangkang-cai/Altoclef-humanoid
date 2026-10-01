@@ -143,6 +143,9 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     // (2026-09-13 CursorArbiter 根修) 同 CraftInInventoryTask._receiveTask: 光标被腾位链
     // 租用时维持收输出子树不翻面, 避免"搬堆叠 ↔ 清光标"每 2s 互相拆台。
     private Task _receiveTask = null;
+    // [2026-10-01 埋点] "材料够却做不出成品"(用户点名镐子类, 对所有台前合成生效)诊断:
+    // 同内容签名只发一次; 任务重启(新实例)后签名清空 → 必发首条。
+    private String _lastCraftDiagSig = null;
 
     public DoCraftInTableTask(RecipeTarget[] targets, boolean collect, boolean ignoreUncataloguedSlots, boolean detached) {
         super(Blocks.CRAFTING_TABLE, new ItemTarget("crafting_table"));
@@ -347,6 +350,8 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                     Debug.logMessage("[CraftTable] 材料被同链步骤消费(收集闩锁过期), 重新盘点: "
                             + Arrays.toString(_targets));
                 }
+                // [2026-10-01 埋点] 材料判缺: 发"需求 vs 实有"诊断, 当场裁决"真缺料 vs 判据口径分裂"。
+                logCraftFailDiag(mod, "NO-MATERIALS");
                 setDebugState("craft does NOT have RECIPE MATERIALS: " + Arrays.toString(_targets));
                 return _collectTask;
             }
@@ -413,6 +418,8 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         // Refresh crafting table Juuust in case
         _craftResetTimer.setInterval(mod.getModSettings().getContainerItemMoveDelay() * 10 + CRAFT_RESET_TIMER_BONUS_SECONDS);
         if (_craftResetTimer.elapsed()) {
+            // [2026-10-01 埋点] 台前刷新 = 输出格长期为空, 合成流程没走完(材料够却做不出): 发诊断。
+            logCraftFailDiag(mod, "TABLE-REFRESH(output-slot-empty)");
             Debug.logMessage("Refreshing crafting table.");
             StorageHelper.closeScreen();
             return null;
@@ -477,6 +484,48 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         // 呆住 (2026-09-05 金锭合成 12s 静止实锤, 用户手动停止)。
         _craftCount = _targets.length;
         return null;
+    }
+
+    /**
+     * [2026-10-01 埋点] "材料够后制作失败"诊断日志 (用户要求, 供日志直查; 镐子类含在内)。
+     * 两个触发点:
+     *  ① NO-MATERIALS                 —— 任务判"缺配方材料"回收集链 (材料明明在背包 = 判据口径分裂实锤);
+     *  ② TABLE-REFRESH(output-slot-empty) —— 台前 ~12s 刷新, 输出格一直空 (配方摆好/配方书点了但成品出不来)。
+     * 每条含: 每目标 成品 need/have(真实落袋计数) + 配方每格 need/have + 光标/合成输出格残留,
+     * 足以当场裁决 "真缺料 / 判据口径错 / 材料卡在流程中(2x2 格或光标)" 三种情形。
+     * 节流: 内容签名(含 where)不变则不重发; 任务重启(新实例)后重新发首条。
+     * 诊断自身抛错只降级打一行, 不得影响合成链。
+     */
+    private void logCraftFailDiag(AltoClef mod, String where) {
+        try {
+            StringBuilder sb = new StringBuilder("[CRAFT-FAIL-DIAG] ").append(where).append(" :");
+            for (RecipeTarget target : _targets) {
+                if (target.getOutputItem() == null) continue;
+                int realHave = StorageHelper.countItemInInventoryReal(mod, target.getOutputItem());
+                sb.append(' ').append(target.getOutputItem().getTranslationKey())
+                        .append(" need=").append(target.getTargetCount())
+                        .append(" have=").append(realHave)
+                        .append(" |");
+                for (int i = 0; i < target.getRecipe().getSlotCount(); ++i) {
+                    ItemTarget mat = target.getRecipe().getSlot(i);
+                    if (mat == null || mat.isEmpty()) continue;
+                    int matHave = 0;
+                    for (Item m : mat.getMatches()) matHave += StorageHelper.countItemInInventoryReal(mod, m);
+                    sb.append(" in[").append(i).append("]=").append(mat)
+                            .append(" have=").append(matHave);
+                }
+            }
+            ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+            ItemStack gridOut = StorageHelper.getItemStackInSlot(PlayerSlot.CRAFT_OUTPUT_SLOT);
+            sb.append(" | cursor=").append(cursor.isEmpty() ? "EMPTY" : cursor)
+                    .append(" gridOut=").append(gridOut.isEmpty() ? "EMPTY" : gridOut);
+            String sig = sb.toString();
+            if (sig.equals(_lastCraftDiagSig)) return;
+            _lastCraftDiagSig = sig;
+            Debug.logMessage(sig);
+        } catch (Exception e) {
+            Debug.logMessage("[CRAFT-FAIL-DIAG] emit error: " + e);
+        }
     }
 
     /** (2026-09-13) collect=false = "材料在调用方手上, 本任务不负责补料"。 */
