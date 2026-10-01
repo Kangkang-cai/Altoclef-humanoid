@@ -128,7 +128,10 @@ public class ConstructNetherPortalBucketTask extends Task {
                 for (Vec3i framePosRelative : PORTAL_FRAME) {
                     BlockPos framePos = _portalOrigin.add(rotateY(framePosRelative, _portalRotation));
                     if (block.equals(framePos)) {
-                        return mod.getWorld().getBlockState(framePos).getBlock() == Blocks.OBSIDIAN;
+                        // (2026-10-01) 门框是产品不是脚手架: 两种合法门框材质都保护
+                        // (哭泣黑曜石也是框, 见 frame loop 同日注释)。
+                        Block fb = mod.getWorld().getBlockState(framePos).getBlock();
+                        return fb == Blocks.OBSIDIAN || fb == Blocks.CRYING_OBSIDIAN;
                     }
                 }
             }
@@ -306,7 +309,13 @@ public class ConstructNetherPortalBucketTask extends Task {
         for (Vec3i framePosRelative : PORTAL_FRAME) {
             BlockPos framePos = _portalOrigin.add(rotateY(framePosRelative, _portalRotation));
             Block frameBlock = mod.getWorld().getBlockState(framePos).getBlock();
-            if (frameBlock == Blocks.OBSIDIAN) {
+            // (2026-10-01) 哭泣黑曜石也算门框满足 —— vanilla 1.16+ 它是合法门框
+            // 方块 (废墟门原生自带, 设计上就是给玩家补全的)。旧口径只认 OBSIDIAN,
+            // 对废墟门自带的哭黑格照样派浇铸, 浇铸清场阶段又要挖哭黑 → 需钻石镐
+            // → 挖已宣布放弃的钻石 (DecisionMemory diamondCollectGivenUp) → 整链
+            // 每 tick 重建死锁 (113143 实证: -252,71,172 = crying_obsidian)。
+            // 与 findReusablePortalStructure 的计数口径 (:669) 对齐。
+            if (frameBlock == Blocks.OBSIDIAN || frameBlock == Blocks.CRYING_OBSIDIAN) {
                 // Already satisfied, clear water above if need be.
                 BlockPos waterCheck = framePos.up();
                 if (mod.getWorld().getBlockState(waterCheck).getBlock() == Blocks.WATER && WorldHelper.isSourceBlock(mod, waterCheck, true)) {

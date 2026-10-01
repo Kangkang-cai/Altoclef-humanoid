@@ -10,6 +10,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Items;
@@ -257,7 +258,12 @@ public class PlaceObsidianBucketTask extends Task {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        return mod.getBlockTracker().blockIsValid(_pos, Blocks.OBSIDIAN) && !mod.getBlockTracker().blockIsValid(_pos.up(), Blocks.WATER);
+        // (2026-10-01) 目标格已是合法门框材质 (黑曜石或哭泣黑曜石, vanilla 1.16+
+        // 哭黑是合法门框, 废墟门原生自带) 即完成 —— 旧口径只认 OBSIDIAN, 对哭黑格
+        // 派浇铸后清场阶段又要挖哭黑 → 需钻石镐 → 挖已放弃的钻石 → 死锁 (113143)。
+        Block atPos = mod.getWorld().getBlockState(_pos).getBlock();
+        return (atPos == Blocks.OBSIDIAN || atPos == Blocks.CRYING_OBSIDIAN)
+                && mod.getWorld().getBlockState(_pos.up()).getBlock() != Blocks.WATER;
     }
 
     @Override
