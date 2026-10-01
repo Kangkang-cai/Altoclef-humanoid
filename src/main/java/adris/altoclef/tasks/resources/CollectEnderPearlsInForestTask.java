@@ -122,6 +122,13 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     // 走回林子的"到位"判据: 进到锚点这么多格内就算回到林子, 交给巡逻接管。
     // 必须 < CAMP_RADIUS, 否则会出现"到位后仍在拉回半径外"的自相矛盾。
     private static final int RETURN_RADIUS = 8;
+
+    // (2026-10-01 就近重锚拉回, 用户拍板) 上闩边沿重锚的搜索半径: 只在 bot 周围
+    // 这么多格的信号方块缓存里找"最近森林点"作新拉回目标。旧口径拉回目标恒为
+    // 最初锚点 —— bot 被战斗/失联远走带进另一片林子后仍被拽回最初位置, 用户
+    // 指出"不管自己是否已经在森林或近处有森林"。取 CAMP_RADIUS+RETURN_RADIUS:
+    // 比蹲守半径大一档, 保证蹲守边界外的正常巡逻/远走落点附近够得着缓存点。
+    private static final double REANCHOR_MAX_DIST = CAMP_RADIUS + RETURN_RADIUS;
     // ------------------------------------------------------------------
     // (2026-09-20 用户机制) 林内巡逻 = 菌岩目标点巡逻。
     // 用户拍板两点: ① "至少应该停在菌岩上, 不然会走出去" —— 原来的
@@ -544,6 +551,14 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
         // 两口径统一到方块坐标 (BlockPos.getSquaredDistance)。
         double distSq = mod.getPlayer().getBlockPos().getSquaredDistance(_anchor);
         if (distSq > CAMP_RADIUS * CAMP_RADIUS) {
+            // (2026-10-01 就近重锚拉回, 用户拍板) 上闩【边沿】先把锚点推进到 bot
+            // 附近缓存里最近的森林点 —— 拉回目标从"最初的锚点"改为"最近的林子"。
+            // 只在边沿做一次 (false→true), 闩住期间不逐拍重锚; 缓存近处无森林点
+            // 则沿用旧锚 (旧锚至少曾是有林子的地方)。失联远走/战斗拉出/巡逻探新盘
+            // 三条出界路径由此统一覆盖: 解锁后落回巡逻线, 拉回判据用新锚点。
+            if (!_returning) {
+                tryReanchorNearForest(mod);
+            }
             _returning = true;
         } else if (distSq <= RETURN_RADIUS * RETURN_RADIUS && _returning) {
             _returning = false;
@@ -552,6 +567,66 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
                     + " anchor=" + _anchor.toShortString()
                     + " (真正走进林心 " + RETURN_RADIUS + " 格内, 解锁回巡逻)");
         }
+    }
+
+    /**
+     * (2026-10-01 就近重锚拉回, 用户拍板"不管自己是否已经在森林或近处有森林")
+     * 上闩边沿的锚点推进: 从信号方块缓存里取离 bot 最近的【可站立森林点】作新锚,
+     * 写回会话 lastAnchor (与 anchor-advance 同一条持久化路径), 并强制重建拉回任务。
+     * 选点约束: 距 bot ≤ {@link #REANCHOR_MAX_DIST} (超出视为缓存陈旧, 不选) +
+     * Y 带宽 (防选到菌菇顶/洞里, 同巡逻/远走口径) + 可站立 + 无流体。
+     * 缓存近处无森林点 → 不动锚, 沿用旧锚拉回 (打 REANCHOR-MISS 供观测)。
+     * 判定源单一化: 与巡逻/远走同用 WARPED_NYLIUM(站其上) + FUNGUS/ROOTS(站进所在格),
+     * WART_BLOCK 是实心块刻意不入候选 (同 scanCandidates 口径)。
+     */
+    private void tryReanchorNearForest(AltoClef mod) {
+        BlockPos bot = mod.getPlayer().getBlockPos();
+        double maxDistSq = REANCHOR_MAX_DIST * REANCHOR_MAX_DIST;
+        BlockPos best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int yOff = 1; yOff >= 0; yOff--) {
+            List<BlockPos> list = (yOff == 1)
+                    ? mod.getBlockTracker().getKnownLocations(Blocks.WARPED_NYLIUM)
+                    : mod.getBlockTracker().getKnownLocations(
+                            Blocks.WARPED_FUNGUS, Blocks.WARPED_ROOTS);
+            if (list == null) continue;
+            for (BlockPos c : list) {
+                double d = c.getSquaredDistance(bot);
+                if (d > maxDistSq) continue;
+                // Y 带宽相对 bot (重锚可能发生在远走出锚盘之后, 相对锚点会漏判)。
+                if (Math.abs(c.getY() - bot.getY()) > PATROL_Y_BAND) continue;
+                BlockPos standPos = c.up(yOff);
+                if (mod.getWorld().getBlockState(standPos).isSolidBlock(mod.getWorld(), standPos)
+                        || !mod.getWorld().getBlockState(standPos.down())
+                                .isSolidBlock(mod.getWorld(), standPos.down())) {
+                    continue;
+                }
+                if (hasFluidAt(mod, standPos)) continue;
+                if (d < bestDistSq) {
+                    bestDistSq = d;
+                    best = c;
+                }
+            }
+        }
+        if (best == null) {
+            Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR-MISS anchor="
+                    + _anchor.toShortString()
+                    + " (附近 " + (int) REANCHOR_MAX_DIST + " 格缓存无森林点, 沿用旧锚拉回)");
+            return;
+        }
+        BlockPos old = _anchor;
+        _anchor = best;
+        _patrolSession.lastAnchor = best;
+        _goToAnchor = null;
+        Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tRETURN-REANCHOR old="
+                + old.toShortString() + " new=" + best.toShortString()
+                + " dist=" + String.format("%.0f", Math.sqrt(bestDistSq))
+                + " (出界上闩边沿就近重锚 — 拉回目标=最近森林, 不再回最初位置)");
+    }
+
+    /** 外层用的流体判定 (与巡逻内部 {@code hasFluid} 同口径, 见 InteractWithBlockTask:813)。 */
+    private boolean hasFluidAt(AltoClef mod, BlockPos pos) {
+        return !mod.getWorld().getBlockState(pos).getFluidState().isEmpty();
     }
 
     /**
