@@ -431,14 +431,15 @@ public class BeatMinecraft2Task extends Task {
     private static final long PEARL_BIOME_NO_SIGNAL_LOG_INTERVAL_MS = 10_000;
     /** 群系快路径要求的"近区有信号方块"半径 (= BlockTracker 近区扫描半径)。 */
     private static final double PEARL_BIOME_FASTPATH_NEAR_RADIUS = 16;
-    // (2026-09-20) 蹲守冷却期间的"林内原地等待"任务 (实例缓存, 防每 tick new 清状态)。
-
-    /** (2026-09-20 冷却 hold 拉回) 离林锚点超过该半径就走回去, 防随机 wander 漂离林子。 */
-    private static final double PEARL_HOLD_PULL_RADIUS = 10;
-
-    /** 拉回任务缓存实例 (同锚点复用, 到达/锚点变化才重建)。 */
-    private GetToBlockTask _pearlCooldownReturnTask = null;
-    private BlockPos _pearlCooldownReturnAnchor = null;
+    // (2026-10-01 用户拍板"冷却期直接换任务/正常去干别的") 冷却期的去向语义:
+    // 顺手阶段 (烈焰棒没攒够) 冷却期本来就自然落回烈焰棒主线; 正式收珍珠阶段
+    // 不再"回旧锚罚站" —— 枯竭 giveup 时把枯竭林的记忆中心拉黑 (本会话), 冷却期
+    // 走记忆直航/远征去下一片林子; 非枯竭 (camp-timeout, 林子可能还有货) 且脚下
+    // 恰在林中 → 原地站住等冷却结束重开。原 hold 拉回 (PEARL_HOLD_PULL_RADIUS /
+    // _pearlCooldownReturnTask) 已删 —— 现场 20260920-155006 的"漂出可感知范围"
+    // 风险由记忆直航/远征的目标约束接管, 不再依赖拉回。
+    /** 上次蹲守放弃是否因枯竭 (no-enderman-seen): true = 冷却期不去脚下林中等。 */
+    private boolean _pearlLastGiveUpDry = false;
 
     /** 假锚点拒绝日志节流。 */
     private long _lastFakeAnchorRejectMs = 0;
@@ -3688,39 +3689,24 @@ public class BeatMinecraft2Task extends Task {
                         && camp.hasActiveEndermanLock())) {
                 return new KillAndLootTask(EndermanEntity.class, new ItemTarget(Items.ENDER_PEARL, count));
             }
-            // (2026-09-20) 看得见/刚看过林子却进不了蹲守 = 蹲守冷却中 (60s 没见末影人
-            // giveup → 120s 冷却)。此时去别处逐区块找"身处的林子"是语义倒置 —— 现场
-            // 20260920-145211 实锤: 冷却一生效 bot 立刻被派去 Get to chunk [49,15] 离开
-            // 林子。改为原地小步等待: 冷却结束 getForestPearlCampTask 自然重开蹲守;
-            // 等待期间末影人若被感知, 上面的 entityFound 分支照样接管击杀。
-            if (_pearlForestAnchor != null) {
-                // (2026-09-20 现场 20260920-155006 实锤) 纯随机 wander(6 格)在 120s
-                // 冷却里约 20 段随机方向, 净漂移可达几十格 → bot 漂出林子可感知范围 →
-                // 冷却结束 anchor=none → 落入区块搜索兜底跑远 ("在完全非诡异森林的
-                // 地方 wander")。改为: 离锚点 >10 格先走回去 (GetToBlockTask), 近锚点
-                // 才原地小步等待 —— 漂移被 pull-back 兜住, 冷却结束时 bot 仍在林中,
-                // 群系快路径 O(1) 重锚, 不再跑远。
-                double holdDistSq = mod.getPlayer().getBlockPos().getSquaredDistance(_pearlForestAnchor);
-                long reCampIn = Math.max(0, (_pearlCampBlockedUntilMs - System.currentTimeMillis()) / 1000);
-                if (holdDistSq > PEARL_HOLD_PULL_RADIUS * PEARL_HOLD_PULL_RADIUS) {
-                    if (_pearlCooldownReturnTask == null || _pearlCooldownReturnTask.isFinished(mod)
-                            || !_pearlForestAnchor.equals(_pearlCooldownReturnAnchor)) {
-                        _pearlCooldownReturnTask = new GetToBlockTask(_pearlForestAnchor.up());
-                        _pearlCooldownReturnAnchor = _pearlForestAnchor;
-                    }
-                    setDebugState("Pearl camp cooldown; returning to forest anchor (re-camp in " + reCampIn + "s)");
-                    return _pearlCooldownReturnTask;
+            // (2026-10-01 用户拍板"冷却期直接换任务/正常去干别的") 冷却期不再回旧锚
+            // 罚站 (原 hold 拉回已删): 只有"非枯竭放弃 (林子可能还有货) 且脚下恰在
+            // 诡异森林群系"时才原地站住等冷却结束 (蹲守重开时扫描/群系快路径自然
+            // 重锚; 末影人被感知仍由上方分支接管击杀)。枯竭放弃或不在林中 → 直接
+            // 落到下面两级兜底: 记忆直航去下一片林子 / 方位角远征。枯竭林的记忆
+            // 中心在 giveup 时已拉黑 (见 getForestPearlCampTask 的 COOLDOWN 处理),
+            // 记忆直航天然跳过刚枯竭的这片, 不会"换个姿势回旧林"。
+            long nowMsCool = System.currentTimeMillis();
+            if (nowMsCool < _pearlCampBlockedUntilMs) {
+                long reCampIn = Math.max(0, (_pearlCampBlockedUntilMs - nowMsCool) / 1000);
+                if (!_pearlLastGiveUpDry && isBotInWarpedForestBiome(mod)) {
+                    setDebugState("Pearl camp cooldown; holding in forest (re-camp in " + reCampIn + "s)");
+                    return null;
                 }
-                // (2026-09-20 19:05 现场 20260920-190542 实锤) 小步等待用随机
-                // wander(6) 会漂出 10 格拉回半径 → 与 GetToBlockTask 拉回形成
-                // "wander 2.7s → 拉回 2s" 永久振荡 (用户观感"原地转圈", 与 17:01
-                // 修的失联/拉回振荡同族: 拉回门槛内的自由移动迟早越界)。冷却期
-                // 等待没有任何移动需求 → 直接原地站住 (return null), 漂移源清零;
-                // 末影人出现仍由上方 entityFound 分支接管击杀。
-                setDebugState("Pearl camp cooldown; holding still near forest (re-camp in " + reCampIn + "s)");
-                return null;
+                // 枯竭放弃 / 不在林中: 不站住, 继续走兜底 (换一片林子)。
             }
-            // (2026-09-20 用户需求落位) 看不见任何林子 → 两级兜底, 取代原
+            // (2026-09-20 用户需求落位; 2026-10-01 语义扩展"冷却期换任务") 看不见
+            // 任何林子 / 冷却期且要换林 → 两级兜底, 取代原
             // SearchChunkForBlockTask 的"chunk 全方块透视 + 无方向 wander"
             // (堡垒 09-04 已淘汰同款机制, 森林按"堡垒行, 森林就做同样处理"跟进):
             // ① 记忆中有林子 (KnowledgeMemory.WARPED_FOREST, 只记亲眼看见 +
@@ -3750,6 +3736,16 @@ public class BeatMinecraft2Task extends Task {
             setDebugState("No forest known; expedition (locked bearing)");
             return _forestExpeditionTask;
         }
+    }
+
+    /**
+     * (2026-10-01 冷却期换任务) bot 脚下是否处于诡异森林群系。与
+     * {@code pickNearestRememberedForest} 的记忆中心群系校验同一条口径
+     * (getWorld().getBiome + matchesKey, 未加载区块为 null 时判 false)。
+     */
+    private boolean isBotInWarpedForestBiome(AltoClef mod) {
+        var biome = mod.getWorld().getBiome(mod.getPlayer().getBlockPos());
+        return biome != null && biome.matchesKey(BiomeKeys.WARPED_FOREST);
     }
 
     /**
@@ -3849,6 +3845,32 @@ public class BeatMinecraft2Task extends Task {
                 // (2026-09-28 用户拍板) 冷却结束后必须【亲眼看到林子】才重开蹲守:
                 // 挂 LOS 确认闩, 禁群系快路径 (见字段注释的现场证据)。
                 _pearlCampRequireLosUntilSeen = true;
+                // (2026-10-01 用户拍板"冷却期直接换任务") 记录放弃性质, 供冷却期
+                // 去向判据使用 (枯竭 → 不在脚下林中等, 直接换林)。
+                _pearlLastGiveUpDry = camp.gaveUpDry();
+                // 枯竭 = 这片林子没货 (60s 零感知) → 把它最近的记忆中心本会话拉黑,
+                // 冷却期的记忆直航就不会再奔向刚枯竭的这片。只拉枯竭: camp-timeout
+                // 是"蹲够 5 分钟了", 林子本身可能还有货, 不拉黑。
+                if (_pearlLastGiveUpDry && camp.getCampAnchor() != null) {
+                    BlockPos dryAnchor = camp.getCampAnchor();
+                    List<BlockPos> nearCenters = mod.getKnowledgeMemory().getRememberedCenters(
+                            KnowledgeMemory.StructureType.WARPED_FOREST,
+                            Vec3d.ofCenter(dryAnchor), 4096);
+                    BlockPos dryCenter = null;
+                    double bestSq = Double.MAX_VALUE;
+                    for (BlockPos c : nearCenters) {
+                        double sq = c.getSquaredDistance(dryAnchor);
+                        if (sq < bestSq && sq <= 64 * 64) {
+                            bestSq = sq;
+                            dryCenter = c;
+                        }
+                    }
+                    if (dryCenter != null && _discreditedForestCenters.add(dryCenter.toImmutable())) {
+                        Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tDRY-FOREST-DISCREDIT center="
+                                + dryCenter.toShortString() + " anchor=" + dryAnchor.toShortString()
+                                + " (枯竭林记忆拉黑, 冷却期记忆直航跳过这片)");
+                    }
+                }
                 Debug.logToFile("altoclef_diag.log", "[PEARL-OPP]\tCOOLDOWN reason=" + camp.getGiveUpReason()
                         + " seconds=" + (int) mod.getModSettings().getOpportunisticPearlRetryCooldownSeconds()
                         + " (重开需 LOS 确认看到林子)");

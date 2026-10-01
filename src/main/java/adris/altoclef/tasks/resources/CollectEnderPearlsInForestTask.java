@@ -979,6 +979,20 @@ public class CollectEnderPearlsInForestTask extends ResourceTask {
     }
 
     /**
+     * (2026-10-01 冷却期换任务) 放弃原因是否为【枯竭】(no-enderman-seen, 这片林子
+     * 没货)。上层据此决定冷却期去向: 枯竭 → 不在脚下林中等待, 换一片林子; 总时长
+     * 上限 (camp-timeout) → 林子本身可能还有货, 冷却期可在林中原地等重开。
+     */
+    public boolean gaveUpDry() {
+        return _gaveUp && "no-enderman-seen".equals(_giveUpReason);
+    }
+
+    /** (2026-10-01) 当前蹲守锚点 (放弃后仍保留最后值) — 供上层拉黑枯竭林记忆中心。 */
+    public BlockPos getCampAnchor() {
+        return _anchor;
+    }
+
+    /**
      * (2026-09-20 用户"同时只打一只") 是否持有激活的单目标锁。父任务的贪婪击杀 /
      * 兜底击杀分支据此不对第二只末影人开火 —— 锁定期间无锁的 KillAndLootTask
      * 顶掉蹲守 (tasks.log 15:07:39 实锤 Greedy enderman kill 打断 ENGAGED-STUCK)
