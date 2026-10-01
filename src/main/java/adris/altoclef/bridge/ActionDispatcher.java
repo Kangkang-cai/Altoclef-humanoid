@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>回执两级</b>：同步 action_accepted（HTTP 线程受理即发）+ 异步 action_done
  *       （顶层任务结束 / 瞬时命令立即发）。失败不做模组侧判定（信号不可靠），
  *       由对端按 actionId 超时兜底。</li>
+ *   <li><b>完成即回主线（B'，1001 对端拍板）</b>：goto/follow/give 这类有终点的行动，
+ *       完成时自动重建主线（action_done 文本附"已自动回主线"）；`@idle` 与 `@pause_main`
+ *       归"按住"侧——无终点或语义就是"立正等到下一条指令"，只由显式 `@resume_main` 解除。</li>
  *   <li><b>停顿标记</b>：pause 的 cancel 会同步触发 TaskFinishedEvent
  *       （UserTaskChain.cancel → onTaskFinish → publish，1001 实测）。若不处理，
  *       LLM 会看到"完成：BeatMinecraft2Task"这种误导性完成信号。故 pause 期间置
@@ -46,6 +49,13 @@ final class ActionDispatcher {
 
     /** 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done）。 */
     private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list", "idle");
+
+    /**
+     * 完成即自动回主线的行动（B' 口径，1001 对端拍板）：只有"有终点的行动"——
+     * goto/follow/give。`@idle` 与 `@pause_main` 归"按住"侧：它们无终点或语义就是
+     * "立正等到下一条指令"，自动续跑会违背语义，只能显式 `@resume_main` 解除。
+     */
+    private static final Set<String> AUTO_RESUME_TOKENS = Set.of("goto", "follow", "give");
 
     /** 主线干预伪命令 token（不在 CommandExecutor 注册，仅 bridge 识别）。 */
     static final String PAUSE = "pause_main";
@@ -245,7 +255,7 @@ final class ActionDispatcher {
         return _paused;
     }
 
-    /** 顶层任务结束 → 关联最近的 pending action，发 action_done。 */
+    /** 顶层任务结束 → 关联最近的 pending action，发 action_done；有终点的行动完成即回主线（B'）。 */
     private void onTaskFinished(TaskFinishedEvent evt) {
         if (_interrupting) return; // pause 的 cancel，不当作行动完成
         PendingAction p = pollOldestValid();
@@ -253,7 +263,14 @@ final class ActionDispatcher {
         String label = evt == null || evt.lastTaskRan == null
                 ? "" : evt.lastTaskRan.toString();
         if (label.length() > 40) label = label.substring(0, 40) + "…";
-        emitDone(p.actionId, p.token, label.isEmpty() ? "完成" : "完成：" + label);
+        String text = label.isEmpty() ? "完成" : "完成：" + label;
+        // B'：goto/follow/give 完成 → 自动回主线（idle/pause_main 不在此列，按住等显式 resume）。
+        // 此刻 UserTaskChain.onTaskFinish 已把 _mainTask 置 null 且 EventBus.publish 同步派发到
+        // 本回调，故这里 runUserTask 是安全的重入（setTask 走 _mainTask==null 分支，不会误停旧任务）。
+        if (AUTO_RESUME_TOKENS.contains(p.token) && resumeMainline()) {
+            text += "，已自动回主线";
+        }
+        emitDone(p.actionId, p.token, text);
     }
 
     private PendingAction pollOldestValid() {
