@@ -20,7 +20,7 @@ import net.minecraft.screen.slot.SlotActionType;
  *
  * 两种药水处理:
  * - 饮用型 (Items.POTION): 装备到主手 + 按住右键 ~1.6s 喝下
- * - 喷溅型 (Items.SPLASH_POTION): 低头 (pitch 90) + 右键扔在脚下爆开
+ * - 喷溅型 (Items.SPLASH_POTION): 低头 (pitch 88, 俯仰到位才扔) + 右键扔在脚下爆开
  *
  * 完成 = 玩家获得 FIRE_RESISTANCE 效果 (两种方式生效即完成)。
  * 超时保护: 5 秒内没生效 (药水拿错/被打断) 自动放弃, 不卡死。
@@ -34,6 +34,14 @@ public class DrinkFireResPotionTask extends Task {
     private boolean _started = false;
     // (2026-09-15 统一超时标签) elapsed() 不自动复位, 放弃后打一次 [TIMEOUT] 即闩住。
     private boolean _giveUpLogged = false;
+    /**
+     * (2026-10-01) 喷溅型投掷的俯仰到位容差 (度)。
+     * 1001 16:46 现场: lookAt 走 baritone 平滑转身 (LookHelper.updateTarget, 非瞬间
+     * snap), 旧代码同拍 lookAt + tryPress → 右键出手时相机还指着行走方向 (水平),
+     * 瓶子按旧朝向平飞 —— 靠喷溅 ~4 格有效半径兜住才没浪费 (用户"丢的方向有点极限")。
+     * 改为先低头、pitch 与 88° 差 ≤ 此容差才按右键。
+     */
+    private static final float SPLASH_THROW_PITCH_TOLERANCE_DEG = 3.0f;
 
     @Override
     protected void onStart(AltoClef mod) {
@@ -92,24 +100,25 @@ public class DrinkFireResPotionTask extends Task {
         }
 
         // 主手已拿防火药水: 喝或扔
-        if (!_started) {
-            _started = true;
-            _timeout.reset();
-            if (mainHand.getItem() == Items.SPLASH_POTION) {
-                // 喷溅型: 低头扔脚下 (瞬间生效)
-                LookHelper.lookAt(mod, new Rotation(mod.getPlayer().getYaw(), 88));
+        if (mainHand.getItem() == Items.SPLASH_POTION) {
+            // 喷溅型: 先低头扔脚下 (瞬间生效)。两拍修正 (2026-10-01):
+            // 每拍持续 lookAt, pitch 实际到位 (≤3°) 才按右键, 杜绝旧朝向平飞。
+            Rotation splashRotation = new Rotation(mod.getPlayer().getYaw(), 88);
+            LookHelper.lookAt(mod, splashRotation);
+            float pitchOff = Math.abs(mod.getPlayer().getPitch() - 88f);
+            if (pitchOff <= SPLASH_THROW_PITCH_TOLERANCE_DEG) {
                 mod.getInputControls().tryPress(Input.CLICK_RIGHT);
-                setDebugState("Throwing splash fire resistance potion at feet");
-            } else {
-                // 饮用型: 按住右键喝 (~1.6s)
-                mod.getInputControls().hold(Input.CLICK_RIGHT);
-                setDebugState("Drinking fire resistance potion");
             }
+            setDebugState("Throwing splash fire resistance potion at feet (pitchOff="
+                    + String.format("%.1f", pitchOff) + ")");
         } else {
-            if (mainHand.getItem() != Items.SPLASH_POTION) {
-                // 持续按住右键直到喝完
-                mod.getInputControls().hold(Input.CLICK_RIGHT);
+            // 饮用型: 按住右键喝 (~1.6s)
+            if (!_started) {
+                _started = true;
+                _timeout.reset();
             }
+            mod.getInputControls().hold(Input.CLICK_RIGHT);
+            setDebugState("Drinking fire resistance potion");
         }
         return null;
     }
