@@ -21,6 +21,7 @@ import adris.altoclef.tasks.misc.LootDesertTempleTask;
 import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.movement.*;
+import adris.altoclef.trackers.DecisionMemory;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.tasks.resources.*;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask;
@@ -516,6 +517,20 @@ public class BeatMinecraft2Task extends Task {
     private long _diamondCollectCumulativeMs = 0;
     private long _diamondCollectSegmentStartMs = -1; // -1 = 当前未在连续活跃段
     private boolean _diamondCollectGivenUp = false;
+
+    // =========================================================================
+    // (2026-09-30 决策台账, 用户"重启任务要承接上次停止时的状态")
+    // 上面三个字段全是内存态, 进程重启即归零 → 放弃过的钻石任务重启后重干
+    // (实锤)。修法 = DecisionMemory 落盘台账 (按存档目录名隔离): 放弃时写
+    // givenUp=true + 最终累计时长; 活跃期每 30s 快照一次累计 (重启最多丢
+    // 30s/300s 预算); onTick 首拍水合回字段。箱子拉黑表同步入账。
+    // 注意: 台账只恢复"决策", 不恢复任务实例 (_diamondPieceTask/_lootTask
+    // 等照旧重建) —— 重启后环境已变, 恢复半小时前的执行计划反而有害。
+    // =========================================================================
+    private static final String DECISION_DIAMOND_GIVEN_UP = "diamondCollectGivenUp";
+    private static final String DECISION_DIAMOND_CUMULATIVE_MS = "diamondCollectCumulativeMs";
+    private static final String DECISION_NOT_RUINED_PORTAL_CHEST = "notRuinedPortalChest";
+    private boolean _decisionsHydrated = false;
     private static final long DIAMOND_COLLECT_LIMIT_MS = 5 * 60 * 1000L;
     private long _lastDiamondGiveUpLogMs = 0;
     // (2026-09-03 钻石时间限制辅助) _gearTask 被铁装/钻石复用, 只有钻石收集阶段
@@ -1087,6 +1102,11 @@ public class BeatMinecraft2Task extends Task {
 
     @Override
     protected Task onTick(AltoClef mod) {
+        // (2026-09-30 决策台账) 首拍水合: 进程重启后从 decisions.log 恢复一次性
+        // 决策 (钻石放弃/累计时长/废墟宝箱拉黑)。必须放 onTick 顶层 —— 消费点
+        // (:2388 钻石合成分支 / :2487 preNetherPhase) 不一定还会经过
+        // recordDiamondCollectActive, 放那里水合不到。
+        hydrateDecisionsFromLedger(mod);
         // (2026-09-23 战后补扫) 自检 onTick 空档: 两次 onTick 间隔超过
         // RESUME_GAP_TICKS 说明 beat 曾被高优链抢占挂起过 → 恢复后强制补一次
         // 贪心探针 (见 _greedyProbeLatch 字段注释)。
@@ -2202,6 +2222,9 @@ public class BeatMinecraft2Task extends Task {
             }
         }
         _notRuinedPortalChests.add(blockPos);
+        // (2026-09-30 决策台账) 该判定是稳定的世界观察 (箱子周边无下界岩 = 非废墟
+        // 传送门宝箱), 入账防重启后重复检查。add 自带去重, 谓词内反复调用不刷盘。
+        DecisionMemory.add(DECISION_NOT_RUINED_PORTAL_CHEST, posCsv(blockPos));
         return false;
     }
 
@@ -2446,6 +2469,8 @@ public class BeatMinecraft2Task extends Task {
                 if (_lootTask instanceof LootContainerTask lootAbandoned
                         && lootAbandoned.wasRefusedOrTimedOut()) {
                     _notRuinedPortalChests.add(lootAbandoned.getChestPos());
+                    // (2026-09-30 决策台账) 拉黑入账, 防重启后重新去开已放弃的箱子。
+                    DecisionMemory.add(DECISION_NOT_RUINED_PORTAL_CHEST, posCsv(lootAbandoned.getChestPos()));
                     Debug.logMessage("(LootSweep) abandon ruined portal chest "
                             + lootAbandoned.getChestPos().toShortString()
                             + " (deep water / open timeout) — blacklisted");
@@ -4737,10 +4762,64 @@ public class BeatMinecraft2Task extends Task {
     }
 
     /**
+     * (2026-09-30 决策台账) onTick 首拍从 decisions.log 恢复一次性决策。
+     * 台账无任何相关记录时静默早退 (首局/新存档); 有记录才打日志 —— 给现场
+     * 一个可观测信号: 重启后首拍应见 "(DecisionMemory) restored ..."。
+     */
+    private void hydrateDecisionsFromLedger(AltoClef mod) {
+        if (_decisionsHydrated) return;
+        _decisionsHydrated = true;
+        boolean ledgerGivenUp = DecisionMemory.getBool(DECISION_DIAMOND_GIVEN_UP, false);
+        long ledgerCumulativeMs = DecisionMemory.getLong(DECISION_DIAMOND_CUMULATIVE_MS, 0);
+        java.util.List<String> ledgerChests = DecisionMemory.getAll(DECISION_NOT_RUINED_PORTAL_CHEST);
+        if (!ledgerGivenUp && ledgerCumulativeMs == 0 && ledgerChests.isEmpty()) return;
+        if (ledgerGivenUp && !_diamondCollectGivenUp) {
+            _diamondCollectGivenUp = true;
+            Debug.logMessage("(DecisionMemory) restored diamondCollectGivenUp=true (cumulative "
+                    + (ledgerCumulativeMs / 1000) + "s) — NOT re-collecting diamonds this run");
+            Debug.logToFile("altoclef_diag.log", "[DecisionMemory]\trestore\tdiamondCollectGivenUp=true"
+                    + "\tcumulative=" + ledgerCumulativeMs + "ms");
+        } else if (!_diamondCollectGivenUp && ledgerCumulativeMs > _diamondCollectCumulativeMs) {
+            // 未放弃: 只回填不回退, 让 300s 上限口径跨重启连续。
+            _diamondCollectCumulativeMs = ledgerCumulativeMs;
+            Debug.logMessage("(DecisionMemory) restored diamondCollect cumulative="
+                    + (ledgerCumulativeMs / 1000) + "s (limit 300s)");
+        }
+        int restoredChests = 0;
+        for (String v : ledgerChests) {
+            BlockPos p = parsePosCsv(v);
+            if (p != null && !_notRuinedPortalChests.contains(p)) {
+                _notRuinedPortalChests.add(p);
+                restoredChests++;
+            }
+        }
+        if (restoredChests > 0) {
+            Debug.logMessage("(DecisionMemory) restored " + restoredChests
+                    + " blacklisted ruined-portal chest(s)");
+        }
+    }
+
+    private static BlockPos parsePosCsv(String s) {
+        try {
+            String[] p = s.split(",");
+            return new BlockPos(Integer.parseInt(p[0].trim()),
+                    Integer.parseInt(p[1].trim()), Integer.parseInt(p[2].trim()));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String posCsv(BlockPos pos) {
+        return pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    /**
      * (2026-09-03 钻石时间上限, 用户确认以 5 分钟为准, 常量 DIAMOND_COLLECT_LIMIT_MS=5min)
      * 每 tick 钻石收集活跃时调用: 用墙上时钟累加两次调用间的真实时长 (被打断去
      * 食物/木柴等时不调用, 天然暂停), 达到 DIAMOND_COLLECT_LIMIT_MS 后永久
      * give up 并打印累计时间。打印节流: 放弃时打一次, 平时每 30s 打一次累计进度。
+     * (2026-09-30 决策台账) 放弃时落盘 givenUp+最终累计; 活跃期随 30s 节流
+     * 快照累计 —— 重启最多丢 30s/300s 预算, 换来台账不逐 tick 刷行。
      */
     private void recordDiamondCollectActive(AltoClef mod) {
         long now = System.currentTimeMillis();
@@ -4752,12 +4831,15 @@ public class BeatMinecraft2Task extends Task {
         _diamondCollectSegmentStartMs = now;
         if (_diamondCollectCumulativeMs >= DIAMOND_COLLECT_LIMIT_MS && !_diamondCollectGivenUp) {
             _diamondCollectGivenUp = true;
+            DecisionMemory.put(DECISION_DIAMOND_GIVEN_UP, "true");
+            DecisionMemory.put(DECISION_DIAMOND_CUMULATIVE_MS, String.valueOf(_diamondCollectCumulativeMs));
             Debug.logMessage("(DiamondCollect) cumulative " + (_diamondCollectCumulativeMs / 1000)
                     + "s >= 5min: giving up diamond gear, proceeding forward.");
             Debug.logToFile("altoclef_diag.log", "[DiamondCollect] GAVE UP, cumulative="
                     + _diamondCollectCumulativeMs + "ms");
         } else if (now - _lastDiamondGiveUpLogMs > 30000) {
             _lastDiamondGiveUpLogMs = now;
+            DecisionMemory.put(DECISION_DIAMOND_CUMULATIVE_MS, String.valueOf(_diamondCollectCumulativeMs));
             Debug.logToFile("altoclef_diag.log", "[DiamondCollect] cumulative active="
                     + (_diamondCollectCumulativeMs / 1000) + "s so far (limit 300s)");
         }

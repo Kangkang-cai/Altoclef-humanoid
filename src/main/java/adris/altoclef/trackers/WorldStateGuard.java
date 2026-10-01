@@ -128,6 +128,9 @@ public final class WorldStateGuard {
         register("MineDownExploreTask(矿洞/自挖)", MineDownExploreTask::onWorldBoundary);
         register("BearingExpeditionTask(方位/锚点)", BearingExpeditionTask::onWorldBoundary);
         register("PortalMemoryStore(传送门)", PortalMemoryStore::onWorldBoundary);
+        // (2026-09-30 决策台账) 同款丢弃语义: 换存档清内存、不重载磁盘
+        // (key 本身按存档隔离, 清表只为阻止跨存档重载)。
+        register("DecisionMemory(跨重启决策台账)", DecisionMemory::onWorldBoundary);
 
         // ---- 冷却 / 哨兵 / 账本(危害: 误压制新世界的行为) ----
         register("CraftGenericWithRecipeBooksTask(合成放弃/格归属)",
