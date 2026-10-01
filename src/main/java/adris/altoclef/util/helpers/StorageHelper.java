@@ -637,7 +637,11 @@ public class StorageHelper {
                 continue;
             }
             // 保护名单+机制统一收口 (importantItems/硬保护/自定义名/最后镐/任务保护)。
-            if (!ItemHelper.canThrowAwayStack(mod, stack)) continue;
+            // (2026-10-01 食物禁抛豁免入口, 用户"A+豁免") 此处 allowFoodLastResort=true
+            // 仅为了让食物能进档7 候选池; 档7 在档1-6 全空时才触发 (见下方),
+            // 是全代码库唯一允许丢真食物的路径。光标抛丢/随机丢/装备序列等其它
+            // 调用方走默认 false = 食物不可抛 (canThrowAwayStack 默认入口)。
+            if (!ItemHelper.canThrowAwayStack(mod, stack, true)) continue;
             if (mod.getModSettings().isThrowaway(item)) {
                 // 档1: 白名单 = 排序偏好, 不是准入门槛。
                 if (item instanceof BlockItem) {
@@ -860,6 +864,10 @@ public class StorageHelper {
             // 由调用方等待 (宁可短暂等待, 不无限扔/捡循环)。
             if (ItemHelper.isThrowOnCooldown(stack.getItem())) continue;
             if (ArrayUtils.contains(NEVER_DISCARD, stack.getItem())) continue;
+            // (2026-10-01 食物禁抛, 用户"A+豁免") 保底随机丢不得动真食物 —
+            // 食物唯一可丢出口是 getGarbageSlot 档7 最后保底。白名单垃圾食物
+            // (腐肉/蜘蛛眼/蛋) 是明文垃圾, 照常参与随机丢。
+            if (stack.isFood() && !mod.getModSettings().isThrowaway(stack.getItem())) continue;
             // (2026-08-25 镐永不丢, 用户指定) 用户实测随机丢把镐子全丢掉了。
             // 镐是挖矿刚需, 任何镐都不参与随机丢 (原 wouldLeaveNoPickaxe 只
             // 护"唯一镐", 两把镐时仍会丢 — 不够)。剑/斧/铲等工具同理保守保护。

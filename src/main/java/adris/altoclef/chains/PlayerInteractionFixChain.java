@@ -319,24 +319,28 @@ public class PlayerInteractionFixChain extends TaskChain {
             Optional<Slot> moveTo = mod.getItemStorage().getSlotThatCanFitInPlayerInventory(_lastHandStack, false);
             if (moveTo.isPresent()) {
                 mod.getSlotHandler().clickSlot(moveTo.get(), 0, SlotActionType.PICKUP);
-            } else {
+            } else if (ItemHelper.canThrowAwayStack(mod, StorageHelper.getItemStackInCursorSlot())) {
                 // Try throwing away cursor slot if it's garbage
-                if (ItemHelper.canThrowAwayStack(mod, StorageHelper.getItemStackInCursorSlot())) {
-                    mod.getSlotHandler().clickSlot(Slot.UNDEFINED, 0, SlotActionType.PICKUP);
+                mod.getSlotHandler().clickSlot(Slot.UNDEFINED, 0, SlotActionType.PICKUP);
+            } else {
+                // (2026-10-01 胡萝卜整堆被丢修复, 用户"A+豁免") 光标物不可抛
+                // (典型=食物: canThrowAwayStack 默认入口对非白名单食物返回 false)
+                // 且背包满放不下 → 旧代码走下方"随机丢一个腾位"只做交换,
+                // 垃圾上光标后要再等 8s 下一轮才被抛。现改为
+                // FoodChain.restoreCursorItemToInventory 同款一拍两击: 拿一摞
+                // 可抛垃圾换位 (光标物入背包, 垃圾上光标), 再把垃圾点窗外抛掉。
+                // 20261001-185104 会话 19:11:43 实锤: carrot x43 滞留光标 8s 后
+                // 被本链点窗外整堆抛丢 (背包明明有 warped_roots x29 等一堆可丢
+                // 垃圾) → bot 零食物死于凋零。
+                Slot toDrop = StorageHelper.getRandomThrowableSlot(mod);
+                if (toDrop != null) {
+                    ItemStack rs = StorageHelper.getItemStackInSlot(toDrop);
+                    Debug.logMessage("(PlayerInteractionFix) Cursor item unthrowable + inventory full — swapping with "
+                            + rs.getCount() + "x " + rs.getItem().getTranslationKey() + " and tossing it.");
+                    mod.getSlotHandler().clickSlotForced(toDrop, 0, SlotActionType.PICKUP);
+                    mod.getSlotHandler().clickSlotForced(Slot.UNDEFINED, 0, SlotActionType.PICKUP);
                 } else {
-                    // (2026-08-23 满背包卡死修复) 光标物品不能扔 (是要留的) 且
-                    // 背包满无垃圾 → 旧逻辑只打日志 "We're stuck" 永久卡死 (用户:
-                    // "东西捡不上又不会丢东西所以卡住不动")。用保底: 随机丢一个
-                    // 非关键物品腾位, 让光标物品能放回背包。
-                    Slot toDrop = StorageHelper.getRandomThrowableSlot(mod);
-                    if (toDrop != null) {
-                        ItemStack rs = StorageHelper.getItemStackInSlot(toDrop);
-                        Debug.logMessage("(PlayerInteractionFix) Cursor stuck with full inventory — random tossing "
-                                + rs.getCount() + "x " + rs.getItem().getTranslationKey() + " to make room.");
-                        mod.getSlotHandler().clickSlot(toDrop, 0, SlotActionType.PICKUP);
-                    } else {
-                        Debug.logMessage("Cursor stack edge case: Full inventory AND NO GARBAGE! We're stuck.");
-                    }
+                    Debug.logMessage("Cursor stack edge case: Full inventory AND NO GARBAGE! We're stuck.");
                 }
             }
             return Float.NEGATIVE_INFINITY;

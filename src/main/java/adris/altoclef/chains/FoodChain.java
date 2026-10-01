@@ -650,7 +650,12 @@ public class FoodChain extends SingleTaskChain {
                 // 修法: 受保护食物不再跳过, 而是加"最后兜底"惩罚 —— 有普通食物
                 // 时优先吃普通的; 只剩受保护食物时才轮到它。foodTotal 照常计入,
                 // 这样 hasFood 与 calculateInventoryFoodScore 口径也重新对齐。
-                boolean protectedFood = !ItemHelper.canThrowAwayStack(mod, stack);
+                // (2026-10-01 判定源换掉, 配套"食物禁抛") 原判据 !canThrowAwayStack
+                // 在 canThrowAwayStack 加食物禁抛后会把【所有】食物判成受保护
+                // (全员兜底惩罚, 语义失真)。protect 的语义 = 别当垃圾丢掉
+                // (isStackProtected: importantItems/任务保护/硬保护), 与"可否
+                // 丢弃"解耦 — 正是本处 2026-09-18 修复注释里定的口径。
+                boolean protectedFood = ItemHelper.isStackProtected(mod, stack);
 
                 // Ignore spider eyes
                 if (stack.getItem() == Items.SPIDER_EYE) {

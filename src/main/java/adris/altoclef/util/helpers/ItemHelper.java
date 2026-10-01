@@ -607,6 +607,12 @@ public class ItemHelper {
     }
 
     public static boolean canThrowAwayStack(AltoClef mod, ItemStack stack) {
+        // (2026-10-01 食物禁抛, 用户拍板"A+豁免") 默认入口: 食物一律不可抛。
+        // 豁免只开给 getGarbageSlot 档7 (池内只剩食物时丢最便宜的) — 传 true。
+        return canThrowAwayStack(mod, stack, false);
+    }
+
+    public static boolean canThrowAwayStack(AltoClef mod, ItemStack stack, boolean allowFoodLastResort) {
         // Can't throw away empty stacks!
         if (stack.isEmpty())
             return false;
@@ -659,6 +665,16 @@ public class ItemHelper {
         if (adris.altoclef.util.helpers.StorageHelper.wouldLeaveNoPickaxe(mod, stack))
             return false;
         if (isReservedBlockUnderLimit(mod, stack))
+            return false;
+        // (2026-10-01 食物禁抛, 用户拍板"A+豁免") 非白名单食物一律不可抛 —
+        // 20261001-185104 会话 19:11:43 实锤: 装备序列把 carrot x43 捡上光标后
+        // 被任务抢占 8s 无人认领, PlayerInteractionFixChain 光标滞留超时收光标
+        // 时背包满放不下, canThrowAwayStack(胡萝卜)=true (本函数末行
+        // shouldThrowawayUnusedItems 兜底放行) → 点窗外整堆 43 根抛丢, bot
+        // 零食物状态继续游荡后死于凋零骷髅 DOT。白名单垃圾食物 (腐肉/蜘蛛眼/
+        // 蛋) 不受此限, 照常走档1; 真食物只在 getGarbageSlot 档7 "池内只剩
+        // 食物" 的最后保底时才允许丢 (allowFoodLastResort=true, 仅该调用方传)。
+        if (stack.isFood() && !allowFoodLastResort && !mod.getModSettings().isThrowaway(item))
             return false;
         return mod.getModSettings().isThrowaway(stack.getItem()) || mod.getModSettings().shouldThrowawayUnusedItems();
     }
