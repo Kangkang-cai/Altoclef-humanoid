@@ -141,6 +141,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
     // 到达判定: XZ 6 格内视为已到湖边 —— trackBlock(LAVA) 近区扫描自会接管找
     // 源, 不需要踩到锚点头上。
     private static final double LAKE_NAV_ARRIVE_XZ = 6.0;
+    // (2026-10-01 用户拍板) 选锚点的 |dy| 上限。导航是 GetToXZTask 只走 XZ,
+    // 深井锚点 (洞穴岩浆湖, 231949 场 y=-55) 地表走到头顶也够不着, 每个白烧
+    // 30s 且 TTL 过期后重选 —— 地表舀岩浆只认可达锚点, 深井湖留给未来
+    // "挖矿取岩浆"类任务。
+    private static final int LAKE_MAX_DY = 24;
 
     private boolean wasWandering = false;
 
@@ -476,9 +481,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
     /**
      * (2026-09-23 岩浆湖记忆) 取 KnowledgeMemory 中最近的 LAVA_LAKE 锚点并粘性
      * 导航过去 (跨会话持久化, 无距离上限 —— 与找堡垒同款"记得就奔过去"语义)。
+     * (2026-10-01 用户拍板) |dy| > {@value #LAKE_MAX_DY} 的深井锚点跳过:
+     * 导航是 XZ 口径, 洞穴湖地表走到头顶也够不着 (231949 场 y=-55 湖白烧)。
      * 返回 null = 没有可用记忆, 交回外层探索。到达 XZ {@value #LAKE_NAV_ARRIVE_XZ}
      * 格 (近区 trackBlock 扫描会接管找源), 或导航子任务自行结束, 就把锚点拉黑
      * {@value #LAKE_BLACKLIST_TTL_MS}ms 并重选, 防同一湖死循环。
+     * d= 打印为水平距离 (与 GetToXZTask 口径一致)。
      */
     private Task getRememberedLakeTask(AltoClef mod) {
         BlockPos feet = mod.getPlayer().getBlockPos();
@@ -504,18 +512,31 @@ public class CollectBucketLiquidTask extends ResourceTask {
         _lakeBlacklist.entrySet().removeIf(e -> now > e.getValue());
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
-        // 1e7 格上限 ≈ 不限距离: 记忆是"亲眼见过的重要位置", 与堡垒记忆一致。
+        int deepSkipped = 0;
+        // (2026-10-01 用户拍板) |dy| > LAKE_MAX_DY 的深井锚点跳过 —— XZ 导航
+        // 到不了 (见 LAKE_MAX_DY 注释)。d= 同步改为水平距离 (旧值含无效 Y 分量,
+        // y=-55 的锚点打出 d=180 假近)。
         for (BlockPos center : mod.getKnowledgeMemory().getRememberedCenters(
                 adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
                 mod.getPlayer().getPos(), 1.0e7)) {
             if (_lakeBlacklist.containsKey(center)) continue;
-            double sq = center.getSquaredDistance(feet);
+            if (Math.abs(center.getY() - feet.getY()) > LAKE_MAX_DY) {
+                deepSkipped++;
+                continue;
+            }
+            double sq = horizontalSq(center, feet);
             if (sq < bestSq) {
                 bestSq = sq;
                 best = center;
             }
         }
-        if (best == null) return null;
+        if (best == null) {
+            if (deepSkipped > 0) {
+                Debug.logMessage("[LavaMemory] " + deepSkipped + " 个记忆锚点 |dy|>"
+                        + LAKE_MAX_DY + " 跳过 (XZ 地表导航到不了深井湖)");
+            }
+            return null;
+        }
         _lakeNavTarget = best.toImmutable();
         _lakeNavTask = new GetToXZTask(best.getX(), best.getZ());
         setDebugState("Heading to remembered lava lake -> " + best.getX() + "," + best.getZ()
