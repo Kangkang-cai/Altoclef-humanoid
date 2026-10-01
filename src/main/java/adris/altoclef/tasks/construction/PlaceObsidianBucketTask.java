@@ -44,6 +44,16 @@ public class PlaceObsidianBucketTask extends Task {
     private BlockPos _currentCastTarget;
     private BlockPos _currentDestroyTarget;
 
+    // (2026-10-01 出口补齐 — 父链侧) 模具格被放置保护拒绝时**不能"持有等它变实心"**:
+    // 框架不消费子任务 isFinished (Task.tickInternal 只跑 onTick, 子任务何时被替换由
+    // 父链决定), 被拒子任务每拍只写一行 debugstate、零动作 ⇒ 整链零行为冻死
+    // (141836 实证 31s, 直到僵尸来袭才被打断)。出口必须补在调用侧: 判定"该格永远
+    // 放不上"就松手换格。判据与 PlaceBlockTask.refuseIfProtected 同源
+    // (shouldAvoidPlacingAt) —— 拒绝在哪里判定, 这里就查哪里 (判定源单一化)。
+    // 本任务自己的门在 reuse 认领时已解除死门保护 (见 ConstructNetherPortalBucketTask
+    // forgetClaimedPortalProtection), 此处兜底的是"工地与旁观保护区重叠"的残余情形。
+    private final java.util.Set<BlockPos> _forbiddenMoldLogged = new java.util.HashSet<>();
+
     // (2026-10-01 通用自愈口径, 用户拍板) 移除 CAST_FRAME 禁拆保护 (原
     // _protectCastFrame + avoidBlockBreaking 谓词, 0927 引入)。新口径:
     // **模具允许被拆** —— bot 路径需要时拆掉模具站位/通行是合法动作;
@@ -106,6 +116,11 @@ public class PlaceObsidianBucketTask extends Task {
         if (_currentCastTarget != null) {
             if (WorldHelper.isSolid(mod, _currentCastTarget)) {
                 _currentCastTarget = null;
+            } else if (isPlacementForbidden(mod, _currentCastTarget)) {
+                // (2026-10-01 出口补齐, 见字段区注释) 该模具格被放置保护拒绝 → 永远
+                // 放不上: 松手换下一个, 不再持有被拒子任务。
+                logMoldForbiddenOnce(mod, _currentCastTarget);
+                _currentCastTarget = null;
             } else {
                 return new PlaceStructureBlockTask(_currentCastTarget);
             }
@@ -160,6 +175,12 @@ public class PlaceObsidianBucketTask extends Task {
         for (Vec3i castPosRelative : CAST_FRAME) {
             BlockPos castPos = _pos.add(castPosRelative);
             if (!WorldHelper.isSolid(mod, castPos)) {
+                if (isPlacementForbidden(mod, castPos)) {
+                    // (2026-10-01 出口补齐) 保护格选模时直接跳过 (不再派发必被拒的
+                    // 放置任务)。见字段区注释。
+                    logMoldForbiddenOnce(mod, castPos);
+                    continue;
+                }
                 _currentCastTarget = castPos;
                 return null;
             }
@@ -293,6 +314,19 @@ public class PlaceObsidianBucketTask extends Task {
      *   isSolidBlock → 清 (原口径);
      *   其余有碰撞箱且可挖 (树叶/栅栏等) → 清 (本次修复的盲区)。
      */
+    /** (2026-10-01 出口补齐) 该格是否被放置保护禁止 —— 与 PlaceBlockTask.refuseIfProtected 同源判据。 */
+    private static boolean isPlacementForbidden(AltoClef mod, BlockPos pos) {
+        return mod.getExtraBaritoneSettings().shouldAvoidPlacingAt(pos);
+    }
+
+    /** (2026-10-01 出口补齐) 每个被跳过的保护格只打一条日志。 */
+    private void logMoldForbiddenOnce(AltoClef mod, BlockPos pos) {
+        if (_forbiddenMoldLogged.add(pos.toImmutable())) {
+            Debug.logMessage("[CastMold] 模具格 " + pos.toShortString()
+                    + " 在放置保护区内, 跳过 (该格永远放不上, 不再重试)");
+        }
+    }
+
     private boolean needsClearing(AltoClef mod, BlockPos pos) {
         BlockState s = mod.getWorld().getBlockState(pos);
         if (s.isAir() || !s.getFluidState().isEmpty()) return false;

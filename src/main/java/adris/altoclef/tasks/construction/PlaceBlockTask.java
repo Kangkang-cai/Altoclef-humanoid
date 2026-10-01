@@ -220,6 +220,14 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // 与"被其他任务直接构造"两种绕过路径。
         if (refuseIfProtected(mod)) {
             setDebugState("Refusing to place at protected position");
+            // (2026-10-01 出口补齐) 拒绝分支每拍返 null 是"零动作"; 子任务的
+            // isFinished 不被框架消费 (只对直接查完成判定的调用方有效), 退出必须
+            // 由调用侧补 —— 见 PlaceObsidianBucketTask 的 _forbiddenMoldLogged 注释。
+            // 这里做输入侧收尾: 不残留右键强制态/建造进程/nudge 按键, 避免"拒绝中
+            // 还在按着键"的脏状态。
+            mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
+            mod.getClientBaritone().getBuilderProcess().onLostControl();
+            releaseNudge(mod);
             return null;
         }
 
