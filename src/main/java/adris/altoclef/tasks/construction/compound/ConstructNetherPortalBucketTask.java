@@ -250,6 +250,15 @@ public class ConstructNetherPortalBucketTask extends Task {
                     _portalOrigin = reusable;
                     _reuseMode = true;
                     foundSpot = true;
+                    // (2026-10-01 施工认领) 这扇门已归本任务施工 → 清掉它的残留
+                    // "死门"保护记录: 门内格必须允许放模具/补框 (现场 141836: 模具格
+                    // (-252,73,172) 撞 lostPortalLocations 保护区, 拒绝分支无出口冻 31s)。
+                    // 保护的本意是"别让无关任务污染/破坏一扇**可能被补全**的旁观门";
+                    // 现在补全者就是本任务, 前提消失 → 保护让位。施工期由本任务自有
+                    // frame 保护 (onStart 的 avoidBlockBreaking) + 点燃前内部清理兜底;
+                    // 点燃后 live 门保护 (紫块/相邻黑曜石) 自然恢复。
+                    // (_portalRotation 已由 findReusablePortalStructure 对齐, 见其尾部赋值)
+                    forgetClaimedPortalProtection(mod, reusable);
                 }
 
                 if (!foundSpot) {
@@ -616,6 +625,24 @@ public class ConstructNetherPortalBucketTask extends Task {
     }
 
     // ==================== (2026-09-18) 复用已有门结构 ====================
+
+    /**
+     * (2026-10-01 施工认领) 把该门的足迹 (框 10 格 + 内部 6 格, 按当前 rotation
+     * 展开) 从 WorldMemory 的"死门保护"记录里清掉 —— 调用点 = reuse 认领处,
+     * 原因见那里的注释。模板朝向换算必须过 {@link #rotateY} (同框循环/内部循环)。
+     */
+    private void forgetClaimedPortalProtection(AltoClef mod, BlockPos origin) {
+        List<BlockPos> footprint = new ArrayList<>(PORTAL_FRAME.length + PORTAL_INTERIOR.length);
+        for (Vec3i offs : PORTAL_FRAME) {
+            Vec3i r = rotateY(offs, _portalRotation);
+            footprint.add(origin.add(r.getX(), r.getY(), r.getZ()));
+        }
+        for (Vec3i offs : PORTAL_INTERIOR) {
+            Vec3i r = rotateY(offs, _portalRotation);
+            footprint.add(origin.add(r.getX(), r.getY(), r.getZ()));
+        }
+        mod.getWorldMemory().forgetLostPortalLocations(footprint);
+    }
 
     /**
      * 绕 y 轴把模板偏移旋转 quarterTurns × 90°。

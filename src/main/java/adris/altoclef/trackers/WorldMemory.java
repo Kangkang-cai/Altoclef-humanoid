@@ -329,6 +329,33 @@ public final class WorldMemory {
     }
 
     /**
+     * (2026-10-01 施工认领) 清除指定位置的"死门"记忆 —— 一扇门被施工任务
+     * (ConstructNetherPortalBucketTask 复用认领) 收为施工对象后, 它不再是需要
+     * 保护的**旁观者**门: 门内格必须允许放置 (浇铸模具 / 补框), 施工期由施工方
+     * 自有的 frame 破坏保护与点燃前内部清理兜底, 点燃后 live 门保护 (紫块/相邻
+     * 黑曜石) 自然恢复。
+     *
+     * 现场 20261001-141836: 门被玩家手动打掉 → 6 个门内格进 lost 记录 → 本任务
+     * 认领后照旧受保护 → 浇铸模具格 (-252,73,172) 落在保护格, PlaceBlockTask
+     * 拒绝分支无出口 → 冻 31s。根因是**保护作用域/所有权**错位, 不是门"该不该
+     * 保护"本身 (20260909 的旁观者保护继续有效)。
+     */
+    public void forgetLostPortalLocations(Iterable<BlockPos> positions) {
+        Dimension dim = WorldHelper.getCurrentDimension();
+        Set<BlockPos> set = _lostPortalMemory.get(dim);
+        if (set == null || set.isEmpty()) return;
+        int removed = 0;
+        for (BlockPos p : positions) {
+            if (set.remove(p.toImmutable())) removed++;
+        }
+        if (removed == 0) return;
+        _memoryRevision++;
+        if (set.isEmpty()) _lostPortalMemory.remove(dim);
+        adris.altoclef.Debug.logMessage("[PortalGuard] 施工认领: 清除 " + removed
+                + " 个死门保护格 (该门已归本任务施工)");
+    }
+
+    /**
      * (2026-09-09) 记住一扇熄灭的门并打诊断快照: 玩家位置 + 32 格内恶魂/苦力怕
      * (爆炸是"紫块全没、黑曜石框无损"的头号嫌疑 — 爆炸对方块选择性破坏)。
      * 零行为改动, 只写 altoclef_diag.log 与聊天栏一条。
