@@ -91,19 +91,23 @@
 
 ```
 职责：
-- 维护主线令牌 _mainlineToken（enum { GAMER, NONE }，当前只有 @gamer 一条主线，刻意枚举而非字符串——不给任意任务名开口子）
-- pauseMainline()：
-    判定 UserTaskChain.getCurrentTask() 非 idle（判定源：TaskRunner.getCurrentTaskChain()
-    =="User Tasks" 且 getCurrentTask() != null 且 !isRunningIdleTask()——
-    三个方法均已存在：UserTaskChain.java:143-145、TaskRunner.java:187，
-    SingleTaskChain.getCurrentTask 已被 TaskRunner.java:125 引用）
-    → 记令牌 → 调 AltoClef.cancelUserTask()（AltoClef.java:1472-1474 已存在）
-    → 若本来就没在跑主线：返回 false（幂等，不算失败）
-- resumeMainline()：
-    令牌==GAMER → mod.runUserTask(new BeatMinecraft2Task())（与 GamerCommand 同构）
-    → 清令牌；令牌==NONE → 返回 false
-- 主线自然结束时令牌自清：订阅 TaskFinishedEvent（顶层）→ 若当前无活跃用户任务 → 令牌=NONE
-  （防"暂停后 LLM 忘了 resume，人类 @gamer 手动重开"造成的令牌悬挂）
+- 主线令牌 _paused（boolean，当前只有 @gamer 一条主线，刻意布尔而非任务名字符串
+  ——不给任意任务名开口子）
+- pauseMainline()【语义定稿：停下手头任何用户任务，不限于主线】：
+    判定 UserTaskChain.getCurrentTask() != null 且 !isRunningIdleTask()
+    （等价于"手头有用户任务在跑"——gamer/follow/goto 统统算，与"停下手头事"的用户预期一致）
+    → _paused = true → _interrupting = true（同步窗口标记，见下）→
+      AltoClef.cancelUserTask()（AltoClef.java:1472-1474）→ finally _interrupting = false
+    → 返回 true；若无任务在跑：返回 false（幂等，不算失败）
+- resumeMainline()【语义定稿：回到主线，不恢复被暂停的那个任务】：
+    若当前任务已是 BeatMinecraft2Task 实例 → _paused = false，返回 false（"主线已在推进"，
+      同时覆盖"人类手动 @gamer 接管"场景，避免重复拉起）
+    否则 _paused = false → mod.runUserTask(new BeatMinecraft2Task()) → 返回 true
+    （恢复用重建而非复用实例：被 cancel 的实例已 stop，二次 setTask 会走 onStart 二次
+      进入雷区（记忆 detail/01）；重建有死亡恢复/@gamer 重开先例，进度由 KnowledgeMemory 承接）
+- 不做事件驱动的令牌自清：pause 的 cancel 会同步触发 TaskFinishedEvent（见 §6.1 实测），
+  按事件自清必然把令牌当场清掉 → resume 必失败。改为"resume 时查已在跑主线"这一处判定，
+  无需区分"主动 cancel"与"自然结束"。
 ```
 
 **新增 2：bridge.json 三个字段**（`BridgeConfig`，ConfigHelper 范式照旧）
@@ -171,7 +175,7 @@ POST /command {"cmd":"@follow 小影", "actionId":"a-<对端生成，可选>"}
 | 给物接收方感知 | **已覆盖，无需新事件** | 抛出的物品被接收 bot 拾取 → 背包增量 → 白名单内物品已有 `collected` 事件（"捡到了 5 个铁锭"）。verb 是"捡到"而非"收到"——语义上有细微差别，但结合聊天上下文（发起方刚说过"给你铁"）对 LLM 足够。新增 `received` 类型属锦上添花，进"不做"清单 |
 | **互相 follow 死锁** | **真实风险，需对端编排约束** | A follow B + B follow A → 两 bot 互追永不停（follow 无超时机制）。对端行动层必须保证"同一时刻至多一条 follow 边"（LLM 侧 prompt 约束 + 对端去重）；模组侧不加超时（克制即真实，follow 被下一个任务顶掉即解除） |
 | **给物时接收方在动** | **轻微风险，对端编排约定** | 抛掷有落点散布，接收方高速移动会漏捡（掉落物 5 分钟 despawn）。对端约定：give 前接收方先 idle。模组侧不做握手 |
-| 给物隐含收集远征 | 见 §1.1 | 对端 prompt 约束 LLM："只 give 对方 keyItems 里可见的物品"；`@give` 未注册物品名时现逻辑只查背包（GiveCommand.java:39-45 fallback），失败仅 log → 对端超时兜底覆盖 |
+| 给物隐含收集远征 | 见 §1.1 | 对端 prompt 约束 LLM：**只 give 自己背包里有的物品**（GiveCommand 走 TaskCatalogue 时"背包没有该物品"才会触发收集任务；发起方背包已有 → 直接走 ThrowCursorTask 抛掷，不触发远征）；对方背包内容不可见（真实底线），LLM 无从判断"对方有没有"，只能按自己持有来给。`@give` 物品名未注册时现逻辑只查背包（GiveCommand.java:39-45 fallback），失败仅 log → 对端超时兜底覆盖 |
 
 ---
 
@@ -189,12 +193,15 @@ POST /command {"cmd":"@follow 小影", "actionId":"a-<对端生成，可选>"}
 
 ---
 
-## 6. 实现期首个验证点（进实现前需查证）
+## 6. 实现期验证点（1001 21:4x 已查证前两条）
 
-1. `SingleTaskChain.setTask` 替换旧任务时，旧任务路径是否触发 `onTaskFinish`/`TaskFinishedEvent`——影响 action_done 关联窗口与令牌自清的写法（读 chains/SingleTaskChain.java 后定稿）。
-2. `CommandExecutor.execute(cmd)` 抛 CommandException 时的返回路径（影响 400/500 划分——现状 404 在 HTTP 线程预校验，执行期异常目前吃进 client.execute 的 catch）。
-3. `@idle` 之后 settings `shouldRunIdleCommandWhenNotActive` 的当前值（决定干预任务结束后 bot 站桩还是跑闲置命令——影响对端预期）。
-4. 部署前按流程：说明 → 要求重启客户端（服务端 keepInventory=true，如需测死亡掉落先改回 false）。
+1. ✅ **已查证（chains/SingleTaskChain.java:79-94、chains/UserTaskChain.java:58-63）**：
+   - `setTask` 替换旧任务：只调 `_mainTask.stop(_mod, task)`，**不发 TaskFinishedEvent**（所以 goto/follow 互相顶替时不会有伪 task_done）。
+   - `cancelUserTask()` 路径：`UserTaskChain.cancel` → `stop(mod)` + **直接调 `onTaskFinish(mod)`** → 其中 `actuallyDone=true` → **同步 publish TaskFinishedEvent**，且若 settings `shouldRunIdleCommandWhenNotActive` 为真还会立刻跑 idle command。
+   - 结论：**用户反馈的问题 3 成立**——pause 的 cancel 会当场发出 TaskFinishedEvent。按此定稿：①令牌不走事件自清（resume 靠"已在跑主线"判定）；②pause 的 cancel 期间置 `_interrupting` 同步标记，EventCollector 在该窗口内**不发 task_done**（否则 LLM 会看到"完成：BeatMinecraft2Task"这种误导性完成信号），ActionDispatcher 也不把这次结束当作 pending action 的完成。
+2. ⬜ `CommandExecutor.execute(cmd)` 执行期异常的返回路径（HTTP 线程只做 404 预校验；执行期异常目前吃进 `client.execute` 的 catch）——实现时补 500/action_failed 收敛判断。
+3. ⬜ `shouldRunIdleCommandWhenNotActive` 当前值（决定 pause 后 bot 是站桩还是跑闲置命令，影响对端预期）。
+4. ⬜ 部署前按流程：实现说明 → 要求重启客户端（服务端 keepInventory=true，如需测死亡掉落先改回 false）。
 
 ## 7. 对端（chat_and_play）需按契约接的清单
 
