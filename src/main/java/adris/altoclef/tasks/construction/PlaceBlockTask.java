@@ -8,13 +8,16 @@ import adris.altoclef.tasks.movement.TimeoutWanderTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
 import baritone.api.schematic.AbstractSchematic;
 import baritone.api.schematic.ISchematic;
 import baritone.api.utils.BlockOptionalMeta;
+import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -23,6 +26,10 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -33,6 +40,7 @@ import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Place a block type at a position
@@ -69,6 +77,9 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     private int _nudgeSinceTick = 0;
     /** nudge 硬上限: 1.5s (30 tick) 仍未脱离 → 判定方向被堵, 松键落 wander 兜底。 */
     private static final int NUDGE_MAX_TICKS = 30;
+    // (2026-10-01 手动放置兜底) baritone builder 失败 N 次后接管: 1 次 ≈ 一次
+    // progress 判负 (~5s), 足够 baritone 正常场景首放成功。
+    private static final int MANUAL_PLACE_AFTER_FAILS = 1;
     // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
     private boolean _protectedRefusalLogged = false;
 
@@ -381,6 +392,16 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             setDebugState("Alternative way: Trying to go above block to place block.");
             return new GetToBlockTask(_target.up(), false);
         } else {
+            // (2026-10-01 手动放置兜底) baritone builder 的已知病理: 目标格嵌入
+            // 凹槽/上沿悬挑时, 所有点击射线擦到悬挑石 → 全部 rotation 判死 →
+            // builder=true pathing=false path[present=false] 原地空转 (113143/
+            // 135411 两场实锤, failCount 1→8)。通用兜底: 失败一次后自己来 ——
+            // 选面 (getReach 精确到面, 射线被挡自动跳过该面)、瞄准、interactBlock
+            // 右键 (复用 PlaceBlockNearbyTask 的机构)。任何面都够不着 → 返回
+            // false 落回 baritone/wander 换位后再试。
+            if (_failCount >= MANUAL_PLACE_AFTER_FAILS && tryManualPlace(mod)) {
+                return null;
+            }
             setDebugState("Letting baritone place a block.");
 
             // Perform baritone placement
@@ -558,6 +579,62 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     private static boolean hasAttachFace(AltoClef mod, BlockPos pos) {
         for (Direction dir : Direction.values()) {
             if (WorldHelper.isSolid(mod, pos.offset(dir))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (2026-10-01 手动放置兜底) baritone builder 反复失败后自己动手放:
+     * 选依附面 → LookHelper.getReach(pos, side) 精确瞄准该面 (射线被悬挑遮挡的
+     * 面自动返空跳过) → crosshair 命中校验 (块+面都对才点) → interactBlock 右键。
+     * 复用 PlaceBlockNearbyTask 的交互机构 (sneak 不需要 —— 常规站位脚下实心)。
+     *
+     * @return true = 本 tick 由手动放置接管 (已装备/已转向/已点击); false = 没有可
+     *         用的面或目标已就位, 交回 baritone/wander 流程。
+     */
+    private boolean tryManualPlace(AltoClef mod) {
+        // 目标已实心 → 交给完成判定, 不再重复点击。
+        if (WorldHelper.isSolid(mod, _target)) return false;
+        // 手动接管期间 baritone builder 不得抢准星。
+        mod.getClientBaritone().getBuilderProcess().onLostControl();
+        _progressChecker.reset();
+
+        // 装备: 指定材质优先, 否则 throwaway 清单 (baritone 同款口径)。
+        Item[] candidates = _toPlace.length > 0
+                ? ItemHelper.blocksToItems(_toPlace)
+                : (_useThrowaways
+                        ? mod.getClientBaritoneSettings().acceptableThrowawayItems.value.toArray(new Item[0])
+                        : new Item[0]);
+        if (candidates.length == 0) return false;
+        if (!StorageHelper.isEquipped(mod, candidates)) {
+            mod.getSlotHandler().forceEquipItem(candidates);
+            return true;
+        }
+
+        for (Direction dir : Direction.values()) {
+            BlockPos support = _target.offset(dir);
+            if (!WorldHelper.isSolid(mod, support)) continue;
+            Direction face = dir.getOpposite();
+            Optional<Rotation> reach = LookHelper.getReach(support, face);
+            if (!reach.isPresent()) continue;
+            if (!LookHelper.isLookingAt(mod, reach.get())) {
+                LookHelper.lookAt(mod, reach.get());
+                return true;
+            }
+            // 准星校验: 必须命中支撑块的目标面 (块+面都对才点, 防 face 擦边误放)。
+            HitResult hit = MinecraftClient.getInstance().crosshairTarget;
+            if (hit instanceof BlockHitResult bhit
+                    && bhit.getBlockPos().equals(support)
+                    && bhit.getSide() == face
+                    && !mod.getExtraBaritoneSettings().isInteractionPaused()) {
+                Hand hand = Hand.MAIN_HAND;
+                ActionResult result = MinecraftClient.getInstance().interactionManager
+                        .interactBlock(mod.getPlayer(), mod.getWorld(), hand, bhit);
+                if (result == ActionResult.SUCCESS) {
+                    mod.getPlayer().swingHand(hand);
+                }
                 return true;
             }
         }
