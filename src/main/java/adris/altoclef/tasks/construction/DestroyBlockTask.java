@@ -3,7 +3,6 @@ package adris.altoclef.tasks.construction;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
-import adris.altoclef.tasks.movement.EscapeLavaVicinityTask;
 import adris.altoclef.tasks.movement.GetToLandTask;
 import adris.altoclef.tasks.movement.JumpStuckResolver;
 import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
@@ -18,7 +17,7 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.LandHelper;
-import adris.altoclef.util.helpers.LavaVicinityHelper;
+import adris.altoclef.util.helpers.LavaSightHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WaterExitHelper;
@@ -40,7 +39,9 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Destroy a block at a position.
@@ -131,31 +132,39 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _waterExitGroundedPos = null;
     private static final int WATER_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
 
-    // ==== (2026-10-02 作业侧避岩浆闸门, 用户"作业侧模仿避水原则") ====
-    // 现场 20261002-175747 18:56 (贪心挖矿, 目标 = 洞穴里的铁矿石 -698,23,231):
-    //   18:56:16.2  unreachable ×3 拉黑重试 (够不着, 原地耗)
-    //   18:56:21.03 [LavaNav] 触发"脚下邻域岩浆" —— 但它只管 baritone 的旋转跳
-    //               开关, 挖掘照跑;
+    // ==== (2026-10-02 作业侧避岩浆: 遇岩浆即弃道) ====
+    // 口径与 MineDownExploreTask 的 [MineDown-LavaAbandon] 【完全一致】——
+    // 同一判定源 (LavaSightHelper: 椭球 12/6 视觉感知 + 贴身 11 格兜底, 反透视)、
+    // 同一撤离动作 (RunAwayFromPositionTask, maintainY=当前高度即只许水平跑)、
+    // 同一后撤距离 (主世界 16 / 下界 20, 必须 > 视觉半径 12 才能"撤完就看不见它")。
+    //   用户 09-17 拍板原话: "只要视觉范围内扫到的岩浆，那就叫看见了，看见了就该弃坑。"
+    //
+    // 为什么需要它 (现场 20261002-175747 18:56):
+    //   18:56:00.6 <Digging down to find ores> 挖到天然洞穴
+    //   18:56:04.1 STOP <Digging down to find ores> by <Destroy block at -698,23,231>  ← 交棒
+    //   18:56:08.3 <Collect visible ores> → <Mine And Collect: [[raw_iron] x 1]> → 本任务
+    //   18:56:16.2 unreachable 42 ticks ×3 拉黑重试 (够不着洞穴里的铁矿)
+    //   18:56:21.03 [LavaNav] 已报"脚下邻域岩浆" —— 但那只管导航开关
     //   18:56:21~25.3 坐标恒 -698,20,227 (4.3s 零位移)
-    //   18:56:25.98 被流过来的岩浆泡住 → 26.03 [LavaEscape] → 28.43 [DEATH] cause=lava
-    // 泡进去之后只有 2.45s 预算, 而 baritone 拿到第一条路径实测 3.35s —— 物理上来不及。
-    // 用户定调: "根本就不应该让 bot 泡进岩浆"。
+    //   18:56:25.98 被流过来的岩浆泡住 → 18:56:28.43 [DEATH] cause=lava
+    //   ↑ 一旦从"挖隧道"切到"洞穴里挖具体矿块", MineDownExploreTask 那套弃道判据
+    //     就整段失效 —— 本闸门补的正是这个断层。
     //
-    // 语义照搬 WATER-EXIT (泡水漂浮 → 停挖上岸): 人一进岩浆邻域就【中断挖掘,
-    // 先撤到邻域无岩浆的格】; 撤清后若同一目标 30s 内又把人带回岩浆邻域 →
-    // 拉黑换目标 (同 _waterExitGroundedTick 的收敛出口)。
+    // 与水的处置刻意分开 (勿合并参数): 水是"能走过去 → 累计 2 次才撤、撤 10 格、撤完
+    // 回原地继续挖"(见上方 WATER-EXIT 段); 岩浆是"走过去=死 → 第一次看见就弃道、
+    // 撤 16~20 格、不回原目标"。两者物理性质相反。
     //
-    // 触发判据 = LavaVicinityHelper (水平≤2/下2/上1), 与 AltoClef.LavaNav 的
-    // 触发内圈同一把尺子 —— 判定源单一化。
-    // 动作 = EscapeLavaVicinityTask (不 wander; 与"泡进去之后"的 EscapeFromLavaTask
-    // 分工不同, 见该类注释)。
+    // 与"泡进去之后"的 EscapeFromLavaTask 分工: 那个由 WorldSurvivalChain(prio 100) 在
+    // isInLava() 时派发; 本闸门在【还没泡进去】时就把人带走 —— 泡进去只有 2.45s 预算,
+    // 而逃生任务启动到 baritone 首条路径实测要 3.35s, 物理上来不及。
     private boolean _lavaExitLatched = false;
-    // 收敛出口: 撤清成功后 30s 内同目标再次触发 = 这块只能贴着岩浆挖 → 拉黑换目标。
-    private int _lavaExitClearedTick = -1;
-    private BlockPos _lavaExitClearedPos = null;
-    private static final int LAVA_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
-    // 撤离子任务实例缓存 (isEqual 恒 true, 完成/放弃后 reset 复用, 同 _toLand 先例)。
-    private EscapeLavaVicinityTask _toLavaSafe = null;
+    /** 撤离动作: RunAwayFromPositionTask (与 MineDownExploreTask 弃道同款)。 */
+    private Task _toLavaSafe = null;
+    /** 本轮亲眼见过的岩浆点 (不是预测): 后撤目标带上全部, 避免在两处岩浆之间来回。 */
+    private final Set<BlockPos> _lavaHazards = new HashSet<>();
+    /** 撤离超时 (铁律: hold 必须有出口 —— 被围死/路线全断时不无限 hold)。 */
+    private static final double LAVA_EXIT_TIMEOUT_SEC = 20.0;
+    private final TimerGame _lavaExitTimer = new TimerGame(LAVA_EXIT_TIMEOUT_SEC);
 
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
@@ -299,6 +308,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
         mod.getBehaviour().avoidBlockPlacing(pos -> _pos.up().equals(pos));
+    }
+
+    /**
+     * (2026-10-02 作业侧避岩浆) 弃道收尾: 把当前目标拉黑 (换通道, 由上层另选) +
+     * 给 {@link LavaSightHelper} 一个 2s 感知宽限。
+     *
+     * <p>{@code allowed=0} = 首次即拉黑, 不再等默认的 5 轮 (同本文件 [LavaEdge] 的口径) ——
+     * 目标在岩浆边上不是"偶尔够不着", 而是"这块地方本身危险"。
+     */
+    private void abandonTargetAfterLava(AltoClef mod) {
+        mod.getBlockTracker().requestBlockUnreachable(_pos, 0);
+        LavaSightHelper.grantSightGrace();
     }
 
     /**
@@ -533,78 +554,64 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         }
 
-        // ==== (2026-10-02 作业侧避岩浆闸门: 保活 + 触发) ====
-        // 保活与触发都放在此处 (保护性早退之后、wander/挖掘之前):
-        //   ① 覆盖【整段作业】而不只是"已进入挖掘距离" —— 本次事故正是
-        //      "够不着 → 反复清障/重试 17s", 若只挂在 reach 分支就救不到;
-        //   ② 闸门优先级高于 wander/挖掘: 进危险区先撤, 撤完再谈干活。
+        // ==== (2026-10-02 作业侧避岩浆: 遇岩浆即弃道) 保活 + 触发 ====
+        // 位置: 保护性早退之后、wander/挖掘之前 —— 必须覆盖【整段作业】而不只是
+        // "已进入挖掘距离": 本次事故正是"够不着 → 原地清障/重试 17s"这一段。
         if (_lavaExitLatched) {
             if (_toLavaSafe != null && _toLavaSafe.isFinished(mod)) {
-                if (!_toLavaSafe.hasGivenUp()) {
-                    // 真撤清了 (邻域无岩浆持续 1.5s), 记锚点供下面重复触发拉黑。
-                    _lavaExitClearedTick = WorldHelper.getTicks();
-                    _lavaExitClearedPos = _pos;
-                    Debug.logToFile("altoclef_diag.log",
-                            "[LAVA-EXIT] cleared lava vicinity next to target " + _pos.toShortString());
-                }
-                // 放弃时任务内部已写 30s static 冷却 (isOnCooldown 兜底)。
-                _toLavaSafe.reset();
+                // 撤完: 弃道拉黑 (换通道, 由上层另选) + 2s 感知宽限 (churn 修复, 同
+                // MineDownExploreTask 的 LAVA_SIGHT_GRACE_MS —— 落点可能只是贴着视觉
+                // 半径边缘, 否则同一秒又"看见"同一处)。
+                // 拉黑刻意放在【撤离完成时】而非触发瞬间: 触发瞬间拉黑会让上层立刻换目标、
+                // 连带把本实例一起替换掉, 正在跑的撤离任务随之被拆 (新实例 _toLavaSafe=null),
+                // bot 还没走出去就停了。
+                abandonTargetAfterLava(mod);
                 _toLavaSafe = null;
                 _lavaExitLatched = false;
+                _lavaHazards.clear();
+            } else if (_lavaExitTimer.elapsed()) {
+                // 出口 (铁律: hold 必须有出口): 20s 还没撤出去 (被围死 / 路线全断) →
+                // 弃道拉黑 + 松闩, 不再无限 hold。
+                String m = "[LAVA-EXIT] retreat timed out at "
+                        + mod.getPlayer().getBlockPos().toShortString()
+                        + " -> abandon target " + _pos.toShortString() + " (no further hold)";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                abandonTargetAfterLava(mod);
+                _toLavaSafe = null;
+                _lavaExitLatched = false;
+                _lavaHazards.clear();
             } else if (_toLavaSafe != null) {
-                setDebugState("Lava vicinity (mining here would cook us) -> leaving first (latched)");
+                setDebugState("Saw lava -> abandoned target, retreating");
                 return _toLavaSafe;
             } else {
                 // 防御: 闩在但任务缺失 (理论上不发生) → 松闩走正常流程。
                 _lavaExitLatched = false;
             }
         }
-
-        // 收敛出口: 撤清后 30s 内同目标又把人带回岩浆邻域 = 这块只能贴着岩浆挖 → 拉黑换目标。
-        if (!_lavaExitLatched
-                && _lavaExitClearedTick >= 0
-                && _pos.equals(_lavaExitClearedPos)
-                && WorldHelper.getTicks() - _lavaExitClearedTick < LAVA_EXIT_REPEAT_BLACKLIST_TICKS
-                && LavaVicinityHelper.playerInLavaVicinity(mod)) {
-            String m = "[LAVA-EXIT] target " + _pos.toShortString()
-                    + " pulls into lava vicinity again within 30s after clearing -> blacklist"
-                    + " (lava-adjacent block). player=" + mod.getPlayer().getBlockPos().toShortString();
-            Debug.logMessage(m);
-            Debug.logToFile("altoclef_diag.log", m);
-            mod.getBlockTracker().requestBlockUnreachable(_pos);
-            _lavaExitClearedTick = -1;
-            _lavaExitClearedPos = null;
-            return null;
-        }
-
-        // 触发: 人一进岩浆邻域就中断挖掘, 先撤。冷却期内 (撤离链路已被证明走不通)
-        // 直接拉黑目标 —— 该目标在岩浆邻域又撤不出去, 不值得继续试。
         if (!_lavaExitLatched) {
-            if (EscapeLavaVicinityTask.isOnCooldown()) {
-                if (LavaVicinityHelper.playerInLavaVicinity(mod)) {
-                    String m = "[LAVA-EXIT] target " + _pos.toShortString()
-                            + " blacklisted (lava vicinity + evacuation on cooldown). player="
-                            + mod.getPlayer().getBlockPos().toShortString();
-                    Debug.logToFile("altoclef_diag.log", m);
-                    mod.getBlockTracker().requestBlockUnreachable(_pos);
-                    return null;
-                }
-            } else if (LavaVicinityHelper.playerInLavaVicinity(mod)) {
+            BlockPos hazard = LavaSightHelper.findLavaHazard(mod);
+            if (hazard != null) {
+                _lavaHazards.add(hazard.toImmutable());
                 _lavaExitLatched = true;
-                if (_toLavaSafe != null) {
-                    _toLavaSafe.reset();
-                } else {
-                    _toLavaSafe = new EscapeLavaVicinityTask();
-                }
-                String m = "[LAVA-EXIT] player in lava vicinity while mining -> pause & leave first"
-                        + " (latched until clear/give-up). target=" + _pos.toShortString()
-                        + " player=" + mod.getPlayer().getBlockPos().toShortString();
+                _lavaExitTimer.reset();
+                double dist = LavaSightHelper.retreatDistance();
+                // maintainY = 当前高度: 后撤只许水平跑, 不许上下乱窜 —— 下界往上跑
+                // 可能一头扎进头顶的岩浆海, 往下跑可能踩空 (同 MineDownExploreTask)。
+                _toLavaSafe = new RunAwayFromPositionTask(dist,
+                        mod.getPlayer().getBlockPos().getY(),
+                        _lavaHazards.toArray(new BlockPos[0]));
+                String m = "[LAVA-EXIT] saw lava at " + hazard.toShortString()
+                        + " -> abandon target " + _pos.toShortString()
+                        + " & retreat " + (int) dist + " blocks"
+                        + " (撤离目标 " + _lavaHazards.size() + " 处). player="
+                        + mod.getPlayer().getBlockPos().toShortString();
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
             }
         }
         if (_lavaExitLatched && _toLavaSafe != null) {
-            setDebugState("Lava vicinity (mining here would cook us) -> leaving first (latched)");
+            setDebugState("Saw lava -> abandoned target, retreating");
             return _toLavaSafe;
         }
 

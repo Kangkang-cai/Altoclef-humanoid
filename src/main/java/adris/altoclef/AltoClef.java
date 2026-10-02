@@ -21,7 +21,6 @@ import adris.altoclef.ui.CommandStatusOverlay;
 import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
 import adris.altoclef.util.helpers.InputHelper;
-import adris.altoclef.util.helpers.LavaVicinityHelper;
 import adris.altoclef.util.RenderThreadWatchdog;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
 import adris.altoclef.util.helpers.OffhandHygiene;
@@ -912,13 +911,16 @@ public class AltoClef implements ModInitializer {
     // allowDiagonalAscend, 防任务栈 applyState 把旧值写回去。
     // 脚下邻域 (兜底): 半径 3 → 2 (2026-09-19 用户"洞里一直触发"/"应该减小触发半径"),
     // 前方危险改由下面的**路径预检**接管 —— 它比"人已经站在危险区"更早、更准。
-    // (2026-10-02 单一判定源) 触发内圈口径改由 LavaVicinityHelper 提供 —— 作业侧
-    // 避岩浆闸门 (DestroyBlockTask 的 LAVA-EXIT) 判"人是不是站在危险位"用的是同一
-    // 把尺子, 两处必须同步, 否则会出现"导航觉得危险、作业侧觉得安全"的裂缝。
-    // 数值不变 (2/2/1), 零行为改动。
-    private static final int LAVA_NAV_TRIGGER_RADIUS = LavaVicinityHelper.LAVA_VICINITY_RADIUS;
-    private static final int LAVA_NAV_TRIGGER_DOWN = LavaVicinityHelper.LAVA_VICINITY_DOWN;
-    private static final int LAVA_NAV_TRIGGER_UP = LavaVicinityHelper.LAVA_VICINITY_UP;
+    // (2026-10-02 回退一次"单一判定源"尝试) 曾把这三个值抽到共享类想与作业侧弃道
+    // 闸门共用 —— 复核后两者判的**不是同一件事**, 共用反而错:
+    //   · 这里 = 【导航开关】口径的贴身盲扫 (只管要不要关旋转跳, 误触发代价只是
+    //     路径变长, 所以允许盲扫且半径可以很小);
+    //   · 作业侧 (LavaSightHelper) = 【作业弃道】口径的视觉感知 (椭球 12/6 + LOS,
+    //     误触发代价 = 放弃一个目标 + 撤 16~20 格, 必须过反透视边界)。
+    // 恢复字面量, 数值与历史一致。
+    private static final int LAVA_NAV_TRIGGER_RADIUS = 2;
+    private static final int LAVA_NAV_TRIGGER_DOWN = 2;
+    private static final int LAVA_NAV_TRIGGER_UP = 1;
     private static final int LAVA_NAV_HOLD_RADIUS = 6;
     private static final int LAVA_NAV_HOLD_DOWN = 3;
     private static final int LAVA_NAV_HOLD_UP = 2;
