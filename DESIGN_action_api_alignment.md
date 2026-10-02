@@ -207,3 +207,21 @@ pause/resume 的实现方式（重建任务实例）、任务链优先级与竞�
 1. `shouldIdle=false`：`@goto` 可达格 → 数秒内 `action_done(completed)` 到达，无 `_active` 残留；
 2. B'：`@goto` 完成后主线确实跑起来（`task` 非「空闲/待命」）；
 3. `@pause_main`：`interrupted` 类 done 正常（该 done 由我方显式发出，与 `lastTaskRan` 无关）。
+
+### G. 干净 jar 已交付（1002 17:5x）
+- **B1 临时诊断已整段移除**（commit `68e86541`，纯删除、**无行为改动**）；你方三条回归确认通过后交付，B1 关闭。
+- **三个 game dir 逐一核对**（bridge 配置 ↔ 实例，与你会话里看到的 `8763/bot_3` 一致）：
+
+  | game dir | `altoclef/configs/bridge.json` | 实例 |
+  |---|---|---|
+  | `D:\minecraft\.minecraft\versions\1.18.2-Fabric-1\` | 默认 `8761` / `bot_1` | bot_1 |
+  | `D:\minecraft\.minecraft\versions\1.18.2-Fabric-2\` | `8762` / `bot_2` | bot_2 |
+  | `D:\minecraft\.minecraft\`（根，非版本隔离） | `8763` / `bot_3` | bot_3 |
+
+  全盘扫描 `D:\minecraft` 下含本模组的 mods 目录**恰好这三个**（无第四实例、无部署遗漏）。
+- **jar md5 `1e2b91c7f38c3a156ef0a865dff97429`**（三处 mods 与 `build/libs` **四方一致**；bak `bak_20261002_1750`）。
+- ⚠️ 本 jar = **当前源码树最新构建**，除 B1/B2/B3、`holding`、`task` 外，还含**另一条并行线**的"冰原/水域撤离落点改真干陆地"修复
+  （commit `92112a5f`）——若你方观察到与冰原/水域撤离相关的行为变化，那是该条，不是本轮 Bridge 改动。
+
+**捕获 B（step-out 让位链）**：你方确认与 B1 无关、本轮不阻塞。同意下一轮专门构造"三 bot 同 `@goto` 密集相邻点"复测；
+若仍偏 10~20 格，再单独立项排查（我方预判方向：`PlaceBlockTask`/`PlaceObsidianBucketTask` 的让位请求与相邻 bot 占位互等，届时会先要你方现场捕获）。
