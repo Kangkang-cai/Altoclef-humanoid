@@ -8,6 +8,7 @@ import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.MiningRequirement;
+import adris.altoclef.util.helpers.DryGroundHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -478,17 +479,42 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 阶段 1 上爬: 爬回本轮挖掘起点高度 (digStartY, 即当时的地表/进入面), 复用
     //   既有爬升机器 (baritone-first + 看门狗 + 楼梯回退), 目标经 _ascendGoalY
     //   临时改写 —— 水域在浅层时爬回 _targetY (深部矿带) 反而是往深处爬。
-    // 阶段 2 水平撤离: 背离水源方向走 40~64 格 (地表行走 baritone 自然避水),
-    //   120s 看门狗兜底 (到不了就原地重开)。
+    // 阶段 2 水平撤离: 背离水源方向, 落在"真干陆地"上 (距离表见下方
+    //   WATER_EVAC_DRY_DISTANCES; 2026-10-02 起由"固定 40~64 格随机"改为
+    //   "按距离表扫真干陆地", 旧 WATER_EVAC_TRAVEL_MIN/MAX 已删),
+    //   120s 看门狗兜底 (到不了就继续外撤, 轮数超限则放弃)。
     // 收尾: 换通道计数清零, 从当前位置重开楼梯下挖, 本任务继续存活。
     private static final int WATER_EVAC_ASCEND_MIN_GAIN = 12;
-    private static final int WATER_EVAC_TRAVEL_MIN = 40;
-    private static final int WATER_EVAC_TRAVEL_MAX = 64;
     private static final double WATER_EVAC_TRAVEL_TIMEOUT = 120.0;
     /** 0=无撤离, 1=上爬中, 2=水平撤离中。 */
     private int _waterEvacPhase = 0;
     private Task _waterEvacTask = null;
     private final TimerGame _waterEvacTravelTimer = new TimerGame(WATER_EVAC_TRAVEL_TIMEOUT);
+
+    // ==================== (2026-10-02 冰原/水域禁挖) ====================
+    // 现场 20261002-172442: 冰原地形 (地表 ice/packed_ice, 冰下即水) 下挖找铁,
+    // 「3 连败 → 水平撤离 40~64 格 → 重开下挖 → 又撞水」循环, water skipped
+    // 3→29→59→93 零收敛; 两次撤离 120s 超时收尾 (落点是冰面浮壳, 判可达却走不到)。
+    // 旧撤离只挑"背离水源的正方向"走固定距离, 【不校验落点是否可站/是否真陆地】。
+    // 修: ① 撤离落点必须过 DryGroundHelper.isSolidDryGround (排除冰面浮壳/水域);
+    //     ② 下挖起点同样必须是真干陆地, 否则先水平找干地;
+    //     ③ 出口: 连续 _waterEvacRounds 轮撤离仍找不到干地 → 拉黑这片 + 放弃本轮
+    //        下挖 (交上层换点)。禁止无限"撤离-重挖-遇水"。
+    /** 已完成的撤离轮数 (本轮下挖内)。 */
+    private int _waterEvacRounds = 0;
+    /** 本轮因"无真干陆地"放弃下挖 → isFinished 短路, 交上层换点。 */
+    private boolean _giveUpNoDryLand = false;
+    /** 撤离选点距离表 (由近到远; 越远越可能出水域/冰原边缘)。 */
+    private static final int[] WATER_EVAC_DRY_DISTANCES = {48, 64, 80, 96, 128};
+    /** 撤离轮数上限: 到顶仍未站上真干陆地 = 这片撤不出去。 */
+    private static final int WATER_EVAC_MAX_ROUNDS = 4;
+    /** 禁挖区 (static 跨实例): 判定这片不适合下挖后拉黑, 防上层就地重建死循环。 */
+    private static BlockPos s_refusedDigZone = null;
+    private static long s_refusedDigZoneUntilMs = 0L;
+    /** 禁挖区刷屏节流: 同一片只打一次"已在禁挖区"日志。 */
+    private static long s_refuseLogUntilMs = 0L;
+    private static final long DIG_ZONE_REFUSE_COOLDOWN_MS = 5 * 60 * 1000L;
+    private static final double DIG_ZONE_REFUSE_RADIUS = 96;
 
     // ==== (2026-09-23 通道灌水感知) 流动水灌入【已挖开的干通道】= 1 次即后撤换向 ====
     // skipAirAndWater 的水判据只扫【挖掘队列队首】(几何路径上即将挖的格): 挖开方块
@@ -719,6 +745,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _waterChannelSwitches = 0;
         _waterEvacPhase = 0;
         _waterEvacTask = null;
+        // (2026-10-02 冰原禁挖) 本轮撤离轮数/放弃标志随完整重置归零 (续探分支不走这里)。
+        _waterEvacRounds = 0;
+        _giveUpNoDryLand = false;
         _digStart = mod.getPlayer().getBlockPos().down();
         _step = 0;
         _realDigs = 0;
@@ -841,6 +870,29 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         } else {
             _dirX = STAIR_DIR_X;
             _dirZ = STAIR_DIR_Z;
+        }
+        // ==================== (2026-10-02 冰原/水域禁挖) ====================
+        // 下挖起点必须是"真干陆地"(DryGroundHelper: 脚下连续实心岩土, 4 格内无冰无水)。
+        // 冰原地形 (地表 ice/packed_ice, 冰下即水) 站上去能站, 但往下挖必然全水 ——
+        // 现场 20261002-172442 就是在这里开始 3 连败→撤离→重挖→又遇水的死循环。
+        // 上行模式 (_ascendMode/_baritoneAscent) 不拦: 那是"从地下爬回地表/矿带",
+        // 起点天然在地下岩层里, 与冰原无关。
+        if (!_ascendMode && !_baritoneAscent) {
+            BlockPos here = mod.getPlayer().getBlockPos();
+            if (isInRefusedDigZone(here)) {
+                logRefuseOnce(mod, here);
+                giveUpWaterExcavation(mod, "位于已标记的冰原/水域禁挖区内");
+                return;
+            }
+            if (!DryGroundHelper.isSolidDryGround(mod, here)) {
+                String m = "[MineDown-IceGuard] 下挖起点非真干陆地 (脚下="
+                        + mod.getWorld().getBlockState(here.down()).getBlock()
+                        + ") at " + here.toShortString() + " -> 不在此下挖, 先水平找干陆地";
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+                enterWaterTravelPhase(mod);
+                return;
+            }
         }
     }
 
@@ -2212,28 +2264,97 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * baritone 地表行走 (自然避水)。120s 看门狗兜底。
      */
     private void enterWaterTravelPhase(AltoClef mod) {
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        // (2026-10-02 冰原禁挖) 撤离落点必须是"真干陆地": 沿背离水源的方向按距离表扫
+        // surfaceY 落点, 用 DryGroundHelper 判定 (排除冰面浮壳/水域)。旧实现只按方向走
+        // 固定 40~64 格、不校验落点 —— 冰原地形 4 个方向全是冰, 撤到哪儿都是浮冰壳,
+        // 而冰面 heightmap 落点"能站", baritone 判可达却走不到 (两次 120s 超时收尾)。
+        BlockPos target = findDryLandingForEvac(mod, feet, _lastWaterPos);
+        if (target == null || _waterEvacRounds >= WATER_EVAC_MAX_ROUNDS) {
+            // 出口: 附近没有真干陆地 (整片冰原/水域), 或撤离轮数超限 → 拉黑这片 +
+            // 放弃本轮下挖, 交上层换点。禁止无限"撤离-重挖-遇水"。
+            refuseDigZone(mod, feet);
+            giveUpWaterExcavation(mod, target == null
+                    ? "撤离无真干陆地可去 (整片冰原/水域)"
+                    : "撤离轮数达上限 " + WATER_EVAC_MAX_ROUNDS + " 仍在冰原/水域");
+            return;
+        }
+        _waterEvacRounds++;
         _waterEvacPhase = 2;
         _waterEvacTravelTimer.reset();
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        // 方向: 背离最近水源; 4 个 cardinal 里选, 全朝向水源就随机兜底。
-        int[] dir = null;
-        for (int[] cand : TUNNEL_DIRS) {
-            if (!pointsToward(feet, cand, _lastWaterPos)) {
-                dir = cand;
-                break;
+        _waterEvacTask = new GetToBlockTask(target);
+        String m = "[MineDown-WaterEvac] phase=2 撤往真干陆地 -> " + target.toShortString()
+                + " (轮次 " + _waterEvacRounds + "/" + WATER_EVAC_MAX_ROUNDS
+                + ", 水源=" + (_lastWaterPos != null ? _lastWaterPos.toShortString() : "?")
+                + ", watchdog " + (int) WATER_EVAC_TRAVEL_TIMEOUT + "s)";
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * (2026-10-02 冰原禁挖) 在背离水源的方向上找一处"真干陆地"落点。
+     *
+     * 方向顺序: 先排"不朝向最近水源"的 cardinal (pointsToward=false), 再补朝向的
+     * (四面环水时仍要有兜底)。每个方向按 {@link #WATER_EVAC_DRY_DISTANCES} 由近到远
+     * 扫 surfaceY 落点, 第一个过 {@link DryGroundHelper#isSolidDryGround} 的即选中。
+     *
+     * @return 合格落点 (站立空气格); 全方向全距离都不合格 → null (调用方收口放弃)。
+     */
+    private BlockPos findDryLandingForEvac(AltoClef mod, BlockPos from, BlockPos awayFrom) {
+        List<int[]> dirs = new ArrayList<>(4);
+        for (int[] c : TUNNEL_DIRS) {
+            if (!pointsToward(from, c, awayFrom)) dirs.add(c);
+        }
+        for (int[] c : TUNNEL_DIRS) {
+            if (pointsToward(from, c, awayFrom)) dirs.add(c);
+        }
+        for (int[] d : dirs) {
+            for (int dist : WATER_EVAC_DRY_DISTANCES) {
+                int x = from.getX() + d[0] * dist;
+                int z = from.getZ() + d[1] * dist;
+                int y = BiasedExploreTask.surfaceYNoLeavesAt(mod, x, z, from.getY());
+                BlockPos cand = new BlockPos(x, y, z);
+                if (DryGroundHelper.isSolidDryGround(mod, cand)) return cand;
             }
         }
-        if (dir == null) {
-            dir = TUNNEL_DIRS[(int) (Math.random() * TUNNEL_DIRS.length)];
-        }
-        int dist = WATER_EVAC_TRAVEL_MIN
-                + (int) (Math.random() * (WATER_EVAC_TRAVEL_MAX - WATER_EVAC_TRAVEL_MIN + 1));
-        BlockPos target = feet.add(dir[0] * dist, 0, dir[1] * dist);
-        _waterEvacTask = new GetToBlockTask(target);
-        String m = "[MineDown-WaterEvac] phase=2 水平撤离 " + dist + " 格 -> "
-                + target.toShortString() + " (水源=" + (_lastWaterPos != null
-                ? _lastWaterPos.toShortString() : "?") + ", watchdog "
-                + (int) WATER_EVAC_TRAVEL_TIMEOUT + "s)";
+        return null;
+    }
+
+    /** (2026-10-02) 位置是否落在"冰原/水域禁挖区"内 (static, 跨实例)。 */
+    private boolean isInRefusedDigZone(BlockPos pos) {
+        return s_refusedDigZone != null
+                && System.currentTimeMillis() < s_refusedDigZoneUntilMs
+                && pos.isWithinDistance(s_refusedDigZone, DIG_ZONE_REFUSE_RADIUS);
+    }
+
+    /** (2026-10-02) 拉黑这片不适合下挖的区域。 */
+    private void refuseDigZone(AltoClef mod, BlockPos pos) {
+        s_refusedDigZone = pos.toImmutable();
+        s_refusedDigZoneUntilMs = System.currentTimeMillis() + DIG_ZONE_REFUSE_COOLDOWN_MS;
+    }
+
+    /** (2026-10-02) 禁挖区命中日志节流: 上层原地重建时避免每轮刷屏。 */
+    private void logRefuseOnce(AltoClef mod, BlockPos pos) {
+        long now = System.currentTimeMillis();
+        if (now < s_refuseLogUntilMs) return;
+        s_refuseLogUntilMs = now + DIG_ZONE_REFUSE_COOLDOWN_MS;
+        String m = "[MineDown-IceGuard] 处于冰原/水域禁挖区 (中心="
+                + (s_refusedDigZone != null ? s_refusedDigZone.toShortString() : "?")
+                + ", 半径 " + (int) DIG_ZONE_REFUSE_RADIUS + ") at " + pos.toShortString()
+                + " -> 放弃本轮下挖, 交上层换点";
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /** (2026-10-02) 放弃本轮下挖 (冰原/水域撤不出去), 交上层换点。 */
+    private void giveUpWaterExcavation(AltoClef mod, String reason) {
+        BlockPos feet = mod.getPlayer() != null ? mod.getPlayer().getBlockPos() : null;
+        _waterEvacPhase = 0;
+        _waterEvacTask = null;
+        _waterChannelSwitches = 0;
+        _giveUpNoDryLand = true;
+        String m = "[MineDown-IceGuard] " + reason + " -> 放弃本轮下挖 (交上层换点) at "
+                + (feet != null ? feet.toShortString() : "?");
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
     }
@@ -2258,7 +2379,20 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _step = 0;
         _skipStreak = 0;
         _digQueue.clear();
-        _digStart = mod.getPlayer().getBlockPos();
+        // (2026-10-02 冰原禁挖) 撤到的地方必须仍是"真干陆地"才能重开下挖: 冰原地形
+        // 撤 40~64 格往往还是冰 (旧实现直接重开下挖 → 3 连败 → 再撤, 死循环)。
+        // 不合格 → 继续往外撤 (轮数上限见 enterWaterTravelPhase); 超限/无干地则拉黑放弃。
+        BlockPos arrived = mod.getPlayer().getBlockPos();
+        if (!DryGroundHelper.isSolidDryGround(mod, arrived)) {
+            String m = "[MineDown-WaterEvac] 撤离落点仍非真干陆地 (脚下="
+                    + mod.getWorld().getBlockState(arrived.down()).getBlock()
+                    + ") at " + arrived.toShortString() + " -> 继续外撤";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            enterWaterTravelPhase(mod);
+            return;
+        }
+        _digStart = arrived;
         int[] dir = pickDriestDir(mod, _digStart,
                 new int[]{_dirX, _dirZ}, new int[]{-_dirX, -_dirZ}, _lastWaterPos);
         if (dir == null) {
@@ -3187,7 +3321,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // (2026-09-14 岩浆弃道) _lavaGiveUp: 本轮换向 4 次都撞上岩浆 (见
         // LAVA_ABANDON_LIMIT), 这片区域挖不下去了 —— 收工, 由父任务重新选址重派,
         // 比在岩浆里反复打转强。短路在前, 避免再算一次 reachedBottom。
-        boolean result = _lavaGiveUp || (!_inCave && reachedBottom(mod));
+        // (2026-10-02 冰原禁挖) _giveUpNoDryLand: 冰原/水域撤不出去 (撤离无真干陆地
+        // 或轮数超限), 本轮下挖放弃 —— 交上层换点比在原地"撤离-重挖-遇水"死循环强。
+        boolean result = _giveUpNoDryLand || _lavaGiveUp || (!_inCave && reachedBottom(mod));
         // (2026-09-10 探索断裂诊断) 翻转沿打点, 重点抓"空中宣告到底"瞬间。
         if (result != _finishedDiagLastState) {
             _finishedDiagLastState = result;
