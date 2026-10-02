@@ -197,6 +197,16 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "food"); sb.append(':'); BridgeJson.str(sb, s.food);
             sb.append(','); BridgeJson.str(sb, "foodCount"); sb.append(':').append(BridgeJson.i(s.foodCount));
             sb.append(','); BridgeJson.str(sb, "keyItems"); sb.append(':'); BridgeJson.str(sb, s.keyItems);
+            // ---- 阶段三感知补全：任务细化 + 环境感知（主线没在跑时省略 mainlineProgress）----
+            sb.append(','); BridgeJson.str(sb, "taskDetail"); sb.append(':'); BridgeJson.str(sb, s.taskDetail);
+            if (s.mainlineProgress != null && !s.mainlineProgress.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "mainlineProgress"); sb.append(':'); BridgeJson.str(sb, s.mainlineProgress);
+            }
+            sb.append(','); BridgeJson.str(sb, "timeOfDay"); sb.append(':'); BridgeJson.str(sb, s.timeOfDay);
+            sb.append(','); BridgeJson.str(sb, "weather"); sb.append(':'); BridgeJson.str(sb, s.weather);
+            sb.append(','); BridgeJson.str(sb, "environment"); sb.append(':'); BridgeJson.str(sb, s.environment);
+            sb.append(','); BridgeJson.str(sb, "biome"); sb.append(':'); BridgeJson.str(sb, s.biome);
+            sb.append(','); BridgeJson.str(sb, "nearbyHostiles"); sb.append(':').append(BridgeJson.i(s.nearbyHostiles));
             sb.append(','); BridgeJson.str(sb, "online"); sb.append(':'); sb.append(Boolean.toString(s.online));
             sb.append('}');
             sendJson(ex, 200, sb.toString());

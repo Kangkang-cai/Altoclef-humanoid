@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.math.Vec3d;
 
 import java.time.Instant;
@@ -51,11 +52,28 @@ final class BotSnapshot {
     final int foodCount;
     /** 稀有+有用级持有（"钻石x2、铁锭x5"），无则空串。 */
     final String keyItems;
+    // ---- 阶段三感知补全（1002）：任务细化 + 环境感知。只随快照拉取，不进 L0 事件 ----
+    /** 当前实际在干的子任务中文短名（如"挖钻石"）。允许高频变化。 */
+    final String taskDetail;
+    /** 主线阶段+进度（如"下界·烈焰棒2/8"）；主线没在跑为空串（对端据此省略字段）。 */
+    final String mainlineProgress;
+    /** day | night（黄昏/黎明归入相邻档）。 */
+    final String timeOfDay;
+    /** clear | rain | thunder。 */
+    final String weather;
+    /** 地表 | 洞穴 | 水下 | 下界 | 末地。 */
+    final String environment;
+    /** 当前生物群系中文短名。 */
+    final String biome;
+    /** 16 格内敌对生物数（无则 0）。 */
+    final int nearbyHostiles;
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
                         int hunger, int level, String equipment,
-                        String food, int foodCount, String keyItems) {
+                        String food, int foodCount, String keyItems,
+                        String taskDetail, String mainlineProgress, String timeOfDay,
+                        String weather, String environment, String biome, int nearbyHostiles) {
         this.botId = botId;
         this.ts = ts;
         this.online = online;
@@ -72,12 +90,20 @@ final class BotSnapshot {
         this.food = food;
         this.foodCount = foodCount;
         this.keyItems = keyItems;
+        this.taskDetail = taskDetail;
+        this.mainlineProgress = mainlineProgress;
+        this.timeOfDay = timeOfDay;
+        this.weather = weather;
+        this.environment = environment;
+        this.biome = biome;
+        this.nearbyHostiles = nearbyHostiles;
     }
 
-    /** 离线时的占位快照（player 为 null / 未进世界）。 */
+    /** 离线时的占位快照（player 为 null / 未进世界）。环境字段降级为空串/0。 */
     static BotSnapshot offline(String botId) {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
-                0, 0, 0, "overworld", 0, 0, 0, "", "", 0, "");
+                0, 0, 0, "overworld", 0, 0, 0, "", "", 0, "",
+                "", "", "", "", "", "", 0);
     }
 
     /**
@@ -92,6 +118,10 @@ final class BotSnapshot {
         }
         ClientPlayerEntity p = mod.getPlayer();
         if (p == null) {
+            return offline(botId);
+        }
+        ClientWorld world = p.clientWorld;
+        if (world == null) {
             return offline(botId);
         }
         // 背包摘要先算（带读失败防抖：冻结窗口内沿用上一个有效的背包派生字段），
@@ -112,7 +142,11 @@ final class BotSnapshot {
 
         return new BotSnapshot(botId, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
                 digest.hunger, digest.level, digest.equipment,
-                digest.food, digest.foodCount, digest.keyItems);
+                digest.food, digest.foodCount, digest.keyItems,
+                SceneDigest.taskDetail(mod), SceneDigest.mainlineProgress(mod),
+                SceneDigest.timeOfDay(world), SceneDigest.weather(world),
+                SceneDigest.environment(mod, p), SceneDigest.biome(world, p),
+                SceneDigest.nearbyHostiles(world, p));
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */
