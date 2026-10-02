@@ -207,6 +207,18 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 合成台留输出格, 整场未清。铁律: "返回任务"≠"任务会跑完", 侧线任务必须续租。
     private Task _shieldCraftTask = null;
 
+    // ===== (2026-10-02 细雪冻结逃生) 见 tryPowderSnowEscape 注释 =====
+    /** 原地未动还困在细雪里这么久 → 本轮放弃 (整片细雪原/被围)。 */
+    private static final double POWDER_SNOW_TIMEOUT_SEC = 15.0;
+    /** 一次走开多少格 (细雪片通常 1~3 格宽, 走 3 格基本就出去了)。 */
+    private static final double POWDER_SNOW_RETREAT_DIST = 3.0;
+    /** 低于溺水/火/岩浆 (那些秒级致死), 高于普通任务与 SurfaceExit(52)。 */
+    private static final float POWDER_SNOW_ESCAPE_PRIORITY = 70.0f;
+    private Task _powderSnowTask = null;
+    /** 进入时的细雪格: 位置不变 = 没人动 (可判超时); 位置变了 = 在往外走 (重置计时)。 */
+    private BlockPos _powderSnowPos = null;
+    private final TimerGame _powderSnowTimer = new TimerGame(POWDER_SNOW_TIMEOUT_SEC);
+
     // ==== 镐子维持看门狗 (2026-09-25, 实例20260925-111302实锤) ====
     // 现场链: 就近搜刮透视 (问题一, KnowledgeMemory Y 约束另案修) → baritone
     // 垂直下挖奔箱子 → 木镐挖穿途中爆耐久 (diag 11:14:41 hand=wooden_pickaxe →
@@ -354,6 +366,11 @@ public class WorldSurvivalChain extends SingleTaskChain {
         // Drowning escape: 找空气 (置于岩浆/火焰之后, 那两者死得更快)
         float drownEscape = tryDrowningEscape(mod);
         if (drownEscape != Float.NEGATIVE_INFINITY) return drownEscape;
+
+        // Powder snow escape: (2026-10-02 防护落点清点 detail/37 §3.5 后补 —— 全仓
+        // 此前对细雪零防护, 而它是唯一"无防护 + 冻结伤害可致死"的环境方块)
+        float snowEscape = tryPowderSnowEscape(mod);
+        if (snowEscape != Float.NEGATIVE_INFINITY) return snowEscape;
 
         // Extinguish with water
         if (mod.getModSettings().shouldExtinguishSelfWithWater()) {
@@ -574,6 +591,59 @@ public class WorldSurvivalChain extends SingleTaskChain {
      * 任务在跑期间不换目标防抖动；失败/被打断后经 1s 重发冷却再重找。
      * 找不到目标时不动 (留旧 handleDrowning 的按跳上浮兜底)。
      */
+    /**
+     * (2026-10-02 细雪冻结逃生) 陷在细雪（powder snow）里 → 走开 {@value #POWDER_SNOW_RETREAT_DIST} 格。
+     *
+     * <p><b>为什么只做细雪、不做岩浆块/营火/甜浆果丛</b>（清点见 {@code detail/37} §3.5）：
+     * 那些方块在下界（岩浆块地面）与村庄（营火）是**正常地形**，加"站上去就走开"会让 bot
+     * 在那些地方被反复抢占，反而更危险；而细雪**没有任何任务需要站在上面**（收集细雪桶是
+     * 拿桶右键），场景干净。且细雪冻结伤害**可致死** —— 它是全仓唯一"零防护 + 能死"的环境
+     * 方块（此前全仓仅 4 处引用：物品中文名 / BiasedExplore 拒落点 / SurfaceExitGuide 拒落点 /
+     * 估值，**没有一处是"陷进去了怎么办"**）。
+     *
+     * <p>判据 = 玩家【脚所在格或身体格】是 {@code POWDER_SNOW}。刻意不依赖
+     * {@code Entity.inPowderSnow} 字段（Yarn 名未自证），用方块口径 —— 与本仓其它危险判据
+     * （岩浆看 {@code Blocks.LAVA}）同风格，可自证。
+     *
+     * <p>动作 = {@link RunAwayFromPositionTask}（当前 Y 恒定 = 只许水平走，不许上下窜）——
+     * 与 {@code [LAVA-EXIT]} 同款骨架。细雪里移动速度大幅下降，3 格要好几秒，故给
+     * {@value #POWDER_SNOW_TIMEOUT_SEC}s 超时出口（铁律：hold 必须有出口）。**位置变化即重置
+     * 计时** = "在往外走"就不算卡住；超时也不置任何永久标志，一旦挪到新格就重新开始。
+     *
+     * <p>prio {@value #POWDER_SNOW_ESCAPE_PRIORITY}：低于溺水/火/岩浆（那些是秒级致死），
+     * 细雪是冻结条满后才开始掉血，不该抢在它们前面。
+     */
+    private float tryPowderSnowEscape(AltoClef mod) {
+        var p = mod.getPlayer();
+        if (p == null || mod.getWorld() == null) return Float.NEGATIVE_INFINITY;
+        BlockPos feet = p.getBlockPos();
+        boolean inPowder = mod.getWorld().getBlockState(feet).getBlock() == Blocks.POWDER_SNOW
+                || mod.getWorld().getBlockState(feet.up()).getBlock() == Blocks.POWDER_SNOW;
+        if (!inPowder) {
+            // 已脱出: 清状态, 让下一次陷入重新起一轮。
+            _powderSnowTask = null;
+            _powderSnowPos = null;
+            return Float.NEGATIVE_INFINITY;
+        }
+        if (_powderSnowPos == null || !_powderSnowPos.equals(feet)) {
+            // 新一次陷入 / 已挪到新的细雪格 (说明在往外走) → 起任务并重置计时。
+            _powderSnowPos = feet.toImmutable();
+            _powderSnowTask = new RunAwayFromPositionTask(
+                    POWDER_SNOW_RETREAT_DIST, feet.getY(), _powderSnowPos);
+            _powderSnowTimer.reset();
+            String m = "[SnowEscape] 陷在细雪 " + _powderSnowPos.toShortString()
+                    + " -> 走开 " + (int) POWDER_SNOW_RETREAT_DIST + " 格"
+                    + " (player=" + feet.toShortString() + ")";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        } else if (_powderSnowTimer.elapsed()) {
+            // 出口: 原地未动还困在细雪里 (整片细雪原 / 被围) → 本轮放弃, 不再 hold。
+            return Float.NEGATIVE_INFINITY;
+        }
+        setTask(_powderSnowTask);
+        return POWDER_SNOW_ESCAPE_PRIORITY;
+    }
+
     private float tryDrowningEscape(AltoClef mod) {
         var p = mod.getPlayer();
         if (p == null || !p.isTouchingWater() || p.getMaxAir() <= 0) {
