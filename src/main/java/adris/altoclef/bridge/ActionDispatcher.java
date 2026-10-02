@@ -364,7 +364,7 @@ final class ActionDispatcher {
     private void onTaskFinished(TaskFinishedEvent evt) {
         Task finished = evt == null ? null : evt.lastTaskRan;
         if (_interrupting) {
-            diagDoneMiss("suppressed by _interrupting", finished);
+            diagDoneMiss("expected: pause-cancel (suppressed by _interrupting)", finished);
             return; // pause 的 cancel，不当作行动完成
         }
         if (finished == null) {

@@ -112,14 +112,22 @@ public class UserTaskChain extends SingleTaskChain {
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         }
+        // (1002 17:1x 修复，对端现场锁定) **必须先抓 oldTask**：下面的 disable() 会经
+        // TaskRunner.disable → 每链 TaskChain.stop → SingleTaskChain.onStop
+        // 执行 `_mainTask.stop(mod); _mainTask = null;`。旧顺序在此之后才读 _mainTask
+        // ⇒ 拿到 null ⇒ 发布 TaskFinishedEvent(seconds, null) ⇒ ActionDispatcher
+        // 认不出结束的任务（不发 action_done、_active 永久残留，探针继续对死行动报"已到位"），
+        // EventCollector 也只能退化成"完成了一项任务"。
+        // 触发条件：shouldIdle=false（idleCommand 为空）才会走到 disable()。
+        // 任务本身仍由 onStop 正常 stop()，行为不缺失。_mainTask = null 保持幂等。
+        double seconds = _taskStopwatch.time();
+        Task oldTask = _mainTask;
         if (!shouldIdle) {
             // Stop.
             mod.getTaskRunner().disable();
             // Extra reset. Sometimes baritone is laggy and doesn't properly reset our press
             mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
         }
-        double seconds = _taskStopwatch.time();
-        Task oldTask = _mainTask;
         _mainTask = null;
         if (_currentOnFinish != null) {
             //noinspection unchecked
