@@ -56,7 +56,21 @@ public class GiveItemToPlayerTask extends Task {
         Optional<Vec3d> lastPos = mod.getEntityTracker().getPlayerMostRecentPosition(_playerName);
 
         if (lastPos.isEmpty()) {
-            setDebugState("No player found/detected. Doing nothing until player loads into render distance.");
+            // (2026-10-02) 与 FollowPlayerTask 同口径: 区分"名字打错 / 服务器没这人 / 在线但太远"。
+            // debug state 保留 "No player found" 前缀, bridge probeGive 依赖它做状态映射。
+            var et = mod.getEntityTracker();
+            List<String> online = et.getServerPlayerNames();
+            Optional<String> closest = et.findClosestServerPlayerName(_playerName);
+            if (!online.isEmpty() && closest.isEmpty()) {
+                mod.logWarning("Player \"" + _playerName + "\" is not on this server. Online players: " + String.join(", ", online));
+                stop(mod);
+                return null;
+            }
+            if (closest.isPresent() && !closest.get().equalsIgnoreCase(_playerName)) {
+                setDebugState("No player found/detected. Did you mean \"" + closest.get() + "\"?");
+            } else {
+                setDebugState("No player found/detected. Target is online but outside client tracking range; no coordinates to navigate to.");
+            }
             return null;
         }
         Vec3d targetPos = lastPos.get().add(0, 0.2f, 0);

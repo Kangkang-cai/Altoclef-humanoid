@@ -13,6 +13,7 @@ import adris.altoclef.util.helpers.ProjectileHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.PlayerListEntry;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EyeOfEnderEntity;
 import net.minecraft.entity.ItemEntity;
@@ -26,6 +27,7 @@ import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
 import net.minecraft.entity.projectile.thrown.ExperienceBottleEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.*;
@@ -411,6 +413,90 @@ public class EntityTracker extends Tracker {
             }
         }
         return Optional.empty();
+    }
+
+    // ==================== 多人服: 服务器玩家列表 (tab 列表) ====================
+    // (2026-10-02 用户实锤) 第三方服务器上, 追踪范围外的玩家实体根本不下发坐标,
+    // 客户端唯一能确认"此人是否在线"的来源就是 tab 列表 (PlayerListEntry)。
+    // 此前 goto player 把"名字打错 / 服务器没这人 / 在线但太远"三种情况混为
+    // 一句 empty, 用户只看到 "No player found" 无从下手。这里把三者分开。
+
+    /**
+     * 服务器在线玩家名 (tab 列表)。含服务器自定义昵称 (display name),
+     * 部分第三方服用它显示中文昵称; 去重, 保持 tab 列表顺序。
+     */
+    public List<String> getServerPlayerNames() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.getNetworkHandler() == null) return Collections.emptyList();
+        List<String> names = new ArrayList<>();
+        for (PlayerListEntry entry : mc.getNetworkHandler().getPlayerList()) {
+            String profile = entry.getProfile().getName();
+            if (profile != null && !profile.isEmpty() && !names.contains(profile)) {
+                names.add(profile);
+            }
+            Text display = entry.getDisplayName();
+            if (display != null) {
+                String d = display.getString();
+                if (!d.isEmpty() && !names.contains(d)) names.add(d);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 该名字是否在服务器玩家列表里 (大小写不敏感)。
+     * 注意: 在线 != 有坐标, 太远的玩家仍然拿不到位置。
+     */
+    public boolean isPlayerOnServer(String name) {
+        if (name == null) return false;
+        for (String n : getServerPlayerNames()) {
+            if (n.equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 在服务器玩家列表里找与输入最接近的名字 (改错字/大小写/中文昵称的兜底)。
+     * 顺序: 忽略大小写精确匹配 -> 前缀/包含 -> 编辑距离 <= 2。找不到返回 empty。
+     */
+    public Optional<String> findClosestServerPlayerName(String name) {
+        if (name == null || name.isEmpty()) return Optional.empty();
+        List<String> online = getServerPlayerNames();
+        for (String n : online) {
+            if (n.equalsIgnoreCase(name)) return Optional.of(n);
+        }
+        String lower = name.toLowerCase(Locale.ROOT);
+        for (String n : online) {
+            String nl = n.toLowerCase(Locale.ROOT);
+            if (nl.startsWith(lower) || nl.contains(lower)) return Optional.of(n);
+        }
+        String best = null;
+        int bestDist = 3;
+        for (String n : online) {
+            int d = editDistance(lower, n.toLowerCase(Locale.ROOT));
+            if (d < bestDist) {
+                bestDist = d;
+                best = n;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    private static int editDistance(String a, String b) {
+        int[] prev = new int[b.length() + 1];
+        int[] cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            int[] tmp = prev;
+            prev = cur;
+            cur = tmp;
+        }
+        return prev[b.length()];
     }
 
     /**

@@ -651,7 +651,12 @@ final class ActionDispatcher {
             return new Probe("follow|lost|" + (int) (d / 2) + "|" + name,
                     prefix + "受阻：目标不在加载范围（正赶往最后位置，距" + Math.round(d) + "格）", null);
         }
-        // 从未见过该玩家 → 持续无进展即判 failed（"目标始终不在线"）
+        // 从未见过该玩家。区分两种情况（2026-10-02）:
+        //   在线但超出追踪范围 → 客户端拿不到坐标, 不是"不在线", 继续等, 不判死。
+        //   tab 列表里没有此人 → 目标确实不在线, 无进展即判 failed。
+        if (_mod.getEntityTracker().isPlayerOnServer(name)) {
+            return new Probe("follow|far|" + name, prefix + "受阻：目标在线但超出追踪范围（无坐标）", null);
+        }
         return new Probe("follow|offline|" + name, prefix + "受阻：目标不在线", "目标始终不在线");
     }
 
