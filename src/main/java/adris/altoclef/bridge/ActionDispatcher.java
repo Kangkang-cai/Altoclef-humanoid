@@ -273,6 +273,9 @@ final class ActionDispatcher {
             // 会替换手头用户任务的命令（动作三类 + idle）→ 先给旧活跃行动发 cancelled
             boolean replacesUserTask = TASK_ACTIONS.contains(token) || "idle".equals(token);
             if (replacesUserTask) {
+                // 新行动接管 = 不再是"被 @pause_main 按住"态。必须清，否则 isPaused() 永久为真，
+                // 会让 LivenessDigest 把后续真卡死当成"合法静止"而漏报。
+                _paused = false;
                 supersedeActive(token);
             }
             executor.execute(cmd);

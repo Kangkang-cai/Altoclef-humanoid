@@ -80,6 +80,26 @@ final class LivenessDigest {
         return _reason;
     }
 
+    /**
+     * {@code bot_stuck} 的 detail：附带当前活跃行动，供对端回执"你那条 @goto 的任务卡住了"。
+     * 无活跃行动（主线/内部任务卡住）时两个字段为空串 ⇒ 对端可区分"是不是它刚下的指令卡的"。
+     * 任何异常返回 null（detail 省略，事件本体照发）。
+     */
+    private String stuckDetail() {
+        try {
+            ActiveAction a = _dispatcher == null ? null : _dispatcher.activeAction();
+            StringBuilder sb = new StringBuilder(48);
+            sb.append("{\"actionId\":");
+            BridgeJson.str(sb, a == null ? "" : a.actionId);
+            sb.append(",\"cmd\":");
+            BridgeJson.str(sb, a == null ? "" : a.cmd);
+            sb.append('}');
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** 客户端线程每 tick 调用。任何异常都不能影响主循环。 */
     void tick() {
         try {
@@ -99,7 +119,7 @@ final class LivenessDigest {
                     || (mc != null && mc.isPaused())
                     || p.isSleeping()
                     || !hasTask
-                    || (_dispatcher != null && _dispatcher.isHolding());
+                    || (_dispatcher != null && (_dispatcher.isHolding() || _dispatcher.isPaused()));
             if (legitStill) {
                 // 这些场景下的"不动"合法：静默重置，不发任何事件
                 _armed = false;
@@ -138,7 +158,7 @@ final class LivenessDigest {
                 String taskName = deepestClass(stack);
                 _buffer.emitImmediate("bot_stuck",
                         "我在执行的任务卡住了，可能需要重新下指令（" + taskName + " 已 "
-                                + (stillMs / 1000) + "s 无进展）", true);
+                                + (stillMs / 1000) + "s 无进展）", true, stuckDetail());
             }
 
             if (_stuck) {

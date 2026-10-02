@@ -71,9 +71,12 @@ POST /command
 
 **`/events` 新增两个离散事件（只发一次，不进变化键）：**
 ```json
-{"type":"bot_stuck","text":"我在执行的任务卡住了，可能需要重新下指令（… 已 45s 无进展）","strong":true}
+{"type":"bot_stuck","text":"我在执行的任务卡住了，可能需要重新下指令（… 已 45s 无进展）","strong":true,
+ "detail":{"actionId":"a-1","cmd":"goto"}}   // 1002 15:3x 新增：附带当时活跃行动
 {"type":"bot_recovered","text":"已从卡住中恢复，继续原任务","strong":false}
 ```
+- `bot_stuck.detail`：`actionId` + `cmd` = **卡住时正在跑的 AI 行动**（供对端回执"你那条 `@goto` 卡住了"）。
+  **无活跃行动**（主线/内部任务卡住）时两字段为**空串** `""`，对端据此区分"是不是它刚下的指令卡的"。
 
 ## 二、必须按此实现的 5 条（对端动作）
 
