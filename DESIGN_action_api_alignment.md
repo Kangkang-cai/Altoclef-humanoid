@@ -3,6 +3,7 @@
 > 用途：一页交付，可直接转给对方负责人。模组侧现状 = 已实现并部署
 > （最新 commit `ab10d05b`，jar md5 `e80479d51d142041d770020d5aac09c1`），对端可开始接。
 > 设计全文见 `DESIGN_action_api.md`（含命令分档理由、窄接口清单、不做清单）。
+> 1002 15:3x 追加 **§五（给 chat_and_play 的补充）**：新增端点 8763、变化键排除易变字段、语义误判清单、待确认 3 件事。
 
 ## 一、已就绪的接口（对端直接接）
 
@@ -99,3 +100,46 @@ POST /command
 ## 四、模组侧内部事项（对端不需要处理）
 
 pause/resume 的实现方式（重建任务实例）、任务链优先级与竞态、`_interrupting` 窗口抑制伪 `task_done`、`idleCommand` 配置项。
+
+## 五、给 chat_and_play 侧的补充说明（1002 15:3x，现场执行状态落地后）
+
+### A. 请务必同步（阻塞级）
+1. **多一个实例端点**：本次新增第三实例 **`bot_3` = `http://127.0.0.1:8763`**
+   （另两个仍是 `bot_1`:8761、`bot_2`:8762）。请把 **`GAME_BOT_PORTS` 加上 `8763`**，
+   否则 bot_3 的 bridge 会正常起、但你们的编排拿不到它。
+2. **⚠️ 变化键必须排除易变字段**（最容易踩的一条）：`activeAction.detail` / `activeAction.sinceSec` /
+   `botStatus` / `stuckReason` 随 5s 快照**每轮都在变**。**不要把 `/status` 整个 payload 或这几个键
+   当作"有变化就唤起 LLM"的判据**——会每 5s 刷一次。建议变化键只取稳定量：`/events` 新事件（游标）、
+   `mainlineProgress`、`taskDetail`、关键 `equipment`/`food` 等。
+3. **能力探测**：`activeAction` / `botStatus` / `stuckReason` 只在**重启加载新 jar 后**出现。
+   连上某个实例后建议先探一次 `/status` 是否含 `activeAction` 键：**缺 → 该实例仍是旧 jar**，
+   走"只靠超时"降级，别当成错误。
+
+### B. 语义要点（避免误判）
+4. **`activeAction` 缺席 = 当前无活跃行动**（不是错误、也不是"任务已结束"的信号）。它只在
+   `goto`/`follow`/`give` 运行期、以及 `idle` 的驻留期（`detail="待命中，等你下一条指令"`）出现。
+   `@pause_main`、`@resume_main`、只读命令（`coords`/`status`/`inventory`）**之后都不会有** activeAction。
+5. **`phase=blocked` ≠ 失败**：只是内部进度计数器（路径态/距离桶/可见性/收集数）**15s 没变**，任务仍在跑。
+   **不要因 blocked 就重发命令**——重发会 `setTask` 顶掉在跑的任务，你们会先收到一条
+   `action_done(status=cancelled, reason="被 @X 顶替")`。
+6. **`action_done` 缺席是设计允许的**：我方对无法语义匹配的结束**宁可丢弃也不发错配信号** ⇒
+   单条命令可能永远收不到 done，必须靠你们侧超时兜底（建议值见 §二.1）。反过来可信任：
+   **收到的 done 若 actionId 命中，就一定是这条命令的真实终态**。
+7. **`detail` 前缀「被打断（X），稍后继续；」= 挂起，不是终态**（X=战斗/吃食/逃生/死亡恢复）。
+   任务会自动续跑；此时**不要**判 follow/goto 结束、也不要重发。
+8. **`failed` 只在我方"确定做不到"时出现**，只有两种：`goto` ≥120s 算不出路径；`follow` 目标**从未**出现过（180s）。
+   **特别提醒**：若 detail 为「受阻：目标不在加载范围（正赶往最后位置，距N格）」——这是**不会失败**的
+   （目标曾出现过），bot 会一直往最后已知位置赶；要结束请发新命令或 `@pause_main`。
+9. **`bot_stuck` 是离散告警（`strong=true`，只发一次）**，恢复用 `botStatus: recovering→ok` + `bot_recovered` 表达，
+   不会重复发。建议收到后**先别急于重发命令**（可能是短暂身体打结、会自愈），先看 `stuckReason` 与
+   `activeAction.detail` 再决定是否 `@pause_main`。
+10. **驻留态（`idle`）被顶替是静默的**：`idle` 被新指令顶替**不发 done**（它不是有终点的行动）。
+    别等 idle 的 cancelled。
+11. 重申 B'：`goto`/`follow`/`give` 完成 → **自动回主线**，无需再发 `@resume_main`；
+    只有 `idle` / `@pause_main` 需要显式 `@resume_main` 解除。
+
+### C. 想请你们确认的 3 件事
+1. **轮询频率**：你们打算多久拉一次 `/status`？`activeAction` 随 5s 快照刷新；若你们拉得比 5s 更密没有增量收益，
+   若想要更细粒度我方可以把快照周期调短（如 2s）——请给目标值。
+2. **follow 的 10min TTL 到点你们怎么处理**（发新命令 / `@pause_main`）？确认后我方可在 detail 里给出更贴合的措辞。
+3. **`bot_stuck` 要不要附带"是哪条行动卡了"**（现 `stuckReason` 是任务级；可在 `bot_stuck.detail` 附 `actionId`/`cmd`）？
