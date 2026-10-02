@@ -56,8 +56,10 @@ public final class BridgeHttpServer {
     private final SummaryGenerator _gen = new SummaryGenerator();
     private final EventBuffer _buffer;
     private final EventCollector _collector;
-    /** 阶段三行动派发器：白名单/限流/回执/主线干预。 */
+    /** 阶段三行动派发器：白名单/限流/回执/主线干预/现场执行状态。 */
     private final ActionDispatcher _dispatcher;
+    /** botStatus 存活判据（位置+背包+任务态 30s 全不变 → stuck）。 */
+    private final LivenessDigest _liveness;
     /** 背包读失败防抖：EventCollector 采样判定 + 快照沿用，两处共用同一实例。 */
     private final InventoryGuard _invGuard = new InventoryGuard();
 
@@ -74,6 +76,7 @@ public final class BridgeHttpServer {
         this._botId = cfg.botId;
         this._buffer = new EventBuffer(cfg.botId);
         this._dispatcher = new ActionDispatcher(mod, _buffer);
+        this._liveness = new LivenessDigest(mod, _buffer, _dispatcher);
         this._collector = new EventCollector(mod, _buffer, cfg.botId, this._invGuard, this._dispatcher);
         // 初始快照：离线占位，避免 /status 在首次 tick 前返回 null
         this._snapshot = BotSnapshot.offline(cfg.botId);
@@ -158,13 +161,19 @@ public final class BridgeHttpServer {
      */
     private void onClientTick() {
         long now = System.currentTimeMillis();
+        // 现场状态评估（每 tick，不节流）：活跃行动进度 + botStatus 存活判据
+        if (_dispatcher != null) _dispatcher.onClientTick();
+        if (_liveness != null) _liveness.tick();
         if (now - _lastFlushMs >= FLUSH_INTERVAL_MS) {
             _lastFlushMs = now;
             _buffer.flushPending();
         }
         if (now - _lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
             _lastSnapshotMs = now;
-            _snapshot = BotSnapshot.snapshot(_mod, _gen, _botId, _invGuard);
+            _snapshot = BotSnapshot.snapshot(_mod, _gen, _botId, _invGuard,
+                    _dispatcher == null ? null : _dispatcher.activeAction(),
+                    _liveness == null ? "" : _liveness.status(),
+                    _liveness == null ? "" : _liveness.reason());
         }
     }
 
@@ -207,6 +216,23 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "environment"); sb.append(':'); BridgeJson.str(sb, s.environment);
             sb.append(','); BridgeJson.str(sb, "biome"); sb.append(':'); BridgeJson.str(sb, s.biome);
             sb.append(','); BridgeJson.str(sb, "nearbyHostiles"); sb.append(':').append(BridgeJson.i(s.nearbyHostiles));
+            // ---- 阶段三感知补全：现场执行状态（在线时才有意义；离线快照省略）----
+            if (s.botStatus != null && !s.botStatus.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "botStatus"); sb.append(':'); BridgeJson.str(sb, s.botStatus);
+                if (s.stuckReason != null && !s.stuckReason.isEmpty()) {
+                    sb.append(','); BridgeJson.str(sb, "stuckReason"); sb.append(':'); BridgeJson.str(sb, s.stuckReason);
+                }
+            }
+            if (s.activeAction != null) {
+                ActiveAction a = s.activeAction;
+                sb.append(','); BridgeJson.str(sb, "activeAction"); sb.append(":{");
+                BridgeJson.str(sb, "actionId"); sb.append(':'); BridgeJson.str(sb, a.actionId);
+                sb.append(','); BridgeJson.str(sb, "cmd"); sb.append(':'); BridgeJson.str(sb, a.cmd);
+                sb.append(','); BridgeJson.str(sb, "phase"); sb.append(':'); BridgeJson.str(sb, a.phase);
+                sb.append(','); BridgeJson.str(sb, "detail"); sb.append(':'); BridgeJson.str(sb, a.detail);
+                sb.append(','); BridgeJson.str(sb, "sinceSec"); sb.append(':').append(BridgeJson.i(a.sinceSec));
+                sb.append('}');
+            }
             sb.append(','); BridgeJson.str(sb, "online"); sb.append(':'); sb.append(Boolean.toString(s.online));
             sb.append('}');
             sendJson(ex, 200, sb.toString());

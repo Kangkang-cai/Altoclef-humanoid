@@ -67,13 +67,21 @@ final class BotSnapshot {
     final String biome;
     /** 16 格内敌对生物数（无则 0）。 */
     final int nearbyHostiles;
+    // ---- 阶段三感知补全（1002 C 块）：现场执行状态。只随快照拉取，不进 L0 事件 ----
+    /** 当前 AI 行动的实时状态；无活跃行动为 null（/status 省略该键）。 */
+    final ActiveAction activeAction;
+    /** ok | stuck | recovering；离线为空串（对端省略）。 */
+    final String botStatus;
+    /** 仅 stuck/recovering 时非空，说明卡在哪。 */
+    final String stuckReason;
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
                         int hunger, int level, String equipment,
                         String food, int foodCount, String keyItems,
                         String taskDetail, String mainlineProgress, String timeOfDay,
-                        String weather, String environment, String biome, int nearbyHostiles) {
+                        String weather, String environment, String biome, int nearbyHostiles,
+                        ActiveAction activeAction, String botStatus, String stuckReason) {
         this.botId = botId;
         this.ts = ts;
         this.online = online;
@@ -97,13 +105,17 @@ final class BotSnapshot {
         this.environment = environment;
         this.biome = biome;
         this.nearbyHostiles = nearbyHostiles;
+        this.activeAction = activeAction;
+        this.botStatus = botStatus == null ? "" : botStatus;
+        this.stuckReason = stuckReason == null ? "" : stuckReason;
     }
 
-    /** 离线时的占位快照（player 为 null / 未进世界）。环境字段降级为空串/0。 */
+    /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
     static BotSnapshot offline(String botId) {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", 0, "",
-                "", "", "", "", "", "", 0);
+                "", "", "", "", "", "", 0,
+                null, "", "");
     }
 
     /**
@@ -111,8 +123,12 @@ final class BotSnapshot {
      * ClientTickEvent 订阅调用（保证客户端线程）。
      *
      * @param guard 背包读失败防抖（可 null；null 时防抖旁路，摘要直出）
+     * @param activeAction 当前 AI 行动现场状态（可 null = 无活跃行动）
+     * @param botStatus    ok | stuck | recovering（来自 {@link LivenessDigest}）
+     * @param stuckReason  卡住原因（仅 stuck/recovering 非空）
      */
-    static BotSnapshot snapshot(AltoClef mod, SummaryGenerator gen, String botId, InventoryGuard guard) {
+    static BotSnapshot snapshot(AltoClef mod, SummaryGenerator gen, String botId, InventoryGuard guard,
+                               ActiveAction activeAction, String botStatus, String stuckReason) {
         if (mod == null || !AltoClef.inGame()) {
             return offline(botId);
         }
@@ -146,7 +162,8 @@ final class BotSnapshot {
                 SceneDigest.taskDetail(mod), SceneDigest.mainlineProgress(mod),
                 SceneDigest.timeOfDay(world), SceneDigest.weather(world),
                 SceneDigest.environment(mod, p), SceneDigest.biome(world, p),
-                SceneDigest.nearbyHostiles(world, p));
+                SceneDigest.nearbyHostiles(world, p),
+                activeAction, botStatus, stuckReason);
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */
