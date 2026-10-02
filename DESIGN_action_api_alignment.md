@@ -180,3 +180,30 @@ pause/resume 的实现方式（重建任务实例）、任务链优先级与竞�
 - **你方问的 `8761` ↔ 日志目录**：`8761 = bot_1 = D:\minecraft\.minecraft\versions\1.18.2-Fabric-1\`，
   日志在 `...\versions\1.18.2-Fabric-1\logs\altoclef\<会话>\`。证据：你方捕获 A 的 `16:14:38 → (-599,71,245)`
   与该目录会话 `20261002-155251` 的 `tasks.log` **同刻同目标** ⇒ 先前查的就是同一实例的日志。
+
+### F. B1 根因与修复（1002 17:2x；你方现场锁定，判断正确，已修）
+- **根因**：`UserTaskChain.onTaskFinish` 旧顺序为 `if (!shouldIdle) taskRunner.disable();` **在前**、
+  `Task oldTask = _mainTask;` **在后**；而 `disable() → TaskChain.stop → SingleTaskChain.onStop` 会执行
+  `_mainTask.stop(mod); _mainTask = null;` ⇒ `oldTask` **恒为 `null`** ⇒ 发布 `TaskFinishedEvent(seconds, null)`
+  ⇒ 我方 `ActionDispatcher.onTaskFinished` 的 `if (finished == null) return;` 直接吃掉：
+  **不发 `action_done`、`_active` 永久残留**，探针只能继续对**已死**行动报「已到位，等待确认」再翻 `blocked`；
+  `EventCollector` 退化成「完成了一项任务」。这也解释了先前日志里 `finished=true` 却无 done 的矛盾。
+- **触发条件**：`shouldIdle == false`（`idleCommand` 为空）——即你方环境。
+- **修复**：把 `double seconds` / `Task oldTask` 提到 `disable()` **之前**（与你方方案一致）。
+  任务本身仍由 `onStop` 正常 `stop()`，`_mainTask = null` 幂等。
+  **自然完成路径（`SingleTaskChain.onTick`）在 `onTaskFinish` 之前并不清 `_mainTask`**，故本修复覆盖
+  `goto`/`follow`/`give` 的**全部正常结束**。
+- **`@pause_main` 路径**：`cancel → stop()` 仍会先置空 `_mainTask`，但 ① `EventCollector` 已有 `_interrupting` 抑制
+  （不发伪 `task_done`）；② `interrupted` 的 `action_done` 由 `ActionDispatcher.pauseMainline` **显式发出**、
+  **不依赖 `lastTaskRan`** ⇒ 不受影响，无需额外处理。
+- **回归自查（代码层）**：B' 链路 `resumeMainline() → runUserTask → UserTaskChain.runTask` 第 93 行
+  `mod.getTaskRunner().enable()` —— 被 `disable()` 关掉的 runner 会**重新启用**；`_runningIdleTask` 会在 `runTask` 里
+  按 `_nextTaskIdleFlag`(false) 复位，故后续完成仍正常发事件。**实跑仍请你方按下面三条走一遍。**
+- **B1 临时诊断保留一轮**：修复生效后 `altoclef_diag.log` **不应**再出现 `[Bridge-done-miss] no pending match`
+  或 `orphan action …`；`expected: pause-cancel` 那条是 `@pause_main` 的正常记录，不是缺陷。
+- jar md5 **`d994974ebd0eabd836afdd74cd012dbd`**（bak `bak_20261002_1720`）。
+
+**请回归（你方三条）**：
+1. `shouldIdle=false`：`@goto` 可达格 → 数秒内 `action_done(completed)` 到达，无 `_active` 残留；
+2. B'：`@goto` 完成后主线确实跑起来（`task` 非「空闲/待命」）；
+3. `@pause_main`：`interrupted` 类 done 正常（该 done 由我方显式发出，与 `lastTaskRan` 无关）。
