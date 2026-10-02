@@ -3,6 +3,7 @@ package adris.altoclef.tasks.construction;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.tasks.movement.EscapeLavaVicinityTask;
 import adris.altoclef.tasks.movement.GetToLandTask;
 import adris.altoclef.tasks.movement.JumpStuckResolver;
 import adris.altoclef.tasks.resources.SatisfyMiningRequirementTask;
@@ -17,6 +18,7 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.LandHelper;
+import adris.altoclef.util.helpers.LavaVicinityHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WaterExitHelper;
@@ -128,6 +130,32 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private int _waterExitGroundedTick = -1;
     private BlockPos _waterExitGroundedPos = null;
     private static final int WATER_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
+
+    // ==== (2026-10-02 作业侧避岩浆闸门, 用户"作业侧模仿避水原则") ====
+    // 现场 20261002-175747 18:56 (贪心挖矿, 目标 = 洞穴里的铁矿石 -698,23,231):
+    //   18:56:16.2  unreachable ×3 拉黑重试 (够不着, 原地耗)
+    //   18:56:21.03 [LavaNav] 触发"脚下邻域岩浆" —— 但它只管 baritone 的旋转跳
+    //               开关, 挖掘照跑;
+    //   18:56:21~25.3 坐标恒 -698,20,227 (4.3s 零位移)
+    //   18:56:25.98 被流过来的岩浆泡住 → 26.03 [LavaEscape] → 28.43 [DEATH] cause=lava
+    // 泡进去之后只有 2.45s 预算, 而 baritone 拿到第一条路径实测 3.35s —— 物理上来不及。
+    // 用户定调: "根本就不应该让 bot 泡进岩浆"。
+    //
+    // 语义照搬 WATER-EXIT (泡水漂浮 → 停挖上岸): 人一进岩浆邻域就【中断挖掘,
+    // 先撤到邻域无岩浆的格】; 撤清后若同一目标 30s 内又把人带回岩浆邻域 →
+    // 拉黑换目标 (同 _waterExitGroundedTick 的收敛出口)。
+    //
+    // 触发判据 = LavaVicinityHelper (水平≤2/下2/上1), 与 AltoClef.LavaNav 的
+    // 触发内圈同一把尺子 —— 判定源单一化。
+    // 动作 = EscapeLavaVicinityTask (不 wander; 与"泡进去之后"的 EscapeFromLavaTask
+    // 分工不同, 见该类注释)。
+    private boolean _lavaExitLatched = false;
+    // 收敛出口: 撤清成功后 30s 内同目标再次触发 = 这块只能贴着岩浆挖 → 拉黑换目标。
+    private int _lavaExitClearedTick = -1;
+    private BlockPos _lavaExitClearedPos = null;
+    private static final int LAVA_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
+    // 撤离子任务实例缓存 (isEqual 恒 true, 完成/放弃后 reset 复用, 同 _toLand 先例)。
+    private EscapeLavaVicinityTask _toLavaSafe = null;
 
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
@@ -503,6 +531,81 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                 // 防御: 闩在但任务缺失 (理论上不发生) → 松闩走正常流程。
                 _waterExitLatched = false;
             }
+        }
+
+        // ==== (2026-10-02 作业侧避岩浆闸门: 保活 + 触发) ====
+        // 保活与触发都放在此处 (保护性早退之后、wander/挖掘之前):
+        //   ① 覆盖【整段作业】而不只是"已进入挖掘距离" —— 本次事故正是
+        //      "够不着 → 反复清障/重试 17s", 若只挂在 reach 分支就救不到;
+        //   ② 闸门优先级高于 wander/挖掘: 进危险区先撤, 撤完再谈干活。
+        if (_lavaExitLatched) {
+            if (_toLavaSafe != null && _toLavaSafe.isFinished(mod)) {
+                if (!_toLavaSafe.hasGivenUp()) {
+                    // 真撤清了 (邻域无岩浆持续 1.5s), 记锚点供下面重复触发拉黑。
+                    _lavaExitClearedTick = WorldHelper.getTicks();
+                    _lavaExitClearedPos = _pos;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[LAVA-EXIT] cleared lava vicinity next to target " + _pos.toShortString());
+                }
+                // 放弃时任务内部已写 30s static 冷却 (isOnCooldown 兜底)。
+                _toLavaSafe.reset();
+                _toLavaSafe = null;
+                _lavaExitLatched = false;
+            } else if (_toLavaSafe != null) {
+                setDebugState("Lava vicinity (mining here would cook us) -> leaving first (latched)");
+                return _toLavaSafe;
+            } else {
+                // 防御: 闩在但任务缺失 (理论上不发生) → 松闩走正常流程。
+                _lavaExitLatched = false;
+            }
+        }
+
+        // 收敛出口: 撤清后 30s 内同目标又把人带回岩浆邻域 = 这块只能贴着岩浆挖 → 拉黑换目标。
+        if (!_lavaExitLatched
+                && _lavaExitClearedTick >= 0
+                && _pos.equals(_lavaExitClearedPos)
+                && WorldHelper.getTicks() - _lavaExitClearedTick < LAVA_EXIT_REPEAT_BLACKLIST_TICKS
+                && LavaVicinityHelper.playerInLavaVicinity(mod)) {
+            String m = "[LAVA-EXIT] target " + _pos.toShortString()
+                    + " pulls into lava vicinity again within 30s after clearing -> blacklist"
+                    + " (lava-adjacent block). player=" + mod.getPlayer().getBlockPos().toShortString();
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            mod.getBlockTracker().requestBlockUnreachable(_pos);
+            _lavaExitClearedTick = -1;
+            _lavaExitClearedPos = null;
+            return null;
+        }
+
+        // 触发: 人一进岩浆邻域就中断挖掘, 先撤。冷却期内 (撤离链路已被证明走不通)
+        // 直接拉黑目标 —— 该目标在岩浆邻域又撤不出去, 不值得继续试。
+        if (!_lavaExitLatched) {
+            if (EscapeLavaVicinityTask.isOnCooldown()) {
+                if (LavaVicinityHelper.playerInLavaVicinity(mod)) {
+                    String m = "[LAVA-EXIT] target " + _pos.toShortString()
+                            + " blacklisted (lava vicinity + evacuation on cooldown). player="
+                            + mod.getPlayer().getBlockPos().toShortString();
+                    Debug.logToFile("altoclef_diag.log", m);
+                    mod.getBlockTracker().requestBlockUnreachable(_pos);
+                    return null;
+                }
+            } else if (LavaVicinityHelper.playerInLavaVicinity(mod)) {
+                _lavaExitLatched = true;
+                if (_toLavaSafe != null) {
+                    _toLavaSafe.reset();
+                } else {
+                    _toLavaSafe = new EscapeLavaVicinityTask();
+                }
+                String m = "[LAVA-EXIT] player in lava vicinity while mining -> pause & leave first"
+                        + " (latched until clear/give-up). target=" + _pos.toShortString()
+                        + " player=" + mod.getPlayer().getBlockPos().toShortString();
+                Debug.logMessage(m);
+                Debug.logToFile("altoclef_diag.log", m);
+            }
+        }
+        if (_lavaExitLatched && _toLavaSafe != null) {
+            setDebugState("Lava vicinity (mining here would cook us) -> leaving first (latched)");
+            return _toLavaSafe;
         }
 
         // Wander and check
