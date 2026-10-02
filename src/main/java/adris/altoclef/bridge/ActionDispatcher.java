@@ -128,8 +128,6 @@ final class ActionDispatcher {
     // ---- 进度判定状态（仅客户端线程读写）----
     private String _progressKey = null;
     private long _progressAtMs = 0;
-    /** (1002 16:5x 临时诊断) 行动在飞、用户任务却已没了/换型的起始时刻（0=正常）。 */
-    private long _orphanSinceMs = 0;
 
     private Subscription<TaskFinishedEvent> _subTask;
 
@@ -362,20 +360,11 @@ final class ActionDispatcher {
      * （对端按 actionId 超时兜底，宁可无信号也不发错配信号）。
      */
     private void onTaskFinished(TaskFinishedEvent evt) {
+        if (_interrupting) return; // pause 的 cancel，不当作行动完成
         Task finished = evt == null ? null : evt.lastTaskRan;
-        if (_interrupting) {
-            diagDoneMiss("expected: pause-cancel (suppressed by _interrupting)", finished);
-            return; // pause 的 cancel，不当作行动完成
-        }
-        if (finished == null) {
-            diagDoneMiss("finished=null", null);
-            return;
-        }
+        if (finished == null) return;
         PendingAction p = pollMatching(finished);
-        if (p == null) {
-            diagDoneMiss("no pending match", finished);
-            return; // 无匹配（含 pending 为空 / 类型不符）：丢弃，等对端超时
-        }
+        if (p == null) return; // 无匹配（含 pending 为空 / 类型不符）：丢弃，等对端超时
         String label = finished.toString();
         if (label.length() > 40) label = label.substring(0, 40) + "…";
         String text = label.isEmpty() ? "完成" : "完成：" + label;
@@ -424,40 +413,6 @@ final class ActionDispatcher {
             case "give" -> finished instanceof GiveItemToPlayerTask;
             default -> false;
         };
-    }
-
-    /**
-     * (1002 16:5x **临时诊断**，定位对端报的"任务 finished 但没发 action_done / _active 未清"。
-     * 对端复现一轮后即可整段移除。)
-     *
-     * <p>只在"确有活跃行动(有终点)却没被本次结束认领"时落盘 —— 正常路径（没有在飞的行动，
-     * 或结束的本就是内部任务）不写，避免刷屏。
-     */
-    private void diagDoneMiss(String why, Task finished) {
-        try {
-            ActiveAction a = _active;
-            if (a == null || !TASK_ACTIONS.contains(a.cmd)) return;
-            Debug.logToFile("altoclef_diag.log", "[Bridge-done-miss] " + why
-                    + " | finished=" + cls(finished)
-                    + " | interrupting=" + _interrupting
-                    + " | active=" + a.actionId + "/" + a.cmd
-                    + " | pending=" + pendingDump());
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static String cls(Task t) {
-        return t == null ? "null" : t.getClass().getSimpleName();
-    }
-
-    /** 诊断用：当前待回执队列快照（token:actionId 列表）。 */
-    private String pendingDump() {
-        StringBuilder sb = new StringBuilder("[");
-        for (PendingAction p : _pending) {
-            if (sb.length() > 1) sb.append(',');
-            sb.append(p.token).append(':').append(p.actionId);
-        }
-        return sb.append(']').toString();
     }
 
     private void prunePending() {
@@ -549,27 +504,6 @@ final class ActionDispatcher {
         Probe probe = probe(a, p);
         if (probe == null || probe.key == null) return;
         long now = System.currentTimeMillis();
-
-        // (1002 16:5x 临时诊断) 互补证据：行动还在飞、但用户任务已经没了/换了型 ⇒
-        // TaskFinishedEvent 没被认领（或根本没发）—— 这正是"finished 而无 done"的直接证据。
-        try {
-            if (TASK_ACTIONS.contains(a.cmd)) {
-                var utc = _mod.getUserTaskChain();
-                Task cur = utc == null ? null : utc.getCurrentTask();
-                boolean orphan = cur == null || !matchesToken(a.cmd, cur);
-                if (!orphan) {
-                    _orphanSinceMs = 0;
-                } else if (_orphanSinceMs == 0) {
-                    _orphanSinceMs = now;
-                } else if (now - _orphanSinceMs >= 5_000 && now - _orphanSinceMs < 6_000) {
-                    Debug.logToFile("altoclef_diag.log", "[Bridge-done-miss] orphan action " + a.actionId
-                            + "/" + a.cmd + " alive but user task is " + cls(cur)
-                            + " | interrupting=" + _interrupting + " | pending=" + pendingDump());
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
         if (_progressKey == null || !_progressKey.equals(probe.key)) {
             _progressKey = probe.key;
             _progressAtMs = now;
@@ -930,7 +864,6 @@ final class ActionDispatcher {
     private void resetProgress() {
         _progressKey = null;
         _progressAtMs = 0;
-        _orphanSinceMs = 0;
     }
 
     /** goto 目标（从命令文本解析；kind 见常量）。 */
