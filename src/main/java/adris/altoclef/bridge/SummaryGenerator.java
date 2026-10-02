@@ -1,6 +1,8 @@
 package adris.altoclef.bridge;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.tasks.movement.IdleTask;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
@@ -79,6 +81,32 @@ final class SummaryGenerator {
         };
     }
 
+    /**
+     * (1002 16:5x 对端要求) 细分 {@code task} 标签。链名太粗 —— User Tasks 链里跑
+     * {@code @idle} 驻留时也会报"主线任务"，害对端把 idle 误判成"主线在跑"（B4/B5 误判源头）。
+     *
+     * <p>口径：无任务 → {@code 空闲}；{@code @idle} 驻留 → {@code 待命}；
+     * {@link BeatMinecraft2Task} 在跑 → {@code 主线任务}；其余用户任务（@goto/@follow/@give 等）
+     * → {@code 行动任务}。非 User Tasks 链保持原链名映射。
+     */
+    private static String refineUserTaskLabel(AltoClef mod, TaskChain chain, String fallback) {
+        try {
+            if (chain != null && "User Tasks".equals(chain.getName())) {
+                var utc = mod.getUserTaskChain();
+                if (utc == null) return fallback;
+                if (utc.isRunningIdleTask()) return "待命";
+                Task cur = utc.getCurrentTask();
+                if (cur == null) return "空闲";
+                if (cur instanceof IdleTask) return "待命";
+                if (cur instanceof BeatMinecraft2Task) return "主线任务";
+                return "行动任务";
+            }
+            if (chain == null || chain.getTasks().isEmpty()) return "空闲";
+        } catch (Throwable ignored) {
+        }
+        return fallback;
+    }
+
     /** 维度枚举 → 契约 {@code pos.dim} 字段的小写字符串。 */
     static String dimToken(Dimension dim) {
         if (dim == null) return "overworld";
@@ -111,7 +139,7 @@ final class SummaryGenerator {
         TaskChain chain = runner == null ? null : runner.getCurrentTaskChain();
         String chainName = chain == null ? null : chain.getName();
         String verb = chainToVerb(chainName);
-        String taskLabel = chainToTaskLabel(chainName);
+        String taskLabel = refineUserTaskLabel(mod, chain, chainToTaskLabel(chainName));
 
         // 闲着：没有链胜出，或链的任务栈空（TaskRunner 已有 "(no task running)" 口径）
         boolean idle = (chain == null) || chain.getTasks().isEmpty();

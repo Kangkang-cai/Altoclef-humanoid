@@ -203,6 +203,8 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "hunger"); sb.append(':').append(BridgeJson.i(s.hunger));
             sb.append(','); BridgeJson.str(sb, "level"); sb.append(':').append(BridgeJson.i(s.level));
             sb.append(','); BridgeJson.str(sb, "equipment"); sb.append(':'); BridgeJson.str(sb, s.equipment);
+            // (1002 16:5x 对端新增) 主手此刻拿着的物品中文名；空手空串
+            sb.append(','); BridgeJson.str(sb, "holding"); sb.append(':'); BridgeJson.str(sb, s.holding);
             sb.append(','); BridgeJson.str(sb, "food"); sb.append(':'); BridgeJson.str(sb, s.food);
             sb.append(','); BridgeJson.str(sb, "foodCount"); sb.append(':').append(BridgeJson.i(s.foodCount));
             sb.append(','); BridgeJson.str(sb, "keyItems"); sb.append(':'); BridgeJson.str(sb, s.keyItems);

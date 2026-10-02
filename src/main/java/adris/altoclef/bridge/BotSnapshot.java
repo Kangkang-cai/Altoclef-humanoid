@@ -44,8 +44,10 @@ final class BotSnapshot {
     final int hunger;
     /** 经验等级原始数值。 */
     final int level;
-    /** 护甲+主手工具签名（"铁套+石镐"），裸装空串。 */
+    /** 纯护甲签名（"铁套"），裸装空串（1002 对端要求：不含主手）。 */
     final String equipment;
+    /** 主手此刻拿着的物品中文名（1002 16:5x 对端新增）；空手 → 空串。 */
+    final String holding;
     /** 背包食物种类概述（"面包x5、生牛肉x3"），无食物空串。 */
     final String food;
     /** 背包食物总数。 */
@@ -77,7 +79,7 @@ final class BotSnapshot {
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
-                        int hunger, int level, String equipment,
+                        int hunger, int level, String equipment, String holding,
                         String food, int foodCount, String keyItems,
                         String taskDetail, String mainlineProgress, String timeOfDay,
                         String weather, String environment, String biome, int nearbyHostiles,
@@ -95,6 +97,7 @@ final class BotSnapshot {
         this.hunger = hunger;
         this.level = level;
         this.equipment = equipment;
+        this.holding = holding == null ? "" : holding;
         this.food = food;
         this.foodCount = foodCount;
         this.keyItems = keyItems;
@@ -113,7 +116,7 @@ final class BotSnapshot {
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
     static BotSnapshot offline(String botId) {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
-                0, 0, 0, "overworld", 0, 0, 0, "", "", 0, "",
+                0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
                 null, "", "");
     }
@@ -157,7 +160,7 @@ final class BotSnapshot {
         String dimTok = SummaryGenerator.dimToken(dim);
 
         return new BotSnapshot(botId, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
-                digest.hunger, digest.level, digest.equipment,
+                digest.hunger, digest.level, digest.equipment, digest.holding,
                 digest.food, digest.foodCount, digest.keyItems,
                 SceneDigest.taskDetail(mod), SceneDigest.mainlineProgress(mod),
                 SceneDigest.timeOfDay(world), SceneDigest.weather(world),

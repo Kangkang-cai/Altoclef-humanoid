@@ -49,6 +49,12 @@ final class InventoryDigest {
     final int level;
     /** 纯护甲签名，如 "铁套"；裸装给空串（1002 对端要求：不含主手）。 */
     final String equipment;
+    /**
+     * 主手此刻拿着的物品中文名（1002 16:5x 对端新增）。语义与 {@link #keyItems} 不同 ——
+     * "镐在背包" 与 "手里举着镐" 是两种状态；空手 → 空串。**任意物品**都算（含方块/食物，
+     * 这里是"如实摘要"不是变化键，抖动由对端渲染层承担）。
+     */
+    final String holding;
     /** 背包食物种类概述，如 "面包x5、生牛肉x3"；无食物空串。 */
     final String food;
     /** 背包食物总数（所有 isFood 项计数和）。 */
@@ -56,11 +62,12 @@ final class InventoryDigest {
     /** 稀有+有用级持有，如 "钻石x2、铁锭x5"；无则空串。 */
     final String keyItems;
 
-    private InventoryDigest(int hunger, int level, String equipment,
+    private InventoryDigest(int hunger, int level, String equipment, String holding,
                             String food, int foodCount, String keyItems) {
         this.hunger = hunger;
         this.level = level;
         this.equipment = equipment;
+        this.holding = holding;
         this.food = food;
         this.foodCount = foodCount;
         this.keyItems = keyItems;
@@ -68,7 +75,7 @@ final class InventoryDigest {
 
     /** 空摘要（离线占位用）。 */
     static InventoryDigest empty() {
-        return new InventoryDigest(0, 0, "", "", 0, "");
+        return new InventoryDigest(0, 0, "", "", "", 0, "");
     }
 
     /**
@@ -91,7 +98,7 @@ final class InventoryDigest {
     /** hunger/level 用新值，背包派生四字段沿用上一个有效摘要。 */
     static InventoryDigest withPrevInventory(int hunger, int level, InventoryDigest prev) {
         return new InventoryDigest(hunger, level,
-                prev.equipment, prev.food, prev.foodCount, prev.keyItems);
+                prev.equipment, prev.holding, prev.food, prev.foodCount, prev.keyItems);
     }
 
     /** 上一个有效摘要（冻结窗口时快照沿用）。仅客户端线程读写。 */
@@ -102,9 +109,10 @@ final class InventoryDigest {
         int hunger = p.getHungerManager().getFoodLevel();
         int level = p.experienceLevel;
         String equipment = equipmentSignature(p);
+        String holding = holdingName(p);
         FoodAgg foodAgg = foodAgg(p);
         String keyItems = keyItemsAgg(p);
-        return new InventoryDigest(hunger, level, equipment,
+        return new InventoryDigest(hunger, level, equipment, holding,
                 foodAgg.text, foodAgg.total, keyItems);
     }
 
@@ -150,6 +158,19 @@ final class InventoryDigest {
         // 旧行为：裸装手持木镐会返回 "木镐"，对端按"护甲段"算变化键会被工具切换污染。
         // 若要保留"手持什么工具"，应另开独立字段（如 holding），不混进 equipment。
         return armorStr;
+    }
+
+    /**
+     * 主手物品中文名（1002 16:5x 对端新增字段 {@code holding}）。空手 → 空串。
+     * 与 {@code equipment}（护甲）无关；任意物品都算 —— 对端要的就是"此刻手里举着什么"。
+     */
+    private static String holdingName(ClientPlayerEntity p) {
+        try {
+            ItemStack s = p.getMainHandStack();
+            return (s == null || s.isEmpty()) ? "" : ItemNames.name(s);
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /** 从"铁胸甲"这类拼名里剥出材质前缀（剥掉件型尾巴）。 */
