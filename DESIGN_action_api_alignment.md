@@ -164,3 +164,19 @@ pause/resume 的实现方式（重建任务实例）、任务链优先级与竞�
   此时 `mainlineProgress` 省略、`taskDetail="待命"` **符合设计**；误导源是 `task` 字段——它是**链级**标签，
   只要胜出链是 `User Tasks` 就恒为 "主线任务"，即使链里跑的是 `Idle`。是否需要让 `task` 区分
   "主线在跑" vs "User 链在跑 idle"，请拍。
+
+### E. 本轮已实现 + B1 诊断已埋（1002 17:0x）
+- **拍板 3 —— `/status` 新增 `holding`**：= **主手此刻拿着的物品中文名**（任意物品，含方块/食物；空手 `""`）。
+  语义与 `keyItems` 不同（"镐在背包" vs "手里举着镐"）；**不混入 `equipment`**，也**不进 `summary`**（避免 summary 抖动）。
+- **拍板 4 —— `task` 字段已细分**（口径即你方建议）：`空闲`（无任务）/ `待命`（`@idle` 驻留）/
+  `主线任务`（`BeatMinecraft2Task` 在跑）/ `行动任务`（其余用户任务，如 `@goto`/`@follow`/`@give`）。
+  非 User Tasks 链仍按链名映射（战斗/觅食/捡尸…）。⚠️ 变化键第一段现在多了 `行动任务` 取值。
+- **B1 诊断已埋（临时：仅落盘日志，行为零改动）**：复现后取 **`logs/altoclef/<会话>/altoclef_diag.log`** 的
+  `[Bridge-done-miss]` 行 —— 三条丢弃路径各记
+  `finished=<类名> | interrupting= | active=<id/cmd> | pending=[token:actionId,...]`；
+  另加互补判据：**行动还在飞、但用户任务已没了/换型持续 ≥5s** 也会记一条（= 事件根本没被认领）。
+  拿到该行即可判定是"类型不匹配 / pending 缺失 / 被 `_interrupting` 抑制"，之后再动 holding 共用分支。
+  诊断确认后会移除，不在正式版留存。
+- **你方问的 `8761` ↔ 日志目录**：`8761 = bot_1 = D:\minecraft\.minecraft\versions\1.18.2-Fabric-1\`，
+  日志在 `...\versions\1.18.2-Fabric-1\logs\altoclef\<会话>\`。证据：你方捕获 A 的 `16:14:38 → (-599,71,245)`
+  与该目录会话 `20261002-155251` 的 `tasks.log` **同刻同目标** ⇒ 先前查的就是同一实例的日志。
