@@ -146,3 +146,21 @@ pause/resume 的实现方式（重建任务实例）、任务链优先级与竞�
    若想要更细粒度我方可以把快照周期调短（如 2s）——请给目标值。
 2. **follow 的 10min TTL 到点你们怎么处理**（发新命令 / `@pause_main`）？确认后我方可在 detail 里给出更贴合的措辞。
 3. **`bot_stuck` 要不要附带"是哪条行动卡了"**（现 `stuckReason` 是任务级；可在 `bot_stuck.detail` 附 `actionId`/`cmd`）？
+
+### D. 本轮修复回执（1002 15:4x，另附两条待你方澄清）
+- **B2 探针措辞 —— 已修**：`probeGoto` 的"已到位"改为 **feet 所在 BlockPos 严格命中目标格** 才报；
+  水平 ≤2 但格进不去 → 「目标格站不进去（雪层/遮挡？），正在重找路径」，并**把该状态的进度 key 固定**，
+  让"长时间站不进"能累积到 `goto` 的 120s 阈值、发出 `action_done(failed)`（否则 bucket 每拍抖动会不断重置计时，永远发不出 failed）。
+- **B3 `/equipment` 混入主手 —— 已修**：`equipment` 语义收窄为**纯护甲签名**（adris 侧 `InventoryDigest`），
+  裸装返回空串。⚠️ 代价：主手工具不再出现在 `equipment`（也不再进 `summary` 的"装备"子句）；
+  若你方仍需要"手持什么工具"，我方可**另开独立字段 `holding`**，请告知，不混回 `equipment`。
+- **B1 `@goto` 到点不结束 —— 未改动，待你方补充现场**：模组侧自查三实例最新会话日志，
+  含你方点名的 `16:14:38 → 目标(-599,71,245)`，全部 `finished=true`（1.1–1.5s），无未配对 START。
+  你方指出的 `CustomBaritoneGoalTask` "≤2 格 holding 无出口" **代码缺陷确实存在**（我方已复核），
+  但在改动这个**全 baritone goal 任务共用**的分支前，需要你方给出**一次实际卡住的原始捕获**
+  （时间戳 + 实例 + `/status` 原文 + 当时 `/events`），以免修错地方又引出回归。
+- **B4/B5 `mainlineProgress` 空 + `taskDetail=待命` —— 疑为误判**：日志实锤该轮 bot 处于 `@idle` 驻留态
+  （`chain=User Tasks task=<<Idle>>`，`shouldIdle=false` ⇒ 该 idle 来自你方 `@idle` 指令而非模组自身）。
+  此时 `mainlineProgress` 省略、`taskDetail="待命"` **符合设计**；误导源是 `task` 字段——它是**链级**标签，
+  只要胜出链是 `User Tasks` 就恒为 "主线任务"，即使链里跑的是 `Idle`。是否需要让 `task` 区分
+  "主线在跑" vs "User 链在跑 idle"，请拍。

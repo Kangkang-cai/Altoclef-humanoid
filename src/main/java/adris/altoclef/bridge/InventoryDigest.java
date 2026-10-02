@@ -6,8 +6,6 @@ import net.minecraft.item.ArmorItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.item.SwordItem;
-import net.minecraft.item.ToolItem;
 import net.minecraft.util.registry.Registry;
 
 import java.util.ArrayList;
@@ -24,8 +22,9 @@ import java.util.Set;
  * <ul>
  *   <li><b>固定排序</b>：所有"集合→字符串"一律按注册表 id 字典序排 —— 背包槽位序
  *       会随整理/腾位变动（同集换序=伪变化=节流失效），绝不按槽位序拼。</li>
- *   <li><b>equipment 不含任意主手</b>：只计护甲四件 + 主手为工具/剑时才进签名。
- *       bot 日常手持圆石垫脚/拿方块放置/拿食物进食，主手随时在变，全算会每拍抖。</li>
+ *   <li><b>equipment 只计护甲四件</b>（1002 15:4x 对端要求，字段语义 = 护甲签名）：
+ *       主手工具/剑一律**不进**本字段，裸装返回空串。bot 日常手持圆石垫脚/拿方块/
+ *       拿食物随时在变，混入会污染对端按"护甲段"算的变化键。</li>
  *   <li><b>keyItems 独立口径</b>：{@link DropValuationHelper#isHighValue} 是
  *       "死亡值不值得回头"的判据（服务墓碑评估），语义不同不污染；这里
  *       isHighValue + 补充集（铁锭/粗铁/煤炭——铁系是日常进度核心但不在
@@ -48,7 +47,7 @@ final class InventoryDigest {
 
     final int hunger;
     final int level;
-    /** 护甲+主手工具签名，如 "铁套+石镐"；裸装给空串。 */
+    /** 纯护甲签名，如 "铁套"；裸装给空串（1002 对端要求：不含主手）。 */
     final String equipment;
     /** 背包食物种类概述，如 "面包x5、生牛肉x3"；无食物空串。 */
     final String food;
@@ -111,7 +110,7 @@ final class InventoryDigest {
 
     // ===================== equipment =====================
 
-    /** 护甲四件 + 主手（仅工具/剑）签名。全部空 → 空串。 */
+    /** 护甲四件签名（head→feet 固定序；1002 对端要求：不含主手）。无护甲 → 空串。 */
     private static String equipmentSignature(ClientPlayerEntity p) {
         // 护甲：head→chest→legs→feet 固定顺序展示
         List<String> pieces = new ArrayList<>(4);
@@ -147,17 +146,10 @@ final class InventoryDigest {
             armorStr = String.join("、", pieces);
         }
 
-        // 主手：仅工具/剑进签名（手持圆石/食物/方块不算装备）
-        String handStr = "";
-        ItemStack main = p.getMainHandStack();
-        if (main != null && !main.isEmpty()
-                && (main.getItem() instanceof ToolItem || main.getItem() instanceof SwordItem)) {
-            handStr = ItemNames.name(main);
-        }
-
-        if (!armorStr.isEmpty() && !handStr.isEmpty()) return armorStr + "+" + handStr;
-        if (!armorStr.isEmpty()) return armorStr;
-        return handStr;
+        // (1002 15:4x 对端要求) equipment 语义收窄为**纯护甲签名** —— 主手工具不再进本字段。
+        // 旧行为：裸装手持木镐会返回 "木镐"，对端按"护甲段"算变化键会被工具切换污染。
+        // 若要保留"手持什么工具"，应另开独立字段（如 holding），不混进 equipment。
+        return armorStr;
     }
 
     /** 从"铁胸甲"这类拼名里剥出材质前缀（剥掉件型尾巴）。 */

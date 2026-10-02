@@ -22,6 +22,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.registry.Registry;
 
@@ -602,19 +603,34 @@ final class ActionDispatcher {
                     prefix + "上下移动中（目标 y=" + (int) g.y + "）", null);
         }
         double dist = g.horizontalDistanceTo(p.getPos());
-        int bucket = (int) (dist / 2);
+        // (1002 15:4x 对端实测) 严格到位判据：baritone GoalBlock 无容差，feet 所在 BlockPos
+        // 必须**正好**等于目标格。旧逻辑只看水平 ≤2 就报"已到位"，目标格站不进
+        // （雪层/非完整方块/被占）时会误导 LLM 对外报"我到了"。
+        BlockPos goalCell = new BlockPos((int) Math.floor(g.x), (int) Math.floor(g.y), (int) Math.floor(g.z));
+        boolean arrived = p.getBlockPos().equals(goalCell);
         boolean noPath = available && !pathing && !pathPresent;
+        String bucketKey;
         String detail;
         String hardFail = null;
-        if (dist <= 2) {
+        if (arrived) {
+            bucketKey = "done";
             detail = prefix + "已到位，等待确认";
-        } else if (noPath) {
-            detail = prefix + "受阻：算不出路径";
-            hardFail = "坐标不可达（长时间算不出路径）";
+        } else if (dist <= 2) {
+            // 水平已到但 feet 格进不去：key 固定，让"长时间站不进"能累积到 hardFail 阈值
+            // （否则每拍 bucket 抖动会不断重置 stalledSec，永远发不出 failed）。
+            bucketKey = "unenterable";
+            detail = prefix + "目标格站不进去（雪层/遮挡？），正在重找路径";
+            hardFail = "目标格无法站立（水平已到但 feet 格进不去）";
         } else {
-            detail = prefix + "导航中，剩余" + Math.max(1, (int) Math.ceil(dist)) + "格";
+            bucketKey = String.valueOf((int) (dist / 2));
+            if (noPath) {
+                detail = prefix + "受阻：算不出路径";
+                hardFail = "坐标不可达（长时间算不出路径）";
+            } else {
+                detail = prefix + "导航中，剩余" + Math.max(1, (int) Math.ceil(dist)) + "格";
+            }
         }
-        return new Probe("goto|xz|" + bucket + "|" + barKey, detail, hardFail);
+        return new Probe("goto|xz|" + bucketKey + "|" + barKey, detail, hardFail);
     }
 
     private Probe probeFollow(ClientPlayerEntity p, String prefix) {
