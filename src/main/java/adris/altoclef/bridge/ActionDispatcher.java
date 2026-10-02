@@ -6,6 +6,12 @@ import adris.altoclef.commandsystem.CommandExecutor;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
+import adris.altoclef.tasks.entity.GiveItemToPlayerTask;
+import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
+import adris.altoclef.tasks.movement.FollowPlayerTask;
+import adris.altoclef.tasks.movement.GetToBlockTask;
+import adris.altoclef.tasks.movement.GetToXZTask;
+import adris.altoclef.tasks.movement.GetToYTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 
@@ -47,15 +53,20 @@ final class ActionDispatcher {
     /** 只读命令：不占限流额度（不改变世界状态）。 */
     private static final Set<String> READ_ONLY = Set.of("coords", "status", "inventory", "help", "list");
 
-    /** 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done）。 */
+    /** 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done，**不进 pending 队列**）。 */
     private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list", "idle");
 
     /**
-     * 完成即自动回主线的行动（B' 口径，1001 对端拍板）：只有"有终点的行动"——
-     * goto/follow/give。`@idle` 与 `@pause_main` 归"按住"侧：它们无终点或语义就是
-     * "立正等到下一条指令"，自动续跑会违背语义，只能显式 `@resume_main` 解除。
+     * 有任务生命期的行动：只有这些命令才登记 pending、才可能在顶层任务结束时回 action_done
+     * （B' 口径同集：完成后自动回主线）。
+     *
+     * <p>⚠️ 1002 冒烟实锤缺陷：早前实现用"FIFO 取最老 pending"，且 pause/只读类也压了 pending
+     * 条目（它们的 done 是同步发的、从不 pop）⇒ 队列残留老条目被后续 TaskFinishedEvent 拿走，
+     * done 记到错误 actionId（pause 的 done 出现第二次、goto 的 done 迟到 2.5 分钟）。
+     * 现在两道闸：①非 TASK_ACTIONS 一律不登记 pending；②关联时必须**语义匹配**
+     * （结束的顶层任务类型 == 该 token 期望的任务类型），匹配不上宁可丢弃，交对端超时兜底。
      */
-    private static final Set<String> AUTO_RESUME_TOKENS = Set.of("goto", "follow", "give");
+    private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give");
 
     /** 主线干预伪命令 token（不在 CommandExecutor 注册，仅 bridge 识别）。 */
     static final String PAUSE = "pause_main";
@@ -139,10 +150,17 @@ final class ActionDispatcher {
 
     /** 登记待回执行动 + 发同步受理事件（HTTP 线程）。 */
     void accept(String actionId, String token, String cmd) {
-        prunePending();
-        _pending.addLast(new PendingAction(actionId, token, System.currentTimeMillis()));
-        while (_pending.size() > MAX_PENDING) {
-            _pending.pollFirst();
+        // 只有有任务生命期的行动才进 pending —— pause/resume/只读类的 done 是同步发的，
+        // 登记了也没人 pop，只会在队列里残留并污染后续关联（1002 实锤缺陷）。
+        if (TASK_ACTIONS.contains(token)) {
+            prunePending();
+            // 同 token 的新派发顶掉旧条目：前一次行动的任务已被 setTask 顶替，其 done 永不会来，
+            // 留着只会让后续事件错配（对端对旧 actionId 走超时兜底）。
+            _pending.removeIf(p -> p.token.equals(token));
+            _pending.addLast(new PendingAction(actionId, token, System.currentTimeMillis()));
+            while (_pending.size() > MAX_PENDING) {
+                _pending.pollFirst();
+            }
         }
         _buffer.emitImmediate("action_accepted",
                 "[" + actionId + "] 已受理：" + describe(token, cmd), false,
@@ -255,27 +273,51 @@ final class ActionDispatcher {
         return _paused;
     }
 
-    /** 顶层任务结束 → 关联最近的 pending action，发 action_done；有终点的行动完成即回主线（B'）。 */
+    /**
+     * 顶层任务结束 → 语义匹配 pending action，命中才回 action_done；命中不了直接丢弃
+     * （对端按 actionId 超时兜底，宁可无信号也不发错配信号）。
+     */
     private void onTaskFinished(TaskFinishedEvent evt) {
         if (_interrupting) return; // pause 的 cancel，不当作行动完成
-        PendingAction p = pollOldestValid();
-        if (p == null) return;
-        String label = evt == null || evt.lastTaskRan == null
-                ? "" : evt.lastTaskRan.toString();
+        Task finished = evt == null ? null : evt.lastTaskRan;
+        if (finished == null) return;
+        PendingAction p = pollMatching(finished);
+        if (p == null) return; // 无匹配（含 pending 为空 / 类型不符）：丢弃，等对端超时
+        String label = finished.toString();
         if (label.length() > 40) label = label.substring(0, 40) + "…";
         String text = label.isEmpty() ? "完成" : "完成：" + label;
-        // B'：goto/follow/give 完成 → 自动回主线（idle/pause_main 不在此列，按住等显式 resume）。
+        // B'：goto/follow/give 完成 → 自动回主线（idle/pause_main 不登记 pending，不在此列）。
         // 此刻 UserTaskChain.onTaskFinish 已把 _mainTask 置 null 且 EventBus.publish 同步派发到
         // 本回调，故这里 runUserTask 是安全的重入（setTask 走 _mainTask==null 分支，不会误停旧任务）。
-        if (AUTO_RESUME_TOKENS.contains(p.token) && resumeMainline()) {
+        if (resumeMainline()) {
             text += "，已自动回主线";
         }
         emitDone(p.actionId, p.token, text);
     }
 
-    private PendingAction pollOldestValid() {
+    /** 从待回执队列里取**语义匹配**本次结束任务的最老条目；无匹配返回 null。 */
+    private PendingAction pollMatching(Task finished) {
         prunePending();
-        return _pending.pollFirst();
+        for (PendingAction p : _pending) {
+            if (matchesToken(p.token, finished)) {
+                _pending.remove(p);
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /** token → 期望的顶层任务类型（语义相等才允许关联）。 */
+    private static boolean matchesToken(String token, Task finished) {
+        return switch (token) {
+            case "goto" -> finished instanceof GetToBlockTask
+                    || finished instanceof GetToXZTask
+                    || finished instanceof GetToYTask
+                    || finished instanceof DefaultGoToDimensionTask;
+            case "follow" -> finished instanceof FollowPlayerTask;
+            case "give" -> finished instanceof GiveItemToPlayerTask;
+            default -> false;
+        };
     }
 
     private void prunePending() {
