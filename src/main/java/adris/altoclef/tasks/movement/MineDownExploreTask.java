@@ -9,6 +9,7 @@ import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.DryGroundHelper;
+import adris.altoclef.util.helpers.LavaSightHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -556,8 +557,10 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 20260917-191217 实锤 (19:15:43~52 十秒内 20+ 轮), 用户观感"任务快速跳跃"。
     // 现在二者解耦但必须【匹配】: 撤离距离 > LAVA_SIGHT_RADIUS_XZ 才能保证"撤完就看
     // 不见它"。取 16/20 (>12, 留 4~8 格余量吃岩浆流体继续扩散)。
-    private static final int LAVA_RETREAT_NETHER = 20;
-    private static final int LAVA_RETREAT_OVERWORLD = 16;
+    // (2026-10-02 单一判定源) 数值与注释留在 LavaSightHelper —— DestroyBlockTask 的
+    // LAVA-EXIT 闸门（洞穴挖矿侧）要用同一把尺子。此处保留别名只为不动下方判据文本。
+    private static final int LAVA_RETREAT_NETHER = LavaSightHelper.RETREAT_NETHER;
+    private static final int LAVA_RETREAT_OVERWORLD = LavaSightHelper.RETREAT_OVERWORLD;
     // 撤 16~20 格要实跑一段, 水的 20s 不够。
     private static final double LAVA_DETOUR_TIMEOUT = 30.0;
     // 一轮内弃道次数上限 (水平方向总共只有 TUNNEL_DIRS.length=4 个): 4 个方向全撞上
@@ -593,34 +596,17 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 判据都得兜住, 不能因为"射线没打准"就放过。
     // 贴身偏移表 (2026-09-23 起岩浆 findAdjacentLava 与灌水检测 findFloodedTunnelWater
     // 共用: 同一"贴身 11 格"几何概念只留一份)。
-    private static final BlockPos[] NEAR_FLUID_OFFSETS = {
-            new BlockPos(0, 0, 0),
-            new BlockPos(1, 0, 0), new BlockPos(-1, 0, 0),
-            new BlockPos(0, 0, 1), new BlockPos(0, 0, -1),
-            new BlockPos(0, -1, 0), new BlockPos(0, 1, 0),
-            new BlockPos(1, -1, 0), new BlockPos(-1, -1, 0),
-            new BlockPos(0, -1, 1), new BlockPos(0, -1, -1),
-    };
+    // (2026-10-02 单一判定源) 偏移表本身移到 LavaSightHelper（岩浆 findAdjacentLava 与
+    // 灌水检测 findFloodedTunnelWater 本来就共用它，DestroyBlockTask 侧现在也要用）。
+    private static final BlockPos[] NEAR_FLUID_OFFSETS = LavaSightHelper.NEAR_FLUID_OFFSETS;
     // 视觉感知扫描半径 (椭球): 水平 12 / 垂直 6。取 12 而不是全渲染距离 —— 只关心
     // "会挡到自己这条通道"的近场; 同一个岩浆湖远处的湖面属正常地形, 不该触发弃道。
     // 垂直压到 6: 下界岩浆海常在头顶正上方一层, 再远的头顶岩浆不构成"挖出来的危险"。
-    private static final int LAVA_SIGHT_RADIUS_XZ = 12;
-    private static final int LAVA_SIGHT_RADIUS_Y = 6;
-    // 扫描节流: 半径 12/6 椭球约 8k 格 getBlockState, 200ms 一次 (与 BlockTracker 的
-    // 近场采样同量级, 远低于其 16 格全量扫描)。命中才打 LOS 射线, 而 LOS 自带 400ms
-    // 短缓存 + 玩家位移失效率 (VisibilityHelper.isBlockVisible)。
-    private static final long LAVA_SIGHT_SCAN_INTERVAL_MS = 200;
-    private long _lastLavaSightScanMs = 0;
-    // 贴身兜底节流: 11 次 getBlockState 极便宜; 口径同 SPAWNER_SCAN_INTERVAL_MS。
-    private static final long NEAR_LAVA_SCAN_INTERVAL_MS = 100;
-    private long _lastNearLavaScanMs = 0;
-    // (2026-09-17 churn 修复) 撤离刚结束的宽限期: baritone 把 bot 放到"距该 hazard
-    // ≥ LAVA_RETREAT_* 格"的位置后会立刻判撤离完成, 而这条落点可能只是贴着视觉半径
-    // 边缘 (被墙挤住时更差) → 同一秒又"看见"同一处岩浆。给 2s 让撤退动作真正做完再
-    // 重新评估。只压【视觉】路径: 贴身 11 格兜底 (findAdjacentLava) 不受宽限期影响 —
-    // 危险已经贴到身上时, 不能因为"刚撤过"就不救。
-    private static final long LAVA_SIGHT_GRACE_MS = 2000;
-    private long _lavaSightGraceUntilMs = 0;
+    // (2026-10-02 单一判定源) 扫描半径 / 节流 / 撤离宽限期及其状态字段全部移到
+    // LavaSightHelper —— 两个消费方共一份节流 (同一次扫描不该因为多了一个消费方而翻倍)。
+    // 半径保留别名只为下方 javadoc 的 {@value} 引用继续有效。
+    private static final int LAVA_SIGHT_RADIUS_XZ = LavaSightHelper.SIGHT_RADIUS_XZ;
+    private static final int LAVA_SIGHT_RADIUS_Y = LavaSightHelper.SIGHT_RADIUS_Y;
     // (2026-09-17 churn 修复) 跨实例播种: GiveUp 后父层重建的是【新实例】, 本地 hazards
     // 归零 → 换向时没有背离依据, 又冲同一处岩浆。onStart 时从仓内"见过即记忆"表
     // (VisibilityHelper.getRememberedValuable, 只收真感知过的岩浆, 按维度分表, 非透视)
@@ -770,7 +756,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         _lavaEncounters = 0;
         _lavaAbandonCount = 0;
         _lavaGiveUp = false;
-        _lavaSightGraceUntilMs = 0;
+        LavaSightHelper.resetSightGrace();
         // (2026-09-17 churn 修复) 实例可能是 GiveUp 后父层重建的【新实例】, 本地
         // hazards 已归零 —— 从仓内"见过即记忆"表把附近的岩浆点补回来, 否则换向判据
         // 无依据, 会再次朝着同一处岩浆挖 (20260917-191217 实锤: GiveUp 后 300ms 又
@@ -1260,7 +1246,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             _lavaAbandonCount++;
             // (2026-09-17 churn 修复) 撤离收尾 (完成或超时) 后给视觉判据 2s 宽限, 见字段区
             // LAVA_SIGHT_GRACE_MS 注释。超时收尾尤其需要 —— 那是"根本没撤到位"的情况。
-            _lavaSightGraceUntilMs = System.currentTimeMillis() + LAVA_SIGHT_GRACE_MS;
+            LavaSightHelper.grantSightGrace();
             String m = "[MineDown-LavaRetreat] 后撤" + (timedOut ? "超时" : "完成") + " at "
                     + mod.getPlayer().getBlockPos().toShortString()
                     + " (本轮弃道 " + _lavaAbandonCount + "/" + LAVA_ABANDON_LIMIT + ")"
@@ -1989,8 +1975,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 区块未加载时不判危险 (未加载读作空气, 与本仓 isAir 同款语义, 见 isUnbreakable)。
      */
     private boolean isLava(AltoClef mod, BlockPos pos) {
-        if (!mod.getChunkTracker().isChunkLoaded(pos)) return false;
-        return mod.getWorld().getBlockState(pos).getBlock() == Blocks.LAVA;
+        return LavaSightHelper.isLava(mod, pos);
     }
 
     /**
@@ -2007,33 +1992,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * LOS 自带 400ms 短缓存 (VisibilityHelper.isBlockVisible), 不会退化成每帧射线风暴。
      */
     private BlockPos findSeenLava(AltoClef mod) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
-        long now = System.currentTimeMillis();
-        // (2026-09-17 churn 修复) 刚撤完的宽限期, 见字段区 LAVA_SIGHT_GRACE_MS 注释。
-        if (now < _lavaSightGraceUntilMs) return null;
-        if (now - _lastLavaSightScanMs < LAVA_SIGHT_SCAN_INTERVAL_MS) return null;
-        _lastLavaSightScanMs = now;
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        int xzSq = LAVA_SIGHT_RADIUS_XZ * LAVA_SIGHT_RADIUS_XZ;
-        BlockPos best = null;
-        double bestSq = Double.MAX_VALUE;
-        for (int dy = -LAVA_SIGHT_RADIUS_Y; dy <= LAVA_SIGHT_RADIUS_Y; dy++) {
-            for (int dx = -LAVA_SIGHT_RADIUS_XZ; dx <= LAVA_SIGHT_RADIUS_XZ; dx++) {
-                for (int dz = -LAVA_SIGHT_RADIUS_XZ; dz <= LAVA_SIGHT_RADIUS_XZ; dz++) {
-                    int hSq = dx * dx + dz * dz;
-                    if (hSq > xzSq) continue; // 椭球水平截断
-                    BlockPos p = feet.add(dx, dy, dz);
-                    if (!isLava(mod, p)) continue; // 便宜的血缘复核 (区块未加载/已非岩浆直接跳过)
-                    if (!VisibilityHelper.isBlockPerceivable(mod, p)) continue; // 贵的那步: 表面暴露 + LOS
-                    double d = hSq + (double) dy * dy;
-                    if (d < bestSq) {
-                        bestSq = d;
-                        best = p; // 取最近的一处: 撤离目标/后撤方向都更准
-                    }
-                }
-            }
-        }
-        return best;
+        // (2026-10-02 单一判定源) 实现搬到 LavaSightHelper (逐字搬迁, 行为不变) ——
+        // DestroyBlockTask 的 LAVA-EXIT 闸门要用同一套视觉感知。
+        return LavaSightHelper.findSeenLava(mod);
     }
 
     /**
@@ -2048,16 +2009,8 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
      * 命中哪一格只影响日志与 hazards 记录, 弃道动作 (MineDown-LavaAbandon) 完全一致。
      */
     private BlockPos findAdjacentLava(AltoClef mod) {
-        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
-        long now = System.currentTimeMillis();
-        if (now - _lastNearLavaScanMs < NEAR_LAVA_SCAN_INTERVAL_MS) return null;
-        _lastNearLavaScanMs = now;
-        BlockPos feet = mod.getPlayer().getBlockPos();
-        for (BlockPos off : NEAR_FLUID_OFFSETS) {
-            BlockPos p = feet.add(off);
-            if (isLava(mod, p)) return p;
-        }
-        return null;
+        // (2026-10-02 单一判定源) 同上，实现搬到 LavaSightHelper。
+        return LavaSightHelper.findAdjacentLava(mod);
     }
 
     /**
