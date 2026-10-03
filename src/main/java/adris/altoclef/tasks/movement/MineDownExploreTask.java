@@ -537,6 +537,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     };
     private static final long NEAR_FLOOD_SCAN_INTERVAL_MS = 100;
     private long _lastNearFloodScanMs = 0;
+    // (2026-10-03) 岩浆版【独立】节流戳 —— 不能与水的共用: 岩浆守卫在水的灌入检测
+    // 【之前】跑, 共用会让水检测每 tick 都被刚更新的时间戳挡掉(饿死)。
+    private long _lastNearLavaFloodScanMs = 0;
     // (撤完换向的宽限已并入上方 2026-09-25 字段区的 WATER_FLOOD_GRACE_MS)
 
     // ==== (2026-09-14 遇岩浆弃道) 岩浆不能按水处置, 见一次立刻换通道 ====
@@ -602,11 +605,9 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
     // 视觉感知扫描半径 (椭球): 水平 12 / 垂直 6。取 12 而不是全渲染距离 —— 只关心
     // "会挡到自己这条通道"的近场; 同一个岩浆湖远处的湖面属正常地形, 不该触发弃道。
     // 垂直压到 6: 下界岩浆海常在头顶正上方一层, 再远的头顶岩浆不构成"挖出来的危险"。
-    // (2026-10-02 单一判定源) 扫描半径 / 节流 / 撤离宽限期及其状态字段全部移到
-    // LavaSightHelper —— 两个消费方共一份节流 (同一次扫描不该因为多了一个消费方而翻倍)。
-    // 半径保留别名只为下方 javadoc 的 {@value} 引用继续有效。
-    private static final int LAVA_SIGHT_RADIUS_XZ = LavaSightHelper.SIGHT_RADIUS_XZ;
-    private static final int LAVA_SIGHT_RADIUS_Y = LavaSightHelper.SIGHT_RADIUS_Y;
+    // (2026-10-03) 原 LAVA_SIGHT_RADIUS_XZ/Y 别名随 findSeenLava 一并删除 —— 岩浆判据
+    // 已从"以玩家为圆心的 12/6 椭球"改为"沿自挖通道"(findFloodedTunnelLava)。
+    // 撤离距离/宽限期仍由 LavaSightHelper 提供 (retreatDistance / grantSightGrace)。
     // (2026-09-17 churn 修复) 跨实例播种: GiveUp 后父层重建的是【新实例】, 本地 hazards
     // 归零 → 换向时没有背离依据, 又冲同一处岩浆。onStart 时从仓内"见过即记忆"表
     // (VisibilityHelper.getRememberedValuable, 只收真感知过的岩浆, 按维度分表, 非透视)
@@ -1282,12 +1283,27 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         // 探索态没有挖掘队列, 洞内移动是 baritone 导航(岩浆不可通行, 自动绕行),
         // 无"弃道"可言 → 探索态(_inCave)整条跳过。非探索态 seen+adjacent 双口径不变。
         if (!_inCave && !_inLavaDetour && !_lavaGiveUp && !_ascendMode && !_baritoneAscent) {
-            // 主判据: 仓内人类式视觉 (表面暴露 + LOS 无遮挡), 危险能在 3~12 格外被抓出来。
-            BlockPos seenLava = findSeenLava(mod);
+            // (2026-10-03 口径纠正, 用户: "是在自己要挖的通道中遇到岩浆才放弃并换通道")
+            // 本守卫的语义(见上方注释)一直是【挖掘作业】: 队首是岩浆 / 自挖空间渗入。
+            //   队首      → skipAirAndWater 负责;
+            //   自挖渗入  → 本段负责(与 findFloodedTunnelWater 对称);
+            //   贴身兜底  → findAdjacentLava(危险已贴上身体, 不要求自挖记忆)。
+            //
+            // 旧主判据用的是 findSeenLava —— 以玩家为圆心扫 12/6 椭球内"看得见的岩浆"。
+            // 那是把判据锚在【我周围有什么】; 而本任务挖的是【我挖出来的这条 1-2 格宽、
+            // 2 格高的细长通道】(见字段区 126 行), 通道外、隔着岩壁的天然岩浆与
+            // "我这条通道会不会撞上它"没有必然关系。
+            // 现场 20261003-152002: `[MineDown-Lava] ... (cause=seen) mode=tunnel step=0`
+            // —— 刚启动、一步未挖, 就因 10 格外(玩家下方 6 格)的岩浆弃道, 而那处岩浆
+            // 根本不在隧道轴线上。
+            // 新口径与 findFloodedTunnelWater 完全对称(水/岩浆处置参数不同, 但
+            // "灌进我自己挖的通道"是同一几何概念): 贴身 11 格 → 头行四邻 → 沿当前
+            // 隧道方向前探 FLOOD_LOOKAHEAD 格的脚行/头行; 命中格必须【在自挖记忆里】。
+            BlockPos flooded = findFloodedTunnelLava(mod);
             // 兜底: 贴身 (LOS 射线在脚下/紧贴方块处几何不稳; 且贴身 = 危险已上身)。
-            BlockPos hazard = seenLava != null ? seenLava : findAdjacentLava(mod);
+            BlockPos hazard = flooded != null ? flooded : findAdjacentLava(mod);
             if (hazard != null) {
-                abandonTunnelForLava(mod, hazard, seenLava != null ? "seen" : "adjacent");
+                abandonTunnelForLava(mod, hazard, flooded != null ? "tunnel-flooded" : "adjacent");
             }
         }
 
@@ -1978,24 +1994,11 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
         return LavaSightHelper.isLava(mod, pos);
     }
 
-    /**
-     * (2026-09-17 视觉岩浆感知, 主判据) 在玩家周围 (水平 {@value #LAVA_SIGHT_RADIUS_XZ} /
-     * 垂直 {@value #LAVA_SIGHT_RADIUS_Y} 的椭球) 找【看得见】的岩浆, 命中返回坐标。
-     *
-     * "看得见"走仓内统一视觉入口 {@link VisibilityHelper#isBlockPerceivable}: 岩浆必须先过
-     * "表面暴露(正上方是空气/洞穴空气)"前置, 再过 LOS 射线。所以:
-     *   - 侧壁/脚下渗进已挖空间的岩浆, 上方就是通道空气 → 暴露 → 看得见 → 弃道;
-     *   - 隔着岩壁、或被岩石包裹的源头岩浆, 表面被封 → 判不可见 → 不触发 (反透视边界不变);
-     *   - 前提仍是区块已加载 (isLava 里的 isChunkLoaded)。
-     *
-     * 成本: 椭球约 8k 格 getBlockState / 200ms, 只在"是岩浆"的少数格上打 LOS 射线, 而
-     * LOS 自带 400ms 短缓存 (VisibilityHelper.isBlockVisible), 不会退化成每帧射线风暴。
-     */
-    private BlockPos findSeenLava(AltoClef mod) {
-        // (2026-10-02 单一判定源) 实现搬到 LavaSightHelper (逐字搬迁, 行为不变) ——
-        // DestroyBlockTask 的 LAVA-EXIT 闸门要用同一套视觉感知。
-        return LavaSightHelper.findSeenLava(mod);
-    }
+    // (2026-10-03 删除) 此处原有 findSeenLava 委托 —— "以玩家为圆心扫 12/6 椭球内看得见
+    // 的岩浆"。它把判据锚在【我周围有什么】, 与本任务"我自己挖的这条细长通道会不会撞上
+    // 岩浆"不同义; 实测 `mode=tunnel step=0` 刚启动、一步未挖, 就因 10 格外(且不在隧道
+    // 轴线上)的岩浆弃道。已由 findFloodedTunnelLava(自挖通道渗入) + findAdjacentLava
+    // (贴身) 取代, 详见 onTick 里的口径纠正注释。
 
     /**
      * (2026-09-17 视觉岩浆感知, 贴身兜底) 扫【与玩家紧邻的 11 格】(见 NEAR_FLUID_OFFSETS),
@@ -2360,6 +2363,53 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                 + ", 换通道计数清零, 重开楼梯下挖 dir=(" + _dirX + "," + _dirZ + ")";
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
+    }
+
+    /**
+     * (2026-10-03 通道灌岩浆感知) 找【灌进自挖通道的岩浆】, 命中返回坐标, 否则 null。
+     *
+     * <p><b>为什么需要它</b>（用户原话："是在自己要挖的通道中遇到岩浆才放弃并换通道"）：
+     * 本类挖的是【1-2 格宽、2 格高的细长自挖通道】（见字段区 126 行）。在这种窄道里
+     * bot 无处可躲，真正的危险是"**岩浆进入我这条通道**"。而本类此前岩浆只有两档：
+     * 队首（`skipAirAndWater`）与贴身（`findAdjacentLava`）；"从事后暴露的侧壁/头顶/
+     * 前方蔓延灌入已挖空间"这一档**水有**（{@link #findFloodedTunnelWater}），
+     * **岩浆没有** —— 它靠的是"以玩家为圆心扫 12/6 椭球"的球扫，实测会因通道外、
+     * 隔着岩壁的天然岩浆弃道（现场 20261003-152002 `cause=seen mode=tunnel step=0`）。
+     *
+     * <p>与 {@link #findFloodedTunnelWater} <b>逐行对称</b>：同一扫描顺序（贴身 11 格
+     * → 头行四邻 → 沿当前隧道方向前探 {@value #FLOOD_LOOKAHEAD} 格的脚行与头行），
+     * 同一"命中格必须在自挖记忆里"（`isSelfDugAir`）约束 —— 这格是我们亲手挖开的通道，
+     * 现在是岩浆，只可能是从通道壁/头顶/前方灌进来的。天然岩浆湖里的格子没有自挖记录，
+     * 不触发本检测（不构成"在我要挖的通道中遇到"）。
+     *
+     * <p>成本与 `findFloodedTunnelWater` 同量级（约 21 次 getBlockState）。节流戳
+     * {@code _lastNearLavaFloodScanMs} 与水的那根**刻意分开** —— 本方法在水的灌入检测
+     * **之前**跑，共用会让水检测每 tick 都被刚更新的时间戳挡掉（饿死）。
+     * 撤离收尾后的 2s 宽限期由 {@code LavaSightHelper.isSightGraceActive()} 提供
+     * （贴身兜底不查宽限 —— 危险已贴上身体时不能因"刚撤过"就不救）。
+     */
+    private BlockPos findFloodedTunnelLava(AltoClef mod) {
+        if (mod.getPlayer() == null || mod.getWorld() == null) return null;
+        long now = System.currentTimeMillis();
+        if (LavaSightHelper.isSightGraceActive()) return null;
+        if (now - _lastNearLavaFloodScanMs < NEAR_FLOOD_SCAN_INTERVAL_MS) return null;
+        _lastNearLavaFloodScanMs = now;
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        for (BlockPos off : NEAR_FLUID_OFFSETS) {
+            BlockPos p = feet.add(off);
+            if (isLava(mod, p) && isSelfDugAir(mod, p)) return p;
+        }
+        for (BlockPos off : FLOOD_HEAD_SIDE_OFFSETS) {
+            BlockPos p = feet.add(off);
+            if (isLava(mod, p) && isSelfDugAir(mod, p)) return p;
+        }
+        for (int k = 1; k <= FLOOD_LOOKAHEAD; k++) {
+            BlockPos p = feet.add(_dirX * k, 0, _dirZ * k);
+            if (isLava(mod, p) && isSelfDugAir(mod, p)) return p;
+            BlockPos head = p.up();
+            if (isLava(mod, head) && isSelfDugAir(mod, head)) return head;
+        }
+        return null;
     }
 
     /**
