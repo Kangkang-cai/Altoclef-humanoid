@@ -385,7 +385,7 @@ final class ActionDispatcher {
         } finally {
             _interrupting = false;
         }
-        if (interrupted != null && TASK_ACTIONS.contains(interrupted.cmd)) {
+        if (interrupted != null && hasReceipt(interrupted.cmd)) {
             _pending.removeIf(e -> e.actionId.equals(interrupted.actionId));
             emitDone(interrupted.actionId, interrupted.cmd, "被 @pause_main 暂停",
                     "interrupted", "被 @pause_main 暂停");
@@ -524,10 +524,19 @@ final class ActionDispatcher {
         return _active;
     }
 
-    /** 是否处于"按住"态（idle / pause_main）——此时"不动"是设计意图，不算卡死。 */
+    /** 是否处于"按住"态（idle / sleep_main）——此时"不动"是设计意图，不算卡死。 */
     boolean isHolding() {
         ActiveAction a = _active;
         return a != null && !TASK_ACTIONS.contains(a.cmd);
+    }
+
+    /**
+     * 该行动是否"有回执承诺"：结束时 / 被顶替 / 被暂停都会发 action_done。
+     * = 动作三类（goto/follow/give）+ sleep（按住态但**有自然终点**，天亮会发 completed）。
+     * 纯按住态 idle 不在内 —— 它没有终点，被顶替时静默清除即可。
+     */
+    private static boolean hasReceipt(String cmd) {
+        return TASK_ACTIONS.contains(cmd) || "sleep".equals(cmd);
     }
 
     /** 登记一个"有任务生命期"的活跃行动（解析命令目标供进度探针用）。
@@ -571,7 +580,7 @@ final class ActionDispatcher {
     private void supersedeActive(String newToken) {
         ActiveAction old = _active;
         if (old == null) return;
-        if (TASK_ACTIONS.contains(old.cmd)) {
+        if (hasReceipt(old.cmd)) {
             _pending.removeIf(e -> e.actionId.equals(old.actionId));
             emitDone(old.actionId, old.cmd, "被 @" + newToken + " 顶替",
                     "cancelled", "被 @" + newToken + " 顶替");
