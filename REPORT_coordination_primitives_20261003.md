@@ -175,14 +175,16 @@ bot 会**跨会话一直信**，每次重启都往错地方跑。`@forget` 只�
 
 | 项 | 值 |
 |---|---|
-| commit | `a52ca1d6`（含回执补全；前有 `714c2edd` / `f1b9d889`） |
+| commit | `b484451f`（含回执补全 + @sleep 收尾修复 + 冒烟脚本；前有 `a52ca1d6` / `714c2edd` / `f1b9d889`） |
 | 构建 | `./gradlew --offline build` ✅ BUILD SUCCESSFUL |
-| jar | `build/libs/altoclef-0.4.0.jar`，md5 `a0996d520abf4ade29cf9b9047ad8fe2` |
-| 部署 | ⛔ **未部署** —— 三个客户端均在运行（Fabric-1 / Fabric-2 / 根实例），按规矩不热替换 |
+| jar | `build/libs/altoclef-0.4.0.jar`，md5 `433411c51fd7154e00f7529b91c4539d` |
+| 部署 | ✅ **已部署**（三处 mods + `build/libs` 四方 md5 一致；备份 `altoclef-0.4.0.jar.bak_20261003_2321`×3） |
 
-**部署步骤（客户端全退后）**：备份三处 `mods/altoclef-0.4.0.jar` →
-覆盖 → 校验 src 与 deployed md5 一致。三处 mods 目录：
+**部署流程**（已完成）：客户端全退 → 备份三处 `mods/altoclef-0.4.0.jar`（`bak_20261003_2319` / `bak_20261003_2321`）
+→ 覆盖 → 校验 src 与 deployed md5 一致。三处 mods 目录：
 `versions/1.18.2-Fabric-1/mods/`、`versions/1.18.2-Fabric-2/mods/`、根 `.minecraft/mods/`。
+
+**验证**：跑 `python altoclef/bridge_smoke_test.py`（见 `DOC_bridge_commands.md` §8）。
 
 ---
 
@@ -191,8 +193,9 @@ bot 会**跨会话一直信**，每次重启都往错地方跑。`@forget` 只�
 1. `/status` 出现 `onlinePlayers`（多人在线时）与 `sleepingPlayers`（有人睡时）。
 2. 发 `@quota blaze_rod 0` 后，该 bot 的 `mainlineProgress` 应**不再推进 `烈焰棒N/8`**；
    发 `@quota blaze_rod 3` 后，收集数应**停在 3**（而非 8）。
-3. 发 `@sleep wait-dawn` 后，`activeAction.cmd == "sleep"`、`phase == "running"`，
-   `detail` 含"睡觉 / 等到天亮"；天亮后该 bot 恢复主线。
+3. 发 `@sleep wait-dawn` 后，`action_done(completed)` 文本含"熬到天亮"，`activeAction.cmd == "sleep"`；
+   **天亮时会再发一条 `action_done(completed)`「已醒来（天亮），已自动回主线」**；
+   期间被新指令顶替应变 `cancelled`，被 `@pause_main` 应变 `interrupted`。
 4. 发 `@sleep bed-only` 且附近无床时，应**立刻回话拒绝**（`action_done`），
    且**不出现** `CollectBedTask` / `Getting a bed first` 的远征行为。
 5. `sleep` / `quota` / `forgetmem` 不应出现在 403 列表里（白名单已含）。

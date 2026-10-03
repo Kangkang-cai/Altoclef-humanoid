@@ -41,7 +41,8 @@
 | 类型 | 命令 | 完成时机 |
 |---|---|---|
 | **瞬时** | `coords` `status` `inventory` `remember` `forget` `quota` `forgetmem` | 受理后**立即**发 `action_done` |
-| **按住态** | `idle` `sleep` | 受理后**立即**发 `action_done`（= "开始保持"），**无终态**；由下一条命令或 `@resume_main` 解除 |
+| **按住·无终态** | `idle` | 受理后立即发 `action_done`（= "开始保持"），**不会再有第二条**；由下一条命令或 `@resume_main` 解除 |
+| **按住·有终态** | `sleep` | 受理后立即发 `action_done`（= "已开始睡/熬"）；**天亮时再发一条 `completed`**；被顶替 = `cancelled`，被暂停 = `interrupted` |
 | **有任务** | `goto` `follow` `give` | 顶层任务**结束时**发 `action_done`（`status` = completed / failed / cancelled） |
 
 > ⚠️ 对端**仍应设超时兜底**（建议 `goto` 60s / `give` 300s / 其余 120s）。有任务类在"被新命令顶替"时会立刻收到 `cancelled`；但若 bridge 与客户端断连就不会有事件。
@@ -82,8 +83,12 @@
 - 为什么：主线原版在没床时会去 96 格内找床 / 羊毛+木板造床 = **时长不可预估的远征**。`bed-only` 给你"要么就近睡，要么直说做不到"。
 - `wait-dawn` 是**多人凑不齐全员入睡**时的正解（躺着等天亮 == 站着等天亮，但不会被钉在床边）。
 - 起床不需要命令：任何新行动（`@idle` / `@goto` …）会顶掉它。
-- 回执：受理即 `action_done(completed)`，`text` 是中文现场；`/status.activeAction` 会持续显示 `cmd="sleep"`。
-- **失败**：`bed-only` 附近没床 → `failed`；未知 mode → `failed`（旧版会静默当 `auto`）。
+- 回执（**三条，别只看第一条**）：
+  - 受理即 `action_done(completed)` = "已开始睡 / 已开始熬"，`text` 是中文现场；`/status.activeAction` 显示 `cmd="sleep"`；
+  - **天亮自然结束** → 再发一条 `action_done(completed)`「已醒来（天亮），已自动回主线」（与 `goto`/`follow`/`give` 同款）；
+  - **被新指令顶替** → `action_done(cancelled)`；**被 `@pause_main`** → `action_done(interrupted)`。
+  - ⇒ 对端永远能区分"还在睡"与"已结束 / 被打断"，不会卡在等超时。
+- **失败**：`bed-only` 附近没床 → `failed`；未知 mode → `failed`（旧版会静默当 `auto`，已修）。
 
 ### 3.2 `@quota <item_id> <count>` —— 需求份额
 
@@ -226,5 +231,32 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 
 ## 7. 部署状态
 
-commit `a52ca1d6`；jar md5 `a0996d520abf4ade29cf9b9047ad8fe2`；**未部署**（三客户端在运行，按规矩不热替换）。
+commit `b484451f`；jar md5 `433411c51fd7154e00f7529b91c4539d`；**已部署**三处 mods（+ `build/libs` 四方一致，备份 `bak_20261003_2321`）。
 白名单默认 **12 条**；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+
+---
+
+## 8. 冒烟测试脚本（`bridge_smoke_test.py`）
+
+一次性跑完本手册里的命令与回执契约，跑完给 PASS/FAIL 汇总。
+
+```
+# 开两个客户端进同一服务器后（bridge 在 8761/8762），在本机跑：
+python altoclef/bridge_smoke_test.py
+# 或只测一台 / 只看用例 / 附带破坏性用例：
+python altoclef/bridge_smoke_test.py --bots bot_1=http://127.0.0.1:8761
+python altoclef/bridge_smoke_test.py --list
+python altoclef/bridge_smoke_test.py --destructive
+```
+
+覆盖内容：
+1. **12 条核心用例** —— `quota` / `forgetmem` / `sleep` 的成功与**失败 reason 断言**（含"少参数"这类解析错）；
+2. `/status` 字段检查（`online` / `timeOfDay` / `onlinePlayers` / `sleepingPlayers` / `activeAction`）；
+3. `@sleep` 后 `activeAction.cmd == "sleep"`；
+4. **环境相关用例**（`bed-only`）只报告不断言 —— 有床→completed / 没床→failed 都算正常；
+5. 第二实例（`bot_2`）独立链路 + 双方 `onlinePlayers` 互见；
+6. **收尾自动复位**：测试前在跑主线 → `@resume_main`；否则 `@idle`。
+
+⚠️ 两点注意：
+- **限流**：默认 6 条/分钟（只读不占），全量约 2.5 分钟。想快就临时给三处 `bridge.json` 加 `"actionRatePerMinute": 200` 后重启，再 `--rate 200`（跑完改回 6）。
+- `--destructive` 会执行 `@forgetmem all`，**清掉该 bot 本存档的全部自动结构记忆**（要塞/堡垒坐标等），非扔档测试别用。
