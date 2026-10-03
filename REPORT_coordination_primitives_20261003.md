@@ -3,7 +3,10 @@
 > 2026-10-03 实现。上游需求：用户现场反馈——chat_and_play 实测时"一起睡觉难"，
 > 以及"烈焰棒需求，是不是不需要每个 bot 都获得 8 根，但不加控制每个 bot 都会尝试获得 8 根？"
 >
-> 交付对象：**chat_and_play（Next.js 对端）**。模组侧已提交 `f1b9d889`（未部署，见 §6）。
+> 交付对象：**chat_and_play（Next.js 对端）**。
+>
+> 📘 **要查"有哪些命令、语法、回执长什么样" → 看 `DOC_bridge_commands.md`（命令对接手册）。**
+> 本文件只讲"为什么这么设计、踩了哪些坑"。
 
 ---
 
@@ -172,9 +175,9 @@ bot 会**跨会话一直信**，每次重启都往错地方跑。`@forget` 只�
 
 | 项 | 值 |
 |---|---|
-| commit | `714c2edd`（分支 `main`；前一条 `f1b9d889`） |
+| commit | `a52ca1d6`（含回执补全；前有 `714c2edd` / `f1b9d889`） |
 | 构建 | `./gradlew --offline build` ✅ BUILD SUCCESSFUL |
-| jar | `build/libs/altoclef-0.4.0.jar`，md5 `20354b0bf6f5e01daeb5309c4fc133b9` |
+| jar | `build/libs/altoclef-0.4.0.jar`，md5 `a0996d520abf4ade29cf9b9047ad8fe2` |
 | 部署 | ⛔ **未部署** —— 三个客户端均在运行（Fabric-1 / Fabric-2 / 根实例），按规矩不热替换 |
 
 **部署步骤（客户端全退后）**：备份三处 `mods/altoclef-0.4.0.jar` →
