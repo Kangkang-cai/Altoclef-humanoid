@@ -320,11 +320,11 @@ public class AltoClef implements ModInitializer {
             // (2026-09-18 永久夜视) 客户端常挂夜视, 纯视觉: 录屏画面在暗处可读。
             // 用夜视而非 gamma, 是因为 gamma 在光影下会被覆盖 (详见方法注释)。
             tickPermanentNightVision();
-            // (2026-10-03 永久发光) 客户端常挂 Glowing 描边, 纯视觉: bot 本体在
-            // 画面里始终有轮廓 (隔墙可见)。注意发光不是光源, 不照亮周围环境。
+            // (2026-10-03 永久发光) 客户端常挂 Glowing 描边, 纯视觉: 画面里所有玩家
+            // (排除 kangkang) 都有轮廓。注意发光不是光源, 不照亮周围环境。
             tickPermanentGlowing();
-            // (2026-10-03 隐形光源) 方块光照不足时经 RCON 由服务端在脚下放
-            // minecraft:light (隐形、亮度 15), 离开超阈值自动回收。真实方块光照,
+            // (2026-10-03 隐形光源) 方块光照不足时经 RCON 由服务端在脚下/前方连放
+            // minecraft:light (隐形、亮度 15), 默认不回收 (用户拍板)。真实方块光照,
             // 光影下阴影保留; 背包零参与, 详见 InvisibleLightHelper 注释。
             adris.altoclef.util.helpers.InvisibleLightHelper.tick(this);
         }
@@ -1249,40 +1249,47 @@ public class AltoClef implements ModInitializer {
         }
     }
 
-    // ==== 永久发光 (2026-10-03) ====
-    // 只在我们自己挂过之后才知道"关开关时要撤掉谁"; 药水/服务器给的发光不归这个开关管。
-    private boolean _glowingAppliedByUs = false;
+    // ==== 永久发光 (2026-10-03; 13:4x 起对象=除 kangkang 外的所有玩家) ====
+    // 记录我们挂过描边的实体: 关开关时只撤我们自己挂的 (药水/服务器给的发光不归开关管)。
+    private final java.util.Set<java.util.UUID> _glowingAppliedByUs = new java.util.HashSet<>();
 
     /**
-     * 客户端侧常挂发光 (Glowing 实体描边): bot 本体在画面里始终有轮廓高亮,
-     * 隔墙也可见, 便于旁观/第三人称画面随时定位 bot。
+     * 客户端侧常挂发光 (Glowing 实体描边)。1003 13:4x 用户调整: 对象从"bot 自己"
+     * 改为"本客户端画面里的所有玩家, 排除配置 {@code forceGlowingExcludePlayer}
+     * (默认 "kangkang", 用户本人不发光)"。
      *
-     * <p>【边界】发光不是光源 —— 它不照亮周围环境, 只描 bot 自己的边; 第一人称
-     * 画面里看不到自己的描边 (第三人称/其他客户端视角才可见)。环境照明的需求
-     * 归夜视/lightmap 管, 不归这里。
+     * <p>【边界】发光不是光源, 不照亮环境; 主流光影包会吃掉描边 (outline 是独立
+     * 后处理 pass)。注意: 其他玩家的 flags 字节由服务端同步 (疾跑/着火等 flag
+     * 变化都会重发整字节), 会覆盖本地挂的描边位 —— 每拍重挂兜底, 被覆盖也只闪一拍。
      *
      * <p>实现依据 (1.18.2 反编译核实, minecraft-mapped.jar javap):
      * {@code Entity.isGlowing()} 客户端只读 flag 6 ({@code getFlag(6)}),
-     * {@code Entity.setGlowing()} 同时写字段与 flag ⇒ 客户端本地调用即生效;
-     * LivingEntity 内无客户端重置点, 挂一次即持续。纯视觉改动: 不碰任务/寻路
-     * 判据, 服务器不知情 (flag 不同步), 无服务端副作用。
+     * {@code Entity.setGlowing()} 同时写字段与 flag ⇒ 客户端本地调用即生效。
+     * 纯视觉改动: 不碰任务/寻路判据, 无服务端副作用。
      */
     private void tickPermanentGlowing() {
-        ClientPlayerEntity player = getPlayer();
-        if (player == null || _settings == null) return;
+        if (getPlayer() == null || _settings == null || getWorld() == null) return;
 
         if (!_settings.isForceGlowingEnabled()) {
-            if (_glowingAppliedByUs) {
-                player.setGlowing(false);
-                _glowingAppliedByUs = false;
+            if (!_glowingAppliedByUs.isEmpty()) {
+                for (net.minecraft.entity.Entity e : getWorld().getEntities()) {
+                    if (_glowingAppliedByUs.remove(e.getUuid())) {
+                        e.setGlowing(false);
+                    }
+                }
                 Debug.logMessage("[Glowing] 开关关闭, 已移除客户端发光");
             }
             return;
         }
 
-        if (!player.isGlowing()) {
-            player.setGlowing(true);
-            _glowingAppliedByUs = true;
+        String exclude = _settings.getForceGlowingExcludePlayer();
+        for (net.minecraft.client.network.AbstractClientPlayerEntity p : getWorld().getPlayers()) {
+            if (exclude != null && !exclude.isEmpty()
+                    && p.getGameProfile().getName().equalsIgnoreCase(exclude)) continue;
+            if (!p.isGlowing()) {
+                p.setGlowing(true);
+                _glowingAppliedByUs.add(p.getUuid());
+            }
         }
     }
 

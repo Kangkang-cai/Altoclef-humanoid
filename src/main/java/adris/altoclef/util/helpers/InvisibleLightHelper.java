@@ -2,10 +2,10 @@ package adris.altoclef.util.helpers;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
-import net.minecraft.block.BlockState;
 import net.minecraft.block.LightBlock;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 
 import java.io.BufferedInputStream;
@@ -24,8 +24,9 @@ import java.util.concurrent.Executors;
 
 /**
  * (2026-10-03) 隐形光源照明 —— bot 在方块光照不足的环境 (洞穴/下界) 中,
- * 由服务端通过 RCON 在 bot 脚下放置原版光源方块 ({@code minecraft:light},
- * 亮度 15、完全隐形、无碰撞), 离开超过阈值后自动回收。
+ * 由服务端通过 RCON 在 bot 脚下/眼前 + 视线前方连放原版光源方块
+ * ({@code minecraft:light}, 亮度 15、完全隐形、无碰撞)。默认不回收
+ * (1003 13:4x 用户拍板 "不收回也没事")。
  *
  * <h3>背景</h3>
  * 用户关掉永久夜视以保留光影的阴影美学后, 需要"至少身边一直看得见"。
@@ -45,16 +46,22 @@ import java.util.concurrent.Executors;
  *
  * <h3>判据与出口 (铁律: hold/refuse 分支必须有出口)</h3>
  * <ul>
- *   <li>放置: 脚下方块光照 &lt; {@code invisibleLightMinBlockLight}(默认 8)
- *       且 距最近已放光源 &gt; {@code invisibleLightSpacingBlocks}(默认 12)
- *       且 脚下是空气。只用方块光照 (LightType.BLOCK): 地表夜晚天空光 15
+ *   <li>放置 (1003 13:4x 起): 方块光照 &lt; {@code invisibleLightMinBlockLight}
+ *       (默认 8) 且 距最近已放光源 &gt; {@code invisibleLightSpacingBlocks}(6)
+ *       时, 一批连放: 脚下 + 眼前 (脚上一格) + 沿视线水平方向前方
+ *       {@code invisibleLightForwardCount}(4) 块、间隔
+ *       {@code invisibleLightForwardSpacing}(3) 格 (用户: "看不见前方")。
+ *       只放客户端视角是空气的格子 —— setblock 会无差别覆盖, 绝不能砸进
+ *       实体方块/水里。只用方块光照 (LightType.BLOCK): 地表夜晚天空光 15
  *       不触发, 避免地表夜间刷屏; 洞穴/下界才补光。</li>
- *   <li>回收: 同维度且欧氏距离 &gt; {@code invisibleLightRecycleDistance}
- *       (默认 32) → {@code /setblock ... air}。每拍最多回收 2 条防突发。</li>
+ *   <li>回收: 默认【关闭】({@code invisibleLightRecycleEnabled=false}, 用户
+ *       拍板 "不收回也没事")。开启时同维度且欧氏距离 &gt;
+ *       {@code invisibleLightRecycleDistance}(32) → {@code /setblock ... air}。
  *   <li>失败出口: 放置后靠客户端世界方块状态验证 (服务端方块更新包同步回
- *       客户端), 3s 未生效计一次失败, 连续 3 次失败 → 本会话停用 (一次性
- *       gate, 不无限重试刷日志)。典型失败原因: 服务端 rcon 未开启。</li>
- *   <li>账本上限 512 条: 超限强制回收最老的一条, 防长会话膨胀。</li>
+ *       客户端), 3s 内整批一个都没生效计一次失败, 连续 3 次失败 → 本会话停用
+ *       (一次性 gate, 不无限重试刷日志)。典型失败原因: 服务端 rcon 未开启。</li>
+ *   <li>账本上限 512 条: 超限剔除最老一条 (回收开启时连回收指令一起发;
+ *       关闭时只从账本剔除, 方块留在世界 —— 账本只服务"间距判据")。</li>
  * </ul>
  *
  * <h3>线程与跨世界</h3>
@@ -106,10 +113,12 @@ public final class InvisibleLightHelper {
     /** 已放置光源账本。只在客户端 tick 线程读写。 */
     private static final ArrayList<PlacedLight> PLACED = new ArrayList<>();
 
-    /** 在途放置 (null = 无); 验证通过前不发新指令。 */
-    private static BlockPos _pendingPlace;
+    /** 在途放置批次 (空 = 无); 验证通过前不发新批次。 */
+    private static final ArrayList<BlockPos> PENDING_BATCH = new ArrayList<>();
     private static String _pendingDimension;
     private static int _pendingTicks;
+    /** 本批发送条数 (判"整批全失败"用 —— 部分成功也算成功)。 */
+    private static int _pendingBatchSize;
 
     /** 连续放置失败计数。 */
     private static int _failStreak = 0;
@@ -127,9 +136,10 @@ public final class InvisibleLightHelper {
     /** 换存档清账本 (WorldStateGuard 回调)。停用标记复位: 换服务器给一次新机会。 */
     public static void onWorldBoundary() {
         PLACED.clear();
-        _pendingPlace = null;
+        PENDING_BATCH.clear();
         _pendingDimension = null;
         _pendingTicks = 0;
+        _pendingBatchSize = 0;
         _failStreak = 0;
         _disabledThisSession = false;
     }
@@ -144,61 +154,63 @@ public final class InvisibleLightHelper {
 
         String currentDim = mod.getWorld().getRegistryKey().getValue().toString();
 
-        // ---- 1) 回收: 同维度、离开超阈值 (每拍限额, 防突发) ----
-        double recycleDistSq = settings.getInvisibleLightRecycleDistance()
-                * settings.getInvisibleLightRecycleDistance();
-        int recycleBudget = RECYCLE_BUDGET_PER_TICK;
-        Iterator<PlacedLight> it = PLACED.iterator();
-        while (it.hasNext() && recycleBudget > 0) {
-            PlacedLight light = it.next();
-            if (!light.dimension.equals(currentDim)) continue;
-            if (player.squaredDistanceTo(light.pos.getX(), light.pos.getY(), light.pos.getZ())
-                    > recycleDistSq) {
-                it.remove();
-                sendRcon(mod, light.dimension, String.format(
-                        "setblock %d %d %d minecraft:air",
-                        light.pos.getX(), light.pos.getY(), light.pos.getZ()), "回收");
-                recycleBudget--;
+        // ---- 1) 回收: 默认关闭 (1003 13:4x 用户拍板 "不收回也没事")。开启时
+        //         同维度、离开超阈值 (每拍限额, 防突发) ----
+        if (settings.isInvisibleLightRecycleEnabled()) {
+            double recycleDistSq = settings.getInvisibleLightRecycleDistance()
+                    * settings.getInvisibleLightRecycleDistance();
+            int recycleBudget = RECYCLE_BUDGET_PER_TICK;
+            Iterator<PlacedLight> it = PLACED.iterator();
+            while (it.hasNext() && recycleBudget > 0) {
+                PlacedLight light = it.next();
+                if (!light.dimension.equals(currentDim)) continue;
+                if (player.squaredDistanceTo(light.pos.getX(), light.pos.getY(), light.pos.getZ())
+                        > recycleDistSq) {
+                    it.remove();
+                    sendRcon(mod, light.dimension, String.format(
+                            "setblock %d %d %d minecraft:air",
+                            light.pos.getX(), light.pos.getY(), light.pos.getZ()), "回收");
+                    recycleBudget--;
+                }
             }
         }
 
-        // ---- 2) 在途验证: 服务端方块更新包同步回客户端世界后算成功 ----
-        if (_pendingPlace != null) {
-            BlockState state = mod.getWorld().getBlockState(_pendingPlace);
-            if (state.getBlock() instanceof LightBlock) {
-                PLACED.add(new PlacedLight(_pendingDimension, _pendingPlace));
-                Debug.logMessage(String.format("[InvisibleLight] 放置光源 %s @ %s (账本 %d 条)",
-                        _pendingDimension, _pendingPlace.toShortString(), PLACED.size()));
-                _pendingPlace = null;
+        // ---- 2) 在途验证: 服务端方块更新包同步回客户端世界后算成功。
+        //         整批一个都没生效才算失败 (部分成功也重置失败计数) ----
+        if (!PENDING_BATCH.isEmpty()) {
+            Iterator<BlockPos> pit = PENDING_BATCH.iterator();
+            while (pit.hasNext()) {
+                BlockPos pos = pit.next();
+                if (mod.getWorld().getBlockState(pos).getBlock() instanceof LightBlock) {
+                    pit.remove();
+                    PLACED.add(new PlacedLight(_pendingDimension, pos));
+                    Debug.logMessage(String.format("[InvisibleLight] 放置光源 %s @ %s (账本 %d 条)",
+                            _pendingDimension, pos.toShortString(), PLACED.size()));
+                }
+            }
+            if (_pendingBatchSize - PENDING_BATCH.size() > 0) {
+                // 至少一块生效: 成功, 收尾
+                PENDING_BATCH.clear();
+                trimLedger(mod);
                 _pendingDimension = null;
                 _failStreak = 0;
-                // 账本超限: 强制回收最老一条
-                if (PLACED.size() > LEDGER_CAP) {
-                    PlacedLight oldest = PLACED.remove(0);
-                    sendRcon(mod, oldest.dimension, String.format(
-                            "setblock %d %d %d minecraft:air",
-                            oldest.pos.getX(), oldest.pos.getY(), oldest.pos.getZ()), "超限回收");
-                }
-                return;
-            }
-            if (++_pendingTicks > PLACE_VERIFY_TICKS) {
-                _pendingPlace = null;
+            } else if (++_pendingTicks > PLACE_VERIFY_TICKS) {
+                PENDING_BATCH.clear();
                 _pendingDimension = null;
                 if (++_failStreak >= MAX_FAIL_STREAK) {
                     _disabledThisSession = true;
                     Debug.logWarning("[InvisibleLight] 连续 " + _failStreak
-                            + " 次放置未生效 (大概率服务端 rcon 未开启/不可达), 本次运行停用");
+                            + " 批放置未生效 (大概率服务端 rcon 未开启/不可达), 本次运行停用");
                 }
             }
-            // 在途期间不发新指令
+            // 在途期间不发新批次
             return;
         }
 
-        // ---- 3) 放置判据 ----
+        // ---- 3) 放置判据: 暗处 + 距最近已放光源超过间距 ----
         BlockPos feet = player.getBlockPos();
         if (mod.getWorld().getLightLevel(LightType.BLOCK, feet)
                 >= settings.getInvisibleLightMinBlockLight()) return;
-        if (!mod.getWorld().getBlockState(feet).isAir()) return;
         int spacingSq = settings.getInvisibleLightSpacingBlocks()
                 * settings.getInvisibleLightSpacingBlocks();
         for (PlacedLight light : PLACED) {
@@ -206,13 +218,57 @@ public final class InvisibleLightHelper {
                     && light.pos.getSquaredDistance(feet) < spacingSq) return;
         }
 
-        // ---- 4) 发送放置指令, 进入在途验证 ----
-        sendRcon(mod, currentDim, String.format(
-                "setblock %d %d %d minecraft:light",
-                feet.getX(), feet.getY(), feet.getZ()), "放置");
-        _pendingPlace = feet.toImmutable();
+        // ---- 4) 组批次: 脚下 + 眼前 + 沿视线前方连放 (1003 13:4x "看不见前方") ----
+        ArrayList<BlockPos> batch = new ArrayList<>();
+        addCandidate(mod, batch, feet);
+        addCandidate(mod, batch, feet.up());
+        Vec3d look = player.getRotationVec(1.0F);
+        double horizLen = Math.sqrt(look.x * look.x + look.z * look.z);
+        int count = Math.max(0, settings.getInvisibleLightForwardCount());
+        int gap = Math.max(1, settings.getInvisibleLightForwardSpacing());
+        if (count > 0 && horizLen > 1e-4) {
+            for (int i = 1; i <= count; i++) {
+                int dx = (int) Math.round(look.x / horizLen * i * gap);
+                int dz = (int) Math.round(look.z / horizLen * i * gap);
+                BlockPos base = feet.add(dx, 0, dz);
+                addCandidate(mod, batch, base.up()); // 先试视平线 (脚上一格)
+                addCandidate(mod, batch, base);      // 退而求其次: 脚平面
+            }
+        }
+        if (batch.isEmpty()) return;
+
+        for (BlockPos pos : batch) {
+            sendRcon(mod, currentDim, String.format(
+                    "setblock %d %d %d minecraft:light",
+                    pos.getX(), pos.getY(), pos.getZ()), "放置");
+        }
+        PENDING_BATCH.addAll(batch);
         _pendingDimension = currentDim;
         _pendingTicks = 0;
+        _pendingBatchSize = batch.size();
+    }
+
+    /**
+     * 只往批次里加客户端视角是空气的格子: {@code setblock} 会无差别覆盖目标格,
+     * 绝不能砸进实体方块/水里 (水被换成光源会破坏水体)。重复坐标跳过;
+     * 光源方块经 mixin 也算 air → 对已放格重发无害。
+     */
+    private static void addCandidate(AltoClef mod, ArrayList<BlockPos> batch, BlockPos pos) {
+        if (batch.contains(pos)) return;
+        if (!mod.getWorld().getBlockState(pos).isAir()) return;
+        batch.add(pos.toImmutable());
+    }
+
+    /** 账本超限剔除最老一条 (回收开启时发回收指令, 关闭时只剔除账本条目)。 */
+    private static void trimLedger(AltoClef mod) {
+        while (PLACED.size() > LEDGER_CAP) {
+            PlacedLight oldest = PLACED.remove(0);
+            if (mod.getModSettings().isInvisibleLightRecycleEnabled()) {
+                sendRcon(mod, oldest.dimension, String.format(
+                        "setblock %d %d %d minecraft:air",
+                        oldest.pos.getX(), oldest.pos.getY(), oldest.pos.getZ()), "超限回收");
+            }
+        }
     }
 
     /** 投递一条 {@code /execute in <dim> run setblock ...} 到 RCON 后台线程。 */
@@ -237,7 +293,7 @@ public final class InvisibleLightHelper {
 
     /**
      * 极简 RCON 客户端 (Source RCON 协议, 与原版 server.properties 的 rcon 对应)。
-     * 每条命令一个短连接: 本功能触发频率极低 (黑暗中每 12 格一条),
+     * 每条命令一个短连接: 本功能触发频率极低 (黑暗中每几格一批),
      * 短连接最简单且无陈旧连接问题。
      *
      * <p>协议细节: 整数均为【小端】(Java DataInputStream 是大端, 必须手写 LE);

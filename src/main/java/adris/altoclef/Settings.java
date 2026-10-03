@@ -820,6 +820,13 @@ public class Settings implements IFailableConfigFile {
     private boolean forceGlowing = true;
 
     /**
+     * (2026-10-03 13:4x) 发光描边排除名单 (玩家名, 忽略大小写)。用户拍板:
+     * 画面里所有玩家都挂描边, 但 "kangkang"(用户本人) 不发光。
+     * 留空 = 不排除任何人。
+     */
+    private String forceGlowingExcludePlayer = "kangkang";
+
+    /**
      * (2026-10-03) 隐形光源照明: bot 处于方块光照不足的环境 (洞穴/下界) 时, 由服务端
      * 通过 RCON 在 bot 脚下放置原版光源方块 ({@code minecraft:light}, 亮度 15,
      * 完全隐形、无碰撞) —— 真实方块光照, 光影包照常计算明暗, 阴影美学保留。
@@ -840,6 +847,21 @@ public class Settings implements IFailableConfigFile {
      * 12 → 6 (1003 13:4x), 亮度 15 有效照明半径内双倍重叠。
      */
     private int invisibleLightSpacingBlocks = 6;
+
+    /**
+     * (2026-10-03 13:4x) 触发放置时, 沿视线水平方向在前方连放的亮块数量
+     * (0 = 只放脚下)。用户反馈"看不见前方" → 默认前方 4 块。
+     */
+    private int invisibleLightForwardCount = 4;
+
+    /** (2026-10-03 13:4x) 前方亮块之间的间距 (格)。 */
+    private int invisibleLightForwardSpacing = 3;
+
+    /**
+     * (2026-10-03 13:4x) 是否回收离开超距离的光源。用户拍板"不收回也没事"
+     * → 默认 false: 光源放出后留在世界里, 账本只记最近 512 条用于间距判据。
+     */
+    private boolean invisibleLightRecycleEnabled = false;
 
     /** (2026-10-03) 回收阈值: 离开已放光源超过该距离 (格) 就回收它。 */
     private double invisibleLightRecycleDistance = 32;
@@ -1021,6 +1043,10 @@ public class Settings implements IFailableConfigFile {
         forceGlowing = value;
     }
 
+    public String getForceGlowingExcludePlayer() {
+        return forceGlowingExcludePlayer;
+    }
+
     // ==== 隐形光源照明 (2026-10-03) ====
 
     public boolean isInvisibleLightEnabled() {
@@ -1033,6 +1059,18 @@ public class Settings implements IFailableConfigFile {
 
     public int getInvisibleLightSpacingBlocks() {
         return invisibleLightSpacingBlocks;
+    }
+
+    public int getInvisibleLightForwardCount() {
+        return invisibleLightForwardCount;
+    }
+
+    public int getInvisibleLightForwardSpacing() {
+        return invisibleLightForwardSpacing;
+    }
+
+    public boolean isInvisibleLightRecycleEnabled() {
+        return invisibleLightRecycleEnabled;
     }
 
     public double getInvisibleLightRecycleDistance() {
