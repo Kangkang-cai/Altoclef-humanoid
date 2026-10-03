@@ -17,7 +17,6 @@ import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.AscentHandoffHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.LandHelper;
-import adris.altoclef.util.helpers.LavaSightHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WaterExitHelper;
@@ -39,9 +38,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 
-import java.util.HashSet;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * Destroy a block at a position.
@@ -132,39 +129,11 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
     private BlockPos _waterExitGroundedPos = null;
     private static final int WATER_EXIT_REPEAT_BLACKLIST_TICKS = 20 * 30;
 
-    // ==== (2026-10-02 作业侧避岩浆: 遇岩浆即弃道) ====
-    // 口径与 MineDownExploreTask 的 [MineDown-LavaAbandon] 【完全一致】——
-    // 同一判定源 (LavaSightHelper: 椭球 12/6 视觉感知 + 贴身 11 格兜底, 反透视)、
-    // 同一撤离动作 (RunAwayFromPositionTask, maintainY=当前高度即只许水平跑)、
-    // 同一后撤距离 (主世界 16 / 下界 20, 必须 > 视觉半径 12 才能"撤完就看不见它")。
-    //   用户 09-17 拍板原话: "只要视觉范围内扫到的岩浆，那就叫看见了，看见了就该弃坑。"
-    //
-    // 为什么需要它 (现场 20261002-175747 18:56):
-    //   18:56:00.6 <Digging down to find ores> 挖到天然洞穴
-    //   18:56:04.1 STOP <Digging down to find ores> by <Destroy block at -698,23,231>  ← 交棒
-    //   18:56:08.3 <Collect visible ores> → <Mine And Collect: [[raw_iron] x 1]> → 本任务
-    //   18:56:16.2 unreachable 42 ticks ×3 拉黑重试 (够不着洞穴里的铁矿)
-    //   18:56:21.03 [LavaNav] 已报"脚下邻域岩浆" —— 但那只管导航开关
-    //   18:56:21~25.3 坐标恒 -698,20,227 (4.3s 零位移)
-    //   18:56:25.98 被流过来的岩浆泡住 → 18:56:28.43 [DEATH] cause=lava
-    //   ↑ 一旦从"挖隧道"切到"洞穴里挖具体矿块", MineDownExploreTask 那套弃道判据
-    //     就整段失效 —— 本闸门补的正是这个断层。
-    //
-    // 与水的处置刻意分开 (勿合并参数): 水是"能走过去 → 累计 2 次才撤、撤 10 格、撤完
-    // 回原地继续挖"(见上方 WATER-EXIT 段); 岩浆是"走过去=死 → 第一次看见就弃道、
-    // 撤 16~20 格、不回原目标"。两者物理性质相反。
-    //
-    // 与"泡进去之后"的 EscapeFromLavaTask 分工: 那个由 WorldSurvivalChain(prio 100) 在
-    // isInLava() 时派发; 本闸门在【还没泡进去】时就把人带走 —— 泡进去只有 2.45s 预算,
-    // 而逃生任务启动到 baritone 首条路径实测要 3.35s, 物理上来不及。
-    private boolean _lavaExitLatched = false;
-    /** 撤离动作: RunAwayFromPositionTask (与 MineDownExploreTask 弃道同款)。 */
-    private Task _toLavaSafe = null;
-    /** 本轮亲眼见过的岩浆点 (不是预测): 后撤目标带上全部, 避免在两处岩浆之间来回。 */
-    private final Set<BlockPos> _lavaHazards = new HashSet<>();
-    /** 撤离超时 (铁律: hold 必须有出口 —— 被围死/路线全断时不无限 hold)。 */
-    private static final double LAVA_EXIT_TIMEOUT_SEC = 20.0;
-    private final TimerGame _lavaExitTimer = new TimerGame(LAVA_EXIT_TIMEOUT_SEC);
+    // (2026-10-03 撤除) 此处原有「作业侧避岩浆: 遇岩浆即弃道」闸门 (字段 + onTick 段 +
+    // abandonTargetAfterLava), 已被实跑证伪并整体删除。撤除理由见 onTick 里那一段注释:
+    // 它照搬了"为 1-2 格宽细长自挖通道设计"的【以玩家为圆心 12/6 椭球】判据, 用在
+    // "开阔洞穴里挖指定方块"上, 导致目标一被派发就弃道拉黑, 26 轮死循环零产出
+    // (现场 20261003-152002)。挖通道的弃道机制本来就在 MineDownExploreTask 里。
 
     // (2026-09-01 自挖中央记录) 任务开始时目标是否实心: 只有"开始时实心、结束时
     // 变空气"才算我们真实挖开的一格(开始时已是空气的不记, 防误标天然洞空气)。
@@ -308,18 +277,6 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
         mod.getBehaviour().push();
         // Avoid placing on top, to prevent our annoying "run away" bug
         mod.getBehaviour().avoidBlockPlacing(pos -> _pos.up().equals(pos));
-    }
-
-    /**
-     * (2026-10-02 作业侧避岩浆) 弃道收尾: 把当前目标拉黑 (换通道, 由上层另选) +
-     * 给 {@link LavaSightHelper} 一个 2s 感知宽限。
-     *
-     * <p>{@code allowed=0} = 首次即拉黑, 不再等默认的 5 轮 (同本文件 [LavaEdge] 的口径) ——
-     * 目标在岩浆边上不是"偶尔够不着", 而是"这块地方本身危险"。
-     */
-    private void abandonTargetAfterLava(AltoClef mod) {
-        mod.getBlockTracker().requestBlockUnreachable(_pos, 0);
-        LavaSightHelper.grantSightGrace();
     }
 
     /**
@@ -554,66 +511,18 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
             }
         }
 
-        // ==== (2026-10-02 作业侧避岩浆: 遇岩浆即弃道) 保活 + 触发 ====
-        // 位置: 保护性早退之后、wander/挖掘之前 —— 必须覆盖【整段作业】而不只是
-        // "已进入挖掘距离": 本次事故正是"够不着 → 原地清障/重试 17s"这一段。
-        if (_lavaExitLatched) {
-            if (_toLavaSafe != null && _toLavaSafe.isFinished(mod)) {
-                // 撤完: 弃道拉黑 (换通道, 由上层另选) + 2s 感知宽限 (churn 修复, 同
-                // MineDownExploreTask 的 LAVA_SIGHT_GRACE_MS —— 落点可能只是贴着视觉
-                // 半径边缘, 否则同一秒又"看见"同一处)。
-                // 拉黑刻意放在【撤离完成时】而非触发瞬间: 触发瞬间拉黑会让上层立刻换目标、
-                // 连带把本实例一起替换掉, 正在跑的撤离任务随之被拆 (新实例 _toLavaSafe=null),
-                // bot 还没走出去就停了。
-                abandonTargetAfterLava(mod);
-                _toLavaSafe = null;
-                _lavaExitLatched = false;
-                _lavaHazards.clear();
-            } else if (_lavaExitTimer.elapsed()) {
-                // 出口 (铁律: hold 必须有出口): 20s 还没撤出去 (被围死 / 路线全断) →
-                // 弃道拉黑 + 松闩, 不再无限 hold。
-                String m = "[LAVA-EXIT] retreat timed out at "
-                        + mod.getPlayer().getBlockPos().toShortString()
-                        + " -> abandon target " + _pos.toShortString() + " (no further hold)";
-                Debug.logMessage(m);
-                Debug.logToFile("altoclef_diag.log", m);
-                abandonTargetAfterLava(mod);
-                _toLavaSafe = null;
-                _lavaExitLatched = false;
-                _lavaHazards.clear();
-            } else if (_toLavaSafe != null) {
-                setDebugState("Saw lava -> abandoned target, retreating");
-                return _toLavaSafe;
-            } else {
-                // 防御: 闩在但任务缺失 (理论上不发生) → 松闩走正常流程。
-                _lavaExitLatched = false;
-            }
-        }
-        if (!_lavaExitLatched) {
-            BlockPos hazard = LavaSightHelper.findLavaHazard(mod);
-            if (hazard != null) {
-                _lavaHazards.add(hazard.toImmutable());
-                _lavaExitLatched = true;
-                _lavaExitTimer.reset();
-                double dist = LavaSightHelper.retreatDistance();
-                // maintainY = 当前高度: 后撤只许水平跑, 不许上下乱窜 —— 下界往上跑
-                // 可能一头扎进头顶的岩浆海, 往下跑可能踩空 (同 MineDownExploreTask)。
-                _toLavaSafe = new RunAwayFromPositionTask(dist,
-                        mod.getPlayer().getBlockPos().getY(),
-                        _lavaHazards.toArray(new BlockPos[0]));
-                String m = "[LAVA-EXIT] saw lava at " + hazard.toShortString()
-                        + " -> abandon target " + _pos.toShortString()
-                        + " & retreat " + (int) dist + " blocks"
-                        + " (撤离目标 " + _lavaHazards.size() + " 处). player="
-                        + mod.getPlayer().getBlockPos().toShortString();
-                Debug.logMessage(m);
-                Debug.logToFile("altoclef_diag.log", m);
-            }
-        }
-        if (_lavaExitLatched && _toLavaSafe != null) {
-            setDebugState("Saw lava -> abandoned target, retreating");
-            return _toLavaSafe;
-        }
+        // (2026-10-03 撤除) 这里曾有一段"作业侧避岩浆: 遇岩浆即弃道"闸门 —— 全仓
+        // 实跑证明它是有害的: 它照搬了 MineDownExploreTask 为【1-2 格宽细长自挖通道】
+        // 设计的"以玩家为圆心 12/6 椭球扫看得见的岩浆"。但本任务挖的是【开阔洞穴里的
+        // 指定方块】, "我周围 12 格有岩浆"与"我要挖的方块危不危险"没有因果关系。
+        // 现场 20261003-152002: 目标 -702,33,215 (玩家上方 12 格) 因 -709,14,227
+        // (玩家下方 6 格、垂直相距 19 格) 的岩浆被弃道; 目标一被派发 2 毫秒就触发,
+        // 上层换目标 → 再触发 → 15:25:42~15:28:03 共 26 轮、零产出。
+        // 另: 同一瞬间 15:25:41.869 MineDownExploreTask 自己已打 [MineDown-Lava]
+        // cause=seen 并弃道 —— 挖通道的弃道机制本来就在那边, 这里纯属重复。
+        // 用户口径: "是在自己要挖的通道中遇到岩浆才放弃并换通道" ⇒ 判据必须锚定
+        // 【我要挖的那个东西/我挖出来的那条通道】, 不是【我周围有什么】。
+        // (真正需要补的那一档是给挖通道侧的"岩浆灌进自挖通道", 见 MineDownExploreTask。)
 
         // Wander and check
         if (_wanderTask.isActive() && !_wanderTask.isFinished(mod)) {
