@@ -114,6 +114,15 @@ public final class BridgeHttpServer {
         s.stopInternal();
     }
 
+    /**
+     * 事件缓冲访问（NamedLandmarks 的 landmark_saved/failed 回执用）。
+     * bridge 未启动返回 null —— 调用方跳过事件（游戏内手动 @remember 仍可用）。
+     */
+    static EventBuffer buffer() {
+        BridgeHttpServer s = _instance;
+        return s == null ? null : s._buffer;
+    }
+
     private void startInternal() throws IOException {
         // 只绑 127.0.0.1：bridge 是 localhost-only 桥，绝不对外暴露。
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
@@ -218,6 +227,10 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "environment"); sb.append(':'); BridgeJson.str(sb, s.environment);
             sb.append(','); BridgeJson.str(sb, "biome"); sb.append(':'); BridgeJson.str(sb, s.biome);
             sb.append(','); BridgeJson.str(sb, "nearbyHostiles"); sb.append(':').append(BridgeJson.i(s.nearbyHostiles));
+            // ---- (2026-10-03 重要位置记忆共享, 定稿 §4.1) 空时整键省略 ----
+            if (s.landmarks != null && !s.landmarks.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "landmarks"); sb.append(':').append(s.landmarks);
+            }
             // ---- 阶段三感知补全：现场执行状态（在线时才有意义；离线快照省略）----
             if (s.botStatus != null && !s.botStatus.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "botStatus"); sb.append(':'); BridgeJson.str(sb, s.botStatus);

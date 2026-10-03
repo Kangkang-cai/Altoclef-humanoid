@@ -131,6 +131,9 @@ public final class WorldStateGuard {
         // (2026-09-30 决策台账) 同款丢弃语义: 换存档清内存、不重载磁盘
         // (key 本身按存档隔离, 清表只为阻止跨存档重载)。
         register("DecisionMemory(跨重启决策台账)", DecisionMemory::onWorldBoundary);
+        // (2026-10-03 命名地标) 同款丢弃语义; key 只按存档隔离(条目自带 dim),
+        // WorldStateGuard 触发判据(saveDirName)恰好就是它的 key 口径。
+        register("NamedLandmarks(命名地标)", adris.altoclef.bridge.NamedLandmarks::onWorldBoundary);
 
         // ---- 冷却 / 哨兵 / 账本(危害: 误压制新世界的行为) ----
         register("CraftGenericWithRecipeBooksTask(合成放弃/格归属)",

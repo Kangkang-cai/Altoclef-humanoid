@@ -66,8 +66,13 @@ final class ActionDispatcher {
     /** 只读命令：不占限流额度（不改变世界状态）。 */
     private static final Set<String> READ_ONLY = Set.of("coords", "status", "inventory", "help", "list");
 
-    /** 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done，**不进 pending 队列**）。 */
-    private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list", "idle");
+    /**
+     * 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done，**不进 pending 队列**）。
+     * (2026-10-03) remember/forget 加入：命名地标读写不启任务（NamedLandmarks 直改存储 +
+     * 自发 landmark_saved/failed 回执），成功失败都不等 TaskFinishedEvent。
+     */
+    private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list",
+            "idle", "remember", "forget");
 
     /**
      * 有任务生命期的行动：只有这些命令才登记 pending、才可能在顶层任务结束时回 action_done

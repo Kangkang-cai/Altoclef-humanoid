@@ -38,7 +38,10 @@ public class AltoClefCommands {
                 // (2026-09-17) 训练数据集录制开关/状态。
                 new RecordCommand(),
                 // (2026-09-18) 永久夜视开关 (录屏画面在暗处可读, 光影下也适用)。
-                new NightVisionCommand()
+                new NightVisionCommand(),
+                // (2026-10-03) 命名地标读写 (重要位置记忆共享, bridge /command 白名单)。
+                new RememberCommand(),
+                new ForgetCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

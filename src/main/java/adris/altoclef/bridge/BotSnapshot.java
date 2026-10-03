@@ -76,6 +76,13 @@ final class BotSnapshot {
     final String botStatus;
     /** 仅 stuck/recovering 时非空，说明卡在哪。 */
     final String stuckReason;
+    // ---- (2026-10-03 重要位置记忆共享, 定稿 mod-bridge-landmark.md §4.1) ----
+    /**
+     * landmarks JSON 数组片段（命名地标 + KnowledgeMemory 自动中心, 合计 ≤20, 见
+     * {@link NamedLandmarks#snapshotJsonOrNull}）；无任何内容为 null（/status 整键省略）。
+     * 预序列化片段（同 BridgeEvent.detail 的信任模型：客户端线程用 BridgeJson 转义构建）。
+     */
+    final String landmarks;
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
@@ -83,7 +90,8 @@ final class BotSnapshot {
                         String food, int foodCount, String keyItems,
                         String taskDetail, String mainlineProgress, String timeOfDay,
                         String weather, String environment, String biome, int nearbyHostiles,
-                        ActiveAction activeAction, String botStatus, String stuckReason) {
+                        ActiveAction activeAction, String botStatus, String stuckReason,
+                        String landmarks) {
         this.botId = botId;
         this.ts = ts;
         this.online = online;
@@ -111,6 +119,7 @@ final class BotSnapshot {
         this.activeAction = activeAction;
         this.botStatus = botStatus == null ? "" : botStatus;
         this.stuckReason = stuckReason == null ? "" : stuckReason;
+        this.landmarks = landmarks;
     }
 
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
@@ -118,7 +127,7 @@ final class BotSnapshot {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
-                null, "", "");
+                null, "", "", null);
     }
 
     /**
@@ -166,7 +175,8 @@ final class BotSnapshot {
                 SceneDigest.timeOfDay(world), SceneDigest.weather(world),
                 SceneDigest.environment(mod, p), SceneDigest.biome(world, p),
                 SceneDigest.nearbyHostiles(world, p),
-                activeAction, botStatus, stuckReason);
+                activeAction, botStatus, stuckReason,
+                NamedLandmarks.snapshotJsonOrNull(pos, mod));
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */

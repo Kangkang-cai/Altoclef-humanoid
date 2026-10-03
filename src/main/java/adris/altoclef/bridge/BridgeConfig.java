@@ -46,11 +46,15 @@ public class BridgeConfig {
 
     /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
-     * 其余一律 403。默认 7 条（4 行动 + 3 只读），见 DESIGN_action_api.md §1.2 A 档。
-     * 显式置空数组 = 不允许任何行动命令（关闭行动通道）；字段缺省 = 用默认 7 条。
+     * 其余一律 403。默认 9 条（4 行动 + 2 命名地标读写 + 3 只读），见 DESIGN_action_api.md
+     * §1.2 A 档 + mod-bridge-landmark.md §4.2。显式置空数组 = 不允许任何行动命令
+     * （关闭行动通道）；字段缺省 = 用默认 9 条。
+     * ⚠ 已落盘的旧 bridge.json 若含旧 7 条数组会盖掉此默认 —— 部署时需同步补三处配置
+     * （定稿 §5）。
      */
     public java.util.List<String> allowedCommands = new java.util.ArrayList<>(java.util.Arrays.asList(
-            "goto", "follow", "give", "idle", "coords", "status", "inventory"));
+            "goto", "follow", "give", "idle", "coords", "status", "inventory",
+            "remember", "forget"));
 
     /**
      * 行动类命令限流（条/分钟，滑动窗口）。只读命令（coords/status/inventory）不占额度。
