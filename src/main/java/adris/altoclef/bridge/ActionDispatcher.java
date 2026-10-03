@@ -8,6 +8,8 @@ import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
 import adris.altoclef.tasks.entity.GiveItemToPlayerTask;
+import adris.altoclef.tasks.misc.SleepThroughNightTask;
+import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
@@ -428,6 +430,23 @@ final class ActionDispatcher {
         if (_interrupting) return; // pause 的 cancel，不当作行动完成
         Task finished = evt == null ? null : evt.lastTaskRan;
         if (finished == null) return;
+        // (@sleep) 按住态但**有自然终点**：睡到天亮 / 熬到天亮 → 结束即回执 + 自动回主线（B' 同款）。
+        // 为什么必须单独处理：sleep 走 INSTANT（不登记 pending），若不在此发 done，对端永远收不到
+        // 完成信号；且 UserTaskChain.onTaskFinish 在 idleCommand 为空时会 TaskRunner.disable()
+        // ⇒ 天亮后 bot 会一直停摆到有人再派任务。回主线顺带把它 enable 回来（runTask 内有 enable）。
+        // ⚠ 主线的 sleep 是**子任务**，只有顶层任务结束才发 TaskFinishedEvent，不会误入这里。
+        if (finished instanceof SleepThroughNightTask || finished instanceof WaitForDawnTask) {
+            ActiveAction a = _active;
+            if (a != null && "sleep".equals(a.cmd)) {
+                boolean resumed = resumeMainline();
+                emitDone(a.actionId, "sleep", "已醒来（天亮）" + (resumed ? "，已自动回主线" : ""),
+                        "completed", null);
+                _active = null;
+                _activeSinceMs = 0;
+                resetProgress();
+                return;
+            }
+        }
         PendingAction p = pollMatching(finished);
         if (p == null) return; // 无匹配（含 pending 为空 / 类型不符）：丢弃，等对端超时
         String label = finished.toString();
