@@ -320,6 +320,9 @@ public class AltoClef implements ModInitializer {
             // (2026-09-18 永久夜视) 客户端常挂夜视, 纯视觉: 录屏画面在暗处可读。
             // 用夜视而非 gamma, 是因为 gamma 在光影下会被覆盖 (详见方法注释)。
             tickPermanentNightVision();
+            // (2026-10-03 永久发光) 客户端常挂 Glowing 描边, 纯视觉: bot 本体在
+            // 画面里始终有轮廓 (隔墙可见)。注意发光不是光源, 不照亮周围环境。
+            tickPermanentGlowing();
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)
@@ -1239,6 +1242,43 @@ public class AltoClef implements ModInitializer {
             player.addStatusEffect(new StatusEffectInstance(StatusEffects.NIGHT_VISION,
                     NIGHT_VISION_DURATION_TICKS, 0, false, false, false));
             _nightVisionAppliedByUs = true;
+        }
+    }
+
+    // ==== 永久发光 (2026-10-03) ====
+    // 只在我们自己挂过之后才知道"关开关时要撤掉谁"; 药水/服务器给的发光不归这个开关管。
+    private boolean _glowingAppliedByUs = false;
+
+    /**
+     * 客户端侧常挂发光 (Glowing 实体描边): bot 本体在画面里始终有轮廓高亮,
+     * 隔墙也可见, 便于旁观/第三人称画面随时定位 bot。
+     *
+     * <p>【边界】发光不是光源 —— 它不照亮周围环境, 只描 bot 自己的边; 第一人称
+     * 画面里看不到自己的描边 (第三人称/其他客户端视角才可见)。环境照明的需求
+     * 归夜视/lightmap 管, 不归这里。
+     *
+     * <p>实现依据 (1.18.2 反编译核实, minecraft-mapped.jar javap):
+     * {@code Entity.isGlowing()} 客户端只读 flag 6 ({@code getFlag(6)}),
+     * {@code Entity.setGlowing()} 同时写字段与 flag ⇒ 客户端本地调用即生效;
+     * LivingEntity 内无客户端重置点, 挂一次即持续。纯视觉改动: 不碰任务/寻路
+     * 判据, 服务器不知情 (flag 不同步), 无服务端副作用。
+     */
+    private void tickPermanentGlowing() {
+        ClientPlayerEntity player = getPlayer();
+        if (player == null || _settings == null) return;
+
+        if (!_settings.isForceGlowingEnabled()) {
+            if (_glowingAppliedByUs) {
+                player.setGlowing(false);
+                _glowingAppliedByUs = false;
+                Debug.logMessage("[Glowing] 开关关闭, 已移除客户端发光");
+            }
+            return;
+        }
+
+        if (!player.isGlowing()) {
+            player.setGlowing(true);
+            _glowingAppliedByUs = true;
         }
     }
 

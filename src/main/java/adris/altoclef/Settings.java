@@ -810,6 +810,16 @@ public class Settings implements IFailableConfigFile {
     private double nightVisionRefreshBelowSeconds = 300;
 
     /**
+     * (2026-10-03) 客户端常挂发光 (Glowing, 实体描边): bot 本体在画面里始终有轮廓
+     * 高亮 (隔墙也可见), 纯视觉。注意发光【不是光源】—— 它不照亮周围环境, 只描
+     * bot 自己的边; 第一人称画面里看不到自己的描边 (第三人称/旁观视角才可见)。
+     * 实现走 {@code Entity.setGlowing} → flag 6: 1.18.2 字节码核实客户端
+     * {@code isGlowing()} 只读该 flag, 服务器不知情, 无服务端副作用。
+     * 默认开启。运行时 {@code setForceGlowingEnabled} 可关 (只改内存)。
+     */
+    private boolean forceGlowing = true;
+
+    /**
      * (2026-09-17) 每帧导出的可见方块上限 (按距离由近到远截断)。
      * 防"海洋群系 24 万格水"这类极端场景撑爆单帧 (见 VisibilityHelper 的水体过滤约定)。
      * 设为 0 表示完全不导出方块通道 (D)。
@@ -965,6 +975,20 @@ public class Settings implements IFailableConfigFile {
 
     public double getNightVisionRefreshBelowSeconds() {
         return nightVisionRefreshBelowSeconds;
+    }
+
+    // ==== 永久发光 (2026-10-03) ====
+
+    public boolean isForceGlowingEnabled() {
+        return forceGlowing;
+    }
+
+    /**
+     * (2026-10-03) 运行时开关。跟夜视开关一样只改内存字段, 【不】回写
+     * altoclef_settings.json; 想默认关掉请直接改配置文件的 {@code forceGlowing}。
+     */
+    public void setForceGlowingEnabled(boolean value) {
+        forceGlowing = value;
     }
 
     public int getRecordPerceptionMaxBlocks() {
