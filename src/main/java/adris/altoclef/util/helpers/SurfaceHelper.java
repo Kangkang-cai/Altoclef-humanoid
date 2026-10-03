@@ -256,7 +256,10 @@ public final class SurfaceHelper {
         BlockPos.Mutable m = new BlockPos.Mutable();
         int top = wsTop - 1;
         m.set(x, top, z);
-        if (w.getBlockState(m.toImmutable()).isAir()) {
+        if (w.getBlockState(m.toImmutable()).isAir()
+                && !(w.getBlockState(m.toImmutable()).getBlock() instanceof net.minecraft.block.LightBlock)) {
+            // (2026-10-03) 光源方块豁免: 服务端高度图会计入隐形光源 (isAir=false),
+            // 客户端语义它是空气 —— 不算数据洞, 落下去由 isNotTerrain (isAir) 正常跳过。
             // 高度图说这里非空气, 客户端方块却说是空气 → 数据洞 (092740/094844 形态)。
             // 保守: 整柱按实心算, 埋深 = hb − 1。绝不向下落 —— 落下去就会把洞穴顶当地表。
             return (wsTop - 1) - y;

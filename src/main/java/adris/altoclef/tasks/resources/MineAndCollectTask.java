@@ -2988,7 +2988,7 @@ public class MineAndCollectTask extends ResourceTask {
                         Block block = mod.getWorld().getBlockState(check).getBlock();
                         if (block == Blocks.CAVE_AIR) {
                             caveAir++;
-                        } else if (block == Blocks.AIR) {
+                        } else if (WorldHelper.isAir(block)) {
                             air++;
                         }
                     }

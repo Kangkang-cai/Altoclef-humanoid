@@ -6,6 +6,7 @@ import adris.altoclef.tasks.construction.PlaceBlockTask;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Blocks;
@@ -46,7 +47,7 @@ public class ConstructIronGolemTask extends Task {
             for (BlockPos pos : WorldHelper.scanRegion(mod,
                     new BlockPos(mod.getPlayer().getBlockX(), 64, mod.getPlayer().getBlockZ()),
                     new BlockPos(mod.getPlayer().getBlockX(), 128, mod.getPlayer().getBlockZ()))) {
-                if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.AIR) {
+                if (WorldHelper.isAir(mod.getWorld().getBlockState(pos).getBlock())) {
                     _position = pos;
                     break;
                 }

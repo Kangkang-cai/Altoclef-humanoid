@@ -917,7 +917,7 @@ public class BoatCrossingTask extends Task {
                     BlockPos c = new BlockPos(p.getX() + dx, p.getY(), p.getZ() + dz);
                     if (!mod.getChunkTracker().isChunkLoaded(c)) continue;
                     Block b = mod.getWorld().getBlockState(c).getBlock();
-                    if (b == Blocks.WATER || b == Blocks.AIR) continue;
+                    if (b == Blocks.WATER || WorldHelper.isAir(b)) continue;
                     if (!WorldHelper.isSolid(mod, c.down()) && !WorldHelper.isSolid(mod, c)) continue;
                     return c;
                 }

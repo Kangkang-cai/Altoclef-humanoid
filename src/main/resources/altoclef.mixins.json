@@ -12,6 +12,7 @@
     "ClientUIMixin",
     "EntityAccessor",
     "GameOverlayMixin",
+    "LightBlockAirMixin",
     "PersistentProjectileEntityAccessor",
     "SlotClickMixin",
     "WorldBlockModifiedMixin"

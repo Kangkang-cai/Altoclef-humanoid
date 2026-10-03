@@ -67,6 +67,13 @@ import java.util.concurrent.Executors;
  *       主世界); 换存档时由 {@code WorldStateGuard} 调 {@link #onWorldBoundary()}
  *       清空。</li>
  * </ul>
+ *
+ * <h3>零关联 (2026-10-03 用户要求)</h3>
+ * 客户端全 JVM 把光源方块当空气: {@code LightBlockAirMixin} 在
+ * {@code AbstractBlockState.isAir()} HEAD 接管 (~50 处 isAir 判定 + 感知导出
+ * 自动跳过), {@code WorldHelper.isAir(Block)} 补 Block 级比较
+ * (BlockTracker/MineDownExploreTask 空腔统计等 5 处), SurfaceHelper 数据洞检测
+ * 对光源显式豁免。baritone 走 Material.AIR/无碰撞判可穿过, 天然无关联。
  */
 public final class InvisibleLightHelper {
 

@@ -713,7 +713,11 @@ public interface WorldHelper {
     }
 
     static boolean isAir(Block block) {
-        return block == Blocks.AIR || block == Blocks.CAVE_AIR || block == Blocks.VOID_AIR;
+        // (2026-10-03 隐形光源零关联) 光源方块 (minecraft:light, InvisibleLightHelper
+        // 经 RCON 放置) 客户端语义等同空气 —— 见 LightBlockAirMixin。所有走本方法的
+        // 世界扫描 (BlockTracker/MineAndCollectTask 等) 自动把光源当空气。
+        return block == Blocks.AIR || block == Blocks.CAVE_AIR || block == Blocks.VOID_AIR
+                || block instanceof net.minecraft.block.LightBlock;
     }
 
     static boolean isInteractableBlock(AltoClef mod, BlockPos pos) {

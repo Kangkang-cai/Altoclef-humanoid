@@ -283,7 +283,8 @@ public class ExploreStrongholdTask extends Task {
     }
 
     private boolean isAir(Block b) {
-        return b == Blocks.AIR || b == Blocks.CAVE_AIR || b == Blocks.VOID_AIR;
+        // (2026-10-03) 委托 WorldHelper: 光源方块 (隐形照明) 客户端语义等同空气。
+        return WorldHelper.isAir(b);
     }
 
     /** (2026-08-27 用户要求: 导航终点必须是地牢空气 XYZ, 且【必须严格】上下

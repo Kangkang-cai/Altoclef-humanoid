@@ -835,8 +835,11 @@ public class Settings implements IFailableConfigFile {
     /** (2026-10-03) 触发阈值: 脚下方块光照 (LightType.BLOCK) 低于该值才放光源。 */
     private int invisibleLightMinBlockLight = 8;
 
-    /** (2026-10-03) 两个光源的最小间距 (格, 欧氏)。12 ≈ 亮度 15 的有效照明半径。 */
-    private int invisibleLightSpacingBlocks = 12;
+    /**
+     * (2026-10-03) 两个光源的最小间距 (格, 欧氏)。用户实跑反馈亮度延伸太小,
+     * 12 → 6 (1003 13:4x), 亮度 15 有效照明半径内双倍重叠。
+     */
+    private int invisibleLightSpacingBlocks = 6;
 
     /** (2026-10-03) 回收阈值: 离开已放光源超过该距离 (格) 就回收它。 */
     private double invisibleLightRecycleDistance = 32;

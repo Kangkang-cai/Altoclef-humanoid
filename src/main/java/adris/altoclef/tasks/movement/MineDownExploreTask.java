@@ -2991,7 +2991,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
                             // 区块(未加载按空气算会污染连通集); 半径 8 时恒已加载, 无副作用。
                             if (!mod.getChunkTracker().isChunkLoaded(n)) continue;
                             net.minecraft.block.Block nb = mod.getWorld().getBlockState(n).getBlock();
-                            if (nb == Blocks.AIR || nb == Blocks.CAVE_AIR) {
+                            if (WorldHelper.isAir(nb)) {
                                 queue.add(n);
                             }
                         }
@@ -3228,7 +3228,7 @@ public class MineDownExploreTask extends Task implements ITaskRequiresGrounded {
             up = up.up();
             if (!mod.getChunkTracker().isChunkLoaded(up)) return true;
             net.minecraft.block.Block b = mod.getWorld().getBlockState(up).getBlock();
-            if (b == Blocks.AIR || b == Blocks.CAVE_AIR) continue;
+            if (WorldHelper.isAir(b)) continue;
             if (b instanceof net.minecraft.block.LeavesBlock
                     || b instanceof net.minecraft.block.PillarBlock
                     || b instanceof net.minecraft.block.AzaleaBlock) continue; // 树冠/树干不算岩顶
