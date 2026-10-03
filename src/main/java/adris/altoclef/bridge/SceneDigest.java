@@ -210,6 +210,50 @@ final class SceneDigest {
         }
     }
 
+    // ===================== 3b. 玩家（多人协调用，2026-10-03） =====================
+
+    /**
+     * 服务器在线玩家名（tab 列表），逗号分隔；无则空串（/status 整键省略）。
+     * 供"多人一起睡""会合"这类同步型动作判断"还有谁在线"。
+     */
+    static String onlinePlayers(AltoClef mod) {
+        try {
+            var names = mod.getEntityTracker().getServerPlayerNames();
+            return (names == null || names.isEmpty()) ? "" : String.join(",", names);
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * 正在睡觉的玩家名，逗号分隔；无人睡则空串。
+     * ⚠ 只统计<b>已加载实体</b>的玩家 —— 追踪范围外（第三方服默认 48 格）拿不到姿态，
+     * 所以这是"可见范围内谁在睡"，不是服务器全量的睡况。
+     */
+    static String sleepingPlayers(AltoClef mod) {
+        try {
+            var et = mod.getEntityTracker();
+            var names = et.getServerPlayerNames();
+            if (names == null || names.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder();
+            for (String n : names) {
+                if (!et.isPlayerLoaded(n)) continue;
+                boolean sleeping;
+                try {
+                    sleeping = et.getPlayerEntity(n).map(p -> p.isSleeping()).orElse(false);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (!sleeping) continue;
+                if (sb.length() > 0) sb.append(',');
+                sb.append(n);
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
     /** clear / rain / thunder。注意 isRaining 是世界级标志（干燥群系也报 rain）。 */
     static String weather(ClientWorld world) {
         try {

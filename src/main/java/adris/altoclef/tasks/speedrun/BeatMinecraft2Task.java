@@ -27,6 +27,7 @@ import adris.altoclef.tasks.resources.*;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.DemandQuota;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.SmeltTarget;
@@ -2288,9 +2289,19 @@ public class BeatMinecraft2Task extends Task {
     }
 
     private Task getEyesOfEnderTask(AltoClef mod, int targetEyes) {
-        if (mod.getEntityTracker().itemDropped(Items.ENDER_EYE)) {
+        // ===== (2026-10-03 @quota) 需求覆盖：AI 给本 bot 下的"收集份额" =====
+        // 语义 = 某物品的【绝对持有目标】。设了 = 本 bot 只负责凑够这个数 (0 = 这块归别人);
+        // 没设 = 走下面原有口径 (逐字节不变)。全仓"要把某物品凑到多少"的计算只有本函数
+        // 一处, 所以覆盖也只落在这里 (DemandQuota), 不散到其它判据去。
+        Integer rodQuota = DemandQuota.get(Items.BLAZE_ROD);
+        Integer pearlQuota = DemandQuota.get(Items.ENDER_PEARL);
+        Integer eyeQuota = DemandQuota.get(Items.ENDER_EYE);
+        // 眼是"总份额"旋钮: 份额 0 → 本 bot 整条末影之眼线全停 (棒/粉/珍珠都不再触发)。
+        int demandEyes = (eyeQuota != null) ? Math.max(0, eyeQuota) : targetEyes;
+
+        if (mod.getEntityTracker().itemDropped(Items.ENDER_EYE) && demandEyes > 0) {
             setDebugState("Picking up Dropped Eyes");
-            return new PickupDroppedItemTask(Items.ENDER_EYE, targetEyes);
+            return new PickupDroppedItemTask(Items.ENDER_EYE, demandEyes);
         }
 
         int eyeCount = mod.getItemStorage().getItemCount(Items.ENDER_EYE);
@@ -2306,11 +2317,14 @@ public class BeatMinecraft2Task extends Task {
         // ⚠ 生效前提: altoclef/configs/beat_minecraft.json 的 targetEyes 必须
         // 是 16 —— 该 JSON 在 :75-77 静态加载时【覆盖】源码默认值 (实测
         // "targetEyes" : 14 曾把目标压成 7)。只改源码常量无效。
-        int blazeRodTarget = (int)Math.ceil((double)targetEyes / 2.0);
+        int blazeRodTarget = (rodQuota != null) ? Math.max(0, rodQuota)
+                : (int)Math.ceil((double)demandEyes / 2.0);
         // (2026-09-21 用户"珍珠收到 18, 多两个以后有用, 不要做成末影之眼")
         // 见 ENDER_PEARL_SURPLUS 注释: 收集口径 = 补眼缺口 + 2 颗备份;
         // 合眼分支目标仍是 targetEyes 个成品眼, 备份不会被合掉。
-        int enderPearlTarget = targetEyes - eyeCount + ENDER_PEARL_SURPLUS;
+        int enderPearlTarget = (pearlQuota != null)
+                ? Math.max(0, pearlQuota - mod.getItemStorage().getItemCount(Items.ENDER_PEARL))
+                : demandEyes - eyeCount + ENDER_PEARL_SURPLUS;
         // (2026-09-20 用户"8 根棒已换成 16 粉后还在继续收 8 根") 一次性门: 棒只为补
         // 粉缺口而收。旧行为 needsBlazeRods 只看棒计数 (rods < 8), 而棒一旦合成粉就
         // 归零 → 恒真, 形成 收8根 → 合16粉 → 再收8根 的死循环。现在粉缺口 (眼 + 粉
@@ -2333,8 +2347,18 @@ public class BeatMinecraft2Task extends Task {
         // (blazeRodTarget 仍是 8, 多出的当余量), 本处约束的是【要不要收】;
         // 当量够就不再为棒去下界, 更不会先囤防火药水。两者不冲突。
         int blazePowderEquivalent = eyeCount + blazePowderCount + blazeRodCount * 2;
-        boolean needsBlazePowder = eyeCount + blazePowderCount < targetEyes;
-        boolean needsBlazeRods = needsBlazePowder && blazePowderEquivalent < targetEyes;
+        boolean needsBlazePowder;
+        boolean needsBlazeRods;
+        if (rodQuota != null) {
+            // (@quota) 份额模式：我只管凑够自己的棒；份额达标 → 整条 blaze 需求关闭
+            // (份额 0 = 归别人 → 既不去收棒，也不为合粉再触发收集，否则会绕过份额)。
+            needsBlazeRods = blazeRodCount < blazeRodTarget;
+            needsBlazePowder = needsBlazeRods
+                    || (blazeRodCount > 0 && eyeCount + blazePowderCount < demandEyes);
+        } else {
+            needsBlazePowder = eyeCount + blazePowderCount < demandEyes;
+            needsBlazeRods = needsBlazePowder && blazePowderEquivalent < demandEyes;
+        }
         boolean needsEnderPearls = mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < enderPearlTarget;
         // (2026-09-20 用户) 还差的烈焰棒 ≤ 3 → 药水需求降为 1 瓶; 缺口大 → 2 瓶。
         // 写 static 镜像每 tick 刷新, 供 CollectBlazeRodsTask 断药转收药时取同一口径。
@@ -2344,13 +2368,18 @@ public class BeatMinecraft2Task extends Task {
         if (needsBlazePowder && !needsBlazeRods) {
             // We have enough blaze rods.
             setDebugState("Crafting blaze powder");
-            return TaskCatalogue.getItemTask(Items.BLAZE_POWDER, targetEyes - eyeCount);
+            return TaskCatalogue.getItemTask(Items.BLAZE_POWDER, demandEyes - eyeCount);
         }
 
         if (!needsBlazePowder && !needsEnderPearls) {
             // Craft ender eyes
             setDebugState("Crafting Ender Eyes");
-            return TaskCatalogue.getItemTask(Items.ENDER_EYE, targetEyes);
+            // (@quota) 份额模式不越权：能合出的眼不超过手里"粉当量"上限
+            // (棒 1 根 = 2 粉；份额 0 → 没棒 → 合 0 个眼，否则会绕过份额又去收棒)。
+            int craftEyes = (rodQuota != null)
+                    ? Math.max(0, Math.min(demandEyes, blazePowderEquivalent))
+                    : demandEyes;
+            return TaskCatalogue.getItemTask(Items.ENDER_EYE, craftEyes);
         }
 
         // Get blaze rods + pearls...

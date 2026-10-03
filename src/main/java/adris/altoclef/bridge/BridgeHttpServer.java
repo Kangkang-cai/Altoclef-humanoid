@@ -231,6 +231,13 @@ public final class BridgeHttpServer {
             if (s.landmarks != null && !s.landmarks.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "landmarks"); sb.append(':').append(s.landmarks);
             }
+            // ---- (2026-10-03 多人协调: 谁在线 / 谁在睡) 空时整键省略 ----
+            if (s.onlinePlayers != null && !s.onlinePlayers.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "onlinePlayers"); sb.append(':'); BridgeJson.str(sb, s.onlinePlayers);
+            }
+            if (s.sleepingPlayers != null && !s.sleepingPlayers.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "sleepingPlayers"); sb.append(':'); BridgeJson.str(sb, s.sleepingPlayers);
+            }
             // ---- 阶段三感知补全：现场执行状态（在线时才有意义；离线快照省略）----
             if (s.botStatus != null && !s.botStatus.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "botStatus"); sb.append(':'); BridgeJson.str(sb, s.botStatus);

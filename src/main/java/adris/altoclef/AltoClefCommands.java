@@ -41,7 +41,10 @@ public class AltoClefCommands {
                 new NightVisionCommand(),
                 // (2026-10-03) 命名地标读写 (重要位置记忆共享, bridge /command 白名单)。
                 new RememberCommand(),
-                new ForgetCommand()
+                new ForgetCommand(),
+                // (2026-10-03) AI 角色协调: 睡觉三态 + 需求份额 (bridge 白名单)。
+                new SleepCommand(),
+                new QuotaCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

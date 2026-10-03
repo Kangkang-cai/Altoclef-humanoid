@@ -70,9 +70,19 @@ final class ActionDispatcher {
      * 瞬时命令：无任务生命期，受理即视为完成（立即回 action_done，**不进 pending 队列**）。
      * (2026-10-03) remember/forget 加入：命名地标读写不启任务（NamedLandmarks 直改存储 +
      * 自发 landmark_saved/failed 回执），成功失败都不等 TaskFinishedEvent。
+     * (2026-10-03) sleep 加入：睡觉可能整夜（>PENDING_TTL 5min），登记 pending 只会过期错配；
+     * 它归"按住"态（见 HOLD_ACTIONS），受理即回执，醒来由对端轮询 /status 感知。
+     * (2026-10-03) quota 加入：纯状态写入（改需求份额），无任务生命期、**不打断主线**。
      */
     private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list",
-            "idle", "remember", "forget");
+            "idle", "remember", "forget", "sleep", "quota");
+
+    /**
+     * "按住"态行动：会替换手头用户任务，但本身<b>无终点</b>（idle = 立正待命；sleep = 睡到天亮），
+     * 只由显式 {@code @resume_main} 或下一条新行动解除。这类行动受理即回 action_done，
+     * 不登记 pending；期间"不动"是设计意图 → {@link #isHolding()} 为真，LivenessDigest 不报卡死。
+     */
+    private static final Set<String> HOLD_ACTIONS = Set.of("idle", "sleep");
 
     /**
      * 有任务生命期的行动：只有这些命令才登记 pending、才可能在顶层任务结束时回 action_done
@@ -276,8 +286,8 @@ final class ActionDispatcher {
                 emitDone(actionId, token, "命令执行器未就绪");
                 return;
             }
-            // 会替换手头用户任务的命令（动作三类 + idle）→ 先给旧活跃行动发 cancelled
-            boolean replacesUserTask = TASK_ACTIONS.contains(token) || "idle".equals(token);
+            // 会替换手头用户任务的命令（动作三类 + 按住态 idle/sleep）→ 先给旧活跃行动发 cancelled
+            boolean replacesUserTask = TASK_ACTIONS.contains(token) || HOLD_ACTIONS.contains(token);
             if (replacesUserTask) {
                 // 新行动接管 = 不再是"被 @pause_main 按住"态。必须清，否则 isPaused() 永久为真，
                 // 会让 LivenessDigest 把后续真卡死当成"合法静止"而漏报。
@@ -288,8 +298,8 @@ final class ActionDispatcher {
             // 瞬时命令没有任务生命期，没有 TaskFinishedEvent 可等 —— 受理即完成
             if (INSTANT.contains(token)) {
                 if (replacesUserTask) {
-                    // idle 是"按住"态：受理即 done，但 bot 会一直站着等你下一条指令
-                    setActiveHold(actionId, token, "待命中，等你下一条指令");
+                    // idle / sleep 是"按住"态：受理即 done，但 bot 会一直保持，等你下一条指令
+                    setActiveHold(actionId, token, holdDetail(token));
                 }
                 emitDone(actionId, token, "已执行：" + token);
                 return;
@@ -472,6 +482,14 @@ final class ActionDispatcher {
         _activeItemToken = null;
         _activeSinceMs = System.currentTimeMillis();
         _active = new ActiveAction(actionId, token, "running", detail, 0);
+    }
+
+    /** "按住"态行动的中文现场（idle = 待命；sleep = 睡/等天亮）。 */
+    private static String holdDetail(String token) {
+        if ("sleep".equals(token)) {
+            return "正在睡觉 / 等到天亮（天亮或收到新指令即结束）";
+        }
+        return "待命中，等你下一条指令";
     }
 
     /**
