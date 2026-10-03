@@ -44,7 +44,9 @@ public class AltoClefCommands {
                 new ForgetCommand(),
                 // (2026-10-03) AI 角色协调: 睡觉三态 + 需求份额 (bridge 白名单)。
                 new SleepCommand(),
-                new QuotaCommand()
+                new QuotaCommand(),
+                // (2026-10-03) 作废自动结构记忆 (推翻定稿 §7.2: 见类注释)。
+                new ForgetMemoryCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

@@ -73,9 +73,10 @@ final class ActionDispatcher {
      * (2026-10-03) sleep 加入：睡觉可能整夜（>PENDING_TTL 5min），登记 pending 只会过期错配；
      * 它归"按住"态（见 HOLD_ACTIONS），受理即回执，醒来由对端轮询 /status 感知。
      * (2026-10-03) quota 加入：纯状态写入（改需求份额），无任务生命期、**不打断主线**。
+     * (2026-10-03) forgetmem 加入：同上，作废 KnowledgeMemory 自动结构记忆，不打断主线。
      */
     private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list",
-            "idle", "remember", "forget", "sleep", "quota");
+            "idle", "remember", "forget", "sleep", "quota", "forgetmem");
 
     /**
      * "按住"态行动：会替换手头用户任务，但本身<b>无终点</b>（idle = 立正待命；sleep = 睡到天亮），

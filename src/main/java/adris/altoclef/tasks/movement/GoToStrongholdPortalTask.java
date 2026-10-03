@@ -479,8 +479,9 @@ public class GoToStrongholdPortalTask extends Task {
      * 优先 END_PORTAL (门框精确位置), 其次 STRONGHOLD (丢眼确认位置)。
      * 都没有 → null (走原丢眼定位流程)。距离上限 4096 格 (同诡异森林消费
      * 口径) —— 记录点就是本存档实测, 太远也没意义。
-     * static 公开: BeatMinecraft2Task 在内联眼睛闸之前也用它判"是否旁路收眼"
-     * (口径单一来源, 两处消费同一份记忆)。
+     * static 公开: BeatMinecraft2Task 在内联眼睛闸之前调 {@link #recallEndPortalFromKnowledge}
+     * 判"是否免检眼量" —— 该判据只认 END_PORTAL (STRONGHOLD 旁路已于 2026-10-03 撤除,
+     * 理由见 BeatMinecraft2Task 处的注释); 走廊记忆照旧由本任务 onTick 的 recall 消费。
      */
     private static final double KNOWLEDGE_RECALL_RANGE = 4096;
 
@@ -494,14 +495,14 @@ public class GoToStrongholdPortalTask extends Task {
         }
     }
 
-    /** 只查 END_PORTAL 记忆 (供 BeatMinecraft2Task 每帧直认门中心用, 静默防刷屏)。 */
+    /**
+     * 只查 END_PORTAL 记忆 (= 亲眼看见的门框)。两处消费:
+     * ① BeatMinecraft2Task 每帧直认门中心; ② 同任务内联眼睛闸前的"是否免检眼量"判据
+     * —— 只认它, 不认 STRONGHOLD (丢眼走廊不代表门框插满, 见该处 2026-10-03 注释)。
+     * 静默防刷屏。
+     */
     public static BlockPos recallEndPortalFromKnowledge(AltoClef mod) {
         RecallResult r = recallKnowledge(mod, true, false);
-        return r != null ? r.pos : null;
-    }
-
-    public static BlockPos recallStrongholdFromKnowledge(AltoClef mod) {
-        RecallResult r = recallKnowledge(mod, false, true);
         return r != null ? r.pos : null;
     }
 

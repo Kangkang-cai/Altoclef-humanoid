@@ -574,6 +574,76 @@ public final class KnowledgeMemory {
         Debug.logMessage("[Knowledge] remembered " + type.name() + " center at " + center.toShortString());
     }
 
+    // ===== (2026-10-03 @forgetmem) 自动结构记忆作废 =====
+
+    /**
+     * 作废本 存档:维度 的自动结构记忆（{@code type == null} = 清空全部类型）。
+     *
+     * <p><b>为什么必须重写文件</b>：knowledge.log 是<b>只追加</b>的（{@link #persistCenter}
+     * 只 append），只在内存里删的话下次启动会把行重新读回来。所以这里
+     * ①清内存 {@code _centersByKey}（召回的唯一来源）与 {@code _knownStructures}
+     * （会话集合，顺带解掉 remember 的合并阻挡），②<b>重写</b>文件——只丢弃目标
+     * (key,type) 的行，其余（别的存档 / 别的类型 / 解不出的行）逐行原样保留。
+     *
+     * <p>动机（用户 1003）：bot 能自动<b>记住</b>结构，此前却<b>没有任何手段作废</b> ——
+     * 若 STRONGHOLD 记忆本身记错了（投掷异常 / 地形噪声把落点确认到错处），它会跨会话
+     * 一直信，每次重启都白跑。注意这<b>不是</b>要塞旁路眼闸那条缺陷的修法（那条在
+     * BeatMinecraft2Task 的判据里，两者互不依赖）。
+     *
+     * @return 被清掉的条数（内存侧计数）
+     */
+    public int forgetCenters(StructureType type) {
+        ensureCentersLoaded();
+        String key = worldKey();
+        int removed = 0;
+        Map<StructureType, LinkedHashSet<BlockPos>> byType = _centersByKey.get(key);
+        if (byType != null) {
+            if (type == null) {
+                for (Set<BlockPos> s : byType.values()) removed += s.size();
+                byType.clear();
+            } else {
+                Set<BlockPos> s = byType.get(type);
+                if (s != null) {
+                    removed += s.size();
+                    s.clear();
+                }
+            }
+        }
+        if (type == null) {
+            for (Set<BlockPos> s : _knownStructures.values()) s.clear();
+        } else {
+            Set<BlockPos> s = _knownStructures.get(type);
+            if (s != null) s.clear();
+        }
+        rewriteCenterFile(key, type);
+        _revision++;
+        return removed;
+    }
+
+    /** 重写 knowledge.log：只丢掉属于 (key, type) 的行，其余逐行原样保留。 */
+    private static void rewriteCenterFile(String key, StructureType type) {
+        try {
+            java.nio.file.Path f = knowledgeFile();
+            if (!java.nio.file.Files.exists(f)) return;
+            List<String> keep = new ArrayList<>();
+            for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 4);
+                if (parts != null && parts[0].equals(key)) {
+                    StructureType t = structureTypeByName(parts[1]);
+                    if (t != null && (type == null || t == type)) continue; // 丢弃
+                }
+                keep.add(line);
+            }
+            String body = keep.isEmpty() ? "" : (String.join("\n", keep) + "\n");
+            java.nio.file.Files.write(f, body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    java.nio.file.StandardOpenOption.WRITE);
+        } catch (Exception e) {
+            Debug.logMessage("[Knowledge] rewrite " + KNOWLEDGE_FILE + " failed: " + e.getMessage());
+        }
+    }
+
     // ===== (2026-09-17 数据集录制) 记忆只读导出 =====
 
     /** 记忆写版本号 (静态: 跨会话回填也走它, 见 ensureCentersLoaded)。 */
