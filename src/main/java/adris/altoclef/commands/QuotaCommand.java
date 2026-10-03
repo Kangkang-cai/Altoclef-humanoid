@@ -5,6 +5,7 @@ import adris.altoclef.commandsystem.Arg;
 import adris.altoclef.commandsystem.ArgParser;
 import adris.altoclef.commandsystem.Command;
 import adris.altoclef.commandsystem.CommandException;
+import adris.altoclef.commandsystem.CommandFeedback;
 import adris.altoclef.util.DemandQuota;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
@@ -40,24 +41,36 @@ public class QuotaCommand extends Command {
         int count = parser.get(Integer.class);
 
         if (token == null || token.isEmpty()) {
-            log("quota：缺 item 参数。用法 @quota <item_id> <count>");
+            String m = "缺 item 参数。用法 @quota <item_id> <count>";
+            CommandFeedback.fail(m);
+            log("quota：" + m);
             finish();
             return;
         }
         if ("all".equalsIgnoreCase(token) || "*".equals(token)) {
             DemandQuota.clearAll();
-            log("quota：已清空全部份额，回到主线默认口径。");
+            String m = "已清空全部份额，回到主线默认口径。";
+            CommandFeedback.ok(m);
+            log("quota：" + m);
             finish();
             return;
         }
         Item item = resolve(token);
         if (item == null) {
-            log("quota：认不出物品 id —— " + token + "（示例：blaze_rod / ender_pearl / ender_eye）");
+            String m = "认不出物品 id —— " + token + "（示例：blaze_rod / ender_pearl / ender_eye）";
+            CommandFeedback.fail(m);
+            log("quota：" + m);
             finish();
             return;
         }
+        Integer prev = DemandQuota.get(item);
         DemandQuota.set(item, count);
-        log("quota：" + token + " → " + (count < 0 ? "取消（回主线默认）" : count + " 个（本 bot 的绝对持有目标）"));
+        String m = "quota：" + token + " → " + (count < 0
+                ? "取消（回主线默认）"
+                : count + " 个（本 bot 的绝对持有目标）")
+                + "；原值 " + (prev == null ? "未设" : String.valueOf(prev));
+        CommandFeedback.ok(m);
+        log(m);
         finish();
     }
 

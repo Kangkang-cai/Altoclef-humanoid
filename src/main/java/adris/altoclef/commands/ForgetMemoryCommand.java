@@ -5,6 +5,7 @@ import adris.altoclef.commandsystem.Arg;
 import adris.altoclef.commandsystem.ArgParser;
 import adris.altoclef.commandsystem.Command;
 import adris.altoclef.commandsystem.CommandException;
+import adris.altoclef.commandsystem.CommandFeedback;
 import adris.altoclef.trackers.KnowledgeMemory;
 
 /**
@@ -36,30 +37,38 @@ public class ForgetMemoryCommand extends Command {
     protected void call(AltoClef mod, ArgParser parser) throws CommandException {
         String token = parser.get(String.class);
         if (token == null || token.isEmpty()) {
+            CommandFeedback.fail("缺 type 参数。用法 @forgetmem <type|all>");
             log("forgetmem：缺 type 参数。用法 @forgetmem <type|all>");
             finish();
             return;
         }
         KnowledgeMemory km = mod.getKnowledgeMemory();
         if (km == null) {
+            CommandFeedback.fail("KnowledgeMemory 未就绪（还没进世界？）");
             log("forgetmem：KnowledgeMemory 未就绪。");
             finish();
             return;
         }
         if ("all".equalsIgnoreCase(token) || "*".equals(token)) {
             int n = km.forgetCenters(null);
-            log("forgetmem：已作废本存档全部自动结构记忆（" + n + " 条），knowledge.log 已重写。");
+            String m = "已作废本存档全部自动结构记忆（" + (n == 0 ? "本来就没有，未改动" : n + " 条") + "）。";
+            CommandFeedback.ok(m);
+            log("forgetmem：" + m);
             finish();
             return;
         }
         KnowledgeMemory.StructureType type = parseType(token);
         if (type == null) {
-            log("forgetmem：认不出类型 —— " + token + "（可选：" + allTypes() + " / all）");
+            String m = "认不出类型 —— " + token + "（可选：" + allTypes() + " / all）";
+            CommandFeedback.fail(m);
+            log("forgetmem：" + m);
             finish();
             return;
         }
         int n = km.forgetCenters(type);
-        log("forgetmem：已作废本存档的 " + type.name() + " 记忆（" + n + " 条），knowledge.log 已重写。");
+        String m = "已作废本存档的 " + type.name() + " 记忆（" + (n == 0 ? "本来就没有，未改动" : n + " 条") + "）。";
+        CommandFeedback.ok(m);
+        log("forgetmem：" + m);
         finish();
     }
 

@@ -20,6 +20,9 @@ public class FollowCommand extends Command {
                 username = mod.getButler().getCurrentUser();
             } else {
                 mod.logWarning("No butler user currently present. Running this command with no user argument can ONLY be done via butler.");
+                // (2026-10-03 回执) 未起任务 → 必须自报失败, 否则 bridge 的 action_done 永不会来。
+                adris.altoclef.commandsystem.CommandFeedback.fail(
+                        "做不到：没有指定玩家名，而当前没有 butler 用户可代指。用法 @follow <玩家名>");
                 finish();
                 return;
             }

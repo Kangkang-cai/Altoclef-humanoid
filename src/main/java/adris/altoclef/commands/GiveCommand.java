@@ -25,6 +25,9 @@ public class GiveCommand extends Command {
                 username = mod.getButler().getCurrentUser();
             } else {
                 mod.logWarning("No butler user currently present. Running this command with no user argument can ONLY be done via butler.");
+                // (2026-10-03 回执) 未起任务 → 不自报失败的话 bridge 的 action_done 永不会来
+                adris.altoclef.commandsystem.CommandFeedback.fail(
+                        "做不到：没有指定玩家名，而当前没有 butler 用户可代指。用法 @give <玩家名> <物品> <数量>");
                 finish();
                 return;
             }
@@ -53,6 +56,10 @@ public class GiveCommand extends Command {
             mod.runUserTask(new GiveItemToPlayerTask(username, target), this::finish);
         } else {
             mod.log("Item not found or task does not exist for item: " + item);
+            // (2026-10-03 回执) 物品既不在背包、也没有能收集它的配方任务 → 同样是"未起任务"，
+            // 必须自报失败，否则 AI 只能等超时（用户点名的"丢东西失败"场景）。
+            adris.altoclef.commandsystem.CommandFeedback.fail(
+                    "做不到：背包里没有 " + item + "，也没有能收集它的方法（物品名可能拼错）。");
             finish();
         }
     }

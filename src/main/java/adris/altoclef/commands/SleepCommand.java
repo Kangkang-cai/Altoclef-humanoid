@@ -5,6 +5,7 @@ import adris.altoclef.commandsystem.Arg;
 import adris.altoclef.commandsystem.ArgParser;
 import adris.altoclef.commandsystem.Command;
 import adris.altoclef.commandsystem.CommandException;
+import adris.altoclef.commandsystem.CommandFeedback;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.resources.CollectBedTask;
@@ -49,22 +50,38 @@ public class SleepCommand extends Command {
 
         switch (mode) {
             case "wait-dawn", "wait", "dawn" -> {
-                log("不睡觉，熬到天亮（多人凑不齐入睡时的替代）。任何新指令即可中止。");
+                String m = "不睡觉，熬到天亮（多人凑不齐入睡时的替代）。任何新指令即可中止。";
+                CommandFeedback.ok(m);
+                log(m);
                 mod.runUserTask(new WaitForDawnTask(), this::finish);
             }
             case "bed-only", "bed" -> {
                 if (!hasImmediateBed(mod)) {
-                    // 一次性出口：明确拒绝，不进 CollectBedTask 远征路径
-                    log("bed-only：手里没有床、附近 24 格也没有现成的床，不去远行找/造。已放弃。");
+                    // 一次性出口：明确拒绝，不进 CollectBedTask 远征路径。
+                    // 回执走 failed，让 AI 知道"不是没受理，是做不到"。
+                    String m = "bed-only 做不到：手里没有床、附近 24 格也没有现成的床；按约定不去远行找/造。";
+                    CommandFeedback.fail(m);
+                    log(m);
                     finish();
                     return;
                 }
-                log("bed-only：用现成的床睡。");
+                String m = "bed-only：用现成的床睡。";
+                CommandFeedback.ok(m);
+                log(m);
+                mod.runUserTask(new SleepThroughNightTask(), this::finish);
+            }
+            case "auto" -> {
+                String m = "睡觉（有床用床，没床就地找/造）。";
+                CommandFeedback.ok(m);
+                log(m);
                 mod.runUserTask(new SleepThroughNightTask(), this::finish);
             }
             default -> {
-                log("睡觉（有床用床，没床就地找/造）。");
-                mod.runUserTask(new SleepThroughNightTask(), this::finish);
+                // 未知模式必须显式失败 —— 旧实现把它静默当 auto，AI 以为下的是 bed-only。
+                String m = "未知模式 '" + mode + "'；可用 auto | bed-only | wait-dawn。";
+                CommandFeedback.fail(m);
+                log("sleep：" + m + " 已放弃。");
+                finish();
             }
         }
     }

@@ -3,6 +3,7 @@ package adris.altoclef.bridge;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.commandsystem.CommandExecutor;
+import adris.altoclef.commandsystem.CommandFeedback;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
@@ -218,12 +219,26 @@ final class ActionDispatcher {
         }
         _buffer.emitImmediate("action_accepted",
                 "[" + actionId + "] 已受理：" + describe(token, cmd), false,
-                detailJson(actionId, token));
+                acceptedDetailJson(actionId, token, cmd));
     }
 
-    /** 构建 detail JSON 片段（值全部走 BridgeJson 转义，防 LLM 注入破坏 JSON）。 */
-    static String detailJson(String actionId, String token) {
-        return detailJson(actionId, token, null, null);
+    /**
+     * 受理回执的 detail：{@code {actionId, cmd, args?}} —— 比旧版多带 params，便于对端调试
+     * 与回显（argsOf 是纯字符串处理，HTTP 线程安全）。值全部走 BridgeJson 转义，防 LLM 注入破坏 JSON。
+     */
+    static String acceptedDetailJson(String actionId, String token, String cmd) {
+        String args = String.join(" ", argsOf(cmd));
+        StringBuilder sb = new StringBuilder(96);
+        sb.append("{\"actionId\":");
+        BridgeJson.str(sb, actionId);
+        sb.append(",\"cmd\":");
+        BridgeJson.str(sb, token);
+        if (!args.isEmpty()) {
+            sb.append(",\"args\":");
+            BridgeJson.str(sb, args);
+        }
+        sb.append('}');
+        return sb.toString();
     }
 
     /**
@@ -251,6 +266,19 @@ final class ActionDispatcher {
     private static String describe(String token, String cmd) {
         String rest = cmd == null ? "" : cmd;
         return rest.length() > 60 ? rest.substring(0, 60) + "…" : rest;
+    }
+
+    /** 命令异常消息 → 单行（CommandException 里带 "\nUsage: ..."）。 */
+    private static String oneLine(String s) {
+        if (s == null) return null;
+        String t = s.replace('\n', ' ').replace('\r', ' ').trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    /** 截断长文案（回执 text / detail.reason 用）。 */
+    private static String clip(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max) + "…";
     }
 
     // ===================== 客户端线程侧 =====================
@@ -284,7 +312,7 @@ final class ActionDispatcher {
             }
             CommandExecutor executor = AltoClef.getCommandExecutor();
             if (executor == null) {
-                emitDone(actionId, token, "命令执行器未就绪");
+                emitDone(actionId, token, "命令执行器未就绪", "failed", "命令执行器未就绪");
                 return;
             }
             // 会替换手头用户任务的命令（动作三类 + 按住态 idle/sleep）→ 先给旧活跃行动发 cancelled
@@ -295,22 +323,43 @@ final class ActionDispatcher {
                 _paused = false;
                 supersedeActive(token);
             }
-            executor.execute(cmd);
+            // ===== (2026-10-03) 命令结果自报：clear → execute → 读 =====
+            // ① 走 execute(cmd, 异常回调) 而不是 execute(cmd) —— 后者把 CommandException
+            //    (缺参数 / 参数类型错) 吞进 Debug.logWarning, AI 永远收不到。
+            // ② CommandFeedback 收命令内部的语义失败(bed-only 没床 / give 物品不在背包…)。
+            CommandFeedback.clear();
+            executor.execute(cmd, ex -> {
+                Debug.logWarning("[Bridge] command rejected: " + ex.getMessage());
+                CommandFeedback.fail(oneLine(ex.getMessage()));
+            });
+            String fbMsg = CommandFeedback.message();
+            if (CommandFeedback.failed()) {
+                // 命令自报失败(参数错 / 语义上做不到, 或压根没起任务) → 立即回 failed 终态,
+                // 并撤掉可能登记的 pending —— 它不会再有任何 TaskFinishedEvent 来关联。
+                _pending.removeIf(e -> e.actionId.equals(actionId));
+                _active = null;
+                _activeSinceMs = 0;
+                resetProgress();
+                String text = fbMsg == null ? "命令未能执行" : clip(fbMsg, 160);
+                emitDone(actionId, token, text, "failed", text);
+                return;
+            }
             // 瞬时命令没有任务生命期，没有 TaskFinishedEvent 可等 —— 受理即完成
             if (INSTANT.contains(token)) {
                 if (replacesUserTask) {
                     // idle / sleep 是"按住"态：受理即 done，但 bot 会一直保持，等你下一条指令
-                    setActiveHold(actionId, token, holdDetail(token));
+                    setActiveHold(actionId, token, fbMsg != null ? fbMsg : holdDetail(token));
                 }
-                emitDone(actionId, token, "已执行：" + token);
+                emitDone(actionId, token, fbMsg != null ? fbMsg : ("已执行：" + token), "completed", null);
                 return;
             }
             // 其余（goto/follow/give）等顶层任务结束时报 action_done（见 onTaskFinished），
             // 未结束就结束的（被顶替/被 resume 抢占）由对端超时兜底。
-            setActiveTaskAction(actionId, token, cmd);
+            setActiveTaskAction(actionId, token, cmd, fbMsg);
         } catch (Throwable t) {
             Debug.logWarning("[Bridge] action dispatch threw: " + t);
-            emitDone(actionId, token, "执行失败：" + t.getClass().getSimpleName());
+            emitDone(actionId, token, "执行失败：" + t.getClass().getSimpleName(),
+                    "failed", "命令派发异常");
         }
     }
 
@@ -462,8 +511,9 @@ final class ActionDispatcher {
         return a != null && !TASK_ACTIONS.contains(a.cmd);
     }
 
-    /** 登记一个"有任务生命期"的活跃行动（解析命令目标供进度探针用）。 */
-    private void setActiveTaskAction(String actionId, String token, String cmd) {
+    /** 登记一个"有任务生命期"的活跃行动（解析命令目标供进度探针用）。
+     *  {@code initialDetail} = 命令自报的开场白（可空，空则用通用文案）。 */
+    private void setActiveTaskAction(String actionId, String token, String cmd, String initialDetail) {
         _activeGotoTarget = "goto".equals(token) ? parseGoto(cmd) : null;
         _activePlayerName = ("follow".equals(token) || "give".equals(token)) ? parseNameArg(cmd) : null;
         String[] gi = "give".equals(token) ? parseGiveItem(cmd) : null;
@@ -473,7 +523,8 @@ final class ActionDispatcher {
         _activeSinceMs = now;
         _progressKey = null;
         _progressAtMs = now;
-        _active = new ActiveAction(actionId, token, "running", "已受理，正在启动", 0);
+        _active = new ActiveAction(actionId, token, "running",
+                initialDetail != null ? initialDetail : "已受理，正在启动", 0);
     }
 
     /** 登记一个"按住"态行动（idle / pause_main）：无终点，detail 固定，不判进度。 */
