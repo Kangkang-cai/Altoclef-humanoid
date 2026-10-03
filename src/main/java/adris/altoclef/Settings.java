@@ -820,6 +820,33 @@ public class Settings implements IFailableConfigFile {
     private boolean forceGlowing = true;
 
     /**
+     * (2026-10-03) 隐形光源照明: bot 处于方块光照不足的环境 (洞穴/下界) 时, 由服务端
+     * 通过 RCON 在 bot 脚下放置原版光源方块 ({@code minecraft:light}, 亮度 15,
+     * 完全隐形、无碰撞) —— 真实方块光照, 光影包照常计算明暗, 阴影美学保留。
+     * 离开超过回收距离后自动用 {@code /setblock air} 回收, 光"跟着 bot 走"。
+     *
+     * <p>为什么走 RCON 而不是背包放置: 光源方块不可合成、生存拿不到, 进背包还会撞上
+     * 丢垃圾档位/腾位穿甲两套既有坑 (会被当垃圾丢弃); RCON 直接 {@code /setblock}
+     * 让背包零参与, 任务输入 (装备/瞄准/点击) 完全无感。需要专用服务端开启
+     * rcon ({@code server.properties} 里 enable-rcon=true)。
+     */
+    private boolean invisibleLightEnabled = true;
+
+    /** (2026-10-03) 触发阈值: 脚下方块光照 (LightType.BLOCK) 低于该值才放光源。 */
+    private int invisibleLightMinBlockLight = 8;
+
+    /** (2026-10-03) 两个光源的最小间距 (格, 欧氏)。12 ≈ 亮度 15 的有效照明半径。 */
+    private int invisibleLightSpacingBlocks = 12;
+
+    /** (2026-10-03) 回收阈值: 离开已放光源超过该距离 (格) 就回收它。 */
+    private double invisibleLightRecycleDistance = 32;
+
+    /** (2026-10-03) RCON 连接参数 —— 与专用服务端 server.properties 对应。 */
+    private String rconHost = "127.0.0.1";
+    private int rconPort = 25575;
+    private String rconPassword = "altoclef-test";
+
+    /**
      * (2026-09-17) 每帧导出的可见方块上限 (按距离由近到远截断)。
      * 防"海洋群系 24 万格水"这类极端场景撑爆单帧 (见 VisibilityHelper 的水体过滤约定)。
      * 设为 0 表示完全不导出方块通道 (D)。
@@ -989,6 +1016,36 @@ public class Settings implements IFailableConfigFile {
      */
     public void setForceGlowingEnabled(boolean value) {
         forceGlowing = value;
+    }
+
+    // ==== 隐形光源照明 (2026-10-03) ====
+
+    public boolean isInvisibleLightEnabled() {
+        return invisibleLightEnabled;
+    }
+
+    public int getInvisibleLightMinBlockLight() {
+        return invisibleLightMinBlockLight;
+    }
+
+    public int getInvisibleLightSpacingBlocks() {
+        return invisibleLightSpacingBlocks;
+    }
+
+    public double getInvisibleLightRecycleDistance() {
+        return invisibleLightRecycleDistance;
+    }
+
+    public String getRconHost() {
+        return rconHost;
+    }
+
+    public int getRconPort() {
+        return rconPort;
+    }
+
+    public String getRconPassword() {
+        return rconPassword;
     }
 
     public int getRecordPerceptionMaxBlocks() {

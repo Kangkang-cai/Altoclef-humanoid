@@ -323,6 +323,10 @@ public class AltoClef implements ModInitializer {
             // (2026-10-03 永久发光) 客户端常挂 Glowing 描边, 纯视觉: bot 本体在
             // 画面里始终有轮廓 (隔墙可见)。注意发光不是光源, 不照亮周围环境。
             tickPermanentGlowing();
+            // (2026-10-03 隐形光源) 方块光照不足时经 RCON 由服务端在脚下放
+            // minecraft:light (隐形、亮度 15), 离开超阈值自动回收。真实方块光照,
+            // 光影下阴影保留; 背包零参与, 详见 InvisibleLightHelper 注释。
+            adris.altoclef.util.helpers.InvisibleLightHelper.tick(this);
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)

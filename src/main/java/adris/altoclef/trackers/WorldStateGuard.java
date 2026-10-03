@@ -147,5 +147,9 @@ public final class WorldStateGuard {
         register("BiasedExploreTask(够不着的目标拉黑表)", BiasedExploreTask::onWorldBoundary);
         register("DiagonalJumpFailDetector(斜跳失败计数/抑制窗口)",
                 adris.altoclef.util.helpers.DiagonalJumpFailDetector::onWorldBoundary);
+        // (2026-10-03 隐形光源) 已放光源账本带维度, 但换存档(可能换服务器)必须清空;
+        // 同存档跨维度靠条目里的维度名防误回收 (RCON 命令包 /execute in)。
+        register("InvisibleLightHelper(隐形光源账本)",
+                adris.altoclef.util.helpers.InvisibleLightHelper::onWorldBoundary);
     }
 }
