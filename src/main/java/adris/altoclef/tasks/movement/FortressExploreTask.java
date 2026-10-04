@@ -1425,4 +1425,20 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     protected String toDebugString() {
         return _corridorEnabled ? "Fortress explore (human-like)" : "Nether explore (human-like)";
     }
+
+    // =========================================================================
+    // (2026-10-04 场景摘要) SceneDigest 消费的只读状态 —— "找堡垒"(外围远征,
+    // 还没踏上堡垒) 与 "巡堡垒走廊"(走廊模式, 已在堡垒里) 是两种完全不同的
+    // 现场动作, 此前统一译成"探堡垒"让对端把赶路找路理解成了在里面探索。
+    // =========================================================================
+
+    /** true = 走廊模式（已踏上堡垒地面在巡逻）；false = 外围远征（还在找）。 */
+    public boolean isCorridorMode() {
+        return _corridorMode;
+    }
+
+    /** true = forPiglins() 变体（找猪灵/堡垒，非找要塞）；语义与主变体不同，摘要侧需区分。 */
+    public boolean isPiglinVariant() {
+        return PIGLIN_SOUND_PREFIX.equals(_soundPrefix);
+    }
 }

@@ -62,6 +62,12 @@ final class SceneDigest {
             if (stack == null || stack.isEmpty()) return "";
             // addTaskToChain 是"父→子"顺序（Task.java:106），最深处 = 末元素
             Task deep = stack.get(stack.size() - 1);
+            // (2026-10-04) FortressExploreTask 两种模式动作完全不同: 外围=找路,
+            // 走廊=已在堡垒里巡逻 —— 统一译"探堡垒"会让对端把"正在找"理解成"在里面探索"。
+            if (deep instanceof adris.altoclef.tasks.movement.FortressExploreTask ft) {
+                if (ft.isPiglinVariant()) return "找猪灵";
+                return ft.isCorridorMode() ? "巡堡垒走廊" : "找堡垒";
+            }
             String verb = verbFor(deep);
             // ResourceTask 系能拿到目标物 → "合成钻石镐" / "挖钻石" 这类具体描述
             if (deep instanceof ResourceTask rt) {
@@ -111,7 +117,9 @@ final class SceneDigest {
         CLASS_ZH.put("IdleTask", "待命");
         CLASS_ZH.put("ExploreCaveTask", "探洞");
         CLASS_ZH.put("ExploreStrongholdTask", "找要塞");
-        CLASS_ZH.put("FortressExploreTask", "探堡垒");
+        CLASS_ZH.put("FortressExploreTask", "找堡垒"); // 兜底（正常已被上方 instanceof 分支按模式细分）
+        CLASS_ZH.put("OverworldExpeditionTask", "觅食远征");
+        CLASS_ZH.put("WarpedForestExpeditionTask", "找诡异森林");
         CLASS_ZH.put("CollectBlazeRodsTask", "找烈焰棒");
         CLASS_ZH.put("CollectEnderPearlsInForestTask", "蹲林收珍珠");
         CLASS_ZH.put("GoToStrongholdPortalTask", "去要塞传送门");
