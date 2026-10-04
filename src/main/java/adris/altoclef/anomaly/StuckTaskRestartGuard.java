@@ -163,6 +163,13 @@ public final class StuckTaskRestartGuard {
         }
         Task mainTask = userChain.getCurrentTask();
         if (mainTask == null) return;
+        // (2026-10-04) bridge @idle 走 IdleCommand → runUserTask, **不置** _runningIdleTask
+        // (那是 settings idleCommand 路径专用标志) ⇒ 上面那道闸拦不住它。待命 (定时或无限期)
+        // 的原地静止是设计意图, 且定时 idle 时长可远超 p90 ⇒ 必须按任务类型显式豁免。
+        if (mainTask instanceof adris.altoclef.tasks.movement.IdleTask) {
+            resetStillness();
+            return;
+        }
 
         String cls = mainTask.getClass().getSimpleName();
         Vec3d pos = ctx.playerPos();

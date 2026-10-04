@@ -12,6 +12,7 @@ import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
+import adris.altoclef.tasks.movement.IdleTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.GetToXZTask;
 import adris.altoclef.tasks.movement.GetToYTask;
@@ -143,6 +144,8 @@ final class ActionDispatcher {
     /** give 的目标物品 token 与数量。 */
     private volatile String _activeItemToken;
     private volatile int _activeItemCount = 0;
+    /** 定时 idle 的时长（秒）。0 = 无定时（无限期待命 / 非 idle 行动）。 */
+    private volatile int _activeIdleSec = 0;
 
     // ---- 进度判定状态（仅客户端线程读写）----
     private String _progressKey = null;
@@ -309,6 +312,7 @@ final class ActionDispatcher {
                 // 回主线 → 没有活跃行动（activeAction 键省略）
                 _active = null;
                 _activeSinceMs = 0;
+                _activeIdleSec = 0;
                 resetProgress();
                 // (2026-10-04) 补 status —— 旧版走 3 参 emitDone ⇒ detail.status 缺失，
                 // 与其它命令不一致；对端按 status 统一分支时会漏判。
@@ -348,6 +352,7 @@ final class ActionDispatcher {
                 _pending.removeIf(e -> e.actionId.equals(actionId));
                 _active = null;
                 _activeSinceMs = 0;
+                _activeIdleSec = 0;
                 resetProgress();
                 String text = fbMsg == null ? "命令未能执行" : clip(fbMsg, 160);
                 emitDone(actionId, token, text, "failed", text);
@@ -357,6 +362,8 @@ final class ActionDispatcher {
             if (INSTANT.contains(token)) {
                 if (replacesUserTask) {
                     // idle / sleep 是"按住"态：受理即 done，但 bot 会一直保持，等你下一条指令
+                    // (2026-10-04) idle 带秒参 = 定时待命（有自然终点，见 onTaskFinished 的 IdleTask 分支）。
+                    _activeIdleSec = "idle".equals(token) ? parseIdleSec(cmd) : 0;
                     setActiveHold(actionId, token, fbMsg != null ? fbMsg : holdDetail(token));
                 }
                 emitDone(actionId, token, fbMsg != null ? fbMsg : ("已执行：" + token), "completed", null);
@@ -399,6 +406,7 @@ final class ActionDispatcher {
         }
         _active = null;
         _activeSinceMs = 0;
+        _activeIdleSec = 0;
         resetProgress();
         return true;
     }
@@ -450,9 +458,30 @@ final class ActionDispatcher {
                         "completed", null);
                 _active = null;
                 _activeSinceMs = 0;
+                _activeIdleSec = 0;
                 resetProgress();
                 return;
             }
+        }
+        // (2026-10-04) 定时 idle 到时自然结束：与 sleep 同口径（"按住"态但有自然终点）——
+        // 结束即回执 + 自动回主线。必须在此处理：idle 走 INSTANT 不登记 pending；
+        // 且 UserTaskChain.onTaskFinish 在 idleCommand 为空时会 TaskRunner.disable()，
+        // 不回主线 = 到时后 bot 全停摆（连怪物防御都不跑），直到有人再派任务。
+        // 无限期 idle 恒不 isFinished，不会进这里。
+        if (finished instanceof IdleTask) {
+            ActiveAction idle = _active;
+            if (idle != null && "idle".equals(idle.cmd) && _activeIdleSec > 0) {
+                boolean resumed = resumeMainline();
+                emitDone(idle.actionId, "idle",
+                        "待命 " + _activeIdleSec + " 秒结束（原地站立）" + (resumed ? "，已自动回主线" : ""),
+                        "completed", null);
+                _active = null;
+                _activeSinceMs = 0;
+                _activeIdleSec = 0;
+                resetProgress();
+                return;
+            }
+            // 无限期 idle / 无活跃行动记账：落到 pollMatching（必然无匹配）→ 丢弃。
         }
         PendingAction p = pollMatching(finished);
         if (p == null) return; // 无匹配（含 pending 为空 / 类型不符）：丢弃，等对端超时
@@ -477,6 +506,7 @@ final class ActionDispatcher {
         if (a != null && a.actionId.equals(p.actionId)) {
             _active = null;
             _activeSinceMs = 0;
+            _activeIdleSec = 0;
             resetProgress();
         }
     }
@@ -562,6 +592,7 @@ final class ActionDispatcher {
     /** 登记一个"有任务生命期"的活跃行动（解析命令目标供进度探针用）。
      *  {@code initialDetail} = 命令自报的开场白（可空，空则用通用文案）。 */
     private void setActiveTaskAction(String actionId, String token, String cmd, String initialDetail) {
+        _activeIdleSec = 0; // 任务型行动不带 idle 定时（防上一轮残留误入倒计时/结束分支）
         _activeGotoTarget = "goto".equals(token) ? parseGoto(cmd) : null;
         _activePlayerName = ("follow".equals(token) || "give".equals(token)) ? parseNameArg(cmd) : null;
         String[] gi = "give".equals(token) ? parseGiveItem(cmd) : null;
@@ -584,12 +615,26 @@ final class ActionDispatcher {
         _active = new ActiveAction(actionId, token, "running", detail, 0);
     }
 
-    /** "按住"态行动的中文现场（idle = 待命；sleep = 睡/等天亮）。 */
+    /** "按住"态行动的中文现场（idle = 原地站立待命；sleep = 睡/等天亮）。 */
     private static String holdDetail(String token) {
         if ("sleep".equals(token)) {
             return "正在睡觉 / 等到天亮（天亮或收到新指令即结束）";
         }
-        return "待命中，等你下一条指令";
+        return "原地站立待命（不动），等你下一条指令";
+    }
+
+    /** 解析 idle 的时长参数（秒）。无参/解析失败/非正数 → 0（=无限期待命）。权威校验在 IdleCommand。 */
+    private static int parseIdleSec(String cmd) {
+        String[] t = argsOf(cmd);
+        if (t.length == 0) return 0;
+        String s = t[0].toLowerCase();
+        if (s.endsWith("s")) s = s.substring(0, s.length() - 1).trim();
+        try {
+            int v = Integer.parseInt(s);
+            return v > 0 ? v : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**
@@ -607,16 +652,31 @@ final class ActionDispatcher {
         }
         _active = null;
         _activeSinceMs = 0;
+        _activeIdleSec = 0;
         resetProgress();
     }
 
     /** 客户端线程每 tick 调用（BridgeHttpServer 的 ClientTickEvent）。 */
     void onClientTick() {
         try {
+            long now = System.currentTimeMillis();
             ClientPlayerEntity p = AltoClef.inGame() ? _mod.getPlayer() : null;
             ActiveAction a = _active;
             if (a == null || p == null) return;              // 离线/切换中：不判，离线快照本就不出该键
-            if (!TASK_ACTIONS.contains(a.cmd)) return;        // idle/pause 按住态，detail 固定
+            if (!TASK_ACTIONS.contains(a.cmd)) {
+                // (2026-10-04) 定时 idle：/status 明确报"原地站立不动" + 剩余时间倒计时
+                //（detail 不进变化键，对端 1002 已确认，逐秒刷新安全）。
+                if ("idle".equals(a.cmd) && _activeIdleSec > 0) {
+                    long elapsedSec = Math.max(0, (now - _activeSinceMs) / 1000);
+                    long remainSec = Math.max(0, _activeIdleSec - elapsedSec);
+                    String detail = "原地站立待命（不动），剩 " + remainSec + "s 自动回主线";
+                    int since = (int) elapsedSec;
+                    if (!detail.equals(a.detail) || since != a.sinceSec) {
+                        _active = new ActiveAction(a.actionId, a.cmd, "running", detail, since);
+                    }
+                }
+                return;                                       // idle/pause 按住态，detail 固定
+            }
             evaluateProgress(p, a);
         } catch (Throwable ignored) {
         }
