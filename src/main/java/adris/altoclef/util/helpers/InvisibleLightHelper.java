@@ -184,7 +184,9 @@ public final class InvisibleLightHelper {
                 if (mod.getWorld().getBlockState(pos).getBlock() instanceof LightBlock) {
                     pit.remove();
                     PLACED.add(new PlacedLight(_pendingDimension, pos));
-                    Debug.logMessage(String.format("[InvisibleLight] 放置光源 %s @ %s (账本 %d 条)",
+                    // (2026-10-04 用户要求) 放置不再刷聊天栏 —— 连放模式下每批 6 条太吵。
+                    // 仍写 stdout（→ latest.log），保留"暗处一批 ≈6 条放置日志"这条实跑判据。
+                    Debug.logInternal(String.format("[InvisibleLight] 放置光源 %s @ %s (账本 %d 条)",
                             _pendingDimension, pos.toShortString(), PLACED.size()));
                 }
             }
