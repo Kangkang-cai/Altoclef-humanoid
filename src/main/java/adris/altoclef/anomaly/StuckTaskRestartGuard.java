@@ -8,6 +8,9 @@ import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.trackers.DecisionMemory;
 import net.minecraft.util.math.Vec3d;
 
+import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
+import java.util.Date;
 import java.util.HashMap;
 
 /**
@@ -42,6 +45,20 @@ import java.util.HashMap;
  *       CRITICAL 告警 + DecisionMemory 落盘 —— 交给人和既有检测器, 绝不无限重启。</li>
  * </ul>
  *
+ * 取证 (2026-10-04 追加, 用户要求"事后能核对是不是真卡了"):
+ * <ul>
+ *   <li>守卫每秒采样位置留最近 {@link #POS_HISTORY_MAX} 秒 ({@link #_posHistory});
+ *       触发重启/耗尽时整段落盘 —— 事后可直接看出"触发前到底动没动"。</li>
+ *   <li>所有事件写专用 {@link #FORENSIC_LOG} (restart_guard.log), 带 baritone
+ *       状态 / 血量 / 食物 / 维度 / 任务栈完整现场; altoclef_diag.log 保留单行索引。</li>
+ *   <li>重启 60s 后自动"结算": 记录重启后位移、当前任务、是否再度超时
+ *       ([POST-OK] / [POST-STILL-BAD]) —— 直接回答"真卡了还是误杀、救活没有"。</li>
+ *   <li>事件同步 DecisionMemory (跨会话持久, 按存档 key): add=重启/结算流水,
+ *       put=耗尽标量。</li>
+ * </ul>
+ * 注意: 经 {@link AnomalyWatchdog#report} 走的告警在 anomaly.log 中不带 ctx 快照
+ * (report 传 ctx=null), 所以完整现场以本守卫自己的取证日志为准。
+ *
  * 范围刻意收窄: 只处理 UserTaskChain 主任务, 且跳过 idle 任务 (原地等待指令是
  * 合法静止)。反射链 (岩浆逃生 / MLG / 怪物防御) 的任务绝不被本守卫打断 ——
  * 在逃生中途重启安全链任务可能直接致死; 它们的停滞由 StallDetector 告警覆盖。
@@ -67,12 +84,31 @@ public final class StuckTaskRestartGuard {
     /** 慢变量, 1 秒检查一次 (与 DurationDetector 同频)。 */
     private static final long CHECK_INTERVAL_MS = 1_000;
 
+    /** 重启后等待多久做"结算" (位移/是否复发)。 */
+    private static final long POST_CHECK_MS = 60_000L;
+
+    /** 取证位置轨迹容量: 1 样本/秒, 覆盖触发前 90s。 */
+    private static final int POS_HISTORY_MAX = 90;
+
     private static final String DIAG_LOG = "altoclef_diag.log";
+    private static final String FORENSIC_LOG = "restart_guard.log";
+
+    private static final SimpleDateFormat _timeFmt = new SimpleDateFormat("HH:mm:ss");
 
     /** 停滞锚点 (跨 tick, 换世界/大位移自动重置)。 */
     private static Vec3d _anchor = null;
     private static long _stillSinceMs = 0;
     private static long _lastCheckMs = 0;
+
+    /** 取证轨迹: double[]{timeMs, x, y, z}, 每秒一采, 环形丢弃最老。 */
+    private static final ArrayDeque<double[]> _posHistory = new ArrayDeque<>();
+
+    /** 待结算的最近一次重启 (同时只跟踪一次; 结算后清空)。 */
+    private static String _pendingPostClass = null;
+    private static long _pendingPostAtMs = 0;
+    private static Vec3d _pendingPostPos = null;
+    private static String _pendingPostDim = null;
+    private static int _pendingPostCount = 0;
 
     /** 按任务类名 (稳定标识) 记账; 任务实例每 tick 重建, 不能拿实例做键。 */
     private static final class RestartRecord {
@@ -110,6 +146,7 @@ public final class StuckTaskRestartGuard {
         // 合法静止白名单 (与 StallDetector 一致): 命中即重置停滞计时, 不判定。
         if (!ctx.inGame() || ctx.paused() || ctx.playerPos() == null) {
             resetStillness();
+            _posHistory.clear();
             return;
         }
         if (ctx.chainName() == null || ctx.hasScreen() || ctx.sleeping()) {
@@ -128,6 +165,16 @@ public final class StuckTaskRestartGuard {
         if (mainTask == null) return;
 
         String cls = mainTask.getClass().getSimpleName();
+        Vec3d pos = ctx.playerPos();
+
+        // ---- 取证: 位置轨迹采样 (1 样本/秒, 本方法节流保证) ----
+        if (_posHistory.size() >= POS_HISTORY_MAX) _posHistory.pollFirst();
+        _posHistory.addLast(new double[]{now, pos.x, pos.y, pos.z});
+
+        // ---- 取证: 上一轮重启的 60s 结算 (在任何条件判定之前, 只依赖"到时间了") ----
+        if (_pendingPostClass != null && now - _pendingPostAtMs >= POST_CHECK_MS) {
+            settlePost(ctx, mainTask, now);
+        }
 
         // ---- 条件一: 时长异常 (判定源单一: TaskDurationTracker) ----
         long limit = TaskDurationTracker.timeoutThresholdMs(cls);
@@ -139,7 +186,6 @@ public final class StuckTaskRestartGuard {
         }
 
         // ---- 条件二: 位移停滞 (锚点口径与 StallDetector 一致) ----
-        Vec3d pos = ctx.playerPos();
         if (_anchor == null || pos.squaredDistanceTo(_anchor) > MOVE_THRESHOLD_SQ) {
             _anchor = pos;
             _stillSinceMs = now;
@@ -162,11 +208,15 @@ public final class StuckTaskRestartGuard {
                 String summary = cls + " 软重启 " + rec.count + " 次后仍在停滞 (无位移 "
                         + (stillMs / 1000) + "s), 守卫已停手, 需人工/上层介入";
                 String detail = "stack=" + ctx.stackPath()
-                        + " pos=" + formatPos(ctx.playerPos())
+                        + " pos=" + formatPos(pos)
                         + " elapsed=" + TaskDurationTracker.formatMs(elapsed)
                         + " limit=" + TaskDurationTracker.formatMs(limit);
                 Debug.logWarning("[RestartGuard] " + summary);
                 Debug.logToFile(DIAG_LOG, "[RestartGuard][EXHAUSTED] " + summary + " | " + detail);
+                String forensic = snapshot(ctx, cls, elapsed, limit, stillMs)
+                        + "\n    判定: 重启 " + rec.count + " 次后停滞依旧 -> 配额耗尽, 守卫停手\n"
+                        + posHistoryDump();
+                Debug.logToFile(FORENSIC_LOG, forensic);
                 try {
                     DecisionMemory.put("restartGuardExhausted", cls);
                 } catch (Throwable ignored) {
@@ -185,9 +235,25 @@ public final class StuckTaskRestartGuard {
                 + " 且无位移 " + (stillMs / 1000) + "s → 软重启 ("
                 + rec.count + "/" + MAX_RESTARTS_PER_WINDOW + ")";
         String detail = "stack=" + ctx.stackPath()
-                + " pos=" + formatPos(ctx.playerPos());
+                + " pos=" + formatPos(pos)
+                + " dim=" + ctx.dimension()
+                + " hp=" + ctx.health() + " food=" + ctx.food()
+                + " baritone(pathing=" + ctx.baritonePathing()
+                + " pathPresent=" + ctx.baritonePathPresent() + ")";
         Debug.logMessage("[RestartGuard] " + summary);
         Debug.logToFile(DIAG_LOG, "[RestartGuard][RESTART] " + summary + " | " + detail);
+        String forensic = snapshot(ctx, cls, elapsed, limit, stillMs)
+                + "\n    动作: Task.interrupt 软重启 (" + rec.count + "/" + MAX_RESTARTS_PER_WINDOW
+                + "), " + (POST_CHECK_MS / 1000) + "s 后自动结算\n"
+                + posHistoryDump();
+        Debug.logToFile(FORENSIC_LOG, forensic);
+        try {
+            DecisionMemory.add("restartGuardRestart", _timeFmt.format(new Date(now))
+                    + " " + cls + " elapsed=" + TaskDurationTracker.formatMs(elapsed)
+                    + " still=" + (stillMs / 1000) + "s"
+                    + " pos=" + formatPos(pos));
+        } catch (Throwable ignored) {
+        }
         try {
             // interrupt: 递归 onStop 清理子树、置 _first、保持 active;
             // 下一拍主任务重跑 onStart, 时长计时经 TaskSwitchLogger.taskStarted 归零。
@@ -195,10 +261,100 @@ public final class StuckTaskRestartGuard {
         } catch (Throwable t) {
             // 重启动作自身失败不能反噬调度; 本次计数已记, 下个窗口自然重试。
             Debug.logToFile(DIAG_LOG, "[RestartGuard] interrupt failed: " + t);
+            Debug.logToFile(FORENSIC_LOG, "    ⚠ interrupt 抛异常: " + t);
             return;
         }
+        // 挂起 60s 后的结算任务 (成功 interrupt 之后才挂, 失败不结算)。
+        _pendingPostClass = cls;
+        _pendingPostAtMs = now;
+        _pendingPostPos = pos;
+        _pendingPostDim = ctx.dimension();
+        _pendingPostCount = rec.count;
         AnomalyWatchdog.report(new Anomaly("duration-restart", cls,
                 AnomalySeverity.WARN, summary, detail));
+    }
+
+    // ------------------------------------------------------------------
+    // 取证
+    // ------------------------------------------------------------------
+
+    /**
+     * 重启后 {@link #POST_CHECK_MS} 结算: 位移了多少 / 还是不是同一任务 / 是否再度超时。
+     * 结论直接回答"真卡了还是误杀" —— 真卡死重启后应见位移恢复; 误杀则重启前后
+     * 都在合法移动 (这种情况本方法很少到达, 因为停滞条件很难满足)。
+     */
+    private static void settlePost(AnomalyContext ctx, Task currentTask, long now) {
+        String cls = _pendingPostClass;
+        _pendingPostClass = null; // 先清, 结算自身异常不重入
+        try {
+            double moved = 0;
+            if (_pendingPostPos != null && ctx.playerPos() != null
+                    && ctx.dimension().equals(_pendingPostDim)) {
+                moved = Math.sqrt(ctx.playerPos().squaredDistanceTo(_pendingPostPos));
+            }
+            String curCls = currentTask == null ? "(null)" : currentTask.getClass().getSimpleName();
+            long curElapsed = currentTask == null ? -1 : TaskDurationTracker.elapsedMs(currentTask);
+            long curLimit = TaskDurationTracker.timeoutThresholdMs(curCls);
+            boolean overAgain = curLimit > 0 && curElapsed > curLimit;
+            String verdict = overAgain ? "POST-STILL-BAD (重启后 " + (POST_CHECK_MS / 1000)
+                    + "s 内又超时, 大概率真卡死/该类 p90 基线失真)"
+                    : "POST-OK (重启后未再超时)";
+            String line = "[" + verdict + "] " + cls
+                    + " | 重启后位移=" + String.format("%.1f", moved) + "格"
+                    + " | 当前任务=" + curCls
+                    + " elapsed=" + (curElapsed < 0 ? "?" : TaskDurationTracker.formatMs(curElapsed))
+                    + " limit=" + (curLimit <= 0 ? "样本不足" : TaskDurationTracker.formatMs(curLimit))
+                    + " | 重启序号=" + _pendingPostCount;
+            Debug.logToFile(FORENSIC_LOG, "[" + _timeFmt.format(new Date(now)) + "] " + line);
+            Debug.logToFile(DIAG_LOG, "[RestartGuard][" + verdict.split(" ")[0] + "] " + line);
+            try {
+                DecisionMemory.add("restartGuardPost", _timeFmt.format(new Date(now))
+                        + " " + cls + " moved=" + String.format("%.1f", moved) + "格"
+                        + (overAgain ? " 又超时" : " 未复发"));
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 事件现场快照 (多行, 进 restart_guard.log)。 */
+    private static String snapshot(AnomalyContext ctx, String cls, long elapsed, long limit, long stillMs) {
+        return "[" + _timeFmt.format(new Date(System.currentTimeMillis())) + "][" + ctx.dimension() + "] "
+                + cls
+                + " elapsed=" + TaskDurationTracker.formatMs(elapsed)
+                + " limit=" + TaskDurationTracker.formatMs(limit)
+                + " 停滞=" + (stillMs / 1000) + "s"
+                + " pos=" + formatPos(ctx.playerPos())
+                + " hp=" + ctx.health() + " food=" + ctx.food()
+                + " screen=" + ctx.hasScreen() + " sleeping=" + ctx.sleeping()
+                + " baritone(pathing=" + ctx.baritonePathing()
+                + " pathPresent=" + ctx.baritonePathPresent()
+                + " available=" + ctx.baritoneAvailable() + ")"
+                + "\n    stack=" + ctx.stackPath();
+    }
+
+    /** 触发前的位置轨迹 (最近 90s, 1 样本/秒), 带相邻两点位移。 */
+    private static String posHistoryDump() {
+        if (_posHistory.isEmpty()) return "    pos轨迹: (空)";
+        StringBuilder sb = new StringBuilder("    pos轨迹 (最近 ")
+                .append(_posHistory.size()).append("s, 时间(HH:mm:ss) 坐标 与上一点距离):");
+        double[] prev = null;
+        int i = 0;
+        for (double[] s : _posHistory) {
+            double d = 0;
+            if (prev != null) {
+                double dx = s[1] - prev[1], dy = s[2] - prev[2], dz = s[3] - prev[3];
+                d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            if (i % 5 == 0) sb.append("\n      ");
+            sb.append(_timeFmt.format(new Date((long) s[0])))
+                    .append('(').append(Math.round(s[1])).append(',').append(Math.round(s[2]))
+                    .append(',').append(Math.round(s[3])).append(')')
+                    .append(prev == null ? "" : String.format("Δ%.1f", d)).append("  ");
+            prev = s;
+            i++;
+        }
+        return sb.toString();
     }
 
     private static void resetStillness() {
