@@ -1054,14 +1054,43 @@ public class StorageHelper {
         return ArrayUtils.contains(items, StorageHelper.getItemStackInSlot(PlayerSlot.getEquipSlot()).getItem());
     }
 
+    /**
+     * (2026-10-04 劣质食物不计入储备, 用户点名) "面包等级"锚点: 单个面包 hunger=5。
+     * 低于此线的食物回血太慢 (回血由饱食度驱动, 浆果 hunger2/sat0.4 之类凑不够),
+     * 不允许它们凑数 —— 算进储备分会误判"食物要求已满足"、压住觅食远征触发与
+     * 180s 再平衡、还会让远征收队 (+20 units) 被浆果误触发。
+     */
+    public static final int QUALITY_FOOD_MIN_HUNGER = 5;
+
+    /**
+     * (2026-10-04 劣质食物口径, 用户点名) 是否"面包等级以上"的食物 —— 唯一判定源。
+     * 计入食物储备分数 ({@link #calculateInventoryFoodScore}) 与食物潜力
+     * (CollectFoodTask.calculateFoodPotential) 的共同前置; 【进食】链 (FoodChain)
+     * 不走本判据 —— 饿了浆果照吃, 只是它们不能充当"食物储备已达标"。
+     * <p>低于线的常见食物: 甜浆果/发光浆果(2)、胡萝卜(3)、生薯(1)、甜菜根(1)、
+     * 西瓜片(2)、苹果(4)、腐肉(4)、蜘蛛眼(4, 原独立排除被本判据覆盖)。
+     * 可烹饪生食不受影响: 食物潜力按【熟食】units 计 (熟食全部 >= 5)。
+     * 金苹果/附魔金苹果 hunger 虽为 4, 但饱和度 9.6 + 再生效果, 战斗食品豁免计入。
+     */
+    public static boolean isQualityFood(Item item) {
+        if (item == null || !item.isFood()) return false;
+        if (item == Items.GOLDEN_APPLE || item == Items.ENCHANTED_GOLDEN_APPLE) return true;
+        FoodComponent comp = item.getFoodComponent();
+        return comp != null && comp.getHunger() >= QUALITY_FOOD_MIN_HUNGER;
+    }
+
     public static int calculateInventoryFoodScore(AltoClef mod) {
         int result = 0;
         for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
             // Spider eyes are technically food but never a food RESERVE
             // (FoodChain refuses to eat them). Counting them here would make
             // "only spider eyes in backpack" look well-stocked while the bot
-            // starves. Keep this in sync with FoodChain.calculateFood.
-            if (stack.isFood() && stack.getItem() != Items.SPIDER_EYE)
+            // starves. (2026-10-04 口径升级) 储备单位只认"面包等级以上"的食物
+            // ({@link #isQualityFood}): 浆果/垃圾蔬菜等劣质食物回血太慢, 不算进
+            // 食物要求, 也不得压住食物远征触发/收队。与 CollectFoodTask
+            // .calculateFoodPotential 同口径 —— FoodChain"该不该去收集食物"的
+            // 判定 (FoodChain:317 注释铁律) 两边必须一致, 否则复现 0918 乒乓。
+            if (stack.isFood() && isQualityFood(stack.getItem()))
                 result += Objects.requireNonNull(stack.getItem().getFoodComponent()).getHunger() * stack.getCount();
         }
         return result;

@@ -281,6 +281,14 @@ public class CollectFoodTask extends Task {
         }
         // We're just an ordinary item.
         if (food.getItem().isFood()) {
+            // (2026-10-04 劣质食物不计入食物潜力, 用户点名) 低于面包等级 (hunger>=5,
+            // 判定源 StorageHelper.isQualityFood) 的食物 —— 浆果/胡萝卜/甜菜根/生薯/
+            // 苹果/腐肉等 —— 不计入: 它们回血太慢, 算进去会让"食物要求已满足"
+            // (foodMet/isFinished) 误判成立、也压住远征触发 (潜力高水位不增长才远征)。
+            // 可烹饪生食已在上方按熟食 units 计 (熟食全部 >= 5, 天然达标);
+            // 小麦→面包折算 (下方 potentialBread) 本身就是面包等级, 不受影响。
+            // 【进食】不受影响: FoodChain 饿了照吃这些食物, 只是它们不能充当储备。
+            if (!StorageHelper.isQualityFood(food.getItem())) return 0;
             assert food.getItem().getFoodComponent() != null;
             return count * food.getItem().getFoodComponent().getHunger();
         }

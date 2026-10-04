@@ -22,7 +22,6 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -568,6 +567,9 @@ public class DeathRecoveryChain extends SingleTaskChain {
      * 口径与 {@link StorageHelper#calculateInventoryFoodScore} 严格一致:
      * foodComponent.hunger × count, 排除蜘蛛眼 (FoodChain 拒绝吃蜘蛛眼,
      * 把它算进储备会让"只剩蜘蛛眼"误判成食物充足)。
+     * (2026-10-04 口径同步) 储备单位只认"面包等级以上"的食物
+     * (StorageHelper.isQualityFood): 浆果等劣质食物不算, 满地浆果的墓不值得
+     * 为"食物救援"专门跑一趟 —— 与背包储备分数同一把尺。
      * 区块未加载 / 掉落物已消失 / 离墓超半径 → 0, 不触发救援, 走原判据。
      */
     private static int droppedFoodUnitsNearGrave(AltoClef mod, BlockPos grave, int radius) {
@@ -581,7 +583,7 @@ public class DeathRecoveryChain extends SingleTaskChain {
             if (drop.squaredDistanceTo(centre) > radiusSq) continue;
             ItemStack stack = drop.getStack();
             if (stack.isEmpty() || !stack.isFood()) continue;
-            if (stack.getItem() == Items.SPIDER_EYE) continue;
+            if (!StorageHelper.isQualityFood(stack.getItem())) continue;
             units += stack.getItem().getFoodComponent().getHunger() * stack.getCount();
         }
         return units;
