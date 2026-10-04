@@ -99,6 +99,24 @@ class Bot:
             print("      · 限流中，等待 %.0fs（%d 条/分钟）" % (wait, self.rate))
             time.sleep(max(0.5, wait))
 
+    def post_paced(self, cmd, max_retry=3):
+        """pace + POST，撞到服务端 429 时按其 retryAfterSec 退避重试。
+
+        ⚠️ 服务端限流是 **60s 滑动窗口且跨进程持续**（`ActionDispatcher.rateCheckAndRecord`），
+        而这里的 pace() 只统计**本次运行**发出的命令 ⇒ 连着跑两轮、或与别的脚本同时跑，
+        必然有一部分命令落在上一轮的窗口里被 429。重试是唯一的解法，不是加长等待。
+        """
+        code, resp = None, None
+        for attempt in range(max_retry + 1):
+            self.pace(cmd)
+            code, resp = self.post_raw(cmd)
+            if code != 429:
+                return code, resp
+            wait = float(resp.get("retryAfterSec") or 5) + 1.0
+            print("      · 服务端限流(429)，退避 %.0fs 后重试（第 %d 次）" % (wait, attempt + 1))
+            time.sleep(wait)
+        return code, resp
+
     # ---------- 事件 ----------
     def poll(self):
         r = self._get("/events?cursor=" + urllib.parse.quote(self.cursor))
@@ -144,7 +162,9 @@ class Bot:
 
 # ============================ 用例 ============================
 
-# name, cmd, expect_status(completed/failed/None), must_contain(文本或 reason 里必须出现的片段)
+# name, cmd, expect_status(completed/failed/None), must_contain(文本或 reason 里**命中其一**即可的候选片段)
+# ⚠️ 参数缺失类用例：命令的 call() 根本不会执行（ArgParser 先拦），reason 只会有
+#    "Not enough arguments supplied: ... Usage: xxx" ⇒ 命令自己写的中文串**不可达**，别写进候选。
 CASES_CORE = [
     ("quota 失败：物品名认不出", "@quota no_such_item_xyz 1", "failed", ["认不出物品 id"]),
     ("quota 失败：少参数", "@quota blaze_rod", "failed", ["Not enough arguments", "Usage"]),
@@ -152,7 +172,7 @@ CASES_CORE = [
     ("quota 成功：取消份额", "@quota blaze_rod -1", "completed", ["blaze_rod"]),
     ("quota 成功：清空全部", "@quota all -1", "completed", ["清空"]),
     ("forgetmem 失败：类型认不出", "@forgetmem no_such_type", "failed", ["认不出类型"]),
-    ("forgetmem 失败：少参数", "@forgetmem", "failed", ["Not enough arguments", "缺 type 参数"]),
+    ("forgetmem 失败：少参数", "@forgetmem", "failed", ["Not enough arguments", "Usage"]),
     ("forgetmem 成功：作废某类型", "@forgetmem lava_lake", "completed", ["已作废本存档"]),
     ("sleep 失败：未知模式", "@sleep bogus_mode", "failed", ["未知模式"]),
     ("sleep 成功：熬到天亮", "@sleep wait-dawn", "completed", ["熬到天亮"]),
@@ -174,9 +194,8 @@ CASES_DESTRUCTIVE = [
 def run_case(bot, name, cmd, expect, must_contain, timeout=60):
     print("  [%s] %s" % (bot.name, name))
     print("      → %s" % cmd)
-    bot.pace(cmd)
     try:
-        code, resp = bot.post_raw(cmd)
+        code, resp = bot.post_paced(cmd)
     except Exception as ex:
         print("      ✗ HTTP 异常：%s" % ex)
         return False
@@ -185,6 +204,8 @@ def run_case(bot, name, cmd, expect, must_contain, timeout=60):
             print("      ✗ HTTP 404 unknown command —— 客户端**很可能还在跑旧 jar**（没重启？）")
         elif code == 403:
             print("      ✗ HTTP 403 not in whitelist —— 该实例 bridge.json 的 allowedCommands 未含此命令")
+        elif code == 429:
+            print("      ✗ HTTP 429 服务端限流未能在重试内通过（可能与别的脚本同时在打同一实例）")
         else:
             print("      ✗ HTTP %s %s" % (code, json.dumps(resp, ensure_ascii=False)))
         return False
@@ -204,18 +225,15 @@ def run_case(bot, name, cmd, expect, must_contain, timeout=60):
     if expect is not None and status != expect:
         print("      ✗ 期望 status=%s，实际 %s" % (expect, status))
         ok = False
-    if expect == "failed":
-        if not reason:
-            print("      ✗ 期望带 detail.reason（失败必须给原因）")
-            ok = False
-        for s in (must_contain or []):
-            if s not in (text + " " + reason):
-                print("      ✗ 期望文本/reason 含 %r" % s)
-                ok = False
-    elif must_contain:
-        # 每个候选片段"命中其一"即可（如 'Not enough arguments' / 'Usage'）
+    if expect == "failed" and not reason:
+        print("      ✗ 期望带 detail.reason（失败必须给原因）")
+        ok = False
+    if must_contain:
+        # ⚠️ 多个片段 = "命中其一即可"（候选），**不是**"全部必须出现"。
+        # (2026-10-04 修) 此前 failed 分支用的是 all() 语义，与 else 分支的 any() 不一致
+        # ⇒ 多候选用例（forgetmem 少参数）会假失败。
         if not any(s in (text + " " + reason) for s in must_contain):
-            print("      ✗ 期望文本含其一 %r" % must_contain)
+            print("      ✗ 期望文本/reason 含其一 %r" % must_contain)
             ok = False
     print("      %s" % ("✓ PASS" if ok else "✗ FAIL"))
     return ok
@@ -382,8 +400,7 @@ def main():
     for b in live:
         for c in ("@quota all -1", "@idle" if not b.was_mainline else "@resume_main"):
             try:
-                b.pace(c)
-                code, resp = b.post_raw(c)
+                code, resp = b.post_paced(c)
                 print("  [%s] %s → HTTP %s" % (b.name, c, code))
             except Exception as ex:
                 print("  [%s] %s → 异常 %s" % (b.name, c, ex))
