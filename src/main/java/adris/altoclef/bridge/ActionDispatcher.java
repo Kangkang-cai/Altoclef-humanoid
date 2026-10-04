@@ -300,7 +300,8 @@ final class ActionDispatcher {
         try {
             if (PAUSE.equals(token)) {
                 boolean did = pauseMainline();
-                emitDone(actionId, token, did ? "已暂停手头任务" : "手头没有任务，无需暂停");
+                emitDone(actionId, token, did ? "已暂停手头任务" : "手头没有任务，无需暂停",
+                        "completed", null);
                 return;
             }
             if (RESUME.equals(token)) {
@@ -309,7 +310,9 @@ final class ActionDispatcher {
                 _active = null;
                 _activeSinceMs = 0;
                 resetProgress();
-                emitDone(actionId, token, did ? "已回到主线" : "主线已在推进");
+                // (2026-10-04) 补 status —— 旧版走 3 参 emitDone ⇒ detail.status 缺失，
+                // 与其它命令不一致；对端按 status 统一分支时会漏判。
+                emitDone(actionId, token, did ? "已回到主线" : "主线已在推进", "completed", null);
                 return;
             }
             CommandExecutor executor = AltoClef.getCommandExecutor();

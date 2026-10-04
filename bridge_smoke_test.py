@@ -152,7 +152,7 @@ CASES_CORE = [
     ("quota 成功：取消份额", "@quota blaze_rod -1", "completed", ["blaze_rod"]),
     ("quota 成功：清空全部", "@quota all -1", "completed", ["清空"]),
     ("forgetmem 失败：类型认不出", "@forgetmem no_such_type", "failed", ["认不出类型"]),
-    ("forgetmem 失败：少参数", "@forgetmem", "failed", ["缺 type 参数"]),
+    ("forgetmem 失败：少参数", "@forgetmem", "failed", ["Not enough arguments", "缺 type 参数"]),
     ("forgetmem 成功：作废某类型", "@forgetmem lava_lake", "completed", ["已作废本存档"]),
     ("sleep 失败：未知模式", "@sleep bogus_mode", "failed", ["未知模式"]),
     ("sleep 成功：熬到天亮", "@sleep wait-dawn", "completed", ["熬到天亮"]),
@@ -230,9 +230,9 @@ def check_status_fields(bot, results):
         results.append((bot.name + " /status", False))
         return
     online = s.get("online")
+    pos = s.get("pos") or {}
     print("      online=%s dim=%s pos=(%s,%s,%s) timeOfDay=%s" % (
-        online, s.get("dim"), s.get("pos", {}).get("x"), s.get("pos", {}).get("y"),
-        s.get("pos", {}).get("z"), s.get("timeOfDay")))
+        online, pos.get("dim"), pos.get("x"), pos.get("y"), pos.get("z"), s.get("timeOfDay")))
     print("      onlinePlayers=%r sleepingPlayers=%r" % (
         s.get("onlinePlayers"), s.get("sleepingPlayers")))
     print("      mainlineProgress=%r" % s.get("mainlineProgress"))
@@ -362,13 +362,20 @@ def main():
                                                       ["认不出物品 id"], args.timeout)))
         sq = check_status_fields(live[1], results)
         if sq and first_status:
-            op1 = (first_status.get("onlinePlayers") or "")
-            op2 = (sq.get("onlinePlayers") or "")
-            both = (live[0].name in op2 or live[1].name in op1) if (op1 or op2) else False
-            print("      · 互见检查：%s=%r  %s=%r" % (live[0].name, op1, live[1].name, op2))
-            if not both:
-                print("      · 提示：没看到互见名（同一服务器时双方 onlinePlayers 应含对方；"
-                      "若开了端口转发/不同机器请忽略）")
+            # 注意：onlinePlayers 里是 **MC 用户名**（如 qiaoqiao/kangkang），不是 bridge 的 botId，
+            # 所以不能拿 botId 去比对。判据改为：两边看到的名单一致 且 公共玩家 ≥2
+            # （同一服务器且都在线时，必然互相看见）。
+            op1 = set(x for x in (first_status.get("onlinePlayers") or "").split(",") if x)
+            op2 = set(x for x in (sq.get("onlinePlayers") or "").split(",") if x)
+            common = op1 & op2
+            mut = (op1 == op2) and len(common) >= 2
+            print("      · 互见检查：%s 看到 %s / %s 看到 %s" % (
+                live[0].name, sorted(op1), live[1].name, sorted(op2)))
+            print("      · 名单一致=%s 公共玩家=%s → %s" % (
+                op1 == op2, sorted(common), "✓ PASS" if mut else "✗ FAIL"))
+            if not mut:
+                print("        若两 bot 不在同一服务器/经端口转发/不同机器，此项应忽略。")
+            results.append(("两 bot 在线名单互见", mut))
 
     # ---------- 复位 ----------
     print("\n---- 6) 复位（可逆用例收尾）----")
