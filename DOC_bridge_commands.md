@@ -1,7 +1,7 @@
 # 桥接命令对接手册（AI 行动通道）
 
-> 面向 **chat_and_play（对端）**。2026-10-03 版。
-> 代码 commit `a52ca1d6`；jar md5 `a0996d520abf4ade29cf9b9047ad8fe2`。
+> 面向 **chat_and_play（对端）**。2026-10-04 版。
+> 代码 commit `0b79da92`；jar md5 `b67ae0ee2b831ec88f10ad519be361cc`。
 > 变更报告（为什么加这些）见同目录 `REPORT_coordination_primitives_20261003.md`。
 
 ---
@@ -41,8 +41,8 @@
 | 类型 | 命令 | 完成时机 |
 |---|---|---|
 | **瞬时** | `coords` `status` `inventory` `remember` `forget` `quota` `forgetmem` | 受理后**立即**发 `action_done` |
-| **按住·无终态** | `idle` | 受理后立即发 `action_done`（= "开始保持"），**不会再有第二条**；由下一条命令或 `@resume_main` 解除 |
-| **按住·有终态** | `sleep` | 受理后立即发 `action_done`（= "已开始睡/熬"）；**天亮时再发一条 `completed`**；被顶替 = `cancelled`，被暂停 = `interrupted` |
+| **按住·无终态** | `idle`（不带参数） | 受理后立即发 `action_done`（= "开始保持"），**不会再有第二条**；由下一条命令或 `@resume_main` 解除 |
+| **按住·有终态** | `idle <秒>`（**2026-10-04 新**）、`sleep` | 受理后立即发 `action_done`（= "已开始保持/已开始睡"）；**到时/天亮时再发一条 `completed`**（idle 文案「待命 N 秒结束（原地站立），已自动回主线」）；`sleep` 被顶替 = `cancelled`；⚠️ **`idle`（两种形态）被顶替都静默不发**（与旧口径一致，靠 /status 感知） |
 | **有任务** | `goto` `follow` `give` | 顶层任务**结束时**发 `action_done`（`status` = completed / failed / cancelled） |
 
 > ⚠️ 对端**仍应设超时兜底**（建议 `goto` 60s / `give` 300s / 其余 120s）。有任务类在"被新命令顶替"时会立刻收到 `cancelled`；但若 bridge 与客户端断连就不会有事件。
@@ -56,7 +56,7 @@
 | `goto` | `@goto <x y z\|x z\|y\|维度>` | 导航到坐标/维度 | 有任务 |
 | `follow` | `@follow <玩家名>` | 跟随某人 | 有任务 |
 | `give` | `@give <玩家名> <物品> <数量>` | 给某人物品（**背包没有会去收集**） | 有任务 |
-| `idle` | `@idle` | 站住待命（按住态） | 按住态 |
+| `idle` | `@idle [秒]` | 原地站立待命（可选时长，**2026-10-04 新**，见 §3.4） | 按住态（带秒=有终态） |
 | `coords` | `@coords` | 报坐标（只读） | 瞬时 |
 | `status` | `@status` | 报当前任务（只读） | 瞬时 |
 | `inventory` | `@inventory [物品]` | 查背包（只读） | 瞬时 |
@@ -130,6 +130,25 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 生效范围 = **当前 `存档:维度`**，会同步重写落盘文件（否则重启复活）。与 `@forget`（命名地标）**互不干扰**。
 回执 `text` 会报**清掉了几条**（0 条时说明"本来就没有，未改动"）。
 
+### 3.4 `@idle [秒]` —— 原地站立待命（2026-10-04 新增时长参数）
+
+| 用法 | 语义 | 何时结束 |
+|---|---|---|
+| `@idle`（不带参数，**行为不变**） | 无限期待命 | 只有下一条命令 / `@resume_main` 解除 |
+| `@idle 30` | **待命 30 秒，到时自动回主线** | 到时自动结束；或被新指令提前顶掉 |
+| `@idle 0` / `@idle -5` / `@idle abc` | **当场拒绝，不起任务** | `action_done(failed)` + reason |
+
+- **用途**：编排上的"定时等待"——给对方留拾取时间（give 前后）、错峰让路、按拍节推进等，不再需要靠对端计时器 + `@resume_main` 手动收尾。
+- **`/status.activeAction` 期间明确报待命现场**：
+  - 定时：`detail = "原地站立待命（不动），剩 Xs 自动回主线"`（**逐秒倒计时刷新**；`detail` 不进变化键，不会造成轮询刷屏）；
+  - 无限期：`detail = "原地站立待命（不动），等你下一条指令"`。
+- **回执（定时形态 = 两条，与 `@sleep auto` 同型）**：
+  1. 受理即 `action_done(completed)`，text =「原地站立待命（不动）N 秒，到时自动回主线。」；
+  2. **到时**再发一条 `action_done(completed)`「待命 N 秒结束（原地站立），已自动回主线」+ 通用 `task_done`「完成：Idle(Ns)」。bot 随即自主推进主线。
+- **无限期形态不变**：只有第 1 条回执；被顶替**静默**（无第二条、无 cancelled）。
+- ⚠️ **到时自动回主线是有意的**：否则任务结束后 TaskRunner 停摆（连怪物防御都不跑）。若你想让它待命后继续停着，到时再发 `@pause_main` 即可。
+- **失败**：非正整数秒 → `failed`，reason 如「idle 参数必须是正整数秒（不传=一直待命），收到：0。」
+
 ---
 
 ## 4. 回执字段与"调试信息"（重点）
@@ -175,6 +194,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 
 | 命令 | 触发条件 | 你能收到的 `reason`（示例） |
 |---|---|---|
+| `idle` | 秒参数非正整数（2026-10-04 新） | "idle 参数必须是正整数秒（不传=一直待命），收到：0。" |
 | `sleep` | `bed-only` 且附近无床 | "bed-only 做不到：手里没有床、附近 24 格也没有现成的床；按约定不去远行找/造。" |
 | `sleep` | mode 拼错 | "未知模式 'xxx'；可用 auto \| bed-only \| wait-dawn \| skip。" |
 | `quota` | 物品 id 认不出 | "认不出物品 id —— xxx（示例：blaze_rod / ender_pearl / ender_eye）" |
@@ -239,18 +259,33 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 @forgetmem stronghold      # 作废本存档要塞记忆，让 bot 重新定位
 ```
 
+**给对方留拾取时间（give 前后的定时等待，2026-10-04 起）**
+```
+bot_1: @give bot_2 bread 5
+bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主线，无需再发 @resume_main
+```
+待命期间 `/status.activeAction.detail` 会逐秒报「原地站立待命（不动），剩 Xs 自动回主线」，协调者可据此对齐双方节奏。
+
 ---
 
 ## 7. 部署状态
 
-commit `980d6eee`；jar md5 `49981c80e856e1b88bcffc8e4aec58ad`；⚠️ **未部署** —— 1004 21:5x 构建时三客户端均在运行（17:18 启动），按硬规矩不热替换。待重启后：备份三处 mods → 覆盖 → md5 校验。
-白名单默认 **12 条**（`skip` 是 `sleep` 的一个 mode，不新增命令）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+commit `0b79da92`；jar md5 `b67ae0ee2b831ec88f10ad519be361cc`；⚠️ **未部署** —— 1004 22:15 构建时三客户端均在运行（PID 39364/37744/33836），按硬规矩不热替换。待重启后：备份三处 mods → 覆盖 → md5 校验。
+该 jar 相对上一版累计包含：`@sleep skip`（`980d6eee`）、白天下还点床修复（`1b600f77`）、劣质食物口径（`46cc3d2a`）、death 事件、场景译名细分（`cabb2e5c`）、**`@idle [秒]` 定时待命（`0b79da92`，本节新增）**。
+白名单默认 **12 条**（`skip` 是 `sleep` 的一个 mode、秒是 `idle` 的可选参数，都不新增命令）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
 
 **待实跑判据（`@sleep skip`）**
 1. 夜里发 `@sleep skip` → 立刻回一条 `action_done(completed)`，文案含「本夜不睡」；随后 `/status.task` 应变成主线子任务（挖矿/收集…），**不应**再出现 `Sleeping through night` / 找床。
 2. `@sleep skip` 后**不发**第二条 `action_done`（它是状态开关，没有终态事件）；`/status.activeAction` 键应**消失**（bot 在干活而不是待命）。
 3. 天亮后（或发 `@sleep auto`）→ 下一个夜晚应恢复正常睡觉（skip 自动/显式解除）。
 4. ⚠️ **未验证项**：若命令到达时 bot **已经躺在床上**，任务被顶掉后它**会不会自己起身**（用户判断"换任务就会自己下床"，但仓里没有任何"任务切换→下床"代码，`PlaceBedAndSetSpawnTask.onStop` / `SleepThroughNightTask.onStop` 都是空的）。若发现它赖在床上不动，补一行 `setScreen(null)` + `STOP_SLEEPING` 即可，方案已备。
+
+**待实跑判据（`@idle [秒]`，2026-10-04 新）**
+1. 发 `@idle 30` → 受理即一条 `action_done(completed)`（text 含「原地站立待命（不动）30 秒」）；`/status.activeAction` = `{cmd:"idle", detail:"原地站立待命（不动），剩 Xs 自动回主线"}` 且 X 逐秒递减。
+2. 30 秒到 → **第二条** `action_done(completed)`「待命 30 秒结束（原地站立），已自动回主线」+ 一条通用 `task_done`；随后 `/status.task` = 主线任务，bot 自主推进。
+3. 待命途中发 `@goto ...` 顶掉 → **静默**：无 cancelled、无第二条 done（旧口径不变），靠 /status 感知。
+4. `@idle 0` / `@idle abc` → 一条 `action_done(failed)` + reason「idle 参数必须是正整数秒…」，bot 原任务不受影响。
+5. 定时待命期间 `/status.botStatus` 应保持 `ok`（待命是合法静止，不报 `bot_stuck`），restart_guard.log 不出现 IdleTask 重启记录。
 
 > 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
