@@ -720,6 +720,20 @@ public class Settings implements IFailableConfigFile {
      */
     private boolean anomalyWatchdogEnabled = true;
 
+    /**
+     * (2026-10-04 卡死任务软重启守卫) 是否允许对"时长超限 + 原地停滞"的用户主任务
+     * 自动软重启。与只读的异常看门狗相互独立 —— 本开关管的是"动手"的那一个。
+     *
+     * 触发判据 (双条件缺一不可, 详见 StuckTaskRestartGuard 类注释):
+     *  - 主任务连续运行超过其任务类自适应上限 (max(p90×3, 30s));
+     *  - 且位移停滞 >= 45s (0.5 格锚点; 开 GUI / 睡觉 / idle 等待时计时重置)。
+     *
+     * 出口保证: 同一任务类 10 分钟窗口内最多重启 2 次, 间隔 >= 60s;
+     * 超限后只节流发 CRITICAL 告警, 绝不无限重启。只作用于 UserTaskChain 主任务,
+     * 反射链 (岩浆逃生 / MLG / 怪物防御) 永不被打断。
+     */
+    private boolean durationRestartGuardEnabled = true;
+
     //////////////////////////////////////////////////////////////////////////////////////////
     ////////** 要塞船降 (2026-09-18) **////////////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////////////////////////////
@@ -949,6 +963,10 @@ public class Settings implements IFailableConfigFile {
 
     public boolean isAnomalyWatchdogEnabled() {
         return anomalyWatchdogEnabled;
+    }
+
+    public boolean isDurationRestartGuardEnabled() {
+        return durationRestartGuardEnabled;
     }
 
     // ==== 要塞船降 (2026-09-18) ====

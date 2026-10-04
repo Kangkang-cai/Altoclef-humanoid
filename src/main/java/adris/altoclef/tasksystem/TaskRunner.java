@@ -137,6 +137,15 @@ public class TaskRunner {
             AnomalyWatchdog.tick(_mod, maxChain, _tickCounter);
         } catch (Throwable ignored) {
         }
+
+        // (2026-10-04 卡死任务软重启守卫) 看门狗告警的第一个"动手"消费者:
+        // 主任务时长超限 + 位移停滞双条件成立时软重启 (Task.interrupt, 与抢占恢复
+        // 同路径)。放在看门狗之后: 先告警后动作。自身异常同样被吞, 绝不影响调度。
+        // 范围/出口/判据详见 StuckTaskRestartGuard 类注释。
+        try {
+            adris.altoclef.anomaly.StuckTaskRestartGuard.tick(_mod, maxChain);
+        } catch (Throwable ignored) {
+        }
     }
 
     public void addTaskChain(TaskChain chain) {
