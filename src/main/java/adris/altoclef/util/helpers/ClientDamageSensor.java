@@ -204,6 +204,17 @@ public final class ClientDamageSensor {
             }
             PlayerDamageCauseHolder.record(cause);
 
+            // ---- 1.5) (2026-10-04 bridge 死因事件) 死亡播报原文快照, 供 bridge death
+            // 事件带上死因。就在这里记: 此处同时握有播报原文 + 维度 + 坐标, 不用第二次解析。
+            try {
+                String deathDesc = String.format(Locale.ROOT, "%s（%s %d,%d,%d）",
+                        message.getString(),
+                        mc.world.getRegistryKey().getValue(),
+                        mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ());
+                PlayerDamageCauseHolder.recordDeathDescription(deathDesc);
+            } catch (Throwable ignored) {
+            }
+
             // ---- 2) 击杀者归因: 死亡瞬间唯一权威的"谁打死了我"来源, 喂 HitRegistry
             // (猪灵记仇 + _recentAttackerUntil 实锤)。killerId = -1 表示无攻击者。
             if (killerId >= 0) {

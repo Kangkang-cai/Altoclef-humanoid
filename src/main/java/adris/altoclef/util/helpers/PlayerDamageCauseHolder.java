@@ -28,6 +28,14 @@ public final class PlayerDamageCauseHolder {
     private static volatile String lastDamageCauseName = null;
     private static volatile boolean lastCarriedHighValue = false;
 
+    // ---------- (2026-10-04 bridge 死因事件) 死亡播报原文快照 ----------
+    // 为什么需要: bridge 的 death 事件目前只有字面 "死了"(EventCollector 的 isDead 边沿),
+    // 对端拿不到死因。而死因的权威来源就是死亡播报包(DeathMessageS2CPacket)的原文
+    // ("kangkang被北极熊杀死了"), onDeathMessage 时刻顺手记一份, 消费方读走即清。
+    // 时序: 边沿检测(HealthUpdate 血量归零)可能先于死亡播报包到达, 消费方(bridge)须
+    // 短暂重试; 保险起见读走即清 + 每次死亡必定覆盖, 不会串场。
+    private static volatile String lastDeathDescription = null;
+
     // ---------- (2026-09-29 死因取证升级) 近期伤害流水 ----------
     // 为什么需要: 现场 20260929-222238 的死亡在日志里只留下一行 `cause=mob` —— 没有
     // 怪物种类、没有掉血序列、没有"死前想吃吃不了"。而录制数据里这些信息全都有
@@ -115,6 +123,18 @@ public final class PlayerDamageCauseHolder {
      */
     public static void recordCarriedHighValue(boolean highValue) {
         lastCarriedHighValue = highValue;
+    }
+
+    /** 由 ClientDamageSensor.onDeathMessage 在死亡播报到达时调用(覆盖旧值)。 */
+    public static void recordDeathDescription(String description) {
+        lastDeathDescription = description;
+    }
+
+    /** 死因描述读走即清: 保证"每个墓只被消费一次", 不被下一次死亡继承。 */
+    public static synchronized String consumeDeathDescription() {
+        String desc = lastDeathDescription;
+        lastDeathDescription = null;
+        return desc;
     }
 
     /**

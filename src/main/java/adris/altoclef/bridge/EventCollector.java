@@ -7,6 +7,7 @@ import adris.altoclef.eventbus.events.ChatMessageEvent;
 import adris.altoclef.eventbus.events.ClientTickEvent;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -26,7 +27,9 @@ import java.util.Map;
  *       都不是"我挖到了"）。每 ~0.5s 扫一次背包，白名单物品的增量进 3s 聚合窗口。</li>
  *   <li><b>task_done</b>：订阅 {@link TaskFinishedEvent}（仅 UserTaskChain 顶层任务结束才发，
  *       低频，不聚合，直接发）。</li>
- *   <li><b>death</b>（strong）：检测 {@code player.isDead()} 的 alive→dead 边沿。</li>
+ *   <li><b>death</b>（strong）：检测 {@code player.isDead()} 的 alive→dead 边沿。
+ *       (2026-10-04) 带死因：死亡播报包(DeathMessageS2CPacket)原文（如"被北极熊杀死"）
+ *       + 维度/坐标；播报未到达时挂起等待最多 2s，超时兜底纯 "死了"。</li>
  *   <li><b>help</b>（strong）：订阅 {@link ChatMessageEvent}，命令前缀 + 给物/跟随/求助语义
  *       的聊天视为对方求助（对端据此强制开轮）。普通公屏聊天不进事件（克制即真实）。</li>
  * </ul>
@@ -54,6 +57,11 @@ final class EventCollector {
     private boolean _pendingRebaseline = false;
 
     private boolean _wasDead = false;
+    // (2026-10-04 死因事件) 死亡边沿可能先于死亡播报包(DeathMessageS2CPacket)到达:
+    // HealthUpdate(血量归零) 与 DeathMessage 是两个包, tick 落在两者之间时死因描述尚未
+    // 写入 holder。挂起最多 40 tick(2s) 等死因, 等不到就发兜底 "死了", 绝不无限等。
+    private int _pendingDeathTicks = 0;
+    private static final int DEATH_DESC_WAIT_TICKS = 40;
     private int _tickCounter = 0;
     private static final int INV_SCAN_INTERVAL_TICKS = 10; // 0.5s
 
@@ -217,6 +225,7 @@ final class EventCollector {
         if (!AltoClef.inGame()) {
             _hasLastCounts = false;
             _wasDead = false;
+            _pendingDeathTicks = 0;
             return;
         }
         var player = _mod.getPlayer();
@@ -225,7 +234,22 @@ final class EventCollector {
         // 死亡边沿：alive → dead
         boolean dead = player.isDead();
         if (!_wasDead && dead) {
-            _buffer.emitImmediate("death", "死了", true);
+            String desc = PlayerDamageCauseHolder.consumeDeathDescription();
+            // 死因描述已就绪 → 直接带死因; 否则挂起等死亡播报包到达(最多 2s)。
+            if (desc != null) {
+                _buffer.emitImmediate("death", "死了：" + desc, true);
+            } else {
+                _pendingDeathTicks = DEATH_DESC_WAIT_TICKS;
+            }
+        } else if (_pendingDeathTicks > 0) {
+            // 挂起中: 等死因描述到达; 超时兜底发纯 "死了", 保证事件必达且有出口。
+            String desc = PlayerDamageCauseHolder.consumeDeathDescription();
+            if (desc != null) {
+                _buffer.emitImmediate("death", "死了：" + desc, true);
+                _pendingDeathTicks = 0;
+            } else if (--_pendingDeathTicks == 0) {
+                _buffer.emitImmediate("death", "死了", true);
+            }
         }
         _wasDead = dead;
 
