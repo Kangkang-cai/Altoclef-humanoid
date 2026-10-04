@@ -53,6 +53,10 @@ public class CollectBedTask extends CraftWithMatchingWoolTask {
         if (!mod.getChunkTracker().isChunkLoaded(bed)) return "chunk-unloaded";
         Block actual = mod.getWorld().getBlockState(bed).getBlock();
         if (!(actual instanceof BedBlock)) return "not-bed(" + actual.asItem() + ")";
+        // (2026-10-04 多人抢床) 别人正睡的床不拆: 拆了会把睡在里面的人弹醒, 而且拿到的
+        // 是一张"别人正在用"的床。占用判据与 PlaceBedAndSetSpawnTask 同源
+        // (WorldHelper.isBedOccupied) —— 缺这张床时回落杀羊取毛做床正路。
+        if (WorldHelper.isBedOccupied(mod, bed)) return "occupied";
         if (WorldHelper.isAdjacentToLiquid(mod, bed)) return "liquid";
         String cbFail = WorldHelper.canBreakFailReason(mod, bed);
         return cbFail == null ? null : ("canBreak:" + cbFail);

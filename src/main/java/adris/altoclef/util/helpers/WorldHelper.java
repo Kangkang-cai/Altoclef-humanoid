@@ -230,6 +230,38 @@ public interface WorldHelper {
         return null;
     }
 
+    /**
+     * (2026-10-04 多人抢床) 床是否已被别的玩家占用 (vanilla {@code BedBlock.OCCUPIED})。
+     *
+     * <p>玩家睡进去后服务端会把床置 OCCUPIED=true; 之后别的玩家再点这张床, vanilla
+     * {@code BedBlock.onUse} 直接走 "block.minecraft.bed.occupied" 分支并 return,
+     * {@code trySleep} 根本不执行 ⇒ 不管怎么点都睡不进去、重生点也不会设。
+     *
+     * <p>本项目此前选床只判"从某站侧能不能点到床方块"({@code bedHasClickableLine}),
+     * 不判占用 ⇒ 对着别人正睡的床无限重点 (现场 20261004: 三 bot 抢一张床,
+     * kangkang 在 (-886,66,563) 连点 15 次 / 30s 未睡)。占用判据单一源, 供
+     * {@code PlaceBedAndSetSpawnTask}(选床睡) 与 {@code CollectBedTask}(选床拆) 共用。
+     *
+     * <p>两半块都查: vanilla onUse 会先 offset 到 HEAD 再读该块属性, 但不同实现可能
+     * 只置一侧, 查两侧零成本更稳。
+     */
+    static boolean isBedOccupied(AltoClef mod, BlockPos pos) {
+        if (mod == null || pos == null) return false;
+        ClientWorld world = mod.getWorld();
+        if (world == null) return false;
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof BedBlock)) return false;
+        if (isOccupiedBed(state)) return true;
+        BlockPos other = (state.get(BedBlock.PART) == BedPart.HEAD)
+                ? pos.offset(state.get(BedBlock.FACING).getOpposite())
+                : pos.offset(state.get(BedBlock.FACING));
+        return isOccupiedBed(world.getBlockState(other));
+    }
+
+    static boolean isOccupiedBed(BlockState state) {
+        return state.getBlock() instanceof BedBlock && state.get(BedBlock.OCCUPIED);
+    }
+
     // Get the left side of a chest, given a block pos.
     // Used to consistently identify whether a double chest is part of the same chest.
     static BlockPos getChestLeft(AltoClef mod, BlockPos posWithChest) {

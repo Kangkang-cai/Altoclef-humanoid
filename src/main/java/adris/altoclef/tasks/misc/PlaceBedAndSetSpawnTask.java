@@ -162,6 +162,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final TimerGame _bedClickThrottleTimer = new TimerGame(BED_CLICK_THROTTLE_SECONDS);
     // (2026-09-29 附近有怪拒睡) 清怪决策日志 3s 节流。
     private final TimerGame _sleepBlockerLogTimer = new TimerGame(3);
+    // (2026-10-04 多人抢床) "目标床被别人先睡"告警节流
+    private final TimerGame _bedOccupiedLogTimer = new TimerGame(3);
 
     // ==== (2026-09-29 距床判据与 vanilla 同源) ====
     // 服务端 ServerPlayerEntity.isBedTooFarAway: 玩家位置到【床方块底面中心】
@@ -651,7 +653,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 Debug.logToFile("altoclef_diag.log", "[Diag-bed] sleep target set to just-placed bed at " + placed.toShortString());
             }
         }
-        BlockPos nearestBed = anyBed ? mod.getBlockTracker().getNearestTracking(BEDS).orElse(null) : null;
+        // (2026-10-04 多人抢床) 取最近一张【未被占用】的床 —— 别人正睡的床不是可用目标。
+        // 原 getNearestTracking(BEDS) 会把被占床也算进来 ⇒ nearbyBed=true ⇒
+        // shouldGoToBed=true ⇒ 走过去点一张永远睡不了的床。用 isValidTest 谓词过滤
+        // 占用, 保留 getNearest 原有的 LOS/FOV 感知过滤 (不能换 getKnownLocations 自己扫,
+        // 那会丢掉 VisibilityHelper.isBlockPerceivable 那一层)。
+        BlockPos nearestBed = anyBed
+                ? mod.getBlockTracker().getNearestTracking(p -> !WorldHelper.isBedOccupied(mod, p), BEDS).orElse(null)
+                : null;
         boolean nearbyBed = nearestBed != null
                 && nearestBed.isWithinDistance(mod.getPlayer().getPos(), 30);
         // (2026-09-06 就地合床修复, 用户: 夜里背包有 3 羊毛+原木可做床, 却跑去
@@ -714,6 +723,26 @@ public class PlaceBedAndSetSpawnTask extends Task {
             // ② 床头 (瞄点/设点都以床头为准)
             _bedForSpawnPoint = WorldHelper.getBedHead(mod, toSleepIn);
             if (_bedForSpawnPoint == null) _bedForSpawnPoint = toSleepIn;
+
+            // ②.5 (2026-10-04 多人抢床) 抢占竞态: 选床/走近途中, 目标床被别人先睡了
+            // (vanilla OCCUPIED) → 本 tick 放弃这张, 不点右键、不置 _spawnSet。
+            // 出口: 清掉自放床记录后返回 null, 下一 tick 顶部重算 shouldGoToBed
+            // (此时该床已被 isBedOccupied 排除) ⇒ 背包有床则就地自放, 没床则去收集。
+            // 不做每一步都判会漏: 只有确立 _bedForSpawnPoint 后才可能真的走过去点它。
+            if (WorldHelper.isBedOccupied(mod, toSleepIn) || WorldHelper.isBedOccupied(mod, _bedForSpawnPoint)) {
+                if (_bedOccupiedLogTimer.elapsed()) {
+                    _bedOccupiedLogTimer.reset();
+                    String m = "[Diag-bed] target bed " + _bedForSpawnPoint.toShortString()
+                            + " is OCCUPIED by another player — abandoning it, will place/collect my own"
+                            + " (player=" + mod.getPlayer().getBlockPos().toShortString() + ")";
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+                if (toSleepIn.equals(_justPlacedBed)) _justPlacedBed = null;
+                _bedForSpawnPoint = null;
+                setDebugState("Target bed occupied by another player — re-selecting / placing my own bed");
+                return null;
+            }
 
             // ③ (2026-09-24 用户改革"上床就右键对准就好, 不需要特地站侧位") 不再按
             // 床头 FACING 挑站侧逐个试 (现场铁证: side0 3s 全耗在对齐上点击 0 次;
@@ -1849,6 +1878,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
         beds.sort(Comparator.comparingDouble(b -> b.getSquaredDistance(playerPos)));
         for (BlockPos bed : beds) {
             if (!bed.isWithinDistance(mod.getPlayer().getPos(), range)) continue;
+            // (2026-10-04 多人抢床) 别人正睡的床 (OCCUPIED) 不可作为睡觉目标 —— 跳过。
+            // 实时判 (不进 _bedClickableCache): 占用状态会随别人上床/醒来翻转, 缓存 1s 会误判。
+            if (WorldHelper.isBedOccupied(mod, bed)) continue;
             Boolean cached = _bedClickableCache.get(bed);
             boolean ok;
             if (cached != null) {
