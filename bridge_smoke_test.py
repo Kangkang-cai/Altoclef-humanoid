@@ -181,7 +181,12 @@ def run_case(bot, name, cmd, expect, must_contain, timeout=60):
         print("      ✗ HTTP 异常：%s" % ex)
         return False
     if code != 200:
-        print("      ✗ HTTP %s %s" % (code, json.dumps(resp, ensure_ascii=False)))
+        if code == 404:
+            print("      ✗ HTTP 404 unknown command —— 客户端**很可能还在跑旧 jar**（没重启？）")
+        elif code == 403:
+            print("      ✗ HTTP 403 not in whitelist —— 该实例 bridge.json 的 allowedCommands 未含此命令")
+        else:
+            print("      ✗ HTTP %s %s" % (code, json.dumps(resp, ensure_ascii=False)))
         return False
     aid = resp.get("actionId")
     ev = bot.wait_done(aid, timeout=timeout)
@@ -304,16 +309,42 @@ def main():
         print("\n没有任何在线的 bot，退出。")
         return 2
 
+    print("\n---- 前置条件自检（本轮新命令都不吃物品）----")
+    print("  · 需要：两客户端都已进世界(online=true) + 同一服务器 + 已部署新 jar 并重启")
+    print("  · 不需要：任何背包物品 —— @quota 只写份额/@forgetmem 只改记忆/@sleep wait-dawn 不要床")
+    print("  · 唯一例外：@sleep bed-only 会查【手里有床 或 24 格内有床方块】，没有→failed（属正常）")
+    try:
+        s0 = live[0].status()
+        tod = (s0.get("timeOfDay") or "").strip()
+        print("  · 当前 timeOfDay=%s%s" % (tod, "（白天 ⇒ 睡眠保持态断言会 SKIP，见 §2）"
+                                           if tod and tod != "night" else ""))
+    except Exception:
+        pass
+
     print("\n---- 1) 核心用例（回执 + 失败原因）----")
     for n, c, e, m in CASES_CORE:
         results.append((n, run_case(live[0], n, c, e, m, args.timeout)))
 
     print("\n---- 2) /status 与现场状态 ----")
     first_status = check_status_fields(live[0], results)
-    # sleep 已在核心用例里下过；这里再下一次专门验 activeAction（会占限流额度）
-    results.append(("activeAction=sleep", run_case(live[0], "补一发 @sleep wait-dawn", "@sleep wait-dawn",
-                                                  "completed", ["熬到天亮"], args.timeout)))
-    check_active_action_is_sleep(live[0], results)
+    tod = ((first_status or {}).get("timeOfDay") or "").strip()
+    if tod == "night":
+        # sleep 已在核心用例里下过；这里再下一次专门验 activeAction（会占限流额度）
+        results.append(("activeAction=sleep", run_case(live[0], "补一发 @sleep wait-dawn", "@sleep wait-dawn",
+                                                      "completed", ["熬到天亮"], args.timeout)))
+        check_active_action_is_sleep(live[0], results)
+    else:
+        print("  [SKIP] activeAction=sleep —— 当前 timeOfDay=%r，不是 night。" % tod)
+        print("         原因：WaitForDawnTask 与 SleepThroughNightTask 的 isFinished 判据都是"
+              "【白天=完成】⇒ 白天下发后一个 tick 就结束了，保持态留不住（不是 bug）。")
+        print("         夜里重跑即可验；此处改用 @idle 验同一套保持态机制（与时段无关）：")
+        results.append(("activeAction=idle", run_case(live[0], "@idle 后 activeAction.cmd 应为 idle",
+                                                     "@idle", "completed", ["待命"], args.timeout)))
+        st = live[0].wait_status(lambda x: (x.get("activeAction") or {}).get("cmd") == "idle")
+        aa = (st or {}).get("activeAction") or {}
+        ok = aa.get("cmd") == "idle"
+        print("      activeAction=%s → %s" % (json.dumps(aa, ensure_ascii=False), "✓ PASS" if ok else "✗ FAIL"))
+        results.append(("activeAction=idle", ok))
 
     print("\n---- 3) 环境相关用例（只报告，不断言）----")
     for n, c, e, m in CASES_ENV:
