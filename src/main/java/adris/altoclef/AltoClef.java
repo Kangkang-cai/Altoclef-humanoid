@@ -327,6 +327,10 @@ public class AltoClef implements ModInitializer {
             // minecraft:light (隐形、亮度 15), 默认不回收 (用户拍板)。真实方块光照,
             // 光影下阴影保留; 背包零参与, 详见 InvisibleLightHelper 注释。
             adris.altoclef.util.helpers.InvisibleLightHelper.tick(this);
+            // (2026-10-04 @sleep skip) 「跳过睡觉」只在**本夜**有效 —— 观察到白天即自动解除。
+            // 刻意挂在这里(每 tick 都跑, 与主线在不在跑无关): 若把解除点挂在主线的夜间睡眠
+            // 路由里, 一次白天下的 skip 会因"没有主线在跑"而残留到下一个夜晚, 变成凭空跳一夜。
+            adris.altoclef.util.SleepOverride.autoClearIfDaytime();
         }
 
         // [JankDebug] 帧开始时间戳 (用于帧尾算整帧耗时与帧间隔)

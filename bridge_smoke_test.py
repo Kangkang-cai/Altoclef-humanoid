@@ -176,6 +176,9 @@ CASES_CORE = [
     ("forgetmem 成功：作废某类型", "@forgetmem lava_lake", "completed", ["已作废本存档"]),
     ("sleep 失败：未知模式", "@sleep bogus_mode", "failed", ["未知模式"]),
     ("sleep 成功：熬到天亮", "@sleep wait-dawn", "completed", ["熬到天亮"]),
+    # skip 是"行为开关"（本夜不睡）。副作用：本夜睡眠路由让位，白天自动恢复；
+    # 想立刻撤销就发 @sleep auto（顺便会去睡）或等到白天。
+    ("sleep 成功：本夜跳过", "@sleep skip", "completed", ["本夜"]),
     ("idle：接管（解除 sleep 按住态）", "@idle", "completed", ["待命"]),
     ("resume_main：回主线", "@resume_main", "completed", ["主线"]),
 ]

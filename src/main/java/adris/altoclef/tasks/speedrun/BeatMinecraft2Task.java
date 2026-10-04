@@ -31,6 +31,7 @@ import adris.altoclef.util.DemandQuota;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.SmeltTarget;
+import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ConfigHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
@@ -4369,6 +4370,15 @@ public class BeatMinecraft2Task extends Task {
      * "Get catalogued iron gear" 抢走去下矿, 睡完拆床永远做不完)。
      */
     private Task getNightSleepRouting(AltoClef mod) {
+        // (2026-10-04 @sleep skip) 外部强制"本夜不睡" → 立刻走"跳过睡觉"的同一条路: 返回 null,
+        // 由 onTick 继续派发真实子任务(收床/装备/下矿/食物 —— 也就是"跳过后该走的分支")。
+        // 这是本就存在的第 5 个 return null 理由(前四个: shouldSkipSleepForNether / 地下·水·载具 /
+        // 睡觉失败 30s 冷却 / 本夜放弃找床), 只是由 AI 从外部触发。
+        // ⚠️ 本状态的**解除点不在这里**: 由 AltoClef.onClientTick 每 tick 观察白天自动解除
+        //    (见 SleepOverride.autoClearIfDaytime 注释 —— 挂在路由里会漏掉"无主线在跑"的白天)。
+        if (SleepOverride.isSkipping()) {
+            return null;
+        }
         boolean locatingStronghold = _ranStrongholdLocator && !_locateStrongholdTask.isFinished(mod);
         if (!(_config.sleepThroughNight && !_endPortalOpened && WorldHelper.getCurrentDimension() == Dimension.OVERWORLD && !locatingStronghold)) {
             return null;
@@ -4559,6 +4569,10 @@ public class BeatMinecraft2Task extends Task {
      * 打断没做完)。与睡眠路由 (onTick 内) 的判定保持一致。
      */
     private boolean isNightSleepPriority(AltoClef mod) {
+        // (2026-10-04 @sleep skip) 跳过睡觉期间, 侧线任务不再为"夜间睡优先"让位 ——
+        // 否则收合成台/收熔炉分支会继续空转等一个永远不会来的睡眠路由(判据与
+        // getNightSleepRouting 同源, 遵循"判定源单一化": 两处共用 SleepOverride)。
+        if (SleepOverride.isSkipping()) return false;
         if (!_config.sleepThroughNight || _endPortalOpened) return false;
         if (WorldHelper.getCurrentDimension() != Dimension.OVERWORLD) return false;
         if (_ranStrongholdLocator && !_locateStrongholdTask.isFinished(mod)) return false;

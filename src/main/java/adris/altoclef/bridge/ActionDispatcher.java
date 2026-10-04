@@ -320,8 +320,12 @@ final class ActionDispatcher {
                 emitDone(actionId, token, "命令执行器未就绪", "failed", "命令执行器未就绪");
                 return;
             }
-            // 会替换手头用户任务的命令（动作三类 + 按住态 idle/sleep）→ 先给旧活跃行动发 cancelled
-            boolean replacesUserTask = TASK_ACTIONS.contains(token) || HOLD_ACTIONS.contains(token);
+            // 会替换手头用户任务的命令（动作三类 + 按住态 idle/sleep）→ 先给旧活跃行动发 cancelled。
+            // (@sleep skip 例外, 见 isSleepSkipCmd) 它是"行为开关"不是按住态: 命令本身不派任务,
+            // 只让主线的夜间睡眠路由让位 ⇒ 登记 hold 会让 LivenessDigest 把"正在干活"当成
+            // "合法静止"而掩盖真卡死; 顶掉手头 goto/follow 的行动账本更是不符事实(任务照跑)。
+            boolean replacesUserTask = (TASK_ACTIONS.contains(token) || HOLD_ACTIONS.contains(token))
+                    && !isSleepSkipCmd(token, cmd);
             if (replacesUserTask) {
                 // 新行动接管 = 不再是"被 @pause_main 按住"态。必须清，否则 isPaused() 永久为真，
                 // 会让 LivenessDigest 把后续真卡死当成"合法静止"而漏报。
@@ -540,6 +544,19 @@ final class ActionDispatcher {
      */
     private static boolean hasReceipt(String cmd) {
         return TASK_ACTIONS.contains(cmd) || "sleep".equals(cmd);
+    }
+
+    /**
+     * {@code @sleep skip}（1004 新增第四态）= 行为开关，不是按住态。
+     * 判据：token 是 sleep 且第一个参数是 skip（兼容 no-sleep / nosleep 别名）。
+     * 命令文本形如 {@code @sleep skip}；本方法只认参数位，不用 contains 以免误伤。
+     */
+    private static boolean isSleepSkipCmd(String token, String cmd) {
+        if (!"sleep".equals(token) || cmd == null) return false;
+        String[] parts = cmd.trim().split("\\s+");
+        if (parts.length < 2) return false;
+        String mode = parts[1].toLowerCase();
+        return "skip".equals(mode) || "nosleep".equals(mode) || "no-sleep".equals(mode);
     }
 
     /** 登记一个"有任务生命期"的活跃行动（解析命令目标供进度探针用）。
