@@ -306,7 +306,8 @@ public class PlaceBlockNearbyTask extends Task {
         // (bot 已远走), 直接作废重选, 不再信任 canReach 黑名单口径。
         if (_tryPlace == null
                 || _tryPlace.getSquaredDistance(mod.getPlayer().getPos()) > STALE_PLACE_RANGE * STALE_PLACE_RANGE
-                || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)) {
+                || !WorldHelper.canReach(mod, _tryPlace) || !WorldHelper.canPlace(mod, _tryPlace)
+                || WorldHelper.isUnderwaterAt(mod, _tryPlace)) {
             _tryPlace = locateClosePlacePos(mod);
         }
 
@@ -393,6 +394,10 @@ public class PlaceBlockNearbyTask extends Task {
                 if (WorldHelper.isInsidePlayer(mod, placePos)) {
                     return null;
                 }
+                // (2026-10-04) 被水淹没的位置不放(快路径同口径, 与选点过滤单一判据源)。
+                if (WorldHelper.isUnderwaterAt(mod, placePos)) {
+                    return null;
+                }
                 //Debug.logMessage("TEMP: B (actual): " + placePos);
                 if (WorldHelper.canPlace(mod, placePos)) {
                     return placePos;
@@ -473,6 +478,11 @@ public class PlaceBlockNearbyTask extends Task {
             }
             // We can't place here.
             if (!WorldHelper.canReach(mod, blockPos) || !WorldHelper.canPlace(mod, blockPos)) {
+                continue;
+            }
+            // (2026-10-04) 被水淹没的位置不放 —— 单源判据只接放置路径(勿并入 canReach:
+            // 舀水/追水源/找容器共用 canReach)。现场 20261004-1214 站水里 79s 反复。
+            if (WorldHelper.isUnderwaterAt(mod, blockPos)) {
                 continue;
             }
             boolean hasBelow = WorldHelper.isSolid(mod, blockPos.down());

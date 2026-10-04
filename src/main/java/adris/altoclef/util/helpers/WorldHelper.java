@@ -616,6 +616,26 @@ public interface WorldHelper {
                 && canReach(mod, pos);
     }
 
+    /**
+     * (2026-10-04) 该格是否被流体淹没（上方一格是流体）—— **放置专用**判据。
+     *
+     * 现场 20261004-121411: bot 站在被水淹没的水底（inWater=true onGround=true
+     * @-709,62,713），PlaceBlockNearbyTask 却把放置目标选在它脚下那格
+     * (-709,61,713)（水面下），反复 "Trying to place" 共 79 秒：16 轮
+     * LinearProgressChecker 4s 零进展 + Blacklist 同格 Try 19/4 无出口。
+     * 水下放置必然失败: reachable 判空(Getting to our goal)、且通常无可依附面。
+     *
+     * ⚠ **禁止并入 canReach** —— canReach 的消费方含 CollectBucketLiquidTask
+     * (舀水/舀岩浆)、TraceFlowingWaterToSourceTask(追水源)、
+     * DoStuffInContainerTask(找容器)，一律需要在水面操作，并入会全线瘫痪。
+     *
+     * 性能: 只查一格 fluidState，不走 getGroundHeight 的全高度扫描(性能红线)。
+     * 未加载区块的 fluidState 返回 EMPTY ⇒ 不会误拦未加载区。
+     */
+    static boolean isUnderwaterAt(AltoClef mod, BlockPos pos) {
+        return !mod.getWorld().getFluidState(pos.up()).isEmpty();
+    }
+
     static boolean canReach(AltoClef mod, BlockPos pos) {
         if (mod.getModSettings().shouldAvoidOcean()) {
             // 45 is roughly the ocean floor. We add 2 just cause why not.
