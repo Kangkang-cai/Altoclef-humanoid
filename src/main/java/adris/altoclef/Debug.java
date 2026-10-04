@@ -223,15 +223,58 @@ public class Debug {
         return message == null ? "null" : message.replaceAll("\u00a7.", "");
     }
 
+    /**
+     * 线程安全地把一条已着色文本发到聊天栏。
+     *
+     * <p>⚠ 为什么必须走这里：聊天渲染链（TextRenderer → Glyphs → fastutil
+     * {@code Int2ObjectOpenHashMap}）<b>只在客户端线程安全</b>。从后台线程直接
+     * {@code player.sendMessage} 会与渲染线程并发改同一张字形表。
+     * <b>2026-10-04 实锤</b>：Fabric-1 实例 11:52:10 起 InvisibleLight 的 RCON 线程连抛 6 次
+     * {@code ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 129}
+     * （栈：{@code Debug.logWarning → ClientPlayerEntity.sendMessage → … → Int2ObjectOpenHashMap.rehash}），
+     * 同一时刻渲染线程也被同一张坏表击中（{@code [Record] tick 异常}），11:52:11 客户端异常退出
+     * （HMCL {@code ProcessExitedAbnormallyEvent}）。
+     *
+     * <p>后台调用方不止 InvisibleLight：{@code BlockTracker.rescanWorld} 跑在 Baritone 执行器上、
+     * {@code JsonlSink} 写盘线程也调 logMessage/logWarning ⇒ 在源头做一次类修复，而不是逐个打补丁。
+     *
+     * @return true = 已在本线程发出，或已投递到客户端线程；false = 客户端未就绪
+     */
+    private static boolean sendChatSafe(String coloredText) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null) return false;
+        if (mc.isOnThread()) {
+            return doSendChat(coloredText);
+        }
+        mc.execute(() -> doSendChat(coloredText)); // MinecraftClient.execute 线程安全
+        return true;
+    }
+
+    /** 真正发送（只在客户端线程执行）。异常全吞 —— 绝不让聊天问题逃进 tick / 后台线程。 */
+    private static boolean doSendChat(String coloredText) {
+        try {
+            MinecraftClient mc = MinecraftClient.getInstance();
+            if (mc == null || mc.player == null) return false;
+            mc.player.sendMessage(Text.of(coloredText), false);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public static void logMessage(String message, boolean prefix) {
         logToFile("altoclef_chat.log", "[CHAT] " + stripFormatting(message));
-        if (MinecraftClient.getInstance() != null && MinecraftClient.getInstance().player != null) {
-            if (prefix) {
-                message = "\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7r" + message;
-            }
-            MinecraftClient.getInstance().player.sendMessage(Text.of(message), false);
-            //MinecraftClient.getInstance().player.sendChatMessage(msg);
-        } else {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null) {
+            logInternal(message);
+            return;
+        }
+        String text = prefix
+                ? ("\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7r" + message)
+                : message;
+        // (2026-10-04 线程安全) 统一走 sendChatSafe；后台线程会被投递回客户端线程。
+        // 投递成功就不打 stdout（避免同一条聊天在控制台出现两遍）。
+        if (!sendChatSafe(text) && mc.isOnThread()) {
             logInternal(message);
         }
     }
@@ -248,11 +291,9 @@ public class Debug {
         logInternal("WARNING: " + message);
         logToFile("altoclef_chat.log", "[WARN] " + stripFormatting(message));
         if (jankModInstance != null && !jankModInstance.getModSettings().shouldHideAllWarningLogs()) {
-            if (MinecraftClient.getInstance() != null && MinecraftClient.getInstance().player != null) {
-                String msg = "\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7c" + message + "\u00A7r";
-                MinecraftClient.getInstance().player.sendMessage(Text.of(msg), false);
-                //MinecraftClient.getInstance().player.sendChatMessage(msg);
-            }
+            // (2026-10-04 线程安全) 同 logMessage：后台线程（RCON / Baritone 执行器 / 录制写盘线程）
+            // 直接 sendMessage 会与渲染线程抢字形表 → 见 sendChatSafe 注释。
+            sendChatSafe("\u00A72\u00A7l\u00A7o" + getLogPrefix() + "\u00A7c" + message + "\u00A7r");
         }
     }
 
