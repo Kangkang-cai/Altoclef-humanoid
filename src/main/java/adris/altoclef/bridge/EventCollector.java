@@ -6,6 +6,7 @@ import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.ChatMessageEvent;
 import adris.altoclef.eventbus.events.ClientTickEvent;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
+import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.PlayerDamageCauseHolder;
 import net.minecraft.item.Item;
@@ -252,6 +253,14 @@ final class EventCollector {
             }
         }
         _wasDead = dead;
+
+        // (2026-10-04) 睡觉失败原因: bot 点过床但没睡成时, PlaceBedAndSetSpawnTask
+        // 在 STOP 边沿自诊断出的原因 (时间窗/床被占/NOT_SAFE 怪) 经此回传对端 LLM,
+        // 让那边的模型能理解"上床没睡成"的现场。consume 语义, 取走即清空。
+        String sleepFail = PlaceBedAndSetSpawnTask.consumeSleepFailReason();
+        if (sleepFail != null) {
+            _buffer.emitImmediate("sleep", "上床没睡成：" + sleepFail, false);
+        }
 
         // 背包增量扫描：每 INV_SCAN_INTERVAL_TICKS 一次
         if (++_tickCounter < INV_SCAN_INTERVAL_TICKS) return;

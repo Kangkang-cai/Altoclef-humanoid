@@ -39,7 +39,7 @@ import net.minecraft.client.gui.screen.ingame.MerchantScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.CreeperEntity;
-import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.entity.mob.Monster;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -172,7 +172,8 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private static final double VANILLA_SLEEP_REACH = 3.0;
     private static final double SLEEP_REACH_WITH_MARGIN = VANILLA_SLEEP_REACH - 0.4;
     // ==== (2026-09-29 附近有怪: vanilla NOT_SAFE 判据) ====
-    // ServerPlayerEntity.trySleep: 玩家 ±8 x/z、±5 y 的盒内有存活 HostileEntity
+    // ServerPlayerEntity.trySleep: 玩家 ±8 x/z、±5 y 的盒内有存活 Monster (接口,
+    // 2026-10-04 与 vanilla 同源; 旧口径 HostileEntity 漏检 Slime/Phantom 等)
     // ⇒ 直接返回 NOT_SAFE, 服务端硬拒入睡 (与朝向/距离/点击无关)。
     private static final double SLEEP_SAFE_HORIZONTAL = 8.0;
     private static final double SLEEP_SAFE_VERTICAL = 5.0;
@@ -316,10 +317,54 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 && Math.abs(p.z - (bedHalf.getZ() + 0.5)) <= SLEEP_REACH_WITH_MARGIN;
     }
 
+    // ==== (2026-10-04 睡失败原因回传对端 LLM) ====
+    /** 最近一次"点过床但没睡成"的原因; bridge EventCollector 消费 (consume 即清空)。 */
+    private static String _pendingSleepFailReason;
+    /** 去抖: 同一分钟内多个 STOP 只报一次, 防对端事件刷屏。 */
+    private static long _lastSleepFailPublishMs;
+    private static final long SLEEP_FAIL_PUBLISH_MIN_GAP_MS = 60_000;
+
+    private static void publishSleepFailReason(String reason) {
+        if (reason == null) return;
+        long now = System.currentTimeMillis();
+        if (_lastSleepFailPublishMs != 0 && now - _lastSleepFailPublishMs < SLEEP_FAIL_PUBLISH_MIN_GAP_MS) return;
+        _lastSleepFailPublishMs = now;
+        _pendingSleepFailReason = reason;
+        Debug.logMessage("[Diag-bed] sleep fail reason -> bridge: " + reason);
+        Debug.logToFile("altoclef_diag.log", "[Diag-bed] sleep fail reason -> bridge: " + reason);
+    }
+
+    /** bridge 消费入口: 取走即清空 (返回 null = 无待报)。EventCollector 每 tick 调。 */
+    public static String consumeSleepFailReason() {
+        String r = _pendingSleepFailReason;
+        _pendingSleepFailReason = null;
+        return r;
+    }
+
+    /**
+     * (2026-10-04) 自诊断"点过床但没睡成"的最可能原因。vanilla 拒睡提示走
+     * actionbar, mod 收不到稳定信号, 故按与 vanilla 同源的判据本地推断
+     * (时间窗 / 床被占 / NOT_SAFE 怪), 顺序即 vanilla trySleep 的检查顺序。
+     */
+    private String diagnoseSleepFailure(AltoClef mod) {
+        if (!WorldHelper.canSleep()) {
+            return "不在可睡时段(天亮/白天)";
+        }
+        if (_bedForSpawnPoint != null && WorldHelper.isBedOccupied(mod, _bedForSpawnPoint)) {
+            return "床被其他玩家占用(" + _bedForSpawnPoint.toShortString() + ")";
+        }
+        Entity blocker = findHostileBlockingSleep(mod);
+        if (blocker != null) {
+            return "附近有怪挡睡:" + blocker.getName().getString()
+                    + "@" + blocker.getBlockPos().toShortString();
+        }
+        return "原因未知(服务端拒睡, 时间/占用/怪判据均未命中)";
+    }
+
     /**
      * (2026-09-29 修"附近有怪上不去") 找出会让服务端拒睡的敌对实体 —— vanilla
      * {@code ServerPlayerEntity.trySleep} 的 NOT_SAFE 判据同源实现: 玩家 ±8 x/z、
-     * ±5 y 盒内存在存活 {@link HostileEntity} 时, trySleep 直接失败; 此时无论怎么
+     * ±5 y 盒内存在存活 {@link Monster} 时, trySleep 直接失败; 此时无论怎么
      * 点床都不会上床 (现场: 床边有骷髅, bot 连点 2s+ 零反应; 用户手动清怪后才睡着)。
      * 返回最近的一只, 交给调用方派 {@link KillEntityTask}。
      */
@@ -331,7 +376,13 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 p.x + SLEEP_SAFE_HORIZONTAL, p.y + SLEEP_SAFE_VERTICAL, p.z + SLEEP_SAFE_HORIZONTAL);
         Entity best = null;
         double bestSq = Double.MAX_VALUE;
-        for (Entity e : mod.getWorld().getEntitiesByClass(HostileEntity.class, box, Entity::isAlive)) {
+        // (2026-10-04 怪挡睡漏检) vanilla NOT_SAFE 检查的是 Monster 接口, 不是
+        // HostileEntity 类 —— 1.18.2 里 Slime/Phantom/Ghast/Shulker/Hoglin 实现
+        // Monster 但不继承 HostileEntity, 旧口径查不到 → mod 认为安全继续点床,
+        // 服务端每次都拒 (NOT_SAFE)。此处必须与 vanilla 同源: getEntitiesByClass
+        // 泛型绑死 T extends Entity 收不了接口, 故全实体扫盒后 instanceof 过滤。
+        for (Entity e : mod.getWorld().getEntitiesByClass(Entity.class, box, Entity::isAlive)) {
+            if (!(e instanceof Monster)) continue;
             double d = e.squaredDistanceTo(mod.getPlayer());
             if (d < bestSq) {
                 bestSq = d;
@@ -768,7 +819,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
             // ===== (2026-09-29 附近有怪: 与 vanilla 同源的"睡不了"前置判据) =====
             // 用户现场: 床边有怪时 bot 反复点床就是不上床, 人工清怪后 wander 一下
             // 就睡了。机制 (javap 取证): ServerPlayerEntity.trySleep 在
-            // "玩家 ±8 x/z, ±5 y 内存在存活 HostileEntity" 时直接返回 NOT_SAFE
+            // "玩家 ±8 x/z, ±5 y 内存在存活 Monster (接口)" 时直接返回 NOT_SAFE
             // —— 这是服务端硬拒, 与朝向/距离/点击都无关, 点一万次也不会睡。
             // 日志佐证: [Diag-bed] sleep right-click HELD: crosshair blocked by
             // entity ...skeleton。故此处先把最近的那只清掉再继续睡流程。
@@ -1360,6 +1411,15 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 + " anyFound=" + mod.getBlockTracker().anyFound(BEDS);
         Debug.logMessage(m);
         Debug.logToFile("altoclef_diag.log", m);
+
+        // (2026-10-04 睡失败原因回传对端 LLM) 点过床(_spawnSet)但全程没睡进去
+        // (_wasSleeping=false) 的边沿: 自诊断最可能原因, 经 bridge /events 通知
+        // 对端 chat_and_play, 让 LLM 侧知道"bot 上床为什么没睡成"。
+        // 游牧(_stayInBed=true)才要求睡进去; 永久设点(_stayInBed=false)点一下
+        // 即成功, 不算失败。
+        if (_stayInBed && _spawnSet && !_wasSleeping) {
+            publishSleepFailReason(diagnoseSleepFailure(mod));
+        }
 
         mod.getBehaviour().pop();
         mod.getBlockTracker().stopTracking(BEDS);

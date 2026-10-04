@@ -829,6 +829,11 @@ public class BeatMinecraft2Task extends Task {
     private boolean _nightSurfaceSkipSmeltActive = false;
     private final TimerGame _notSleepableTimer = new TimerGame(30);
     private boolean _wasSleepableOnce = false;
+    // (2026-10-04 白天还点床) 30s 宽限只该护"雷暴抖动"引起的 canSleep 翻假;
+    // 夜→昼是确定性时间转换, 不吃宽限 —— 否则天亮后还会再点最多 30s 必被
+    // 服务端拒绝的床 (1004 15:29 实锤: time=23600→23980 期间连点 8 次)。
+    // 记录最近一次 rawCanSleep=true 是否由雷暴豁免撑起 (非雷暴夜窗 = false)。
+    private boolean _sleepableByThunder = false;
     // rawCanSleep 持续时长计时 (2026-08-22): 须连续 5 秒为真才武装 30s 宽限,
     // 防止世界加载瞬间的 canSleep 幻影 (时间未同步的头几 tick) 触发白天睡觉。
     private final TimerGame _rawSleepableStreakTimer = new TimerGame(5);
@@ -4405,6 +4410,8 @@ public class BeatMinecraft2Task extends Task {
         boolean rawCanSleep = WorldHelper.canSleep();
         if (rawCanSleep) {
             _notSleepableTimer.reset();
+            // (2026-10-04) 记录可睡是"真夜窗"还是"雷暴豁免": 决定宽限撕除时机
+            _sleepableByThunder = WorldHelper.isSleepByThunder();
             if (_rawSleepableStreakTimer.elapsed()) {
                 _wasSleepableOnce = true;
             }
@@ -4419,6 +4426,14 @@ public class BeatMinecraft2Task extends Task {
             }
         }
         boolean effectiveCanSleep = rawCanSleep || (_wasSleepableOnce && !_notSleepableTimer.elapsed());
+        // (2026-10-04 白天还点床) 夜→昼确定性转换立即退出睡眠模式: 上一次可睡
+        // 不是雷暴撑的 + 当前时间已确定性出 vanilla 夜窗 → 30s 宽限不适用。
+        // 雷暴抖动场景 (isThundering 秒级翻转) 由 _sleepableByThunder 保留宽限,
+        // 2026-08-21 的横跳修复不受影响。
+        if (!rawCanSleep && effectiveCanSleep && !_sleepableByThunder
+                && WorldHelper.isVanillaSleepWindowTimeClosed()) {
+            effectiveCanSleep = false;
+        }
 
         // (2026-09-25 183242 实锤, 用户"烧肉中原则上尽量不离开") 食物熔炼任务
         // 活跃时, 夜间睡/床路由整体让位: 曾把烧肉中的 bot 带出 80+ 格, 旧炉被

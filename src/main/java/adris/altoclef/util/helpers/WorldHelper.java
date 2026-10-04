@@ -929,7 +929,36 @@ public interface WorldHelper {
             time = (int)(world.getTimeOfDay() % 24000);
         }
         // https://minecraft.fandom.com/wiki/Daylight_cycle
-        return 12542 <= time && time <= 23992;
+        // (2026-10-04 白天还点床) 旧上界 23992 是错的: vanilla 可睡上界是 23458
+        // (ServerPlayerEntity.startSleepInBed 的 isDay 判据)。23459~23992 这段
+        // 太阳已升起、服务端必拒, mod 却以为还是夜里继续点床 (1004 15:29 实锤:
+        // time=23600→23980 期间连点 8 次, 每次服务端只回"已设置重生点")。
+        return 12542 <= time && time <= 23458;
+    }
+
+    /**
+     * (2026-10-04) 非雷暴且时间确定性地处于 vanilla 不可睡时段 (夜窗
+     * 12542..23458 之外)。与 {@link #canSleep()}=false 的区别: 排除 world
+     * 未加载/时间未同步的暂态 —— 只有这种"确定性关闭"才允许立即撕掉上游
+     * 30s 雷暴去抖宽限 (BeatMinecraft2Task effectiveCanSleep), 否则天亮后
+     * 还会再点 30s 必被服务端拒绝的床。
+     */
+    static boolean isVanillaSleepWindowTimeClosed() {
+        ClientWorld world = MinecraftClient.getInstance().world;
+        if (world == null) return false;
+        if (world.isThundering() && world.isRaining()) return false;
+        int time = (int)(world.getTimeOfDay() % 24000);
+        return time < 12542 || time > 23458;
+    }
+
+    /**
+     * (2026-10-04) 当前"可睡"是否由雷暴豁免撑起 (vanilla: 雷暴白天也可睡)。
+     * 用于区分 30s 去抖宽限该护谁 —— 雷暴 isThundering 秒级抖动 vs 夜→昼的
+     * 确定性时间转换 (后者不吃宽限)。
+     */
+    static boolean isSleepByThunder() {
+        ClientWorld world = MinecraftClient.getInstance().world;
+        return world != null && world.isThundering() && world.isRaining();
     }
 
     /**
