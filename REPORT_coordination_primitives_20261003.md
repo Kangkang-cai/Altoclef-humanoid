@@ -175,10 +175,10 @@ bot 会**跨会话一直信**，每次重启都往错地方跑。`@forget` 只�
 
 | 项 | 值 |
 |---|---|
-| commit | `b484451f`（含回执补全 + @sleep 收尾修复 + 冒烟脚本；前有 `a52ca1d6` / `714c2edd` / `f1b9d889`） |
+| commit | `c52b5f4e`（含冒烟测试暴露的两个回执修；前有 `b484451f` / `a52ca1d6` / `714c2edd` / `f1b9d889`） |
 | 构建 | `./gradlew --offline build` ✅ BUILD SUCCESSFUL |
-| jar | `build/libs/altoclef-0.4.0.jar`，md5 `433411c51fd7154e00f7529b91c4539d` |
-| 部署 | ✅ **已部署**（三处 mods + `build/libs` 四方 md5 一致；备份 `altoclef-0.4.0.jar.bak_20261003_2321`×3） |
+| jar | `build/libs/altoclef-0.4.0.jar`，md5 `e5b4494e62514f593b7eabb154b34c4c` |
+| 部署 | ✅ **已部署**（三处 mods + `build/libs` 四方 md5 一致；备份 `altoclef-0.4.0.jar.bak_20261004_1149`×3） |
 
 **部署流程**（已完成）：客户端全退 → 备份三处 `mods/altoclef-0.4.0.jar`（`bak_20261003_2319` / `bak_20261003_2321`）
 → 覆盖 → 校验 src 与 deployed md5 一致。三处 mods 目录：

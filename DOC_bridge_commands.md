@@ -231,8 +231,10 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 
 ## 7. 部署状态
 
-commit `b484451f`；jar md5 `433411c51fd7154e00f7529b91c4539d`；**已部署**三处 mods（+ `build/libs` 四方一致，备份 `bak_20261003_2321`）。
+commit `c52b5f4e`；jar md5 `e5b4494e62514f593b7eabb154b34c4c`；**已部署**三处 mods（+ `build/libs` 四方一致，备份 `altoclef-0.4.0.jar.bak_20261004_1149`×3）。
 白名单默认 **12 条**；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+
+> 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
 ---
 
