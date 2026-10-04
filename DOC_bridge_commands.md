@@ -62,7 +62,7 @@
 | `inventory` | `@inventory [物品]` | 查背包（只读） | 瞬时 |
 | `remember` | `@remember <名称> <x y z> [维度] [来源]` | 记一条**命名地标** | 瞬时 |
 | `forget` | `@forget <名称>` | 删一条**命名地标** | 瞬时 |
-| **`sleep`** | `@sleep [auto\|bed-only\|wait-dawn]` | **睡觉三态**（新） | 按住态 |
+| **`sleep`** | `@sleep [auto\|bed-only\|wait-dawn\|skip]` | **睡觉四态**（新） | 按住态（**`skip` 除外**，见 §3.1） |
 | **`quota`** | `@quota <item_id> <count>` | **需求份额**（新） | 瞬时 |
 | **`forgetmem`** | `@forgetmem <type\|all>` | **作废自动结构记忆**（新） | 瞬时 |
 
@@ -72,21 +72,28 @@
 
 ## 3. 本次新增命令详解
 
-### 3.1 `@sleep [mode]` —— 睡觉三态
+### 3.1 `@sleep [mode]` —— 睡觉四态
 
 | mode | 语义 | 何时结束 |
 |---|---|---|
 | `auto`（缺省） | 有床用床，没床**就地找/造** | 天亮 / 新指令 |
 | `bed-only` | **只用现成的床**：手里有床 或 24 格内有已知床方块才启动 | 天亮 / 新指令 |
 | `wait-dawn` | **不睡**，站桩熬到天亮 | 天亮 / 新指令 |
+| `skip` | **本夜不睡、也不找床**，立刻回主线干活 | **自动**：下一个白天 / 或收到任何显式 `@sleep` 指令 |
 
 - 为什么：主线原版在没床时会去 96 格内找床 / 羊毛+木板造床 = **时长不可预估的远征**。`bed-only` 给你"要么就近睡，要么直说做不到"。
 - `wait-dawn` 是**多人凑不齐全员入睡**时的正解（躺着等天亮 == 站着等天亮，但不会被钉在床边）。
+- `skip` 的语义是**"当作今夜不该睡觉"**：不派任何睡眠任务，让主线的夜间睡眠路由让位，bot 照常挖矿 / 收集 / 推进主线 —— 也就是主线夜里"**跳过睡觉后启动的那条分支**"。
+  - 与 `wait-dawn` 的区别：`wait-dawn` = 站着干等天亮；`skip` = 该干嘛干嘛，别浪费时间上床。
+  - **只到下一个白天**（与主线"本夜放弃找床"同口径），不会让 bot 永久拒绝睡觉。
+  - 想提前撤销：发 `@sleep auto` / `bed-only` / `wait-dawn` 任意一条（它们会顺手清掉 skip）。
+  - ⚠️ **跳过睡觉 ≠ 天亮**：多人服里**只要有玩家醒着，夜晚就不会被跳过**。`skip` 的真实效果是"别上床，去干活，等真正的天亮（约 7 分钟真实时间）"。
 - 起床不需要命令：任何新行动（`@idle` / `@goto` …）会顶掉它。
-- 回执（**三条，别只看第一条**）：
-  - 受理即 `action_done(completed)` = "已开始睡 / 已开始熬"，`text` 是中文现场；`/status.activeAction` 显示 `cmd="sleep"`；
-  - **天亮自然结束** → 再发一条 `action_done(completed)`「已醒来（天亮），已自动回主线」（与 `goto`/`follow`/`give` 同款）；
-  - **被新指令顶替** → `action_done(cancelled)`；**被 `@pause_main`** → `action_done(interrupted)`。
+- 回执（**别只看第一条**）：
+  - 受理即 `action_done(completed)` = "已开始睡 / 已开始熬 / 本夜已跳过"，`text` 是中文现场；`/status.activeAction` 显示 `cmd="sleep"`；
+  - **`auto`/`bed-only`/`wait-dawn`：天亮自然结束** → 再发一条 `action_done(completed)`「已醒来（天亮），已自动回主线」（与 `goto`/`follow`/`give` 同款）；
+  - **被新指令顶替** → `action_done(cancelled)`；**被 `@pause_main`** → `action_done(interrupted)`；
+  - ⚠️ **`skip` 只有一条回执**（受理即完成）—— 它是"状态开关"，不是按住态：没有终态事件，也不写 `/status.activeAction`（bot 正在干活，不是待命）。别为它等第二条。
   - ⇒ 对端永远能区分"还在睡"与"已结束 / 被打断"，不会卡在等超时。
 - **失败**：`bed-only` 附近没床 → `failed`；未知 mode → `failed`（旧版会静默当 `auto`，已修）。
 
@@ -169,7 +176,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 | 命令 | 触发条件 | 你能收到的 `reason`（示例） |
 |---|---|---|
 | `sleep` | `bed-only` 且附近无床 | "bed-only 做不到：手里没有床、附近 24 格也没有现成的床；按约定不去远行找/造。" |
-| `sleep` | mode 拼错 | "未知模式 'xxx'；可用 auto \| bed-only \| wait-dawn。" |
+| `sleep` | mode 拼错 | "未知模式 'xxx'；可用 auto \| bed-only \| wait-dawn \| skip。" |
 | `quota` | 物品 id 认不出 | "认不出物品 id —— xxx（示例：blaze_rod / ender_pearl / ender_eye）" |
 | `quota` | 少参数 | "Not enough arguments supplied: You supplied 1. Usage: quota [item] [count]" |
 | `forgetmem` | 类型认不出 | "认不出类型 —— xxx（可选：village\|…\|lava_lake / all）" |
@@ -220,7 +227,12 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 2. 读 sleepingPlayers / onlinePlayers —— 看还差谁
 3. 对未入睡的 bot 发 @sleep auto（或 bed-only 若已备床）
 4. 继续轮询直到 sleepingPlayers 覆盖全部 onlinePlayers（或天已亮）
+5. 凑不齐就别耗着：给等不下去的那个发 @sleep skip，让它去干活、等真实天亮
 ```
+
+**为什么需要 `@sleep skip`**：只要有玩家醒着，夜晚就不会被跳过 ⇒ 全员入睡这件事在
+"某个 bot 拿不到床 / 老是睡不进去"时会**卡住所有人**。`skip` 让协调者能明确选择
+"这一夜不睡了，各自干活"，而不是让 bot 反复上下床或站桩空等。
 
 **记忆记错了**
 ```
@@ -231,8 +243,14 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 
 ## 7. 部署状态
 
-commit `c52b5f4e`；jar md5 `e5b4494e62514f593b7eabb154b34c4c`；**已部署**三处 mods（+ `build/libs` 四方一致，备份 `altoclef-0.4.0.jar.bak_20261004_1149`×3）。
-白名单默认 **12 条**；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+commit `980d6eee`；jar md5 `49981c80e856e1b88bcffc8e4aec58ad`；⚠️ **未部署** —— 1004 21:5x 构建时三客户端均在运行（17:18 启动），按硬规矩不热替换。待重启后：备份三处 mods → 覆盖 → md5 校验。
+白名单默认 **12 条**（`skip` 是 `sleep` 的一个 mode，不新增命令）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+
+**待实跑判据（`@sleep skip`）**
+1. 夜里发 `@sleep skip` → 立刻回一条 `action_done(completed)`，文案含「本夜不睡」；随后 `/status.task` 应变成主线子任务（挖矿/收集…），**不应**再出现 `Sleeping through night` / 找床。
+2. `@sleep skip` 后**不发**第二条 `action_done`（它是状态开关，没有终态事件）；`/status.activeAction` 键应**消失**（bot 在干活而不是待命）。
+3. 天亮后（或发 `@sleep auto`）→ 下一个夜晚应恢复正常睡觉（skip 自动/显式解除）。
+4. ⚠️ **未验证项**：若命令到达时 bot **已经躺在床上**，任务被顶掉后它**会不会自己起身**（用户判断"换任务就会自己下床"，但仓里没有任何"任务切换→下床"代码，`PlaceBedAndSetSpawnTask.onStop` / `SleepThroughNightTask.onStop` 都是空的）。若发现它赖在床上不动，补一行 `setScreen(null)` + `STOP_SLEEPING` 即可，方案已备。
 
 > 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
@@ -259,6 +277,7 @@ commit `c52b5f4e`；jar md5 `e5b4494e62514f593b7eabb154b34c4c`；**已部署**�
 
 **副作用提示**：
 - `@resume_main` 会真的**启动主线**（bot 开始跑速通）；脚本会按测试前状态自动复位。
+- `@sleep skip` 的用例会把"本夜跳过"置上：**夜里跑完测试**，该 bot 会一直到天亮才恢复尝试睡觉（白天自动解除；想立刻撤销发 `@sleep auto`）。
 - `@forgetmem lava_lake` 会真删该类型的结构记忆（低价值）；只有 `--destructive` 才删全部。
 - 脚本**刻意不测 `@sleep auto`** —— 它在没床时会派发找床任务（96 格远征），时长不可预估，不适合无人值守跑。
 
@@ -274,7 +293,7 @@ python altoclef/bridge_smoke_test.py --destructive
 ```
 
 覆盖内容：
-1. **12 条核心用例** —— `quota` / `forgetmem` / `sleep` 的成功与**失败 reason 断言**（含"少参数"这类解析错）；
+1. **13 条核心用例** —— `quota` / `forgetmem` / `sleep`（含 `skip`）的成功与**失败 reason 断言**（含"少参数"这类解析错）；
 2. `/status` 字段检查（`online` / `timeOfDay` / `onlinePlayers` / `sleepingPlayers` / `activeAction`）；
 3. `@sleep` 后 `activeAction.cmd == "sleep"`；
 4. **环境相关用例**（`bed-only`）只报告不断言 —— 有床→completed / 没床→failed 都算正常；
