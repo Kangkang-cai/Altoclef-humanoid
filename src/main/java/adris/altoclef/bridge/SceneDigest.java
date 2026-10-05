@@ -2,6 +2,7 @@ package adris.altoclef.bridge;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasks.ResourceTask;
+import adris.altoclef.tasks.resources.TradeWithPiglinsTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
 import adris.altoclef.tasksystem.Task;
@@ -52,7 +53,13 @@ final class SceneDigest {
 
     // ===================== 1. taskDetail =====================
 
-    /** 当前实际在干的子任务中文短名（取任务链最深处）。允许高频变化，注入侧不进变化键。 */
+    /**
+     * 当前实际在干的子任务中文短名（取任务链最深处）。允许高频变化，注入侧不进变化键。
+     *
+     * <p>(1005 目的子串) 深层标签只有"动作+物品"（"收集金子"），AI 角色不知道目的
+     * （"为换末影珍珠"）—— 目的在任务栈上层。拼为 {@code 深层标签 + "，为" + 目的}，
+     * 目的推导见 {@link #purposeFor}；无目的或推导异常时退回纯深层标签。
+     */
     static String taskDetail(AltoClef mod) {
         try {
             var runner = mod.getTaskRunner();
@@ -62,29 +69,107 @@ final class SceneDigest {
             if (stack == null || stack.isEmpty()) return "";
             // addTaskToChain 是"父→子"顺序（Task.java:106），最深处 = 末元素
             Task deep = stack.get(stack.size() - 1);
+            String base;
             // (2026-10-04) FortressExploreTask 两种模式动作完全不同: 外围=找路,
             // 走廊=已在堡垒里巡逻 —— 统一译"探堡垒"会让对端把"正在找"理解成"在里面探索"。
             if (deep instanceof adris.altoclef.tasks.movement.FortressExploreTask ft) {
-                if (ft.isPiglinVariant()) return "找猪灵";
-                return ft.isCorridorMode() ? "巡堡垒走廊" : "找堡垒";
-            }
-            String verb = verbFor(deep);
-            // ResourceTask 系能拿到目标物 → "合成钻石镐" / "挖钻石" 这类具体描述
-            if (deep instanceof ResourceTask rt) {
-                Item[] matches = ItemTarget.getMatches(rt.getItemTargets());
-                if (matches != null && matches.length > 0) {
-                    String zh = ItemNames.name(new ItemStack(matches[0]));
-                    if (!zh.isEmpty()) return verb + zh;
+                base = ft.isPiglinVariant() ? "找猪灵"
+                        : (ft.isCorridorMode() ? "巡堡垒走廊" : "找堡垒");
+            } else {
+                String verb = verbFor(deep);
+                // ResourceTask 系能拿到目标物 → "合成钻石镐" / "挖钻石" 这类具体描述
+                String item = deep instanceof ResourceTask rt ? firstName(rt) : "";
+                if (!item.isEmpty()) {
+                    base = verb + item;
+                } else {
+                    String mapped = CLASS_ZH.get(deep.getClass().getSimpleName());
+                    if (mapped != null) {
+                        base = mapped;
+                    } else {
+                        String state = deep.debugState();
+                        base = (state != null && !state.isBlank())
+                                ? truncate(state, 24)
+                                : truncate(deep.getClass().getSimpleName(), 24);
+                    }
                 }
             }
-            String mapped = CLASS_ZH.get(deep.getClass().getSimpleName());
-            if (mapped != null) return mapped;
-            String state = deep.debugState();
-            if (state != null && !state.isBlank()) return truncate(state, 24);
-            return truncate(deep.getClass().getSimpleName(), 24);
+            String purpose = purposeFor(stack, deep);
+            return truncate(purpose.isEmpty() ? base : base + "，为" + purpose, 32);
         } catch (Throwable t) {
             return "";
         }
+    }
+
+    /**
+     * 目的标签：沿任务栈从深到浅找"为什么做当前动作"（1005 用户需求实锤：
+     * AI 角色知道"在收金子"，不知道"为了什么"——标签只报动作+物品，目的在上层）。
+     * <ol>
+     *   <li><b>显式目的任务</b>（{@link #PURPOSE_ZH}）：TradeWithPiglinsTask 按交易
+     *       目标物写"换末影珍珠"这类具体目的，CollectObsidianByBarterTask 等走静态表；</li>
+     *   <li><b>通用兜底</b>：第一个目标物与深层任务<b>不同</b>的祖先 {@link ResourceTask}
+     *       （"挖金矿"的祖先是"合成金靴子"）。目标物相同 = 同物递进（MineAndCollectTask
+     *       → CollectGoldIngotTask），是机制不是目的，跳过；类名含 Catalogued 的
+     *       备料机制任务同样跳过。</li>
+     * </ol>
+     * BeatMinecraft2Task 不是 ResourceTask 也不进静态表 —— "为通关"粒度太粗，宁可不给。
+     */
+    private static String purposeFor(List<Task> stack, Task deep) {
+        try {
+            // 第一遍：显式目的任务（换/备 X）
+            for (int i = stack.size() - 2; i >= 0; i--) {
+                Task a = stack.get(i);
+                if (a instanceof TradeWithPiglinsTask tw) {
+                    Item[] m = ItemTarget.getMatches(tw.getItemTargets());
+                    if (m != null && m.length > 0) {
+                        String zh = firstNameItem(m[0]);
+                        if (!zh.isEmpty()) return "换" + zh;
+                    }
+                    return "与猪灵交易";
+                }
+                String mapped = PURPOSE_ZH.get(a.getClass().getSimpleName());
+                if (mapped != null) return mapped;
+            }
+            // 第二遍：通用兜底 —— 第一个目标物不同的祖先 ResourceTask
+            String deepItem = deep instanceof ResourceTask rt ? firstName(rt) : "";
+            for (int i = stack.size() - 2; i >= 0; i--) {
+                Task a = stack.get(i);
+                if (!(a instanceof ResourceTask art)) continue;
+                if (a.getClass().getSimpleName().contains("Catalogued")) continue; // 备料机制≠目的
+                String n = firstName(art);
+                if (n.isEmpty() || n.equals(deepItem)) continue; // 同物递进≠目的
+                return verbFor(a) + n;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    /** ResourceTask 的第一个目标物中文名（无目标物/译名缺失返回空串）。 */
+    private static String firstName(ResourceTask rt) {
+        try {
+            Item[] m = ItemTarget.getMatches(rt.getItemTargets());
+            return (m == null || m.length == 0) ? "" : firstNameItem(m[0]);
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static String firstNameItem(Item item) {
+        String zh = ItemNames.name(new ItemStack(item));
+        return zh == null ? "" : zh;
+    }
+
+    /**
+     * 显式目的任务表（1005）：这些任务类本身<b>就是</b>下层收集动作的目的。
+     * TradeWithPiglinsTask 不在表里 —— 它的目标物在参数里（换珍珠/换黑曜石/换龙蛋），
+     * 由 {@link #purposeFor} 按 instanceof 动态写"换X"。
+     */
+    private static final Map<String, String> PURPOSE_ZH = new HashMap<>();
+
+    static {
+        PURPOSE_ZH.put("CollectObsidianByBarterTask", "换黑曜石"); // 内部就是 TradeWithPiglinsTask(OBSIDIAN)
+        PURPOSE_ZH.put("CollectObsidianTask", "备黑曜石");
+        PURPOSE_ZH.put("CollectFireResPotionsTask", "备防火药水");
     }
 
     /** 任务类名前缀 → 中文动词（粗粒度动作词）。 */
