@@ -253,6 +253,26 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private long _lastCaveEntryKickMs = Long.MIN_VALUE;
     private boolean _inNaturalCavePrev = false;
 
+    // ===== (2026-10-05 逃逸 GetToBlock 无路径出口, 用户拍板 A/5s) =====
+    // 现场 20261005-124527 13:34-13:36 实锤: survival chain 的 GetToBlockTask
+    // (-1083,129,1550) 距目标仅 1.35 格, baritone 连续 3 分钟 pathing=false/
+    // path 不在/算路反复失败 (unreachable×10/60s), 父类 FakePath 闸门 (4s) 只会
+    // 重发【同一目标】没有放弃语义, LinearProgressChecker 超时耗尽后任务照样
+    // 挂着 → bot 冻结直到人工 Alt+U。
+    // 出口 (调用侧, 五条②): chain 每 tick 监视 _mainTask —— 是 GetToBlockTask
+    // 且连续 {@value #ESC_EXIT_NOPATH_SECONDS}s 既不 pathing 也无路径也不在目标格
+    // (口径与父类 active-stale 闸门一致, 比它的 4s 重发更保守一档) → setTask(null)
+    // 放弃该导航, 让位正常任务; 并把目标记进 30s 否决窗, 触发分支若立即重派
+    // 【同一目标】则被再次放弃 (否则链会无出口地重建同一冻结点)。换目标不受
+    // 否决影响 —— 正常的逐格步进逃逸 (1548→1549→1550) 不误伤。
+    // 只覆盖本 chain; UserTaskChain 的 @goto 等用户导航不受影响。
+    private static final int ESC_EXIT_NOPATH_SECONDS = 5;
+    private static final long ESC_EXIT_VETO_MS = 30000;
+    private static final TimerGame _escExitNoPathTimer = new TimerGame(ESC_EXIT_NOPATH_SECONDS);
+    private static boolean _escExitArmed = false;
+    private static BlockPos _escExitVetoTarget = null;
+    private static long _escExitVetoUntilMs = 0;
+
     public WorldSurvivalChain(TaskRunner runner) {
         super(runner);
     }
@@ -303,9 +323,80 @@ public class WorldSurvivalChain extends SingleTaskChain {
         _inNaturalCavePrev = inCave;
     }
 
+    /**
+     * (2026-10-05 逃逸 GetToBlock 无路径出口, 用户拍板 A/5s) 见字段注释块。
+     *
+     * <p>出口动作 = 放弃当前导航任务 (setTask(null) + forceCancel 撤算路), 让
+     * getPriority 的其余分支照常评估 —— 正常情况下链回落让位 User Tasks 回主线,
+     * 触发分支若重派【同一目标】则被 30s 否决窗再次放弃 (有出口, 不回冻结点)。
+     */
+    private void tickEscapeGetToBlockExit(AltoClef mod) {
+        if (!(_mainTask instanceof GetToBlockTask task)) {
+            _escExitArmed = false;
+            return;
+        }
+        BlockPos target = task.getTargetPos();
+        long now = System.currentTimeMillis();
+
+        // 否决窗: 同目标重派立即放弃 (setTask(null) 后触发分支可能同 tick 又 setTask,
+        // 那个新实例下一 tick 到这里再被放弃 —— 存活 ≤1 tick, 不会积累任何寻路状态)。
+        if (target.equals(_escExitVetoTarget) && now < _escExitVetoUntilMs) {
+            try {
+                mod.getClientBaritone().getPathingBehavior().forceCancel();
+            } catch (Throwable ignored) {
+            }
+            setTask(null);
+            return;
+        }
+
+        // 无路径监视: 口径与 CustomBaritoneGoalTask 的 active-stale 闸门一致
+        // (pathing / path 存在 / 已在目标格 任一成立 = baritone 在干活或已到位)。
+        boolean busy;
+        try {
+            boolean pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+            boolean pathPresent = mod.getClientBaritone().getPathingBehavior().getPath().isPresent();
+            boolean atGoal = target.equals(mod.getPlayer().getBlockPos());
+            busy = pathing || pathPresent || atGoal;
+        } catch (Throwable t) {
+            // baritone 状态读取异常按"在干活"处理, 不强退
+            busy = true;
+        }
+        if (busy) {
+            _escExitArmed = false;
+            return;
+        }
+        if (!_escExitArmed) {
+            _escExitArmed = true;
+            _escExitNoPathTimer.reset();
+            return;
+        }
+        if (!_escExitNoPathTimer.elapsed()) {
+            return;
+        }
+
+        // 出口触发
+        _escExitArmed = false;
+        _escExitVetoTarget = target;
+        _escExitVetoUntilMs = now + ESC_EXIT_VETO_MS;
+        try {
+            mod.getClientBaritone().getPathingBehavior().forceCancel();
+        } catch (Throwable ignored) {
+        }
+        setTask(null);
+        String m = "[ESC-EXIT] survival chain gave up GetToBlock " + target.toShortString()
+                + " (no path for " + ESC_EXIT_NOPATH_SECONDS + "s, veto same target "
+                + (ESC_EXIT_VETO_MS / 1000) + "s) player=" + mod.getPlayer().getBlockPos().toShortString();
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+    }
+
     @Override
     public float getPriority(AltoClef mod) {
         if (!AltoClef.inGame()) return Float.NEGATIVE_INFINITY;
+
+        // (2026-10-05) 逃逸 GetToBlock 无路径出口: 必须放在所有 setTask 分支之前,
+        // 否决窗内同目标重派在本 tick 就被再次放弃, 不会存活到下一拍。
+        tickEscapeGetToBlockExit(mod);
 
         // Drowning
         handleDrowning(mod);

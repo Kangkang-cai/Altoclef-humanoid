@@ -101,6 +101,11 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
         return "Getting to block " + _position + (_dimension != null ? " in dimension " + _dimension : "");
     }
 
+    /** (2026-10-05 逃逸出口) 目标格只读访问：chain 层无路径看门狗按目标做否决窗口。 */
+    public BlockPos getTargetPos() {
+        return _position;
+    }
+
 
     @Override
     protected Goal newGoal(AltoClef mod) {
