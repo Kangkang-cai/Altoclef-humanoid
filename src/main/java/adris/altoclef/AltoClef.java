@@ -693,6 +693,13 @@ public class AltoClef implements ModInitializer {
         // 本项把散块/废弃传送门结构/哭泣黑曜石一起拔到"寻路不值得挖"的量级。
         getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.OBSIDIAN);
         getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.CRYING_OBSIDIAN);
+        // (2026-10-05 事故修复, 新引入问题) bot2(jingjing) 收到队友共享地标
+        // 「烈焰刷怪笼」-109,70,321 后, GetToBlockTask → GoalBlock 要求"站进
+        // 目标格", 而 spawner 有碰撞箱 ⇒ baritone 为到达把它当挡路方块挖掉
+        // (BetterTool 19:09:07.345 为 spawner 切木镐, 刷怪笼被拆)。
+        // spawner 不可再生, 加入软保护(成本×10)让寻路永远不选"挖穿刷怪笼";
+        // 不用硬禁 — 硬禁 COST_INF 会废掉黑曜石类采集同款机制(见上)。
+        getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.SPAWNER);
     }
 
     // ==== (2026-09-15 interaction pause 看门狗) ====
