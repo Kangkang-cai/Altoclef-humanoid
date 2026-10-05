@@ -17,6 +17,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.helpers.BaritoneHelper;
+import adris.altoclef.util.helpers.EntityHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
@@ -1861,12 +1862,17 @@ public class MineAndCollectTask extends ResourceTask {
         // ---- (20260915 挖金猪灵闸, 用户"挖金附近猪灵超过1只就不挖, 3个拿剑的打不过") ----
         // 挖下界金矿/镶金黑石会激怒 16 格内猪灵 (vanilla 挖金激怒半径)。激怒 2+ 只
         // (尤其持剑) 是必输局 (20260915-123005 实锤: 3 只围殴 4 秒掉 16 血)。闸门:
-        // 目标金块 16 格内猪灵(成年, 含【未被感知/藏在墙后】的) > 1 只 → 该块本轮
-        // 不可选。全部候选被闸 → getClosestTo 落空 → 框架自然走 wander 探索 →
-        // bot 离开猪灵密集区。计数只看"感知到"的 (2026-09-15 用户: 模仿人类,
-        // bot 不知道墙后没看见的猪灵存在, 不能拿上帝视角全知计数)。
+        // 目标金块 16 格内猪灵(成年) > 1 只 → 该块本轮不可选。全部候选被闸 →
+        // getClosestTo 落空 → 框架自然走 wander 探索 → bot 离开猪灵密集区。
+        // 计数口径"知道它在那" = 现在感知到 OR 5s 内刚看见 OR 已激怒指向 bot
+        // (2026-09-15 用户: 模仿人类, 不拿上帝视角全知计数; 20261005 用户拍板修
+        // 盲区: 纯"当前 FOV"口径在仰望挖矿时把贴脸猪灵漏光 → 挖断金矿激怒全场,
+        // 20261005-133105 实锤, 且激怒猪灵本身不可能"没看见", 见 isPiglinKnown)。
         private static final double PIGLIN_ANGER_RADIUS = 16.0;
         private static final int PIGLIN_MINE_MAX_COUNT = 1;
+        // (20261005) "刚看见过"记忆窗口 (100t = 5s): 视角转向矿面期间, 近期瞥见的
+        // 猪灵仍计入闸门, 防"仰望挖矿 → 猪灵出 FOV → 闸门放行"盲区 (见 isPiglinKnown)。
+        private static final int PIGLIN_PERCEPTION_MEMORY_TICKS = 100;
         private static final Set<Block> PIGLIN_ANGERING_BLOCKS = Set.of(
                 Blocks.NETHER_GOLD_ORE, Blocks.GILDED_BLACKSTONE);
         // [GOLD-GATE] 诊断节流。
@@ -1877,14 +1883,45 @@ public class MineAndCollectTask extends ResourceTask {
         // "每候选矿块 × 每猪灵"重复射线, 密集金矿+多猪灵时最坏上百条/tick。
         private long _piglinVisCacheTick = -1;
         private final Map<UUID, Boolean> _piglinVisCache = new HashMap<>();
+        // (20261005 感知记忆) "近期看见过"的猪灵记忆 (UUID -> 最后可见 tick)。
+        private final Map<UUID, Long> _piglinLastSeenTick = new HashMap<>();
 
         private boolean isPiglinPerceived(AltoClef mod, LivingEntity pig) {
             long tick = WorldHelper.getTicks();
             if (tick != _piglinVisCacheTick) {
                 _piglinVisCacheTick = tick;
                 _piglinVisCache.clear();
+                // 记忆表顺手修剪 (可见过的猪灵数量少, 开销可忽略)
+                _piglinLastSeenTick.values()
+                        .removeIf(t -> tick - t > PIGLIN_PERCEPTION_MEMORY_TICKS * 2);
             }
-            return _piglinVisCache.computeIfAbsent(pig.getUuid(), u -> VisibilityHelper.isEntityVisible(mod, pig));
+            Boolean cached = _piglinVisCache.get(pig.getUuid());
+            if (cached == null) {
+                cached = VisibilityHelper.isEntityVisible(mod, pig);
+                _piglinVisCache.put(pig.getUuid(), cached);
+            }
+            if (cached) {
+                _piglinLastSeenTick.put(pig.getUuid(), tick);
+            }
+            return cached;
+        }
+
+        /**
+         * (20261005 闸门盲区修复, 20261005-133105 场次) 挖金猪灵闸的计数口径:
+         * 「现在看得见 OR 5 秒内刚看见过 OR 已激怒指向 bot」三选一即算"知道它
+         * 在"。原口径只数【当前 FOV 内】的猪灵 —— bot 仰望头顶金矿 (Ascent/垫柱)
+         * 时, 脚下 1~8 格的猪灵全在 FOV 外 → 闸门计 0 → 放行 → 矿被挖断 → 16 格
+         * 内猪灵全体激怒 (13:31:02 挖 -154,98,218 实锤: GOLD-GATE 每秒打 skip
+         * 却照挖, ToolEquip×3/Ascent×2 = 视角来回摆导致放行/拒绝横跳)。
+         * "刚看过"记忆模仿人类周边视觉: 2 秒前瞥见的贴脸猪灵不会因为低头挖矿
+         * 就从认知里消失。激怒猪灵无视 FOV (正在打你的东西不存在"没看见")。
+         */
+        private boolean isPiglinKnown(AltoClef mod, LivingEntity pig) {
+            if (isPiglinPerceived(mod, pig)) return true;
+            if (EntityHelper.isAngryAtPlayer(mod, pig)) return true;
+            Long lastSeen = _piglinLastSeenTick.get(pig.getUuid());
+            return lastSeen != null
+                    && WorldHelper.getTicks() - lastSeen <= PIGLIN_PERCEPTION_MEMORY_TICKS;
         }
 
         /**
@@ -1903,11 +1940,11 @@ public class MineAndCollectTask extends ResourceTask {
             synchronized (BaritoneHelper.MINECRAFT_LOCK) {
             for (PiglinEntity pig : mod.getEntityTracker().getTrackedEntities(PiglinEntity.class)) {
                 if (pig.isAlive() && !pig.isBaby() && pig.squaredDistanceTo(center) <= radiusSq
-                        && isPiglinPerceived(mod, pig)) count++;
+                        && isPiglinKnown(mod, pig)) count++;
             }
             for (PiglinBruteEntity brute : mod.getEntityTracker().getTrackedEntities(PiglinBruteEntity.class)) {
                 if (brute.isAlive() && brute.squaredDistanceTo(center) <= radiusSq
-                        && isPiglinPerceived(mod, brute)) count++;
+                        && isPiglinKnown(mod, brute)) count++;
             }
             }
             if (count <= PIGLIN_MINE_MAX_COUNT) return false;
