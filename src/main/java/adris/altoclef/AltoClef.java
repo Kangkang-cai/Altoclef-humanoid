@@ -468,6 +468,9 @@ public class AltoClef implements ModInitializer {
     }
 
     private void onClientRenderOverlay(MatrixStack matrixStack) {
+        // (2026-10-05 拟人转向 v2) 每渲染帧驱动相机 (60~144Hz, 对齐真人鼠标通路);
+        // 无帧目标/关闭开关时零开销直接返回。
+        SmoothLookController.renderFrame(this);
         _commandStatusOverlay.render(this, matrixStack);
     }
 

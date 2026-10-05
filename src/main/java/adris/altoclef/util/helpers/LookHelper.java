@@ -407,19 +407,19 @@ public interface LookHelper {
     }
 
     static void lookAt(AltoClef mod, Rotation rotation) {
-        // (2026-10-05 拟人转向) 只登记目标, tick 尾由 SmoothLookController 限速逼近
-        // (关闭 smoothTurnEnabled 时控制器内直接下发, 行为与旧瞬移一致)。
-        // 时间敏感路径 (战斗瞄头/格挡/MLG/龙战) 走 lookAtImmediate 保持一拍到位。
-        SmoothLookController.setTarget(rotation);
+        // (2026-10-05 拟人转向 v2) 只登记目标, tick 尾仲裁后由 SmoothLookController
+        // 每渲染帧指数平滑驱动相机 (关闭 smoothTurnEnabled 时回退旧瞬移)。
+        // 时间敏感路径 (战斗瞄头/格挡/MLG/龙战) 走 lookAtImmediate 保持同拍到位。
+        SmoothLookController.stage(rotation);
     }
 
     /**
-     * (2026-10-05 拟人转向) immediate 逃生通道: 本拍直接 snap 到位, 并压制平滑层
-     * 同 tick 的覆盖。语义与旧 lookAt 逐字节一致 —— 战斗瞄头/格挡朝向、MLG 落水、
-     * 喝防火药、龙战等时间敏感路径专用, 平滑层不接管。
+     * (2026-10-05 拟人转向) immediate 逃生通道: 同拍直接 snap 到位, 并把该旋转
+     * 登记为帧层锁定目标。语义与旧 lookAt 逐字节一致 —— 战斗瞄头/格挡朝向、
+     * MLG 落水、直游锁向、龙战等时间敏感路径专用, 不进指数平滑。
      */
     static void lookAtImmediate(AltoClef mod, Rotation rotation) {
-        SmoothLookController.suppressThisTick();
+        SmoothLookController.stageImmediate(rotation);
         mod.getClientBaritone().getLookBehavior().updateTarget(rotation, true);
     }
 
