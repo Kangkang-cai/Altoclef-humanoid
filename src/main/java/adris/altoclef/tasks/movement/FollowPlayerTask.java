@@ -13,16 +13,33 @@ public class FollowPlayerTask extends Task {
 
     private final String _playerName;
 
+    // (2026-10-05) 跟随保持距离。原实现把该值直接传给 GetToEntityTask 的 goal
+    // 半径, 但 GoalFollowEntity 的 goal 区域是"半径内任意格都算到达", A* 终点格
+    // 被启发值拉向实体一侧(≈1格), 名义半径 2 实际停点只有 ~1 格 —— 用户反馈
+    // "贴太近影响任务执行"。现在由本任务自己做环形判定: ≤ 距离就停(停泊子任务,
+    // 由框架走子任务 onStop 释放 baritone goal), > 距离+滞回带才重新跟随。
+    private final double _followDistance;
+
+    // 滞回带: 停止跟随后再恢复的额外距离, 防止恰好在边界时每拍重算路径抖动。
+    private static final double RESUME_HYSTERESIS = 0.5;
+
+    private boolean _holdingDistance;
+
     // 空记录提示的节流时间戳 (毫秒)。原先是每 tick 静默刷同一句 debug state。
     private long _lastNoRecordWarnMs;
 
     public FollowPlayerTask(String playerName) {
+        this(playerName, 3);
+    }
+
+    public FollowPlayerTask(String playerName, double followDistance) {
         _playerName = playerName;
+        _followDistance = followDistance;
     }
 
     @Override
     protected void onStart(AltoClef mod) {
-
+        _holdingDistance = false;
     }
 
     @Override
@@ -46,7 +63,21 @@ public class FollowPlayerTask extends Task {
             // Go to last location
             return new GetToBlockTask(new BlockPos((int) target.x, (int) target.y, (int) target.z), false);
         }
-        return new GetToEntityTask(player.get(), 2);
+
+        // (2026-10-05) 环形跟随: 到距离就站定, 不再继续逼近 (旧实现 goal 半径不生效,
+        // A* 终点被启发值拉到 ~1 格)。滞回带防边界抖动; 返回 null 停泊子任务时,
+        // 框架会走 GetToEntityTask.onStop 释放 baritone goal 与按键输入。
+        double dist = mod.getPlayer().getPos().distanceTo(player.get().getPos());
+        if (dist <= _followDistance) {
+            _holdingDistance = true;
+        } else if (dist > _followDistance + RESUME_HYSTERESIS) {
+            _holdingDistance = false;
+        }
+        if (_holdingDistance) {
+            setDebugState("Following \"" + _playerName + "\" (holding " + (int) Math.round(_followDistance) + " blocks away)");
+            return null;
+        }
+        return new GetToEntityTask(player.get(), _followDistance);
     }
 
     /**

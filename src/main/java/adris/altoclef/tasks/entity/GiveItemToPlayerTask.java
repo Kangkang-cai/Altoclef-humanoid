@@ -125,7 +125,9 @@ public class GiveItemToPlayerTask extends Task {
         }
 
         setDebugState("Going to player...");
-        return new FollowPlayerTask(_playerName);
+        // (2026-10-05) FollowPlayerTask 默认跟随距离改为 3 格; 交付物品必须在
+        // 1.5 格内才能触发扔掷 (见上方 isInRange 1.5 判定), 这里显式传近距离。
+        return new FollowPlayerTask(_playerName, 1);
     }
 
     @Override
