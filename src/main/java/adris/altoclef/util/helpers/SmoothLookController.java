@@ -1,6 +1,7 @@
 package adris.altoclef.util.helpers;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import baritone.api.utils.Rotation;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -46,6 +47,55 @@ public final class SmoothLookController {
     private static long _regTick = Long.MIN_VALUE;
     private static long _lastFrameNs = 0L;
 
+    // ==== 诊断埋点 (2026-10-05 22:xx, 排查"视角小幅高频抖动", 零行为改动) ====
+    // 探测器原理: 帧层每帧写入后记下该值; 下一帧进来自检 —— 若玩家朝向与上帧
+    // 写入值不一致, 说明拍间有外部写入者动过相机 (嫌疑: baritone 拍头应用寻路
+    // target 与帧层拉扯)。聚合 + 节流 flush 到 altoclef_diag.log。
+    private static float _diagLastYaw = 0f, _diagLastPitch = 0f;
+    private static boolean _diagLastValid = false;
+    private static int _diagExtN = 0, _diagRetargetN = 0;
+    private static double _diagExtSum = 0, _diagExtMax = 0;
+    private static boolean _diagEverFired = false;
+    private static long _diagFlushTick = 0;
+
+    private static void diagFlush(AltoClef mod, double nowDeg, long curTick) {
+        try {
+            ClientPlayerEntity p = MinecraftClient.getInstance().player;
+            boolean pathing = false;
+            try {
+                pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
+            } catch (Throwable ignored) {}
+            String m = String.format(
+                    "[SL-DIAG] EXT n=%d retarget=%d avgD=%.2f maxD=%.2f nowD=%.2f pathing=%s vel=%.2f" +
+                            " frameT=(%.1f,%.1f) cur=(%.1f,%.1f) actTicks=%d",
+                    _diagExtN, _diagRetargetN,
+                    _diagExtN > 0 ? _diagExtSum / _diagExtN : 0, _diagExtMax, nowDeg,
+                    pathing,
+                    p != null ? (float) p.getVelocity().horizontalLength() : -1f,
+                    _frameTarget != null ? _frameTarget.getYaw() : 0f,
+                    _frameTarget != null ? _frameTarget.getPitch() : 0f,
+                    p != null ? p.getYaw() : 0f, p != null ? p.getPitch() : 0f,
+                    _frameTarget != null ? curTick - _regTick : -1);
+            Debug.logToFile("altoclef_diag.log", m);
+        } catch (Throwable ignored) {}
+        _diagExtN = 0;
+        _diagRetargetN = 0;
+        _diagExtSum = 0;
+        _diagExtMax = 0;
+    }
+
+    private static void diagTickState(AltoClef mod, String state, long curTick) {
+        try {
+            String m = String.format("[SL-DIAG] %s frameT=(%.1f,%.1f) tick=%d",
+                    state,
+                    _frameTarget != null ? _frameTarget.getYaw() : 0f,
+                    _frameTarget != null ? _frameTarget.getPitch() : 0f,
+                    curTick);
+            Debug.logToFile("altoclef_diag.log", m);
+        } catch (Throwable ignored) {}
+    }
+    // ==== 诊断埋点结束 ====
+
     private SmoothLookController() {}
 
     /** 登记本拍转向目标 (普通 lookAt)。同一拍多次调用 = 最后一次生效。 */
@@ -68,19 +118,29 @@ public final class SmoothLookController {
      */
     public static void tick(AltoClef mod) {
         try {
+            long curTick = WorldHelper.getTicks();
             if (_pending != null) {
                 if (!mod.getModSettings().isSmoothTurnEnabled()) {
                     // 关闭时回退旧行为: 每拍瞬移下发赢家
                     mod.getClientBaritone().getLookBehavior().updateTarget(_pending, true);
                     _frameTarget = null;
                 } else {
+                    // (诊断) retarget 计数: 目标跳变 >10° 视为一次换向
+                    if (_frameTarget != null && _pending != null) {
+                        double dY = Math.abs(MathHelper.wrapDegrees(_pending.getYaw() - _frameTarget.getYaw()));
+                        double dP = Math.abs(_pending.getPitch() - _frameTarget.getPitch());
+                        if (Math.max(dY, dP) > 10.0) _diagRetargetN++;
+                    }
+                    boolean wasNull = _frameTarget == null;
                     _frameTarget = _pending;
-                    _regTick = WorldHelper.getTicks();
+                    _regTick = curTick;
+                    if (wasNull) diagTickState(mod, "take", curTick);
                 }
             }
             _pending = null;
-            if (_frameTarget != null && WorldHelper.getTicks() - _regTick > TIMEOUT_TICKS) {
+            if (_frameTarget != null && curTick - _regTick > TIMEOUT_TICKS) {
                 _frameTarget = null; // 归还相机给 baritone 寻路转向
+                diagTickState(mod, "release", curTick);
             }
         } catch (Throwable t) {
             _pending = null;
@@ -98,11 +158,13 @@ public final class SmoothLookController {
         try {
             if (_frameTarget == null || !mod.getModSettings().isSmoothTurnEnabled()) {
                 _lastFrameNs = 0L;
+                _diagLastValid = false;
                 return;
             }
             ClientPlayerEntity player = MinecraftClient.getInstance().player;
             if (player == null) {
                 _lastFrameNs = 0L;
+                _diagLastValid = false;
                 return;
             }
 
@@ -112,6 +174,25 @@ public final class SmoothLookController {
 
             float curYaw = player.getYaw();
             float curPitch = player.getPitch();
+
+            // (诊断) 外部写入探测: 与上帧我们写入的值比较, 不一致 => 拍间有人动过相机
+            if (_diagLastValid) {
+                double extY = Math.abs(MathHelper.wrapDegrees(curYaw - _diagLastYaw));
+                double extP = Math.abs(curPitch - _diagLastPitch);
+                double ext = Math.max(extY, extP);
+                if (ext > 0.05) {
+                    _diagExtN++;
+                    _diagExtSum += ext;
+                    _diagExtMax = Math.max(_diagExtMax, ext);
+                    long curTick = WorldHelper.getTicks();
+                    if (!_diagEverFired || curTick - _diagFlushTick >= 40) {
+                        _diagEverFired = true;
+                        _diagFlushTick = curTick;
+                        diagFlush(mod, ext, curTick);
+                    }
+                }
+            }
+
             // yaw 环绕归一化到 [-180, 180): 350°→10° 转 20° 而不是倒转 340°
             double dYaw = MathHelper.wrapDegrees(_frameTarget.getYaw() - curYaw);
             double dPitch = _frameTarget.getPitch() - curPitch;
@@ -121,6 +202,9 @@ public final class SmoothLookController {
                 // 收敛: 精确赋值 (闸门判定需要 <0.01°, 赋精确值一步到位)
                 player.setYaw(_frameTarget.getYaw());
                 player.setPitch(_frameTarget.getPitch());
+                _diagLastYaw = MathHelper.wrapDegrees(_frameTarget.getYaw());
+                _diagLastPitch = _frameTarget.getPitch();
+                _diagLastValid = true;
                 return;
             }
 
@@ -138,9 +222,13 @@ public final class SmoothLookController {
                     curPitch + (float) (dPitch * alpha * s), -90.0f, 90.0f);
             player.setYaw(MathHelper.wrapDegrees(newYaw));
             player.setPitch(newPitch);
+            _diagLastYaw = MathHelper.wrapDegrees(newYaw);
+            _diagLastPitch = newPitch;
+            _diagLastValid = true;
         } catch (Throwable t) {
             _frameTarget = null;
             _lastFrameNs = 0L;
+            _diagLastValid = false;
             if (t instanceof Error) throw t;
         }
     }
