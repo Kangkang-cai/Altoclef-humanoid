@@ -10,6 +10,7 @@ import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.resources.MineAndCollectTask;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.MiningRequirement;
 import adris.altoclef.util.time.TimerGame;
@@ -115,7 +116,7 @@ public class KillEnderDragonTask extends Task {
         if (!isRailingOnDragon() && _lookDownTimer.elapsed()) {
             if (mod.getPlayer().isOnGround()) {
                 _lookDownTimer.reset();
-                mod.getClientBaritone().getLookBehavior().updateTarget(new Rotation(0f, -90f), true);
+                LookHelper.lookAtImmediate(mod, new Rotation(0f, -90f));
             }
         }
 
@@ -295,7 +296,7 @@ public class KillEnderDragonTask extends Task {
                         // Look torwards da dragon
                         Vec3d targetLookPos = head.getPos().add(0, 3, 0);
                         Rotation targetRotation = RotationUtils.calcRotationFromVec3d(mod.getClientBaritone().getPlayerContext().playerHead(), targetLookPos, mod.getClientBaritone().getPlayerContext().playerRotations());
-                        mod.getClientBaritone().getLookBehavior().updateTarget(targetRotation, true);
+                        LookHelper.lookAtImmediate(mod, targetRotation);
                         // Also look towards da dragon
                         MinecraftClient.getInstance().options.autoJump = false;
                         mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.MOVE_FORWARD, true);

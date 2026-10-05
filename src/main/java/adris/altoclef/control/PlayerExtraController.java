@@ -173,7 +173,9 @@ public class PlayerExtraController {
     public void applyCombatAim() {
         long now = WorldHelper.getTicks();
         if (_defenseAimTick == now && _defenseAimPoint != null) {
-            LookHelper.lookAt(_mod, _defenseAimPoint);
+            // (2026-10-05) immediate: 格挡角度错一点伤害一点挡不住, 且火弹拦截
+            // 只有 ~2 tick 窗口 —— 战斗瞄准不进转向平滑层, 一拍到位。
+            LookHelper.lookAtImmediate(_mod, _defenseAimPoint);
             _defenseAimPoint = null;
             _combatAimEntity = null;
             _combatAimDistSq = Double.MAX_VALUE;
@@ -182,7 +184,8 @@ public class PlayerExtraController {
         }
         if (_combatAimTick != now || _combatAimEntity == null) return;
         if (_combatAimPoint != null) {
-            LookHelper.lookAt(_mod, _combatAimPoint);
+            // (2026-10-05) 同上: 战斗瞄头 immediate, 不进平滑层。
+            LookHelper.lookAtImmediate(_mod, _combatAimPoint);
         }
         _combatAimEntity = null;
         _combatAimDistSq = Double.MAX_VALUE;

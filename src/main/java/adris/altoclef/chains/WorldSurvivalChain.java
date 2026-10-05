@@ -381,7 +381,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
                     if (WorldHelper.isSolid(mod, targetWaterPos.down()) && WorldHelper.canPlace(mod, targetWaterPos)) {
                         Optional<Rotation> reach = LookHelper.getReach(targetWaterPos.down(), Direction.UP);
                         if (reach.isPresent()) {
-                            mod.getClientBaritone().getLookBehavior().updateTarget(reach.get(), true);
+                            LookHelper.lookAtImmediate(mod, reach.get());
                             if (mod.getClientBaritone().getPlayerContext().isLookingAt(targetWaterPos.down())) {
                                 if (mod.getSlotHandler().forceEquipItem(Items.WATER_BUCKET)) {
                                     _extinguishWaterPosition = targetWaterPos;
@@ -691,7 +691,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
             double dz = target.z - eye.z;
             float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
             // 面向目标 (保持当前 pitch, 水中水平移动方向由 yaw 决定, JUMP 负责上浮)。
-            mod.getClientBaritone().getLookBehavior().updateTarget(new Rotation(yaw, p.getPitch()), true);
+            LookHelper.lookAtImmediate(mod, new Rotation(yaw, p.getPitch()));
             var h = mod.getClientBaritone().getInputOverrideHandler();
             h.setInputForceState(Input.MOVE_FORWARD, true);
             h.setInputForceState(Input.JUMP, true);

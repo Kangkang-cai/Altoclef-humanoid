@@ -1047,6 +1047,36 @@ public class Settings implements IFailableConfigFile {
         return nightVisionRefreshBelowSeconds;
     }
 
+    // ==== 拟人转向 (2026-10-05) ====
+
+    /**
+     * (2026-10-05) 转向平滑: lookAt 目标由 SmoothLookController 每拍限速逼近
+     * (ease-out, 快起慢收), 替代 baritone 一拍瞬移。只影响观感与出手时机
+     * (晚 2~4 拍), 不改变任何判定 —— isLookingAt / isCrosshairOn 闸门最终必然
+     * 通过。战斗瞄头/格挡/MLG/喝药/龙战走 lookAtImmediate 豁免, 一拍到位。
+     * 默认开启; 改配置文件的 {@code smoothTurnEnabled} 可全局关掉 (关掉后
+     * 行为与旧瞬移逐字节一致)。
+     */
+    private boolean smoothTurnEnabled = true;
+
+    /** 每拍最大转向角速度 (度/tick)。默认 35 ≈ 700°/s, 90° 转身约 3~4 拍。 */
+    private double smoothTurnMaxStepDeg = 35.0;
+
+    /** 微调阈值: 角差 ≤ 该值直接到位 (交互延迟优先, 小角度瞬移肉眼不可辨)。 */
+    private double smoothTurnMinAngleDeg = 3.0;
+
+    public boolean isSmoothTurnEnabled() {
+        return smoothTurnEnabled;
+    }
+
+    public double getSmoothTurnMaxStepDeg() {
+        return smoothTurnMaxStepDeg;
+    }
+
+    public double getSmoothTurnMinAngleDeg() {
+        return smoothTurnMinAngleDeg;
+    }
+
     // ==== 永久发光 (2026-10-03) ====
 
     public boolean isForceGlowingEnabled() {

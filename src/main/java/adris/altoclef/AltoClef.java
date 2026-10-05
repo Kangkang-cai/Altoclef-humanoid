@@ -25,6 +25,7 @@ import adris.altoclef.util.RenderThreadWatchdog;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
 import adris.altoclef.util.helpers.OffhandHygiene;
 import adris.altoclef.util.helpers.ScaffoldBlocks;
+import adris.altoclef.util.helpers.SmoothLookController;
 import adris.altoclef.util.helpers.TaskStackSnapshot;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.Baritone;
@@ -404,6 +405,11 @@ public class AltoClef implements ModInitializer {
         // tick 准心瞄谁: 脸上最近的攻击诉求拿到瞄准权, 避免"任务层瞄远目标 &
         // 力场瞄近怪"每 tick 互相抢 lookAt 覆盖, 准心永远停在远目标身上。
         getControllerExtras().applyCombatAim();
+
+        // (2026-10-05 拟人转向) 平滑层唯一执行点: 任务/链层全部 lookAt 登记完、
+        // 战斗瞄准已 immediate 下发后, 把本 tick 的转向目标按限速逼近下发。
+        // 不改变任何判定语义 —— isLookingAt 闸门只是晚 2~4 拍通过。
+        SmoothLookController.tick(this);
 
         // (2026-09-17 数据集录制) 六通道快照的唯一采样点: 此时 tracker 已刷新、
         // 任务树已定型 (TaskRunner.tick 内仲裁+任务树都跑完)、动作已下发

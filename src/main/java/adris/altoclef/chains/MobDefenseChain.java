@@ -2014,7 +2014,7 @@ public class MobDefenseChain extends SingleTaskChain {
         IPlayerContext ctx = mod.getClientBaritone().getPlayerContext();
         Optional<Rotation> reachable = RotationUtils.reachableOffset(ctx.player(), pos, new Vec3d(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5), ctx.playerController().getBlockReachDistance(), false);
         if (reachable.isPresent()) {
-            mod.getClientBaritone().getLookBehavior().updateTarget(reachable.get(), true);
+            LookHelper.lookAtImmediate(mod, reachable.get());
             if (ctx.isLookingAt(pos)) {
                 _wasPuttingOutFire = true;
                 mod.getClientBaritone().getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);

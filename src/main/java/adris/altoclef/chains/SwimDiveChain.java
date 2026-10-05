@@ -6,6 +6,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.PillarJumpHelper;
+import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WaterStandHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import baritone.api.utils.input.Input;
@@ -243,8 +244,9 @@ public class SwimDiveChain extends TaskChain {
             h.setInputForceState(Input.JUMP, false);
             // 锁定触发瞬间的朝向 (直游方向), 不让 baritone LookBehavior 残留目标
             // 把准星甩走 (甩走=前进方向乱, 直游失效)。
-            mod.getClientBaritone().getLookBehavior().updateTarget(
-                    new baritone.api.utils.Rotation(_diveYaw, _divePitch), true);
+            // (2026-10-05) immediate: 直游锁向时间敏感, 不进转向平滑层。
+            LookHelper.lookAtImmediate(mod,
+                    new baritone.api.utils.Rotation(_diveYaw, _divePitch));
             if (--_diveTicksLeft <= 0) {
                 releaseDive(mod);
                 resetWindow();
