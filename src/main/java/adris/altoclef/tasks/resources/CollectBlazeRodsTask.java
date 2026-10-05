@@ -3,6 +3,7 @@ package adris.altoclef.tasks.resources;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.bridge.NamedLandmarks;
 import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.KillEntitiesTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
@@ -790,8 +791,10 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private Task recallSpawnerFromMemory(AltoClef mod) {
         if (_worldKey == null || mod.getPlayer() == null) return null;
         Vec3d pos = mod.getPlayer().getPos();
-        List<BlockPos> candidates = new ArrayList<>(mod.getKnowledgeMemory()
-                .getRememberedCenters(KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
+        // (2026-10-05 双源线索召回) 自动记忆 ∪ NamedLandmarks 带类型的共享地标。
+        // 听说的假坐标最坏 = 走一趟, 下方 isRejectedSpawner + 到场验 BlazeEntity 兜底。
+        List<BlockPos> candidates = new ArrayList<>(NamedLandmarks.recallClueCenters(mod,
+                KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
         candidates.removeIf(this::isRejectedSpawner);
         if (candidates.isEmpty()) return null;
 
@@ -1005,8 +1008,9 @@ public class CollectBlazeRodsTask extends ResourceTask {
     private void trySwitchAwayFromLavaSpawner(AltoClef mod) {
         if (_worldKey == null || _foundBlazeSpawner == null || mod.getPlayer() == null) return;
         Vec3d pos = mod.getPlayer().getPos();
-        List<BlockPos> candidates = new ArrayList<>(mod.getKnowledgeMemory()
-                .getRememberedCenters(KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
+        // (2026-10-05 双源线索召回, 同 recallSpawnerFromMemory 口径)
+        List<BlockPos> candidates = new ArrayList<>(NamedLandmarks.recallClueCenters(mod,
+                KnowledgeMemory.StructureType.BLAZE_SPAWNER, pos, SPAWNER_RECALL_RANGE));
         candidates.removeIf(c -> isRejectedSpawner(c)
                 || _lavaTroubleSpawnerKeys.contains(_worldKey + "@" + c.toShortString())
                 || c.getSquaredDistance(_foundBlazeSpawner) < REJECT_RADIUS * REJECT_RADIUS);

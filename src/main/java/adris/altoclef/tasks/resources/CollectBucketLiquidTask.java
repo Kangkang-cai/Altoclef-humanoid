@@ -3,6 +3,7 @@ package adris.altoclef.tasks.resources;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.bridge.NamedLandmarks;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.ResourceTask;
@@ -516,7 +517,10 @@ public class CollectBucketLiquidTask extends ResourceTask {
         // (2026-10-01 用户拍板) |dy| > LAKE_MAX_DY 的深井锚点跳过 —— XZ 导航
         // 到不了 (见 LAKE_MAX_DY 注释)。d= 同步改为水平距离 (旧值含无效 Y 分量,
         // y=-55 的锚点打出 d=180 假近)。
-        for (BlockPos center : mod.getKnowledgeMemory().getRememberedCenters(
+        // (2026-10-05 双源线索召回) 自动记忆中心 ∪ NamedLandmarks 带类型的共享
+        // 地标（含对端转来的 shared: 坐标）。假坐标最坏 = 导航白跑一趟, 下方锚点
+        // 拉黑 + |dy| 闸兜底; 到场亲眼看见后由感知管道自动晋升进 KnowledgeMemory。
+        for (BlockPos center : NamedLandmarks.recallClueCenters(mod,
                 adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
                 mod.getPlayer().getPos(), 1.0e7)) {
             if (_lakeBlacklist.containsKey(center)) continue;

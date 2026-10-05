@@ -49,7 +49,7 @@
 
 ---
 
-## 2. 命令总表（白名单 12 条）
+## 2. 命令总表（白名单 14 条）
 
 | 命令 | 语法 | 语义 | 类型 |
 |---|---|---|---|
@@ -60,11 +60,13 @@
 | `coords` | `@coords` | 报坐标（只读） | 瞬时 |
 | `status` | `@status` | 报当前任务（只读） | 瞬时 |
 | `inventory` | `@inventory [物品]` | 查背包（只读） | 瞬时 |
-| `remember` | `@remember <名称> <x y z> [维度] [来源]` | 记一条**命名地标** | 瞬时 |
+| `remember` | `@remember <名称> <x y z> [维度] [来源] [类型]` | 记一条**命名地标**（**类型参数 2026-10-05 新**，见 §3.5） | 瞬时 |
 | `forget` | `@forget <名称>` | 删一条**命名地标** | 瞬时 |
 | **`sleep`** | `@sleep [auto\|bed-only\|wait-dawn\|skip]` | **睡觉四态**（新） | 按住态（**`skip` 除外**，见 §3.1） |
 | **`quota`** | `@quota <item_id> <count>` | **需求份额**（新） | 瞬时 |
 | **`forgetmem`** | `@forgetmem <type\|all>` | **作废自动结构记忆**（新） | 瞬时 |
+| **`share`** | `@share <on\|off> <type\|all>` | **记忆分享开关**（2026-10-05 新，见 §3.5） | 瞬时 |
+| **`autorecord`** | `@autorecord <on\|off>` | **共享坐标自动落库开关**（2026-10-05 新，见 §3.5） | 瞬时 |
 
 主线干预伪命令（不在上表，走同一入口）：`@pause_main` / `@resume_main`。
 
@@ -149,6 +151,31 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 - ⚠️ **到时自动回主线是有意的**：否则任务结束后 TaskRunner 停摆（连怪物防御都不跑）。若你想让它待命后继续停着，到时再发 `@pause_main` 即可。
 - **失败**：非正整数秒 → `failed`，reason 如「idle 参数必须是正整数秒（不传=一直待命），收到：0。」
 
+### 3.5 被动式记忆分享（2026-10-05 新：`memory_shared` 事件 + `@share` / `@autorecord`）
+
+**口径 = "默认做，AI 只否决"**：bot 自动入账的新结构记忆默认推送、收到的共享坐标默认落库；AI 角色不发任何命令就是全开。
+
+**推送侧（bot 有了新记忆）**：bot 亲眼确认一个结构中心（KnowledgeMemory 入账）时，自动 emit 新事件：
+
+```json
+{"id":...,"bot_id":"bot_1","type":"memory_shared","strong":false,
+ "text":"发现了岩浆湖 (123,64,-456,the_nether)",
+ "detail":{"type":"LAVA_LAKE","pos":[123,64,-456],"dim":"the_nether"}}
+```
+
+- 只推**新入账**（同一结构合并半径内不重复推）；bridge 未启动不推。
+- **编排层职责**：收到 A bot 的 `memory_shared` → 向 B bot `POST /command` 发
+  `@remember <名称> <x y z> <dim> <A的botId> <type>`（source 填分享者、**type 原样带上 detail.type**，小写即可）。
+  B bot 就自动落库为 `source=shared:A的botId` 的命名地标。
+- AI 角色不想让某类记忆外流：`@share off <type|all>`（如 `@share off lava_lake`）；恢复 `@share on <type|all>`。只影响之后的新入账，不回收已推送的。
+
+**记录侧（bot 收到共享坐标）**：`@remember` 新增第 6 个可选参数 `类型`（`lava_lake / nether_fortress / village / ruined_portal / blaze_spawner / warped_forest / stronghold / end_portal`，大小写不敏感）。**带类型的条目会被任务当结构线索自动消费**（找岩浆湖/找堡垒/召回刷怪笼/找诡异森林都会导航过去），不带类型的条目仍是纯地标（只能 `@goto` 直达）。
+
+- AI 不想自动记共享来的坐标：`@autorecord off` —— 之后 shared 来源的 `@remember` 会被拒（`landmark_failed` 回执）；`@autorecord on` 恢复。self 来源（AI 主动记的）不受影响。
+- 事后否决：`@forget <名称>` 删单条。
+- **防伪造边界不变**：共享坐标只进命名地标（NamedLandmarks），**不进**自动结构记忆（KnowledgeMemory）——bot 导航到现场亲眼确认后，由既有感知管道自动晋升，不需要（也不允许）直接灌入。
+- `@share` / `@autorecord` 都是瞬时状态写入，回执走 `action_done`，`text` 回显当前策略（如「分享=全开，但已关闭: LAVA_LAKE」）。
+
 ---
 
 ## 4. 回执字段与"调试信息"（重点）
@@ -214,6 +241,10 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 这两条有自己的专用事件（`landmark_saved` / `landmark_failed`，`detail` 带 `{name,pos,dim,status,reason}`）。
 `action_done` 只表示"命令受理了"。**判断成败请用它们自己的事件。**
 
+(2026-10-05) `@remember` 会 `landmark_failed` 的新原因：
+- `认不出结构类型 —— <token>`：类型参数写错（可选值见 §3.5）；
+- `自动记录共享坐标已关闭（@autorecord off）...`：来源是 shared 且该 bot 关了自动记录 —— 编排层转发前可先 `@autorecord` 确认状态，或收到 failed 就跳过不重试。
+
 ---
 
 ## 5. `/status` 感知字段（本次新增两个）
@@ -259,6 +290,15 @@ bot_3: @quota all -1                                  # 回默认口径（兜底
 @forgetmem stronghold      # 作废本存档要塞记忆，让 bot 重新定位
 ```
 
+**被动式记忆自动共享（2026-10-05 起，编排层职责）**
+```
+1. 轮询各 bot /events：type == "memory_shared"
+2. 对其他每个在线 bot POST /command:
+   @remember <名称> <x y z> <dim> <分享者botId> <detail.type 小写>
+3. B bot 自动落库为 shared 地标；若任务在找这类结构会自动导航过去
+4. 某 bot 不想收：@autorecord off；某 bot 不想发：@share off <type|all>
+```
+
 **给对方留拾取时间（give 前后的定时等待，2026-10-04 起）**
 ```
 bot_1: @give bot_2 bread 5
@@ -272,7 +312,7 @@ bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主�
 
 commit `0b79da92`；jar md5 `b67ae0ee2b831ec88f10ad519be361cc`；⚠️ **未部署** —— 1004 22:15 构建时三客户端均在运行（PID 39364/37744/33836），按硬规矩不热替换。待重启后：备份三处 mods → 覆盖 → md5 校验。
 该 jar 相对上一版累计包含：`@sleep skip`（`980d6eee`）、白天下还点床修复（`1b600f77`）、劣质食物口径（`46cc3d2a`）、death 事件、场景译名细分（`cabb2e5c`）、**`@idle [秒]` 定时待命（`0b79da92`，本节新增）**。
-白名单默认 **12 条**（`skip` 是 `sleep` 的一个 mode、秒是 `idle` 的可选参数，都不新增命令）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
+白名单默认 **14 条**（2026-10-05 起：+`share`/`autorecord`；`skip` 是 `sleep` 的一个 mode、秒是 `idle` 的可选参数、类型是 `remember` 的可选参数，都不另占白名单）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。
 
 **待实跑判据（`@sleep skip`）**
 1. 夜里发 `@sleep skip` → 立刻回一条 `action_done(completed)`，文案含「本夜不睡」；随后 `/status.task` 应变成主线子任务（挖矿/收集…），**不应**再出现 `Sleeping through night` / 找床。

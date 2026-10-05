@@ -181,6 +181,13 @@ CASES_CORE = [
     ("sleep 成功：本夜跳过", "@sleep skip", "completed", ["本夜"]),
     ("idle：接管（解除 sleep 按住态）", "@idle", "completed", ["待命"]),
     ("resume_main：回主线", "@resume_main", "completed", ["主线"]),
+    # (2026-10-05 被动式记忆分享) share / autorecord 两个否决开关
+    ("share 失败：类型认不出", "@share off no_such_type", "failed", ["认不出类型"]),
+    ("share 成功：关闭某类型再打开", "@share off lava_lake", "completed", ["已关闭"]),
+    ("share 成功：恢复全开", "@share on all", "completed", ["分享="]),
+    ("autorecord 失败：参数只认 on/off", "@autorecord bogus", "failed", ["只认 on/off"]),
+    ("autorecord 成功：关掉再打开", "@autorecord off", "completed", ["自动记录共享坐标"]),
+    ("autorecord 成功：恢复默认开", "@autorecord on", "completed", ["自动记录共享坐标"]),
 ]
 
 # 环境相关：结果取决于现场（附近有没有床），只报告不断言

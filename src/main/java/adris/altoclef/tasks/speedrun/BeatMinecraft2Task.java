@@ -3,6 +3,7 @@ package adris.altoclef.tasks.speedrun;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.bridge.NamedLandmarks;
 import adris.altoclef.chains.FoodChain;
 import adris.altoclef.record.RecordManager;
 import adris.altoclef.tasks.CraftInInventoryTask;
@@ -3884,7 +3885,9 @@ public class BeatMinecraft2Task extends Task {
      * 双重保险: 消费时再过一遍群系校验 (remember 侧已守, 这里防手动改档/脏数据)。
      */
     private BlockPos pickNearestRememberedForest(AltoClef mod) {
-        List<BlockPos> centers = mod.getKnowledgeMemory().getRememberedCenters(
+        // (2026-10-05 双源线索召回) 自动记忆 ∪ NamedLandmarks 带类型的共享地标。
+        // 假坐标最坏 = 走一趟: 下方群系校验(区块已加载时) + 24 格失信拉黑兜底。
+        List<BlockPos> centers = NamedLandmarks.recallClueCenters(mod,
                 KnowledgeMemory.StructureType.WARPED_FOREST, mod.getPlayer().getPos(), 4096);
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
@@ -3982,7 +3985,8 @@ public class BeatMinecraft2Task extends Task {
                 // 是"蹲够 5 分钟了", 林子本身可能还有货, 不拉黑。
                 if (_pearlLastGiveUpDry && camp.getCampAnchor() != null) {
                     BlockPos dryAnchor = camp.getCampAnchor();
-                    List<BlockPos> nearCenters = mod.getKnowledgeMemory().getRememberedCenters(
+                    // (2026-10-05 双源线索召回, 同 pickNearestRememberedForest 口径)
+                    List<BlockPos> nearCenters = NamedLandmarks.recallClueCenters(mod,
                             KnowledgeMemory.StructureType.WARPED_FOREST,
                             Vec3d.ofCenter(dryAnchor), 4096);
                     BlockPos dryCenter = null;

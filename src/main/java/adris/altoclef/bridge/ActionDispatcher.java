@@ -78,9 +78,11 @@ final class ActionDispatcher {
      * 它归"按住"态（见 HOLD_ACTIONS），受理即回执，醒来由对端轮询 /status 感知。
      * (2026-10-03) quota 加入：纯状态写入（改需求份额），无任务生命期、**不打断主线**。
      * (2026-10-03) forgetmem 加入：同上，作废 KnowledgeMemory 自动结构记忆，不打断主线。
+     * (2026-10-05) share/autorecord 加入：被动式记忆分享的两个否决开关（纯状态写入，
+     * 不打断主线；NamedLandmarks 静态策略源）。
      */
     private static final Set<String> INSTANT = Set.of("coords", "status", "inventory", "help", "list",
-            "idle", "remember", "forget", "sleep", "quota", "forgetmem");
+            "idle", "remember", "forget", "sleep", "quota", "forgetmem", "share", "autorecord");
 
     /**
      * "按住"态行动：会替换手头用户任务，但本身<b>无终点</b>（idle = 立正待命；sleep = 睡到天亮），

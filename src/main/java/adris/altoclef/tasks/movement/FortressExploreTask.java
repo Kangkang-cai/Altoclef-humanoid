@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.Settings;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.bridge.NamedLandmarks;
 import adris.altoclef.tasksystem.ITaskRequiresGrounded;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
@@ -1084,8 +1085,10 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         boolean suppressMemoryCenter = _tickId < _memoryCenterSuppressUntilTick;
         List<BlockPos> centers = suppressMemoryCenter
                 ? new ArrayList<>()
-                : mod.getKnowledgeMemory()
-                        .getRememberedCenters(KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
+                // (2026-10-05 双源线索召回) 自动记忆中心 ∪ NamedLandmarks 带类型的
+                // 共享地标。假坐标最坏 = 走一趟, 下方 isCheckedMemory 查讫 + 冷却兜底。
+                : NamedLandmarks.recallClueCenters(mod,
+                        KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
         centers.removeIf(this::isCheckedMemory);
         // (2026-09-19) 冷却中的中心 (远处反复走不到) 跳过 —— 最近优选在剩余
         // 中心里照常生效, 更近的新堡垒不会被冷却的老中心挡住。

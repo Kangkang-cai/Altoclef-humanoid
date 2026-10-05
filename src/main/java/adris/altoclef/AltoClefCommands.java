@@ -46,7 +46,10 @@ public class AltoClefCommands {
                 new SleepCommand(),
                 new QuotaCommand(),
                 // (2026-10-03) 作废自动结构记忆 (推翻定稿 §7.2: 见类注释)。
-                new ForgetMemoryCommand()
+                new ForgetMemoryCommand(),
+                // (2026-10-05 被动式记忆分享) 分享/记录否决口 (bridge 白名单)。
+                new ShareCommand(),
+                new AutoRecordCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

@@ -572,6 +572,9 @@ public final class KnowledgeMemory {
         // (2026-09-16) 落盘 + 首记日志 (验证"挖金时看到堡垒被记住"用)。
         persistCenter(worldKey(), type, center);
         Debug.logMessage("[Knowledge] remembered " + type.name() + " center at " + center.toShortString());
+        // (2026-10-05 被动式记忆分享) 新记忆入账即推送 memory_shared 给对端
+        // (默认全推, AI 可 @share off <type|all> 否决; 合并早退保证只推新条)。
+        adris.altoclef.bridge.NamedLandmarks.emitMemorySharedIfAllowed(type, center);
     }
 
     // ===== (2026-10-03 @forgetmem) 自动结构记忆作废 =====

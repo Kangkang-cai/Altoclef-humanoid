@@ -13,12 +13,16 @@ import adris.altoclef.commandsystem.CommandException;
  * 平级、独立落盘跨会话持久化）。主要入口是聊天侧 bridge /command 白名单；
  * 游戏内手动敲也可用（bridge 未启动时只少事件回执）。
  *
- * <p>语法：{@code @remember <名称> <x y z> [dim] [来源]}
+ * <p>语法：{@code @remember <名称> <x y z> [dim] [来源] [类型]}
  * <ul>
  *   <li>名称 ≤16 字符、不允许空格；重名覆盖更新；上限 20 条满则淘汰最旧；</li>
  *   <li>dim 只认 overworld/the_nether/the_end（聊天侧已把中文归一化），缺省 = 当前维度；</li>
  *   <li>来源：分享者名字（AI 说"这是 TA 告诉我的"），缺省 self。定稿 §4.2 语法上
- *       没有此参，实施时补的可选尾参 —— shared:小影 这类 source 只有带上它才成立。</li>
+ *       没有此参，实施时补的可选尾参 —— shared:小影 这类 source 只有带上它才成立；</li>
+ *   <li>(2026-10-05) 类型：结构类型 token（{@code lava_lake / nether_fortress / ...}，
+ *       大小写不敏感），缺省不标类型。带类型的条目会被任务当结构线索自动消费
+ *       （{@code NamedLandmarks.recallClueCenters}）；对端转发 {@code memory_shared}
+ *       时应带上事件 detail 里的真实 type。</li>
  * </ul>
  * 成功/失败都发 landmark_saved / landmark_failed 事件回执（NamedLandmarks 内发），
  * 命令本体瞬时完成（ActionDispatcher INSTANT, 受理即 action_done）。
@@ -34,7 +38,9 @@ public class RememberCommand extends Command {
                 // givenArgs ≤4（只给 名称 x y z）时用缺省 = 当前维度
                 new Arg(String.class, "维度", "", 4),
                 // givenArgs ≤5（给到 dim）时用缺省 = self
-                new Arg(String.class, "来源", "", 5));
+                new Arg(String.class, "来源", "", 5),
+                // givenArgs ≤6（给到 source）时用缺省 = 不标类型（不参与任务自动消费）
+                new Arg(String.class, "类型", "", 6));
     }
 
     @Override
@@ -45,7 +51,8 @@ public class RememberCommand extends Command {
         double z = parser.get(Double.class);
         String dim = parser.get(String.class);
         String source = parser.get(String.class);
-        NamedLandmarks.remember(mod, name, x, y, z, dim, source);
+        String type = parser.get(String.class);
+        NamedLandmarks.remember(mod, name, x, y, z, dim, source, type);
         finish();
     }
 }
