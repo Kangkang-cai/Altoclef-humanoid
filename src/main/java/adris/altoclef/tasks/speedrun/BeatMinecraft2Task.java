@@ -855,9 +855,10 @@ public class BeatMinecraft2Task extends Task {
     // "Phase timed out with 0 potions" 放行, 随后 13:10 裸奔又死岩浆。)
     // (2026-09-06 用户) 目标从 1 瓶提到 2 瓶 (落单烈焰人走盾战不喝药,
     // 2 瓶留给刷怪笼房多只场景)。防任务打架: _fireResPhaseDone 是一次性
-    // 闩 — 本实例内一旦结束 (达标或超时) 就不再进本阶段, 之后喝掉 1~2 瓶
+    // 闩 — 一旦结束 (达标或超时) 就不再进"初次激活"分支, 之后喝掉 1~2 瓶
     // (库存跌回 < 2) 也不会重新触发药水任务, 由喝药门槛 (CollectBlazeRodsTask)
-    // 决定要不要花。
+    // 决定要不要花; 重收走 shouldReopenFireResPotionPhase (0瓶+无效果+180s)。
+    // (2026-10-05) 闩已 static 化 (跨实例重建存活), 见字段处注释。
     // (2026-09-19 18:55 改 public) CollectBlazeRodsTask 断药转收药时引用同一目标数。
     public static final int FIRE_RES_POTION_TARGET = 2;
 
@@ -941,7 +942,13 @@ public class BeatMinecraft2Task extends Task {
     }
 
     private boolean _fireResPhaseActive = false;
-    private boolean _fireResPhaseDone = false;
+    // (2026-10-05 static 化) 实例字段时是缺口: BeatMinecraft2Task 因死亡/链重启重建
+    // (bot3 20261005-185854 实锤: 19:07 相位关闭 done=true, 20:31 紧急喝药库存 2→1,
+    // 20:32:47 链重启 → done 归零 → 走"初次激活"分支 1<2 直接重开收药, 完全绕开
+    // shouldReopen 的 0瓶+无效果+180s 守卫; 22:08 再次复现)。与 _fireResReopenAtMs
+    // 同一个坑同一种修法: 闩必须跨实例重建存活, "本阶段已尝试过"是本次通关的
+    // 全局事实而非单实例状态。重开路径会显式置 false, 不影响 0914 重收设计。
+    private static boolean _fireResPhaseDone = false;
     private final TimerGame _fireResPhaseTimer = new TimerGame(45 * 60);
     // (2026-09-18 死亡刷新) 上次刷新计时器时的连续死亡计数; 激活阶段时记基线,
     // 阶段进行中发现计数前进 → 计时器清零 (死亡/跑尸不该算进交易预算)。
