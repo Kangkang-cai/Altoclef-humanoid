@@ -47,6 +47,7 @@ import net.minecraft.block.EndPortalFrameBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.CreditsScreen;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.EndermanEntity;
@@ -953,6 +954,11 @@ public class BeatMinecraft2Task extends Task {
     // 反复进本阶段会阻塞主线, 所以宁可长一点。
     private static final long FIRE_RES_REOPEN_COOLDOWN_MS = 180_000;
     private static long _fireResReopenAtMs = 0;
+
+    // (2026-10-05) "重开被效果在场挡住"的边沿诊断闩: 只在条件首次成立时落一条
+    // [FireRes] reopen blocked, 防止效果在场期间每 tick 刷屏。实例级即可, 重建最多
+    // 多打一条。效果消失/背包再有药时复位。
+    private boolean _fireResReopenBlockedByEffect = false;
 
     // (2026-09-20 用户"干脆就不要这 8 分钟了") 0919 曾加过"喝完两瓶药 → 8 分钟内
     // 不重开收药阶段"的冷却 (以背包药水 有→无 跳变为锚), 已整体废除: 用户复核后
@@ -3728,6 +3734,23 @@ public class BeatMinecraft2Task extends Task {
      */
     private boolean shouldReopenFireResPotionPhase(AltoClef mod) {
         if (ItemHelper.countFireResPotions(mod) > 0) return false;
+        // (2026-10-05 用户"喝完两瓶药水效果还在就去收集了, 和原设计不符合")
+        // 重开加"当前无防火效果"前置: 效果在场 = 这瓶药还在服役, 该继续围场
+        // 打烈焰人, 不该转身去挖金收药 (现场 20261005-113942 实锤: 12:09:25 喝完
+        // 最后一瓶, 同一秒 REOPENED 抢占"Waiting inside our enclosure for blaze")。
+        // 效果一消失且背包 0 瓶 → 照旧按 180s 冷却重开, 0914"裸奔烧死"事故不回归
+        // (效果没了 + 0 瓶正是那次事故的组合, 本判据不挡它)。
+        // 出口: 返回 false 时外层照常 return getBlazeRodsTask(...), 无挂起分支。
+        // 消费方唯一: 本文件 FireRes 相位分支一处调用 (grep 核对过)。
+        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+            if (!_fireResReopenBlockedByEffect && System.currentTimeMillis() >= _fireResReopenAtMs) {
+                _fireResReopenBlockedByEffect = true;
+                Debug.logToFile("altoclef_diag.log",
+                        "[FireRes] reopen blocked: fire resistance effect still active, potions=0");
+            }
+            return false;
+        }
+        _fireResReopenBlockedByEffect = false;
         return System.currentTimeMillis() >= _fireResReopenAtMs;
     }
 
