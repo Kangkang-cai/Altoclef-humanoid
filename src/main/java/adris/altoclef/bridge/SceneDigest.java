@@ -101,11 +101,21 @@ final class SceneDigest {
     }
 
     /**
-     * 目的标签：沿任务栈从深到浅找"为什么做当前动作"（1005 用户需求实锤：
-     * AI 角色知道"在收金子"，不知道"为了什么"——标签只报动作+物品，目的在上层）。
+     * 目的标签：沿任务栈<b>从顶（最外层）向下</b>找"为什么做当前动作"
+     * （1005 用户需求实锤：AI 角色知道"在收金子"，不知道"为了什么"——标签只报
+     * 动作+物品，目的在上层）。
+     *
+     * <p>方向必须是外层优先（1005 20:1x 用户纠正"金子是为了和猪灵交易获得防火药水，
+     * 防火药水为了打烈焰人"）：TradeWithPiglinsTask 是被多个父任务复用的<b>机制</b>，
+     * 不是目的——CollectFireResPotionsTask 内层的交易子任务目标甚至是
+     * {@code DRAGON_EGG×999999} 永不满足占位（CollectFireResPotionsTask.java:59），
+     * 深层优先会撞上它误报"换龙蛋"。只有最外层的显式目的任务才是真目的：
+     * 药水阶段栈 [BeatMinecraft2, CollectFireResPotionsTask, TradeWithPiglins,
+     * CollectGoldIngotTask, …] 顶向下先命中 CollectFireResPotionsTask → "备防火药水打烈焰人"；
+     * 珍珠阶段栈顶直接是 TradeWithPiglinsTask(ENDER_PEARL) → "换末影珍珠"，两相正确。
      * <ol>
-     *   <li><b>显式目的任务</b>（{@link #PURPOSE_ZH}）：TradeWithPiglinsTask 按交易
-     *       目标物写"换末影珍珠"这类具体目的，CollectObsidianByBarterTask 等走静态表；</li>
+     *   <li><b>显式目的任务</b>（{@link #PURPOSE_ZH} / TradeWithPiglinsTask 按交易
+     *       目标物动态译"换X"）；</li>
      *   <li><b>通用兜底</b>：第一个目标物与深层任务<b>不同</b>的祖先 {@link ResourceTask}
      *       （"挖金矿"的祖先是"合成金靴子"）。目标物相同 = 同物递进（MineAndCollectTask
      *       → CollectGoldIngotTask），是机制不是目的，跳过；类名含 Catalogued 的
@@ -115,8 +125,8 @@ final class SceneDigest {
      */
     private static String purposeFor(List<Task> stack, Task deep) {
         try {
-            // 第一遍：显式目的任务（换/备 X）
-            for (int i = stack.size() - 2; i >= 0; i--) {
+            // 第一遍：显式目的任务（外层优先，见方法注释）
+            for (int i = 0; i <= stack.size() - 2; i++) {
                 Task a = stack.get(i);
                 if (a instanceof TradeWithPiglinsTask tw) {
                     Item[] m = ItemTarget.getMatches(tw.getItemTargets());
@@ -129,9 +139,9 @@ final class SceneDigest {
                 String mapped = PURPOSE_ZH.get(a.getClass().getSimpleName());
                 if (mapped != null) return mapped;
             }
-            // 第二遍：通用兜底 —— 第一个目标物不同的祖先 ResourceTask
+            // 第二遍：通用兜底 —— 同样外层优先
             String deepItem = deep instanceof ResourceTask rt ? firstName(rt) : "";
-            for (int i = stack.size() - 2; i >= 0; i--) {
+            for (int i = 0; i <= stack.size() - 2; i++) {
                 Task a = stack.get(i);
                 if (!(a instanceof ResourceTask art)) continue;
                 if (a.getClass().getSimpleName().contains("Catalogued")) continue; // 备料机制≠目的
@@ -162,14 +172,18 @@ final class SceneDigest {
     /**
      * 显式目的任务表（1005）：这些任务类本身<b>就是</b>下层收集动作的目的。
      * TradeWithPiglinsTask 不在表里 —— 它的目标物在参数里（换珍珠/换黑曜石/换龙蛋），
-     * 由 {@link #purposeFor} 按 instanceof 动态写"换X"。
+     * 由 {@link #purposeFor} 按 instanceof 动态写"换X"；它同时也是被多个父任务
+     * 复用的机制（CollectFireResPotionsTask 内层的交易目标是 DRAGON_EGG×999999
+     * 永不满足占位），所以扫描必须外层优先，机制任务先被外层真目的截住。
      */
     private static final Map<String, String> PURPOSE_ZH = new HashMap<>();
 
     static {
         PURPOSE_ZH.put("CollectObsidianByBarterTask", "换黑曜石"); // 内部就是 TradeWithPiglinsTask(OBSIDIAN)
         PURPOSE_ZH.put("CollectObsidianTask", "备黑曜石");
-        PURPOSE_ZH.put("CollectFireResPotionsTask", "备防火药水");
+        // (1005 20:1x 用户纠正) 金子→猪灵交易→防火药水→打烈焰人：药水是手段，
+        // 打烈焰人才是目的，写成完整链
+        PURPOSE_ZH.put("CollectFireResPotionsTask", "备防火药水打烈焰人");
     }
 
     /** 任务类名前缀 → 中文动词（粗粒度动作词）。 */
