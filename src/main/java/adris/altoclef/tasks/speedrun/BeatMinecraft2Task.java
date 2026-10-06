@@ -37,6 +37,7 @@ import adris.altoclef.util.helpers.BotRole;
 import adris.altoclef.util.helpers.ConfigHelper;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
+import adris.altoclef.util.helpers.SleepHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
@@ -805,6 +806,11 @@ public class BeatMinecraft2Task extends Task {
     // 仍拿不到床就放弃找床, 转挖矿/收食物(熬夜推进), 不无限找羊。超时后冷却
     // SKIP_NIGHT_BED_FOR_MS 毫秒, 避免下 tick 又回头找床打断挖矿。
     private final TimerGame _nightBedFindTimer = new TimerGame(30);
+
+    // (2026-10-06 多 bot 全员入睡才跳夜) 已躺进床后等天亮(跳夜)的计时：多人服要全员入睡才跳夜，
+    // 躺下 30s 仍未见天亮 = 有队友没睡 → 本夜彻底放弃睡觉（起床 + SleepOverride.skip），
+    // 不再僵躺到天亮。阈值与次 bot 跟随睡眠的 30s 放弃一致，两边无需通信即可同步放弃。
+    private final TimerGame _inBedNoDawnTimer = new TimerGame(30);
     private boolean _nightBedFindInProgress = false;
     // (2026-08-31 夜间找床放弃一次就够, 用户) 本夜已放弃找床 → 直到白天不再重启。
     private boolean _nightBedGivenUp = false;
@@ -4470,6 +4476,22 @@ public class BeatMinecraft2Task extends Task {
         boolean hasBedRegard = hasBedRegard(mod);
 
         if (effectiveCanSleep) {
+            // (2026-10-06 多 bot 全员入睡) 已躺进床但 30s 仍未见天亮 = 有人没睡（次 bot 可能没床/
+            // 正在远征）→ 本夜彻底放弃睡觉，起床回去干活；否则会僵躺到天亮（PlaceBed 的收尾条件
+            // 要求 !isSleeping，躺着时永不触发 —— 见 :1469）。与次 bot 的 30s 放弃阈值同源。
+            boolean inBedNow = mod.getPlayer() != null && mod.getPlayer().isSleeping();
+            if (inBedNow) {
+                if (_inBedNoDawnTimer.elapsed()) {
+                    SleepHelper.wakeUpIfSleeping(mod, "SleepPeerWait");
+                    SleepOverride.requestSkipThisNight();
+                    Debug.logToFile("altoclef_diag.log", "[SleepPeerWait] in-bed 30s without dawn;"
+                            + " giving up sleep for tonight (peer not sleeping?)");
+                    _inBedNoDawnTimer.reset();
+                    return null;
+                }
+            } else {
+                _inBedNoDawnTimer.reset();
+            }
             // 路2: 地表夜间 → 优先睡觉
             if (hasBedRegard) {
                 // (2026-09-08 睡觉放弃冷却, 用户"尝试次数两次就够了, 兜底不够智能") 

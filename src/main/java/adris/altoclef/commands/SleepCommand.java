@@ -14,8 +14,7 @@ import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.SleepingChatScreen;
+import adris.altoclef.util.helpers.SleepHelper;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -68,7 +67,7 @@ public class SleepCommand extends Command {
                 // 原版 sleeping 状态（isSleeping / SleepingChatScreen）不是任务，换任务不会发
                 // 起床动作，bot 会一直躺着（SleepingChatScreen 开着还吞掉移动输入）。
                 // 必须 here 显式走原版起床路径。wait-dawn 同为"不睡"指令，一并处理。
-                boolean woke = wakeUpIfSleeping(mod);
+                boolean woke = SleepHelper.wakeUpIfSleeping(mod, "SleepSkip");
                 // "跳过后该走的分支" = 主线的真实子任务。顶层若还停在 sleep 家族的站桩/睡觉任务上,
                 // 它已经没有意义 → 换成主线, 让那条分支立刻接管(等价 @resume_main)。
                 boolean resumed = resumeIfSittingInSleepTask(mod);
@@ -82,7 +81,7 @@ public class SleepCommand extends Command {
             case "wait-dawn", "wait", "dawn" -> {
                 // 显式睡/不睡指令 = 对上一次 skip 的显式撤销(否则 skip 会一直压到白天)。
                 SleepOverride.clear();
-                wakeUpIfSleeping(mod);
+                SleepHelper.wakeUpIfSleeping(mod, "SleepSkip");
                 String m = "不睡觉，熬到天亮（多人凑不齐入睡时的替代）。任何新指令即可中止。";
                 CommandFeedback.ok(m);
                 log(m);
@@ -118,41 +117,6 @@ public class SleepCommand extends Command {
                 log("sleep：" + m + " 已放弃。");
                 finish();
             }
-        }
-    }
-
-    /**
-     * bot 已经睡在床里 → 强制起床（2026-10-05，配套 skip / wait-dawn）。
-     *
-     * <p>背景（用户 1005 实测："skip 无法处理已经睡在床上的情况，bot 会不起床"）：
-     * 原版 sleeping 状态挂在玩家实体上（{@code isSleeping} / 玩法层 SleepingChatScreen），
-     * 与任务系统无关 —— 换任务、让睡眠路由让位都不会发起床动作；且 SleepingChatScreen
-     * 开着时会吞掉移动输入，任务就算想走也走不动。
-     *
-     * <p>这里模仿原版 "Leave bed" 按钮的路径：先关 SleepingChatScreen，再调
-     * {@code player.wakeUp(updateSleepingPlayers=false, setSpawn=false)}
-     * （Yarn 1.18.2 {@code method_7358(ZZ)V}）。setSpawn 固定 false —— 重生点在
-     * 右键上床那一刻就已被服务端设置，起床时不能也不需要再动它。
-     *
-     * @return 本次调用是否真的让一个睡着的 bot 起了床（用于回执文案与 diag）
-     */
-    private static boolean wakeUpIfSleeping(AltoClef mod) {
-        try {
-            if (mod.getPlayer() == null) return false;
-            boolean wasSleeping = mod.getPlayer().isSleeping();
-            if (MinecraftClient.getInstance().currentScreen instanceof SleepingChatScreen) {
-                MinecraftClient.getInstance().setScreen(null);
-            }
-            if (wasSleeping) {
-                mod.getPlayer().wakeUp(false, false);
-                String m = "[SleepSkip] bot was sleeping, woke up by command";
-                Debug.logMessage(m);
-                Debug.logToFile("altoclef_diag.log", m);
-            }
-            return wasSleeping;
-        } catch (Throwable ignored) {
-            // 世界未就绪等极端情况：不把异常抛进命令链，下一拍任务层自会接管。
-            return false;
         }
     }
 
