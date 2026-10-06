@@ -387,8 +387,8 @@ bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主�
 
 ## 7. 部署状态
 
-jar md5 `7a915a86dd3d4854ff4e47b5acb98e21`（4,533,078 B）；✅ **已部署四处** —— 2026-10-06 19:58 客户端全退（8761/8762/8763 均 free）后部署（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`），四处 md5 与构建产物逐一一致。旧 jar 备份：`bak_20261006_1958` / `1939` / `1930`。
-本版含：`d56b56ed`（次 bot 自动引导）+ **入口挂载点修复**（见下）+ `9d0fe167`（验证脚本）+ `98a22506`（role / 目标降档）+ `b946a6da`（随行宿主）。
+jar md5 `a49320369d794c86222d997a58639d49`（4,536,482 B）；⏳ **未部署** —— 2026-10-06 20:58 构建时 8761/8762 仍在线（PID 41004/24924），按硬规矩不热替换。待客户端全退后部署**四处**（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`）：备份 `bak_20261006_HHMM` → 覆盖 → md5 对账。
+本版含：`11ba547f`（**次 bot 睡眠镜像 + 主 bot 队友等待出口 + 前置换主线本体**，判据见下）+ `6114584f`（验证脚本修正）；其上累计含 `d56b56ed`（自动引导）+ `a60c79ec`（入口挂载点修复）+ `9d0fe167` + `98a22506`（role / 目标降档）+ `b946a6da`（随行宿主）。
 
 > ⚠️ **入口挂载点踩过一个坑（2026-10-06 实测）**：`SubBotBootstrapTask` 的自动拉起**不能**挂在
 > `UserTaskChain.onTick` —— `TaskRunner.tick` 会用 `if (!chain.isActive()) continue;` 过滤仲裁候选，
@@ -425,6 +425,18 @@ jar md5 `7a915a86dd3d4854ff4e47b5acb98e21`（4,533,078 B）；✅ **已部署四
 3. 待命途中发 `@goto ...` 顶掉 → **静默**：无 cancelled、无第二条 done（旧口径不变），靠 /status 感知。
 4. `@idle 0` / `@idle abc` → 一条 `action_done(failed)` + reason「idle 参数必须是正整数秒…」，bot 原任务不受影响。
 5. 定时待命期间 `/status.botStatus` 应保持 `ok`（待命是合法静止，不报 `bot_stuck`），restart_guard.log 不出现 IdleTask 重启记录。
+
+**待实跑判据（睡眠镜像 + 前置换主线本体，2026-10-06 新）**
+
+多人服「全员入睡才跳夜」，所以次 bot 必须跟主 bot 一起躺；两边各自 30 秒自检，**无需 bot 间通信**即可同步放弃。
+
+1. **前置跑主线本体**：`altoclef_debugstate.log` 出现 `[次bot引导] 前置(主线智能) 木头 X/8 食物 Y/40`；达标时 `altoclef_diag.log` 出现 `[SUB-BOOT] prep done (wood 8/8, food 40/40), entering follow of <主bot名>`。⚠️ 达标前它跑的是整条主线（造斧/囤木/收食物），**不应**再看到旧版的精简前置痕迹。
+2. **同睡跳夜（成功路径）**：主 bot 入睡 → 次 bot `debugstate.log` 出现 `[次bot引导] 随主bot睡觉 <名>`，`diag.log` 出现 `[SUB-BOOT] mirror sleep start: leader '<名>' is sleeping`，跳夜后出现 `[SUB-BOOT] mirror sleep done (dawn), back to follow`。
+3. **没床放弃**：次 bot 无床、且 32 格内无床/羊毛/羊、背包无 3 同色羊毛 → 30 秒后 `[SUB-BOOT] mirror sleep give up tonight (no bed chance in 30s)`，随即回跟随（`/status.taskDetail` 不再显示「随主bot睡觉」）。
+4. **第三人没睡（关键新出口）**：两个 bot 都躺下但还有人在线没睡 ⇒ 夜不跳 ⇒ 主 bot 30 秒后打 `[SleepPeerWait] in-bed 30s without dawn; giving up sleep for tonight (peer not sleeping?)` + `[SleepPeerWait] bot was sleeping, woke up`；次 bot 同时打 `[SUB-BOOT] mirror sleep give up tonight (in bed 30s without dawn)`。**两边同夜放弃**。⚠️ 修复前主 bot 会僵躺到天亮（`PlaceBedAndSetSpawnTask:1469` 的收尾条件要求 `!isSleeping`，躺着时永不触发）。
+5. **失败判据**：`mirror sleep start` 之后既无 `done` 也无任一 `give up`（卡住）；或出现 `[SleepPeerWait]` 后 `/status` 显示主 bot 仍在床上。
+
+> ⚠️ 阈值：两边放弃判据同为 **30 秒**（与主线既有 `_nightBedFindTimer` / `_notSleepableTimer` 同源）。次 bot 的"躺下 30s 未跳夜"与"未上床且无机会"是两条独立出口。
 
 > 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
@@ -518,8 +530,9 @@ python altoclef/bridge_follow_test.py --skip-geometry # 只跑不需要两个 bo
 1. **几何断言**：`/status.pos` 是双 bot 都能读到的硬数据，「贴 3 格」因此可以客观断言 ——
    先等收敛，再在稳定窗口里采样判中位数。不再依赖「看起来贴着」。
    （前置：脚本会先给主 bot 发 `@idle` 让它站住，否则主 bot 自己在跑主线，距离没有稳态可言。）
-2. **日志断言用锚点**：开始前记录每个日志文件的字节偏移，只读**锚点之后**的新增内容。
-   否则会拿上一局的历史日志当「通过」——这是假阳性最典型的来源。
+2. **日志断言两种读法，按标记的"唯一性"选**：
+   ① **字节偏移锚点**（`new_text`）—— 只读开始之后的新增内容，用于**其它功能也可能写出**的通用标记（如 `Stockpiling wood`）。否则会拿上一局的历史日志当「通过」，这是假阳性最典型的来源。
+   ② **尾部读取**（`tail_text` / `tail_grep`）—— 次 bot 引导在客户端一上线就跑，常早于脚本启动，用锚点会**漏读**；故对**只可能由我们写出**的独有标记（如 `[次bot引导]`、`[SUB-BOOT]`）用尾部。用错方向会产生两类误判：漏读 or 假阳性。
 3. **契约型断言的措辞是「若出现则必须满足」**：例如囤木目标只在日志里真出现
    `Stockpiling wood` 时才断言它降到 8 而不是 25，避免「这局还没走到该阶段」被误判成失败。
 
