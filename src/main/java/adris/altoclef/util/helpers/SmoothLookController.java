@@ -42,6 +42,11 @@ public final class SmoothLookController {
 
     // 本拍任务/战斗层登记的转向目标 (lookAt 写入, tick 尾消费)。
     private static Rotation _pending = null;
+    // 本拍赢家是否来自 immediate 通道 (lookAtImmediate) —— 是则短暂保留 baritone
+    // target 让下一拍头应用 (同拍到位语义), 不被帧尾清空吞掉。
+    private static boolean _pendingImmediate = false;
+    // immediate 保留窗口 (拍): >0 期间帧尾不清空 baritone target。
+    private static int _immKeepTicks = 0;
     // tick 尾仲裁出的帧目标; null = 相机归 baritone/无控制。
     private static Rotation _frameTarget = null;
     private static long _regTick = Long.MIN_VALUE;
@@ -102,14 +107,17 @@ public final class SmoothLookController {
     /** 登记本拍转向目标 (普通 lookAt)。同一拍多次调用 = 最后一次生效。 */
     public static void stage(Rotation target) {
         _pending = target;
+        _pendingImmediate = false;
     }
 
     /**
      * 登记本拍转向目标 (immediate 通道)。调用方同时做了 baritone 同拍 snap;
-     * tick 尾仲裁时本登记作为赢家定格, 帧层锁定该旋转不再拉走。
+     * tick 尾仲裁时本登记作为赢家定格, 帧层锁定该旋转不再拉走, 并短暂保留
+     * baritone target 让下一拍头完成应用 (同拍到位语义)。
      */
     public static void stageImmediate(Rotation target) {
         _pending = target;
+        _pendingImmediate = true;
     }
 
     /**
@@ -135,16 +143,25 @@ public final class SmoothLookController {
                     boolean wasNull = _frameTarget == null;
                     _frameTarget = _pending;
                     _regTick = curTick;
+                    if (_pendingImmediate) {
+                        // immediate: 保留 baritone target 2 拍, 让下一拍头应用
+                        // (同拍到位语义); 窗口过后帧尾恢复清空。
+                        _immKeepTicks = 2;
+                        _pendingImmediate = false;
+                    }
                     if (wasNull) diagTickState(mod, "take", curTick);
                 }
             }
             _pending = null;
+            _pendingImmediate = false;
+            if (_immKeepTicks > 0) _immKeepTicks--;
             if (_frameTarget != null && curTick - _regTick > TIMEOUT_TICKS) {
                 _frameTarget = null; // 归还相机给 baritone 寻路转向
                 diagTickState(mod, "release", curTick);
             }
         } catch (Throwable t) {
             _pending = null;
+            _pendingImmediate = false;
             _frameTarget = null;
             if (t instanceof Error) throw t;
         }
@@ -236,15 +253,21 @@ public final class SmoothLookController {
         }
     }
 
-    // (2026-10-06 拉扯修复) 帧层每帧写入后, 把玩家当前位置回填为 baritone
-    // LookBehavior 的 target: 下一拍 baritone 拍头 (onPlayerUpdate) 应用时写的
-    // 就是玩家已在的位置 => no-op。消除 [SL-DIAG] EXT 取证到的拍间拉扯
-    // (pathing=true 时 maxD=174°; pathing=false 时每拍 1~3° 小幅高频写入)。
-    // 帧层 active 期间 baritone 的视线转向被冻结在任务目标上 —— 与旧 lookAt
-    // 「每拍覆盖 baritone target」语义一致, 仅持续时间从 1 拍变为帧层持有窗口。
+    // (2026-10-06 拉扯修复 v2) 帧尾清空 baritone LookBehavior target:
+    // 回填方案 (写玩家当前位置) 被 baritone 每拍 onTick 重写自己的 target 击穿
+    // (EXT 取证: 修复后仍每拍跳 ~100° 到固定 look 方向, hold=105+ 无效)。
+    // 清空是结构性消除: renderFrame 帧尾是下一拍全部代码之前的最后写入者,
+    // 拍头 onPlayerUpdate 见 target==null 直接 return (反编译已核), 不再写朝向。
+    // ⚠️ 风险标注 (2026-10-06, 本修复新引入): baritone 内部流程 (如寻路中途
+    // 打断方块) 自己每拍 updateTarget 的应用也会被清掉 —— 其"已看向方块"判定
+    // 读玩家真实朝向, 由任务层 lookAt 前置 + 帧层带到位兜底; 若实跑出现寻路
+    // 挖方块卡死, 需细化为仅清非寻路来源。immediate 通道经 _immKeepTicks 保留
+    // 窗口豁免 (2 拍), 战斗瞄头/MLG 同拍到位不受影响。
     private static void holdBackBaritone(AltoClef mod, ClientPlayerEntity player) {
         _diagHoldN++;
-        mod.getClientBaritone().getLookBehavior()
-                .updateTarget(new Rotation(player.getYaw(), player.getPitch()), true);
+        if (_immKeepTicks > 0) {
+            return; // immediate 保留窗口: 不清, 让下一拍头应用
+        }
+        mod.getClientBaritone().getLookBehavior().updateTarget(null, true);
     }
 }
