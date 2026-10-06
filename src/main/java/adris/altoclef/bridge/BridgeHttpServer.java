@@ -7,6 +7,7 @@ import adris.altoclef.commandsystem.CommandExecutor;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.ClientTickEvent;
+import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -229,6 +230,10 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "keyItems"); sb.append(':'); BridgeJson.str(sb, s.keyItems);
             // ---- 阶段三感知补全：任务细化 + 环境感知（主线没在跑时省略 mainlineProgress）----
             sb.append(','); BridgeJson.str(sb, "taskDetail"); sb.append(':'); BridgeJson.str(sb, s.taskDetail);
+            // (2026-10-06 多 bot 阶段跟随) 主线「大阶段」枚举（BeatPhase）——给次 bot 判"跟不跟"。
+            // 刻意不用 taskDetail 当契约: 那是给人看的显示串、随时会改。非主线在跑时为 UNKNOWN。
+            sb.append(','); BridgeJson.str(sb, "phase"); sb.append(':');
+            BridgeJson.str(sb, BeatMinecraft2Task.getCurrentPhase().name());
             if (s.mainlineProgress != null && !s.mainlineProgress.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "mainlineProgress"); sb.append(':'); BridgeJson.str(sb, s.mainlineProgress);
             }

@@ -1061,6 +1061,10 @@ public class BeatMinecraft2Task extends Task {
     @Override
     protected void setDebugState(String state) {
         super.setDebugState(state);
+        // (2026-10-06 多 bot 阶段跟随) 全任务"当前大阶段"的唯一出口 → /status.phase 上报,
+        // 次 bot 据此决定"跟随 or 自主"。必须放在下面的去重判断【之前】—— 去重只影响聊天
+        // 日志的重复抑制, 与阶段本身无关。
+        _currentPhase = BeatPhase.fromDebugState(state);
         if (state.equals(_lastDispatchedChildDesc)) return;
         String prev = (_lastDispatchedChildDesc == null ? "(start)" : "\"" + _lastDispatchedChildDesc + "\"");
         long nowMs = System.currentTimeMillis();
@@ -1102,6 +1106,15 @@ public class BeatMinecraft2Task extends Task {
     private boolean _wasTouchingBreath;
     // (2026-09-21 录制同步) "云贴脸 10 格"主动规避的边沿检测 (诊断日志 + 稀疏事件)。
     private boolean _wasNearBreath;
+
+    // (2026-10-06 多 bot 阶段跟随) 当前大阶段。static 的两个理由: ① /status 的采样在 bridge 层,
+    // 拿不到本实例引用; ② 同一个 JVM 里只会有一个 BeatMinecraft2Task 在跑（UserTaskChain 单任务位）。
+    private static volatile BeatPhase _currentPhase = BeatPhase.UNKNOWN;
+
+    /** 当前大阶段（供 /status 上报、次 bot 判"跟不跟"）。取值稳定, 不随显示文案变化。 */
+    public static BeatPhase getCurrentPhase() {
+        return _currentPhase;
+    }
 
     public BeatMinecraft2Task() {
         _locateStrongholdTask = new GoToStrongholdPortalTask(_config.targetEyes);
@@ -2129,6 +2142,7 @@ public class BeatMinecraft2Task extends Task {
 
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
+        _currentPhase = BeatPhase.UNKNOWN; // 主线停 → 阶段作废, 防次 bot 读到陈旧阶段
         mod.getBlockTracker().stopTracking(TRACK_BLOCKS);
         mod.getBlockTracker().stopTracking(ItemHelper.itemsToBlocks(ItemHelper.BED));
         mod.getBehaviour().pop();
