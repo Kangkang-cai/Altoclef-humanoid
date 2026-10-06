@@ -49,7 +49,7 @@ import java.util.function.Supplier;
  * 本类只换内部子任务、自身几乎不结束。这点是<b>硬要求</b>: 一旦它结束, 链会走
  * {@code UserTaskChain.onTaskFinish} 的"空闲→自动重新拉起"路径（自动引导入口见
  * {@code AltoClef.onClientTick} 内的 maybeStartSubBotBootstrap）, 若它瞬间就结束会形成
- * 每 tick 一次的拉起循环。唯一结束出口是"跟随连续失败 {@link #MAX_CONSECUTIVE_FAILURES} 次"。
+ * 每 tick 一次的拉起循环。唯一结束出口是"连续跟丢超过 {@link #FOLLOW_LOST_GIVEUP_MS}（5 分钟）"。
  *
  * <h3>⚠️ 出口写在调用侧</h3>
  * {@code Task.tickInternal} 不消费子任务的 {@code isFinished}, 替换权在父链。所以前置子任务
@@ -61,11 +61,26 @@ import java.util.function.Supplier;
  */
 public class SubBotBootstrapTask extends Task {
 
-    /** 跟随目标不可达时的重试间隔。 */
-    private static final long RETRY_COOLDOWN_MS = 60_000;
+    /**
+     * 跟丢后的重试间隔。用户 2026-10-06 22:0x 拍板「<b>bot 位置变了就再靠近一次</b>」⇒
+     * 该值必须<b>远小于</b>主 bot 恢复可见所需的时间, 否则位置早变了、这边还在傻等
+     * （原值 60s: 主 bot 一回到加载范围, 次 bot 最长要 60 秒后才开始靠近）。
+     */
+    private static final long RETRY_COOLDOWN_MS = 3_000;
 
-    /** 跟随连续失败多少次后结束本次引导（把控制权交回链, 由上层冷却后重新拉起）。 */
-    private static final int MAX_CONSECUTIVE_FAILURES = 5;
+    /** 稳定跟随该时长 = "已跟上" → 清零跟丢计时（否则计时只增不减）。 */
+    private static final long FOLLOW_STABLE_MS = 20_000;
+
+    /**
+     * 连续跟丢超过该时长 → 结束本次引导（上层会在冷却后重新拉起）。
+     *
+     * <p>取代旧的"失败 5 次"口径: 那是<b>次数</b>语义, 在 3s 重试下 15 秒就耗尽 —— 太紧,
+     * 主 bot 稍微跑远一点引导就自我了断。改用<b>时长</b>, 与重试间隔解耦。
+     */
+    private static final long FOLLOW_LOST_GIVEUP_MS = 5 * 60_000;
+
+    /** 跟丢日志节流: 3s 重试 = 每分钟 20 条, 不节流会把聊天刷爆（其余落 diag）。 */
+    private static final long LOST_LOG_INTERVAL_MS = 60_000;
 
     /** 睡眠放弃阈值（秒）: 与主线 {@code _inBedNoDawnTimer} / {@code _nightBedFindTimer} 同源。 */
     private static final double SLEEP_GIVEUP_SEC = 30;
@@ -86,8 +101,14 @@ public class SubBotBootstrapTask extends Task {
     private FollowAndWorkTask _follow = null;
 
     private long _retryAfterMs = 0;
-    private int _failures = 0;
     private boolean _finished = false;
+
+    /** 本次「连续跟丢」的起点（0 = 当前不在跟丢；稳定跟随后清零）。 */
+    private long _followLostSinceMs = 0;
+    /** 当前 follow 子任务的创建时刻 —— 用于判「已稳定跟随」。 */
+    private long _followStartedMs = 0;
+    /** 跟丢日志上次落聊天的时间（其余落 diag，防刷屏）。 */
+    private long _lastLostLogMs = 0;
 
     // ------------------------------------------------------------------ //
     // 睡眠镜像状态
@@ -270,23 +291,44 @@ public class SubBotBootstrapTask extends Task {
         }
         if (_follow == null) {
             _follow = new FollowAndWorkTask(_leader, new FollowAndWorkTask.GreedySideWorkPicker());
+            _followStartedMs = now;
         }
         if (_follow.isFinished(mod)) {
-            _failures++;
-            Debug.logMessage("[SUB-BOOT] 随行结束（第 " + _failures + " 次）：目标 "
-                    + _leader + " 不可达");
+            // 跟丢（主 bot 超出加载范围 / 走到旧坐标时人已走开 / 跨维度）。用户口径:
+            // "bot 位置变了就再靠近一次" ⇒ 只短暂冷却就重建 follow, 不做长等待 ——
+            // 主 bot 一回到加载范围, 下一轮重建时 getPlayerMostRecentPosition 就是新坐标。
             _follow = null;
-            if (_failures >= MAX_CONSECUTIVE_FAILURES) {
-                Debug.logMessage("[SUB-BOOT] 连续 " + _failures + " 次失败，本次引导结束"
-                        + "（上层会在冷却后重新拉起）");
+            if (_followLostSinceMs == 0) _followLostSinceMs = now;
+            logFollowLost(now);
+            if (now - _followLostSinceMs >= FOLLOW_LOST_GIVEUP_MS) {
+                Debug.logMessage("[SUB-BOOT] 连续跟丢 " + (FOLLOW_LOST_GIVEUP_MS / 60_000)
+                        + " 分钟，本次引导结束（上层会在冷却后重新拉起）");
                 _finished = true;
                 return null;
             }
             _retryAfterMs = now + RETRY_COOLDOWN_MS;
             return null;
         }
+        // 稳定跟随该时长 = 已跟上 → 清零跟丢计时（否则计时只增不减, 久了会误判"连续跟丢"）。
+        if (_followLostSinceMs != 0 && now - _followStartedMs >= FOLLOW_STABLE_MS) {
+            _followLostSinceMs = 0;
+        }
         setDebugState("[次bot引导] 随行 " + _leader);
         return _follow;
+    }
+
+    /**
+     * 跟丢打点: 首次 / 每 {@link #LOST_LOG_INTERVAL_MS} 落聊天, 其余落 diag。
+     * （3s 重试 = 每分钟 20 条, 不节流会把聊天刷爆。）
+     */
+    private void logFollowLost(long now) {
+        String who = "目标 " + _leader + " 不可达（超出加载范围/已走开）";
+        if (now - _lastLostLogMs >= LOST_LOG_INTERVAL_MS) {
+            _lastLostLogMs = now;
+            Debug.logMessage("[SUB-BOOT] 跟丢：" + who + "，3s 后重试");
+        } else {
+            Debug.logToFile("altoclef_diag.log", "[SUB-BOOT] follow lost: " + who + " (retry in 3s)");
+        }
     }
 
     @Override
