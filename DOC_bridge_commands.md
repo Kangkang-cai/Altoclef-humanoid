@@ -335,6 +335,25 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 
 > ⚠️ 两个 bot 必须是**同一版 jar**：`phase` 键是本版新增，旧 jar 的 `/status` 没有它 ⇒ 次 bot 拉不到会一直退回"恒跟随"。
 
+**次 bot 的「当前目的」`/status.duty`**（2026-10-06 23:1x 新）
+
+次 bot 的每个状态都自带"我在为主 bot 做什么"，**只有 `role=sub` 输出**（主 bot / 空闲时整键省略）：
+
+```json
+"duty": { "for": "qiaoqiao", "mode": "COLLECT", "label": "替 qiaoqiao 备货（主bot 正在收烈焰棒）" }
+```
+
+| `mode` | 何时 | `label` 示例 |
+|---|---|---|
+| `PREP` | 开局前置补料 | `为 qiaoqiao 备货（补木头/食物）` |
+| `FOLLOW` | 主 bot 处于跟随集合内的阶段 | `跟随保护 qiaoqiao` |
+| `COLLECT` | 主 bot 处于其余阶段（次 bot 在外自主） | `替 qiaoqiao 备货（主bot 正在收烈焰棒）` |
+| `SLEEP` | 睡眠镜像期间 | `陪 qiaoqiao 睡觉（多人服需全员入睡才跳夜）` |
+
+**`mode=COLLECT` 是给对端的钩子**：读到它 = "这台次 bot 现在是流动仓库"，主 bot 缺料就直接 `@give <次bot名> <物品> <数量>`。**不需要**新增 bot 间通道。
+
+> ⚠️ `duty` 是**独立字段**，不要用 `taskDetail` 代替它 —— `taskDetail` 显示的是任务链**最深层动作**（次 bot 自主跑主线时是 `Stockpiling wood` 这类主线阶段名），宿主层写的目的文案会被它整个盖掉。
+
 **模组侧不会自动做的事**（要由对端编排）：
 
 1. 次 bot **不会**自动向主 bot 要料 —— 缺料时对端自行发 `@give <次bot名> <物品> <数量>`。
@@ -418,7 +437,7 @@ bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主�
 
 jar md5 `a49320369d794c86222d997a58639d49`（4,536,482 B）；✅ **已部署四处** —— 2026-10-06 21:06 客户端全退（8761/8762/8763 均 free）后部署（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`），四处 md5 与构建产物逐一一致。备份：`bak_20261006_2106`（旧 jar = `7a915a86dd3d4854ff4e47b5acb98e21`）。
 
-✅ **后续两批已部署四处**（2026-10-06 22:58，客户端全退后；备份 `bak_20261006_2258`）：当前 jar md5 **`83cdf27cb37add51c2d9e7324dc0d0e6`**，含 `1ae407ba`（跟丢重试 60s→3s + 出口改"连续跟丢 5 分钟"）、`510b6e55`（`/status.phase` 阶段枚举）、`8e1a3292`（次 bot 按阶段跟随 / 自主）。
+✅ **当前 jar md5 `20d3ab829d08f26052fa5a8ad7a8b382`（4,545,514 B）已部署四处**（2026-10-06 23:23，客户端全退后；备份 `bak_20261006_2323`）。累计含：`1ae407ba`（跟丢重试 60s→3s + 出口"连续跟丢 5 分钟"）、`510b6e55`（`/status.phase` 阶段枚举）、`8e1a3292`（按阶段跟随 / 自主）、`ef587c0a`（**`/status.duty` 目的字段 + 状态文案带目的**）。
 本版含：`11ba547f`（**次 bot 睡眠镜像 + 主 bot 队友等待出口 + 前置换主线本体**，判据见下）+ `6114584f`（验证脚本修正）；其上累计含 `d56b56ed`（自动引导）+ `a60c79ec`（入口挂载点修复）+ `9d0fe167` + `98a22506`（role / 目标降档）+ `b946a6da`（随行宿主）。
 
 > ⚠️ **入口挂载点踩过一个坑（2026-10-06 实测）**：`SubBotBootstrapTask` 的自动拉起**不能**挂在
@@ -489,6 +508,7 @@ jar md5 `a49320369d794c86222d997a58639d49`（4,536,482 B）；✅ **已部署四
 3. 主 bot 阶段 ∈ 跟随集合 → 次 bot `taskDetail` = `跟随+顺手干活`；∉ 集合 → `taskDetail` = `自主主线（主bot XXX）`，且 `diag.log` 有 `[SUB-BOOT] switch to AUTONOMOUS mainline (leader phase=XXX)`。
 4. **把主 bot 关掉** → 次 bot 应在 10 秒内退回"跟随"（保守策略），**不应**朝未知方向跑。
 5. **不配 `leaderPort`** → 次 bot 行为与本版之前逐字一致（恒跟随，零回归）。
+6. **`duty` 字段**：次 bot `GET /status` 出现 `"duty":{"for":"qiaoqiao","mode":"…","label":"…"}`，`mode` ∈ `PREP`/`FOLLOW`/`COLLECT`/`SLEEP`；主 bot 的 `/status` **不应**出现 `duty` 键。次 bot 聊天里 `[次bot引导]` 后应变成"跟随保护 qiaoqiao" / "替 qiaoqiao 备货（主bot 收烈焰棒）" / "陪 qiaoqiao 睡觉" / "为 qiaoqiao 备货" —— 不再是"随行 / 自主主线"。
 
 > 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
