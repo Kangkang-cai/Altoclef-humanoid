@@ -55,7 +55,6 @@ public class UserTaskChain extends SingleTaskChain {
         // Pause if we're not loaded into a world.
         if (!mod.inGame()) return;
 
-        maybeStartSubBotBootstrap(mod);
         super.onTick(mod);
     }
 
@@ -64,16 +63,22 @@ public class UserTaskChain extends SingleTaskChain {
      * 时，任务链一空闲就自动拉起 {@link SubBotBootstrapTask} —— 不依赖对端发命令，也不需要在
      * settings 里配 {@code idleCommand}。
      *
-     * <p>为什么挂在 {@link #onTick}：本方法每 tick 都被调用（且已过 {@code inGame} 门），
-     * {@code _mainTask == null} 就是"链空闲"的权威判据。引导任务是<b>常驻</b>的（只换内部
-     * 子任务，自身几乎不结束），所以拉起一次之后 {@code _mainTask} 恒非空，不会重复拉起。
+     * <p>⚠️ <b>调用方必须是 {@code AltoClef.onClientTick()}，不能挂在本链自己的 {@code onTick}</b>：
+     * {@code TaskRunner.tick} 用 {@code if (!chain.isActive()) continue;} 过滤仲裁候选，且只对
+     * <b>胜出的那条链</b>调 {@code tick()}；而 {@code UserTaskChain.isActive()} 就是
+     * {@code _mainTask != null}（SingleTaskChain:98，本链刻意不覆写 —— 见 SingleTaskChain:60-63）。
+     * 于是"链空闲"恰恰是"本链 isActive()=false"的时刻 ⇒ 挂在 onTick 上<b>永远不会执行</b>。
+     * 同一坑 {@code DeathRecoveryChain:122-124} 有记录。</p>
+     *
+     * <p>幂等：引导任务是<b>常驻</b>的（只换内部子任务，自身几乎不结束），所以拉起一次之后
+     * {@code _mainTask} 恒非空，不会重复拉起。</p>
      *
      * <p>与 {@code idleCommand} 的关系：次 bot 引导优先。若两者都启用，引导任务先占住任务位，
-     * {@code idleCommand} 自然不会被触发（它只在链空闲时跑）。
+     * {@code idleCommand} 自然不会被触发（它只在链空闲时跑）。</p>
      *
-     * <p>关闭方式：把 {@code leader} 清空，或把 {@code role} 改回 {@code main}。
+     * <p>关闭方式：把 {@code leader} 清空，或把 {@code role} 改回 {@code main}。</p>
      */
-    private void maybeStartSubBotBootstrap(AltoClef mod) {
+    public void maybeStartSubBotBootstrap(AltoClef mod) {
         if (_mainTask != null) return;
         if (!BotRole.isSub()) return;
         String leader = BridgeConfig.getInstance().leader;

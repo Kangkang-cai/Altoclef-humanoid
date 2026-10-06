@@ -387,7 +387,15 @@ bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主�
 
 ## 7. 部署状态
 
-commit `d56b56ed`（次 bot 自动引导）+ `9d0fe167`（验证脚本）+ `98a22506`（role / 目标降档）+ `b946a6da`（随行宿主）；jar md5 `3e33723fc42a1858e35b0edc68ec4cab`（4,532,869 B）；✅ **已部署** —— 2026-10-06 19:39 客户端全退（8761/8762/8763 均 free）后部署**四处**（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`），四处 md5 与构建产物逐一一致。旧 jar 备份：`altoclef-0.4.0.jar.bak_20261006_1930`（= 1006 12:06 那版 `b193e0b3`）、`bak_20261006_1939`。
+jar md5 `7a915a86dd3d4854ff4e47b5acb98e21`（4,533,078 B）；✅ **已部署四处** —— 2026-10-06 19:58 客户端全退（8761/8762/8763 均 free）后部署（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`），四处 md5 与构建产物逐一一致。旧 jar 备份：`bak_20261006_1958` / `1939` / `1930`。
+本版含：`d56b56ed`（次 bot 自动引导）+ **入口挂载点修复**（见下）+ `9d0fe167`（验证脚本）+ `98a22506`（role / 目标降档）+ `b946a6da`（随行宿主）。
+
+> ⚠️ **入口挂载点踩过一个坑（2026-10-06 实测）**：`SubBotBootstrapTask` 的自动拉起**不能**挂在
+> `UserTaskChain.onTick` —— `TaskRunner.tick` 会用 `if (!chain.isActive()) continue;` 过滤仲裁候选，
+> 且只对**胜出的那条链**调 `tick()`；而 `UserTaskChain.isActive()` 就是 `_mainTask != null`
+> （`SingleTaskChain:98`，本链刻意不覆写）。于是"链空闲"恰恰是"`isActive()=false`"的时刻 ⇒
+> 挂在那里**永远不会执行**（实测 C7 失败、`[SUB-BOOT]` 日志 0 条）。现挂 `AltoClef.onClientTick()`
+> 的 `inGame()` 块内。同一个坑 `DeathRecoveryChain:122-124` 有记录。
 
 本轮 jar 相对上一版（1006 12:06 `b193e0b3`，已部署四处）累计新增：**`role` 字段 + `/status.role`**（`98a22506`，见 §5.1）、**次 bot 木头/食物目标降 1/3**（`98a22506`）、**`@follow <名> work` 随行宿主**（`b946a6da`，见 §2 / §6）、**次 bot 自动引导 `leader` 字段 + 全自动补料→随行**（`d56b56ed`，见 §5.1）、**`BridgeConfig` 补 `@JsonIgnoreProperties(ignoreUnknown=true)`**（同上，防未知键炸整份配置）。
 白名单默认 **14 条**（2026-10-05 起：+`share`/`autorecord`；`skip` 是 `sleep` 的一个 mode、秒是 `idle` 的可选参数、类型是 `remember` 的可选参数、`work` 是 `follow` 的可选第二参，都不另占白名单）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。⚠️ 但 `role` 是**新增字段**，需要给次 bot 实例的 `bridge.json` **手工加上** `"role": "sub"`（见 §5.1），否则一律按 `main` 处理。

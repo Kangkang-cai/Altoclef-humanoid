@@ -295,6 +295,11 @@ public class AltoClef implements ModInitializer {
         if (inGame()) {
             _currentMiningReq = adris.altoclef.util.helpers.StorageHelper.getCurrentMiningRequirement(this);
             tickInteractionPauseWatchdog();
+            // (2026-10-06 次 bot 自动引导) role=sub 且 bridge.json 配了 leader 时, 链一空闲就
+            // 自动拉起引导任务(补木头/食物 → 随行)。必须挂在这个每 tick 执行的位置, 不能挂在
+            // UserTaskChain.onTick —— TaskRunner 只对 isActive() 的链调 tick, 而"链空闲"正是
+            // isActive()=false 的时刻, 挂那边永远不会执行(详见该方法注释)。
+            getUserTaskChain().maybeStartSubBotBootstrap(this);
             // (2026-09-28 斜跳反复失败保险) 反应式缺口: 普通地形上同一斜跳落点连续
             // 跳不上去 (JumpStuckResolver 的零速 streak 口径接不住跳跃循环) → 短暂
             // 关跳 + 重算让 A* 改选垫块路线, 窗口到期自动恢复。必须先于
