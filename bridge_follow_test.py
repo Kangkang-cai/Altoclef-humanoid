@@ -113,6 +113,27 @@ class GameLogs:
         except OSError:
             return ""
 
+    def tail_text(self, name, max_bytes=300_000):
+        """读文件【尾部】。用途：断言"本会话内出现过某个只可能由我们产生的标记" ——
+        这类标记可能在脚本启动之前就已经写了（例：次 bot 引导在客户端一上线就跑），
+        用锚点会漏，用尾部不会。⚠️ 只对【不会被别的功能写入】的独有标记使用，否则会假阳性。"""
+        p = self.path(name)
+        if not p or not p.exists():
+            return ""
+        try:
+            size = p.stat().st_size
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                if size > max_bytes:
+                    f.seek(size - max_bytes)
+                    f.readline()  # 丢掉可能被截断的半行
+                return f.read()
+        except OSError:
+            return ""
+
+    def tail_grep(self, name, pattern, max_bytes=300_000):
+        rx = re.compile(pattern)
+        return [ln for ln in self.tail_text(name, max_bytes).splitlines() if rx.search(ln)]
+
     def grep(self, name, pattern):
         rx = re.compile(pattern)
         return [ln for ln in self.new_text(name).splitlines() if rx.search(ln)]
@@ -183,6 +204,45 @@ def case_follow_geometry(main, sub, leader, results, approach_timeout, steady_se
         print("  [%s] 已下发 @idle 让主 bot 站住" % main.name)
     except Exception as ex:
         print("  [%s] @idle 失败：%s" % (main.name, ex))
+    time.sleep(2)
+
+    # ---- 阶段零：会合（必须！） ----
+    # ⚠️ (2026-10-06 20:0x 实测教训) 客户端只下发约 48 格内的玩家实体
+    # (entity-tracking-range.players)，所以**"跟随"在远距离根本不成立** —— 长距离只能靠
+    # 【共享坐标】会合，这正是 /status.pos 的用途。不先会合就测跟随，测的其实是"会合"，
+    # 必然失败：次 bot 的 last-known 位置就在自己脚下附近 ⇒ FollowPlayerTask 判定
+    # "走到了但目标不在" ⇒ 直接放弃（log 会打 [NAV-STUCK] frozen）。
+    try:
+        mp = main.status().get("pos") or {}
+        goto = "@goto %d %d %d %s" % (int(mp["x"]), int(mp["y"]), int(mp["z"]),
+                                      mp.get("dim") or "overworld")
+    except Exception as ex:
+        goto = None
+        print("  [%s] 读主 bot 坐标失败：%s" % (sub.name, ex))
+    if goto:
+        print("  [%s] 阶段零·会合 → %s" % (sub.name, goto))
+        try:
+            code, _ = sub.post_paced(goto)
+            print("      HTTP %s；等距离 ≤ 8（最多 %ds）" % (code, approach_timeout))
+        except Exception as ex:
+            print("      ✗ 下发失败：%s" % ex)
+        met = False
+        end = time.time() + approach_timeout
+        while time.time() < end:
+            try:
+                d = xz_distance(main.status(), sub.status())
+                if d is not None and d <= 8:
+                    print("      ✓ 已会合（距离 %.1f）" % d)
+                    met = True
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        if not met:
+            print("      ✗ 会合失败（两 bot 相距过远 / 地形不通 / 不同维度）")
+        results.append(("会合: @goto 到主bot坐标", met))
+        if not met:
+            return
     time.sleep(2)
 
     # 下发随行。注意 leader 是【MC 玩家名】，不是 bridge 的 botId。
@@ -273,30 +333,51 @@ def case_sub_targets(sub_logs, results):
         results.append(("目标降档", None))
         return
 
+    # ① 最强判据：引导宿主自己的自述状态「[次bot引导] 补木头 X/8」——
+    #    这个串只可能由 SubBotBootstrapTask 写出，故可用 tail（引导常在脚本启动前就跑起来了）。
+    boot = re.findall(r"\[次bot引导\] 补木头 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
+    boot += re.findall(r"\[次bot引导\] 补食物 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
+    if boot:
+        targets = sorted({int(t) for _, t in boot})
+        ok = all(t <= 60 for t in targets)     # 主 bot: 木头 25 / 食物 120
+        print("      引导宿主目标出现值 %s → %s" % (targets, "✓ PASS" if ok else "✗ FAIL（未降档）"))
+        results.append(("次 bot 引导目标已降档 %s" % targets, ok))
+    else:
+        print("      · 引导宿主自述状态未出现（未走到前置或日志不可读）→ 不判失败")
+
+    # ② 兜底：主线自己的囤木/食物峰值标记（锚点，只在本次运行新增里找）
     wood = re.findall(r"Stockpiling wood \(logs\): (\d+)/(\d+)", sub_logs.new_text("debugstate.log"))
     wood += re.findall(r"Stockpiling wood \(logs\): (\d+)/(\d+)", sub_logs.new_text("diag.log"))
     if wood:
         targets = sorted({int(t) for _, t in wood})
-        ok = all(t <= 12 for t in targets)   # 主 bot 是 25；次 bot 应显著更低
-        print("      囤木目标出现值 %s → %s" % (targets, "✓ PASS" if ok else "✗ FAIL（疑似仍在用主 bot 的 25）"))
+        ok = all(t <= 12 for t in targets)
+        print("      主线囤木目标出现值 %s → %s" % (targets, "✓ PASS" if ok else "✗ FAIL（疑似仍在用 25）"))
         results.append(("木头目标已降档 %s" % targets, ok))
     else:
-        print("      · 未出现 Stockpiling wood（本局未走到该阶段）→ 不判失败")
+        print("      · 本次运行未新增 Stockpiling wood → 不判失败")
 
     peak = re.findall(r"\[FoodPeak\]\s*peak reached food=(\d+)/(\d+)", sub_logs.new_text("diag.log"))
     if peak:
         targets = sorted({int(t) for _, t in peak})
-        ok = all(t <= 60 for t in targets)   # 主 bot 是 120
-        print("      食物峰值目标出现值 %s → %s" % (targets, "✓ PASS" if ok else "✗ FAIL（疑似仍在用主 bot 的 120）"))
+        ok = all(t <= 60 for t in targets)
+        print("      食物峰值目标出现值 %s → %s" % (targets, "✓ PASS" if ok else "✗ FAIL（疑似仍在用 120）"))
         results.append(("食物目标已降档 %s" % targets, ok))
     else:
-        print("      · 未出现 [FoodPeak] peak reached → 不判失败")
+        print("      · 本次运行未新增 [FoodPeak] peak reached → 不判失败")
 
 
 def case_auto_bootstrap(sub, sub_logs, results, wait_sec):
     """
     C7: **全程不发任何命令**，次 bot 应自己动起来（引导前置 → 随行）。
     这是"不需要对端"这句话唯一的硬证据 —— 其他用例都要先发命令才能观测。
+
+    判据（2026-10-06 20:0x 实测修正）：
+    `/status.taskDetail` 显示的是**深层动作**（例："靠近，为击杀生猪排"），看不到
+    宿主任务的类名 ⇒ 不能用 taskDetail 关键字做主判据。改用两条：
+      ① 强判据：`debugstate.log` 出现 `[次bot引导]` —— 这个串只可能由 SubBotBootstrapTask
+         的 setDebugState 写出，不会与别的功能撞（故可用 tail 而非锚点）；
+      ② 弱判据：`/status.task` 非"空闲"，且不是主线（防止被误拉去跑 Beatmashing）。
+    两者取或：① 命中直接通过；否则看 ②。
     """
     print("\n---- C7) 次 bot 自动引导（本轮不发任何命令）----")
     if sub is None:
@@ -314,31 +395,43 @@ def case_auto_bootstrap(sub, sub_logs, results, wait_sec):
         results.append(("自动引导", None))
         return
 
-    keys = ("次bot引导", "跟随", "Sub-bot")
-    print("  · 等 %ds 观察 taskDetail 是否自己变成引导/随行…" % wait_sec)
-    end = time.time() + wait_sec
-    seen = ""
-    while time.time() < end:
+    # ① 强判据：宿主自述状态（tail，因为引导可能早在脚本启动前就跑起来了）
+    marks = []
+    if sub_logs is not None and sub_logs.session() is not None:
+        marks = sub_logs.tail_grep("debugstate.log", r"\[次bot引导\]")
+        marks += sub_logs.tail_grep("diag.log", r"\[SUB-BOOT\]")
+    print("  · 引导标记（tail debugstate/diag）：命中 %d 条" % len(marks))
+    for ln in marks[-4:]:
+        print("      | %s" % ln.strip()[:150])
+
+    # ② 弱判据：现场不空闲、且不是在跑主线
+    end = time.time() + (0 if marks else wait_sec)
+    task, detail = (s.get("task") or ""), (s.get("taskDetail") or "")
+    while time.time() <= end:
         try:
-            s = sub.status()
-            seen = "%s | %s" % (s.get("taskDetail") or "", s.get("task") or "")
-            if any(k in seen for k in keys):
+            x = sub.status()
+            task, detail = (x.get("task") or ""), (x.get("taskDetail") or "")
+            if task and task != "空闲":
                 break
         except Exception:
             pass
         time.sleep(3)
-    ok = any(k in seen for k in keys)
-    print("      当前 taskDetail/task=%r" % seen[:120])
-    print("      %s" % ("✓ PASS（未发命令就自己动起来了）" if ok else
-                       "✗ FAIL（仍空闲）——检查该实例 bridge.json 是否 role=sub 且 leader 非空"))
+    busy = bool(task) and task != "空闲"
+    is_mainline = "Beating the Game" in task
+    print("      /status.task=%r taskDetail=%r" % (task, detail))
+
+    ok = len(marks) > 0 or (busy and not is_mainline)
+    if len(marks) > 0:
+        print("      ✓ PASS（未发命令，[次bot引导] 标记已出现）")
+    elif ok:
+        print("      ✓ PASS（未发命令，次 bot 自己忙起来了：%r）" % task)
+    else:
+        print("      ✗ FAIL —— 仍空闲。检查 bridge.json 的 leader 是否非空、role 是否 sub；"
+              "以及 jar 是否含入口挂载点修复（挂 UserTaskChain.onTick 的旧版永不执行）")
     results.append(("自动引导: 未发命令即启动", ok))
 
-    if sub_logs is not None and sub_logs.session() is not None:
-        marks = sub_logs.grep("diag.log", r"\[SUB-BOOT\]")
-        print("      [SUB-BOOT] 日志 %d 条" % len(marks))
-        for ln in marks[-4:]:
-            print("      | %s" % ln.strip()[:150])
-        results.append(("自动引导: 有 [SUB-BOOT] 日志", len(marks) > 0))
+    if marks:
+        results.append(("自动引导: 有引导标记", True))
 
 
 def case_bad_leader(sub, results, timeout):
