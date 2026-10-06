@@ -287,6 +287,54 @@ def case_sub_targets(sub_logs, results):
         print("      · 未出现 [FoodPeak] peak reached → 不判失败")
 
 
+def case_auto_bootstrap(sub, sub_logs, results, wait_sec):
+    """
+    C7: **全程不发任何命令**，次 bot 应自己动起来（引导前置 → 随行）。
+    这是"不需要对端"这句话唯一的硬证据 —— 其他用例都要先发命令才能观测。
+    """
+    print("\n---- C7) 次 bot 自动引导（本轮不发任何命令）----")
+    if sub is None:
+        print("  [SKIP] 未提供 --sub")
+        results.append(("自动引导", None))
+        return
+    try:
+        s = sub.status()
+    except Exception as ex:
+        print("  ✗ 读 /status 失败：%s" % ex)
+        results.append(("自动引导", False))
+        return
+    if (s.get("role") or "").strip().lower() != "sub":
+        print("  [SKIP] 该实例 role=%r，不是 sub（自动引导只对次 bot 生效）" % s.get("role"))
+        results.append(("自动引导", None))
+        return
+
+    keys = ("次bot引导", "跟随", "Sub-bot")
+    print("  · 等 %ds 观察 taskDetail 是否自己变成引导/随行…" % wait_sec)
+    end = time.time() + wait_sec
+    seen = ""
+    while time.time() < end:
+        try:
+            s = sub.status()
+            seen = "%s | %s" % (s.get("taskDetail") or "", s.get("task") or "")
+            if any(k in seen for k in keys):
+                break
+        except Exception:
+            pass
+        time.sleep(3)
+    ok = any(k in seen for k in keys)
+    print("      当前 taskDetail/task=%r" % seen[:120])
+    print("      %s" % ("✓ PASS（未发命令就自己动起来了）" if ok else
+                       "✗ FAIL（仍空闲）——检查该实例 bridge.json 是否 role=sub 且 leader 非空"))
+    results.append(("自动引导: 未发命令即启动", ok))
+
+    if sub_logs is not None and sub_logs.session() is not None:
+        marks = sub_logs.grep("diag.log", r"\[SUB-BOOT\]")
+        print("      [SUB-BOOT] 日志 %d 条" % len(marks))
+        for ln in marks[-4:]:
+            print("      | %s" % ln.strip()[:150])
+        results.append(("自动引导: 有 [SUB-BOOT] 日志", len(marks) > 0))
+
+
 def case_bad_leader(sub, results, timeout):
     """C6: 跟随一个不存在的目标 → 必须 failed 且带 reason（不能无限空转）。"""
     print("\n---- C6) 无效跟随目标 → failed ----")
@@ -339,6 +387,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="等 action_done 的秒数")
     ap.add_argument("--approach-timeout", type=int, default=120, help="等跟随距离收敛的秒数")
     ap.add_argument("--steady-sec", type=int, default=30, help="稳态采样窗口秒数")
+    ap.add_argument("--bootstrap-wait", type=int, default=45, help="等次 bot 自动拉起引导的秒数")
     ap.add_argument("--skip-geometry", action="store_true", help="跳过需要两个 bot 的几何用例")
     ap.add_argument("--list", action="store_true", help="只列用例")
     args = ap.parse_args()
@@ -350,6 +399,7 @@ def main():
         "C4  [FOLLOW-WORK] 日志：放弃原因只能是 单次超30s / 偏离N格 / 目标离开加载范围",
         "C5  次 bot 目标降档（契约型：日志里若出现囤木/食物峰值，必须是降档值）",
         "C6  跟随不存在的目标 → failed 且有 reason（证明有出口，不无限空转）",
+        "C7  次 bot 自动引导：**不发任何命令**，自己进入引导/随行（role=sub 且 leader 非空时）",
     ]
     if args.list:
         for c in cases:
@@ -401,6 +451,9 @@ def main():
 
     results = []
     case_role(main_bot, sub_bot, results)
+
+    # C7 必须排在任何"发命令"的用例之前 —— 它验的就是"不发命令也会动"。
+    case_auto_bootstrap(sub_bot, sub_logs, results, args.bootstrap_wait)
 
     if not args.skip_geometry:
         case_follow_geometry(main_bot, sub_bot, args.leader, results,
