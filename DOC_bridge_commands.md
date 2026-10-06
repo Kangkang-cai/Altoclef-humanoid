@@ -371,7 +371,7 @@ bot_1: @idle 20             # 原地站 20 秒等对方捡，到时自动回主�
 
 ## 7. 部署状态
 
-commit `98a22506`（role / 次 bot 目标降档）+ `b946a6da`（随行宿主 `@follow <名> work`）；jar md5 `5653832ddb899729fedf07c14380027e`（4,528,759 B）；⚠️ **未部署** —— 2026-10-06 19:13 构建时三客户端均在运行（8761/8762/8763 全部监听，PID 37692/19948/51428），按硬规矩不热替换。待重启后：备份**四处** mods（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`）→ 覆盖 → md5 校验。
+commit `98a22506`（role / 次 bot 目标降档）+ `b946a6da`（随行宿主 `@follow <名> work`）；jar md5 `5653832ddb899729fedf07c14380027e`（4,528,759 B）；✅ **已部署** —— 2026-10-06 19:30 客户端全退（8761/8762/8763 均 free）后部署**四处**（`versions/1.18.2-Fabric-1/2/3` + 根 `.minecraft/mods`），旧 jar 备份为 `altoclef-0.4.0.jar.bak_20261006_1930`，四处 md5 与构建产物逐一一致。
 
 本轮 jar 相对上一版（1006 12:06 `b193e0b3`，已部署四处）新增：**`role` 字段 + `/status.role`**（`98a22506`，见 §5.1）、**次 bot 木头/食物目标降 1/3**（`98a22506`）、**`@follow <名> work` 随行宿主**（`b946a6da`，见 §2 / §6）。
 白名单默认 **14 条**（2026-10-05 起：+`share`/`autorecord`；`skip` 是 `sleep` 的一个 mode、秒是 `idle` 的可选参数、类型是 `remember` 的可选参数、`work` 是 `follow` 的可选第二参，都不另占白名单）；三处 `bridge.json` 都没有 `allowedCommands` 字段 ⇒ 自动生效，**不需要改配置**。⚠️ 但 `role` 是**新增字段**，需要给次 bot 实例的 `bridge.json` **手工加上** `"role": "sub"`（见 §5.1），否则一律按 `main` 处理。
@@ -453,3 +453,51 @@ python altoclef/bridge_smoke_test.py --destructive
 ⚠️ 两点注意：
 - **限流**：默认 6 条/分钟（只读不占），全量约 2.5 分钟。想快就临时给三处 `bridge.json` 加 `"actionRatePerMinute": 200` 后重启，再 `--rate 200`（跑完改回 6）。
 - `--destructive` 会执行 `@forgetmem all`，**清掉该 bot 本存档的全部自动结构记忆**（要塞/堡垒坐标等），非扔档测试别用。
+
+---
+
+## 9. 随行 / 角色验证脚本（`bridge_follow_test.py`）—— **不需要对端**
+
+多 bot 随行那一批改动（`role` 降档 / `@follow work` / 贴 3 格跟随 / 偏离上限）的判据
+散在「几何距离」和「日志标记」里，靠人盯屏幕既不可复现也不可信。本脚本把它们变成可重复跑的断言。
+
+**与 §8 的分工**：`bridge_smoke_test.py` 管「命令回执契约」；本脚本管「多 bot 的行为与几何」。
+两者都直连 localhost bridge，**都不需要 chat_and_play 在线**。本脚本复用前者的 `Bot`（HTTP / 限流 / 事件游标），不改它。
+
+```bash
+python altoclef/bridge_follow_test.py \
+  --main bot_1=http://127.0.0.1:8761 \
+  --sub  bot_2=http://127.0.0.1:8762 \
+  --leader <主bot的MC玩家名，如 qiaoqiao> \
+  --gamedir-main "D:/minecraft/.minecraft/versions/1.18.2-Fabric-1" \
+  --gamedir-sub  "D:/minecraft/.minecraft/versions/1.18.2-Fabric-2"
+
+python altoclef/bridge_follow_test.py --list          # 只列用例
+python altoclef/bridge_follow_test.py --skip-geometry # 只跑不需要两个 bot 的用例
+```
+
+> ⚠️ `--leader` 要填 **MC 玩家名**（`qiaoqiao`），不是 bridge 的 `botId`（`bot_1`）——
+> `@follow` 按游戏内玩家名寻址，两者不是一回事。
+
+| 用例 | 断言什么 | 靠什么观测 |
+|---|---|---|
+| C1 | `/status.role` 存在且运行值正确 | HTTP |
+| C2 | `@follow <leader> work` 后距离**收敛**到 6 格内 | 两 bot 的 `/status.pos` |
+| C3 | 稳态中位数 ∈ [1, 6]，且全程不超 32 格 | 同上，稳定窗口采样 |
+| C4 | `[FOLLOW-WORK]` 的放弃原因只允许「单次超 30s / 偏离 N 格 / 目标离开加载范围」 | `diag.log` |
+| C5 | 次 bot 的囤木/食物目标**若出现则必须已降档**（≤12 / ≤60） | `debugstate.log` / `diag.log` |
+| C6 | 跟随一个不存在的目标 → `failed` 且带 `reason`（证明有出口，不无限空转） | `action_done` 事件 |
+
+**设计要点（这三条是这类脚本最容易翻车的地方）**
+
+1. **几何断言**：`/status.pos` 是双 bot 都能读到的硬数据，「贴 3 格」因此可以客观断言 ——
+   先等收敛，再在稳定窗口里采样判中位数。不再依赖「看起来贴着」。
+   （前置：脚本会先给主 bot 发 `@idle` 让它站住，否则主 bot 自己在跑主线，距离没有稳态可言。）
+2. **日志断言用锚点**：开始前记录每个日志文件的字节偏移，只读**锚点之后**的新增内容。
+   否则会拿上一局的历史日志当「通过」——这是假阳性最典型的来源。
+3. **契约型断言的措辞是「若出现则必须满足」**：例如囤木目标只在日志里真出现
+   `Stockpiling wood` 时才断言它降到 8 而不是 25，避免「这局还没走到该阶段」被误判成失败。
+
+**已知边界**：C5 依赖该实例日志目录可读（`--gamedir-*`）；不给就 SKIP 而不是 FAIL。
+C3 需要主 bot 保持静止 —— 若主 bot 在跑主线，先 `@idle` 再跑本脚本。
+
