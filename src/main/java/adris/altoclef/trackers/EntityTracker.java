@@ -5,6 +5,7 @@ import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.events.PlayerCollidedWithEntityEvent;
 import adris.altoclef.mixins.PersistentProjectileEntityAccessor;
 import adris.altoclef.trackers.blacklisting.EntityLocateBlacklist;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.helpers.BaritoneHelper;
 import adris.altoclef.util.baritone.CachedProjectile;
@@ -49,6 +50,8 @@ public class EntityTracker extends Tracker {
 
     private final HashMap<String, PlayerEntity> _playerMap = new HashMap<>();
     private final HashMap<String, Vec3d> _playerLastCoordinates = new HashMap<>();
+    // (2026-10-06) 与 _playerLastCoordinates 同源写入的最后已知维度（见 getDimensionOfPlayerLastCoordinates）。
+    private final HashMap<String, Dimension> _playerLastDimensions = new HashMap<>();
 
     private final EntityLocateBlacklist _entityBlacklist = new EntityLocateBlacklist();
 
@@ -403,6 +406,19 @@ public class EntityTracker extends Tracker {
     }
 
     /**
+     * (2026-10-06) 最后已知坐标的**记录维度**。{@link #_playerLastCoordinates} 故意跨维度不清空
+     * （"上次在哪见过"是有效记忆），但消费方（FollowPlayerTask）必须能区分"同维度没看清"
+     * 和"人在另一个维度"——否则会拿着 A 维度的过期坐标在 B 维度里走废路。
+     * 与坐标同源写入（同一处 put），保证两表永远一致。
+     */
+    public Optional<Dimension> getDimensionOfPlayerLastCoordinates(String name) {
+        ensureUpdated();
+        synchronized (BaritoneHelper.MINECRAFT_LOCK) {
+            return Optional.ofNullable(_playerLastDimensions.getOrDefault(name, null));
+        }
+    }
+
+    /**
      * Gets the player entity corresponding to a username, if they're loaded/within render distance.
      * @param name Username on a multiplayer server.
      */
@@ -671,6 +687,7 @@ public class EntityTracker extends Tracker {
                     String name = player.getName().getString();
                     _playerMap.put(name, player);
                     _playerLastCoordinates.put(name, player.getPos());
+                    _playerLastDimensions.put(name, WorldHelper.getCurrentDimension());
                 }
             }
 

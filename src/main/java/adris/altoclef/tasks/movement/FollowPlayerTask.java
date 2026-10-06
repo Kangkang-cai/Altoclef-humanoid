@@ -2,6 +2,8 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -50,6 +52,22 @@ public class FollowPlayerTask extends Task {
         if (lastPos.isEmpty()) {
             return onNoPlayerRecord(mod);
         }
+
+        // (2026-10-06) 跨维度守卫：_playerLastCoordinates 故意跨维度不清空，若目标"最后现身"
+        // 在另一个维度，那份坐标在本维度里是废坐标 —— 旧实现会照着它走完整趟废路，到地方才
+        // 发现"no idea where they are"。这里提前拦下：目标不在线（未加载）且记录维度 ≠ 当前
+        // 维度 → 立即结束（one-shot 出口），由 bridge 报 failed 让派发方决策（换维度/放弃）。
+        if (!mod.getEntityTracker().isPlayerLoaded(_playerName)) {
+            Dimension lastSeenDim = mod.getEntityTracker().getDimensionOfPlayerLastCoordinates(_playerName).orElse(null);
+            Dimension currentDim = WorldHelper.getCurrentDimension();
+            if (lastSeenDim != null && lastSeenDim != currentDim) {
+                mod.logWarning("Player \"" + _playerName + "\" was last seen in a different dimension ("
+                        + lastSeenDim + ", we are in " + currentDim + "). Not chasing stale coordinates.");
+                stop(mod);
+                return null;
+            }
+        }
+
         Vec3d target = lastPos.get();
 
         if (target.isInRange(mod.getPlayer().getPos(), 1) && !mod.getEntityTracker().isPlayerLoaded(_playerName)) {

@@ -496,8 +496,25 @@ final class ActionDispatcher {
         // 归 failed 而非 completed（"追不到"是终态失败，不是干完了）。
         if ("follow".equals(p.token) && !isPlayerLoaded(_activePlayerName)) {
             status = "failed";
-            reason = "目标不在加载范围/不在线";
-            text = "做不到：目标不在加载范围";
+            // (2026-10-06) 区分"跨维度被守卫拦下"与普通"看不到人"：任务侧守卫会在目标最后现身
+            // 维度 ≠ 当前维度时提前 stop，这里把真实原因带给派发方（否则只报"不在加载范围"，
+            // 对端无从判断该换维度重派还是等目标上线）。
+            Dimension lastSeenDim = null;
+            try {
+                var et = _mod.getEntityTracker();
+                if (et != null && _activePlayerName != null) {
+                    lastSeenDim = et.getDimensionOfPlayerLastCoordinates(_activePlayerName).orElse(null);
+                }
+            } catch (Throwable ignored) {
+            }
+            Dimension curDim = currentDim();
+            if (lastSeenDim != null && curDim != null && lastSeenDim != curDim) {
+                reason = "目标最后现身于" + dimZh(lastSeenDim) + "，与 bot 当前维度不同，无法跟随";
+                text = "做不到：" + reason;
+            } else {
+                reason = "目标不在加载范围/不在线";
+                text = "做不到：目标不在加载范围";
+            }
         }
         // B'：goto/follow/give 完成 → 自动回主线（idle/pause_main 不登记 pending，不在此列）。
         if (resumeMainline()) {
