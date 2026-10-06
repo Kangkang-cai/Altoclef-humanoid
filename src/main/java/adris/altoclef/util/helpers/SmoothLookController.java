@@ -53,7 +53,7 @@ public final class SmoothLookController {
     // target 与帧层拉扯)。聚合 + 节流 flush 到 altoclef_diag.log。
     private static float _diagLastYaw = 0f, _diagLastPitch = 0f;
     private static boolean _diagLastValid = false;
-    private static int _diagExtN = 0, _diagRetargetN = 0;
+    private static int _diagExtN = 0, _diagRetargetN = 0, _diagHoldN = 0;
     private static double _diagExtSum = 0, _diagExtMax = 0;
     private static boolean _diagEverFired = false;
     private static long _diagFlushTick = 0;
@@ -66,9 +66,9 @@ public final class SmoothLookController {
                 pathing = mod.getClientBaritone().getPathingBehavior().isPathing();
             } catch (Throwable ignored) {}
             String m = String.format(
-                    "[SL-DIAG] EXT n=%d retarget=%d avgD=%.2f maxD=%.2f nowD=%.2f pathing=%s vel=%.2f" +
+                    "[SL-DIAG] EXT n=%d retarget=%d hold=%d avgD=%.2f maxD=%.2f nowD=%.2f pathing=%s vel=%.2f" +
                             " frameT=(%.1f,%.1f) cur=(%.1f,%.1f) actTicks=%d",
-                    _diagExtN, _diagRetargetN,
+                    _diagExtN, _diagRetargetN, _diagHoldN,
                     _diagExtN > 0 ? _diagExtSum / _diagExtN : 0, _diagExtMax, nowDeg,
                     pathing,
                     p != null ? (float) p.getVelocity().horizontalLength() : -1f,
@@ -80,6 +80,7 @@ public final class SmoothLookController {
         } catch (Throwable ignored) {}
         _diagExtN = 0;
         _diagRetargetN = 0;
+        _diagHoldN = 0;
         _diagExtSum = 0;
         _diagExtMax = 0;
     }
@@ -205,6 +206,7 @@ public final class SmoothLookController {
                 _diagLastYaw = MathHelper.wrapDegrees(_frameTarget.getYaw());
                 _diagLastPitch = _frameTarget.getPitch();
                 _diagLastValid = true;
+                holdBackBaritone(mod, player);
                 return;
             }
 
@@ -225,11 +227,24 @@ public final class SmoothLookController {
             _diagLastYaw = MathHelper.wrapDegrees(newYaw);
             _diagLastPitch = newPitch;
             _diagLastValid = true;
+            holdBackBaritone(mod, player);
         } catch (Throwable t) {
             _frameTarget = null;
             _lastFrameNs = 0L;
             _diagLastValid = false;
             if (t instanceof Error) throw t;
         }
+    }
+
+    // (2026-10-06 拉扯修复) 帧层每帧写入后, 把玩家当前位置回填为 baritone
+    // LookBehavior 的 target: 下一拍 baritone 拍头 (onPlayerUpdate) 应用时写的
+    // 就是玩家已在的位置 => no-op。消除 [SL-DIAG] EXT 取证到的拍间拉扯
+    // (pathing=true 时 maxD=174°; pathing=false 时每拍 1~3° 小幅高频写入)。
+    // 帧层 active 期间 baritone 的视线转向被冻结在任务目标上 —— 与旧 lookAt
+    // 「每拍覆盖 baritone target」语义一致, 仅持续时间从 1 拍变为帧层持有窗口。
+    private static void holdBackBaritone(AltoClef mod, ClientPlayerEntity player) {
+        _diagHoldN++;
+        mod.getClientBaritone().getLookBehavior()
+                .updateTarget(new Rotation(player.getYaw(), player.getPitch()), true);
     }
 }
