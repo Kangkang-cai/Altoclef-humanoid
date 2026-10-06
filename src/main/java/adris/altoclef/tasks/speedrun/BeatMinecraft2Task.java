@@ -3543,12 +3543,9 @@ public class BeatMinecraft2Task extends Task {
         // 导致 Restocking 反复误触发。改用直接扫描玩家背包 (main+offhand)
         // 统计原木, 不依赖 tracker 缓存刷新时机。
         int logCount = countLogsInPlayerInventory(mod);
-        // (2026-10-06 主/次 bot, 用户"要求不要像主 bot 那么高") 木头囤积目标按角色降档。
-        // 次 bot 跟着主 bot 走、缺口向主 bot 要, 不必囤够整局 (25→8)。
-        // 触发线必须同比下调: 若目标降到 8 而触发线仍是 6, 次 bot 会在 6~8 之间
-        // 反复被判定"需要补货", 变成"少一个就回来补"。
-        final int woodTargetLogs = BotRole.scaleTarget(_config.minWoodLogs);
-        final int woodRestockAt = BotRole.scaleTarget(_config.woodRestockThreshold);
+        // (2026-10-06 主/次 bot) 木头目标一律走 _config 的按角色折算访问器 ——
+        // 次 bot 降档 (25→8), 触发线同比下调 (6→2)。口径集中在 BeatMinecraftConfig,
+        // 本方法不再自带一份, 避免"主线一份、次 bot 引导一份"两处漂移。
         // (2026-09-17 "链上已有木任务"口径, 事故 20260917-143638) 见 woodMiningActiveInChain。
         // 本方法全程复用同一判定, 诊断串也用它, 避免"门控用的口径"与"日志写的口径"分家。
         boolean woodTaskActive = (_woodStockpileTask != null && !_woodStockpileTask.isFinished(mod))
@@ -3559,17 +3556,17 @@ public class BeatMinecraft2Task extends Task {
         //    同时做触发和持权, 原木到 6 就放行, 25 目标永远攒不满。
         if (_woodStockpiled) {
             if (_restockArmed) {
-                if (logCount >= woodTargetLogs) {
+                if (logCount >= _config.woodLogsTarget()) {
                     _restockArmed = false;
                 }
-            } else if (logCount < woodRestockAt) {
+            } else if (logCount < _config.woodRestockTarget()) {
                 _restockArmed = true;
             }
         }
         // 本轮是否真需要木头: 首次囤货看 < 目标; 囤满后只看闩锁。
-        // (2026-10-06 主/次 bot) 目标是按角色折算后的 woodTargetLogs, 不再是固定的 25。
+        // (2026-10-06 主/次 bot) 目标是按角色折算后的 _config.woodLogsTarget(), 不再是固定的 25。
         boolean needsWood = !_woodStockpiled
-                ? logCount < woodTargetLogs
+                ? logCount < _config.woodLogsTarget()
                 : _restockArmed;
         // (2026-09-01 用户"地下不触发收集木头, 除非原木跌破水位") 地下且
         // 不缺木头就就地继续挖矿, 不回地表/不就地砍树。闩锁武装后地下也
@@ -3589,36 +3586,36 @@ public class BeatMinecraft2Task extends Task {
             return new GoToSurfaceTask();
         }
         if (!_woodStockpiled) {
-            if (logCount >= woodTargetLogs) {
+            if (logCount >= _config.woodLogsTarget()) {
                 _woodStockpiled = true;
                 _woodStockpileTask = null;
                 _stoneAxeTask = null;
             } else {
-                setDebugState("Stockpiling wood (logs): " + logCount + "/" + woodTargetLogs);
+                setDebugState("Stockpiling wood (logs): " + logCount + "/" + _config.woodLogsTarget());
                 diagIronPhase(mod, "stockpile wood",
                         "stockpiled=" + _woodStockpiled
                                 + " logCount=" + logCount
-                                + " minWoodLogs=" + woodTargetLogs
+                                + " minWoodLogs=" + _config.woodLogsTarget()
                                 + " woodTaskActive=" + woodTaskActive
                                 + " underground=" + isUndergroundDebounced(mod) + " inPit=" + isInPit(mod));
                 // (2026-08-27 一次性粘性) 复用同一个任务实例, 不再每 tick new。
                 if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
-                    _woodStockpileTask = TaskCatalogue.getItemTask("log", woodTargetLogs);
+                    _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.woodLogsTarget());
                 }
                 return prependAxeForWood(mod, _woodStockpileTask);
             }
         } else if (_restockArmed) {
             // (2026-09-23 闩锁口径) 分母是真正的收集目标 25, 不再写触发水位。
-            setDebugState("Restocking wood (logs): " + logCount + "/" + woodTargetLogs
-                    + " (latch armed below " + woodRestockAt + ")");
+            setDebugState("Restocking wood (logs): " + logCount + "/" + _config.woodLogsTarget()
+                    + " (latch armed below " + _config.woodRestockTarget() + ")");
             diagIronPhase(mod, "restock wood",
                     "logCount=" + logCount
-                            + " settleTarget=" + woodTargetLogs
-                            + " restockThresh=" + woodRestockAt
+                            + " settleTarget=" + _config.woodLogsTarget()
+                            + " restockThresh=" + _config.woodRestockTarget()
                             + " latchArmed=" + _restockArmed
                             + " woodTaskActive=" + woodTaskActive);
             if (_woodStockpileTask == null || _woodStockpileTask.isFinished(mod)) {
-                _woodStockpileTask = TaskCatalogue.getItemTask("log", woodTargetLogs);
+                _woodStockpileTask = TaskCatalogue.getItemTask("log", _config.woodLogsTarget());
             }
             return prependAxeForWood(mod, _woodStockpileTask);
         }

@@ -2,11 +2,14 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.bridge.BridgeConfig;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
+import adris.altoclef.tasks.movement.SubBotBootstrapTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
+import adris.altoclef.util.helpers.BotRole;
 import adris.altoclef.util.time.Stopwatch;
 
 // A task chain that runs a user defined task at the same priority.
@@ -52,7 +55,30 @@ public class UserTaskChain extends SingleTaskChain {
         // Pause if we're not loaded into a world.
         if (!mod.inGame()) return;
 
+        maybeStartSubBotBootstrap(mod);
         super.onTick(mod);
+    }
+
+    /**
+     * (2026-10-06 次 bot 自动引导) {@code role=sub} 且 {@code bridge.json} 配了 {@code leader}
+     * 时，任务链一空闲就自动拉起 {@link SubBotBootstrapTask} —— 不依赖对端发命令，也不需要在
+     * settings 里配 {@code idleCommand}。
+     *
+     * <p>为什么挂在 {@link #onTick}：本方法每 tick 都被调用（且已过 {@code inGame} 门），
+     * {@code _mainTask == null} 就是"链空闲"的权威判据。引导任务是<b>常驻</b>的（只换内部
+     * 子任务，自身几乎不结束），所以拉起一次之后 {@code _mainTask} 恒非空，不会重复拉起。
+     *
+     * <p>与 {@code idleCommand} 的关系：次 bot 引导优先。若两者都启用，引导任务先占住任务位，
+     * {@code idleCommand} 自然不会被触发（它只在链空闲时跑）。
+     *
+     * <p>关闭方式：把 {@code leader} 清空，或把 {@code role} 改回 {@code main}。
+     */
+    private void maybeStartSubBotBootstrap(AltoClef mod) {
+        if (_mainTask != null) return;
+        if (!BotRole.isSub()) return;
+        String leader = BridgeConfig.getInstance().leader;
+        if (leader == null || leader.isBlank()) return;
+        runTask(mod, new SubBotBootstrapTask(leader.trim()), null);
     }
 
     public void cancel(AltoClef mod) {

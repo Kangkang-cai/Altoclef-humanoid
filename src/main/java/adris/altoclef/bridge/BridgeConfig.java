@@ -1,6 +1,7 @@
 package adris.altoclef.bridge;
 
 import adris.altoclef.util.helpers.ConfigHelper;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
  * bridge 层（HTTP 服务 + 状态摘要 + 事件缓冲 + 命令入口）的实例级配置。
@@ -18,6 +19,7 @@ import adris.altoclef.util.helpers.ConfigHelper;
  *       对齐 chat_and_play 的 {@code GAME_BOT_PORTS} key。</li>
  * </ul>
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class BridgeConfig {
 
     private static BridgeConfig _instance = new BridgeConfig();
@@ -61,6 +63,17 @@ public class BridgeConfig {
      * 未预期的降档）。改动后需重连/重载配置生效（与其他配置字段一致）。
      */
     public String role = "main";
+
+    /**
+     * (2026-10-06 次 bot 自动引导, 用户拍板"leader 从 bridge.json 读") 主 bot 的
+     * <b>MC 游戏内玩家名</b>（如 {@code "qiaoqiao"}），<b>不是</b> bridge 的 {@link #botId}
+     * （{@code "bot_1"}）—— {@code @follow} 按游戏内玩家名寻址，两者不是一回事。
+     *
+     * <p>只有 {@link #role} 为 {@code "sub"} 且本字段非空时，次 bot 才会启用自动引导：
+     * 空闲即自动执行"先补木头/食物 → 再随行"的常驻流程，<b>完全不需要对端发命令</b>。
+     * 留空 = 关闭自动引导（次 bot 退回"等命令"的旧行为）。
+     */
+    public String leader = "";
 
     /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，

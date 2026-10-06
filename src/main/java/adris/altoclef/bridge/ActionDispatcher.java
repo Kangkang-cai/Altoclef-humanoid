@@ -12,6 +12,7 @@ import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FollowAndWorkTask;
+import adris.altoclef.tasks.movement.SubBotBootstrapTask;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.IdleTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
@@ -21,6 +22,7 @@ import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.BotRole;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.Item;
@@ -415,12 +417,27 @@ final class ActionDispatcher {
     }
 
     /**
-     * 回到主线：已在跑主线则幂等返回 false（顺带覆盖"人类手动 @gamer 接管"场景），
-     * 否则重建 BeatMinecraft2Task。
+     * 回到"主线"：已在跑则幂等返回 false（顺带覆盖"人类手动 @gamer 接管"场景），否则重建。
+     *
+     * <p>(2026-10-06 次 bot) 次 bot 的"主线"**不是** {@link BeatMinecraft2Task}，而是
+     * {@link SubBotBootstrapTask}（补料 → 随行）。不区分的话：对端一条 {@code @goto} 顶掉引导后，
+     * 次 bot 回来就变成**第二个主 bot** —— 它会自己跑整条速通链，与"跟着主 bot 走"直接冲突。
      */
     private boolean resumeMainline() {
         var chain = _mod.getUserTaskChain();
         Task cur = chain == null ? null : chain.getCurrentTask();
+        if (BotRole.isSub()) {
+            String leader = BridgeConfig.getInstance().leader;
+            if (leader != null && !leader.isBlank()) {
+                if (cur instanceof SubBotBootstrapTask) {
+                    _paused = false;
+                    return false;
+                }
+                _paused = false;
+                _mod.runUserTask(new SubBotBootstrapTask(leader.trim()));
+                return true;
+            }
+        }
         if (cur instanceof BeatMinecraft2Task) {
             _paused = false;
             return false;

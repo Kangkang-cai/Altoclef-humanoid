@@ -1,5 +1,7 @@
 package adris.altoclef.tasks.speedrun;
 
+import adris.altoclef.util.helpers.BotRole;
+
 public class BeatMinecraftConfig {
     public int targetEyes = 16; // how many eyes of ender to collect (2026-08-25 用户 14→16: 多一点保险)
     public int minimumEyes = 12; // the MINIMUM amount of eyes of ender to have, assuming we don't have our stronghold portal opened yet
@@ -39,4 +41,34 @@ public class BeatMinecraftConfig {
     public int minBuildMaterialCount = 5;
     public int buildMaterialCount = 40;
     public double dragonHeadCloseEnoughClickBedRange = 5.3;
+
+    // ==================== (2026-10-06 主/次 bot) 按角色折算后的目标量 ====================
+    // 次 bot 跟着主 bot 走、缺料向主 bot 要, 不必像主 bot 那样为整局囤货
+    // （用户原话："要求不要像主 bot 那么高"）。
+    //
+    // ⚠️ 木头相关的地方一律走下面这两个方法, **不要直接读字段** —— 直接读就是"只用主 bot 档",
+    // 次 bot 会按 25 根囤货。2026-10-06 已把 BeatMinecraft2Task 内的读取点全部改过来。
+    // 注意触发线必须与目标同比下调：只降目标的话, 次 bot 会在 8 与 6 之间反复被判"需要补货"。
+
+    /** 木头囤积目标（主 bot 25 / 次 bot 8）。 */
+    public int woodLogsTarget() {
+        return BotRole.scaleTarget(minWoodLogs);
+    }
+
+    /** 木头补货触发线（主 bot 6 / 次 bot 2）。必须与 {@link #woodLogsTarget()} 同比降。 */
+    public int woodRestockTarget() {
+        return BotRole.scaleTarget(woodRestockThreshold);
+    }
+
+    /**
+     * 食物囤积目标（主 bot 120 / 次 bot 40）。
+     *
+     * <p>⚠️ 口径说明：这是**配置档**。主线自己算"食物峰值"时还会与
+     * {@code ModSettings.getFoodPeakUnits()} 取大后在派生值上再折算一次
+     * （见 BeatMinecraft2Task 食物门）；两处都属"次 bot 低档", 但数值不一定相同。
+     * 次 bot 引导前置（SubBotBootstrapTask）用的是本方法这个值。
+     */
+    public int foodTarget() {
+        return BotRole.scaleTarget(foodUnits);
+    }
 }
