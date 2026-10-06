@@ -200,8 +200,11 @@ def case_follow_geometry(main, sub, leader, results, approach_timeout, steady_se
 
     # 让主 bot 站住，否则主 bot 自己在跑主线，距离没有稳态可言
     try:
-        main.post_paced("@idle")
-        print("  [%s] 已下发 @idle 让主 bot 站住" % main.name)
+        # ⚠️ 必须带秒数！`@idle` 无参数 = **无限期** "立正等到下一条指令"
+        # （ActionDispatcher:58-59：idle 与 pause_main 归"按住"侧，只由显式 @resume_main 解除）。
+        # 带 600s 是防泄漏：脚本中途崩溃时主 bot 最多被按 10 分钟就会自己回主线。
+        main.post_paced("@idle 600")
+        print("  [%s] 已下发 @idle 600 让主 bot 站住（带时长，防脚本崩溃后永久冻结）" % main.name)
     except Exception as ex:
         print("  [%s] @idle 失败：%s" % (main.name, ex))
     time.sleep(2)
@@ -572,7 +575,10 @@ def main():
     # ---------- 复位 ----------
     print("\n---- 复位 ----")
     for b in live:
-        c = "@resume_main" if b.was_mainline else "@idle"
+        # ⚠️ 一律 @resume_main，**绝不**用无参 `@idle` 复位（21:2x 实测踩坑：它把两个 bot
+        # 冻成无限待命，"等你下一条指令"，靠人手动解）。@resume_main 幂等且按角色分流：
+        # main → BeatMinecraft2Task，sub → SubBotBootstrapTask（ActionDispatcher:426-448）。
+        c = "@resume_main"
         try:
             code, _ = b.post_paced(c)
             print("  [%s] %s → HTTP %s" % (b.name, c, code))
