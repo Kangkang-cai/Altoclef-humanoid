@@ -335,8 +335,12 @@ def case_sub_targets(sub_logs, results):
 
     # ① 最强判据：引导宿主自己的自述状态「[次bot引导] 补木头 X/8」——
     #    这个串只可能由 SubBotBootstrapTask 写出，故可用 tail（引导常在脚本启动前就跑起来了）。
-    boot = re.findall(r"\[次bot引导\] 补木头 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
-    boot += re.findall(r"\[次bot引导\] 补食物 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
+    # ⚠️ 文案在 1006 20:5x 换过：旧「[次bot引导] 补木头 X/8」→ 新「[次bot引导] 前置(主线智能)
+    # 木头 X/8 食物 Y/40」（前置改为跑主线本体）。正则必须同步，否则永远匹配不到 —— 而本用例
+    # 的设计是"匹配不到 = 不判失败"，于是会**静默假阴性**（21:2x 实测踩到）。故用宽松式
+    # `[^\n]*?` 锚住关键词、不绑死整段文案，日后改措辞也不会失效。
+    boot = re.findall(r"\[次bot引导\][^\n]*?木头 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
+    boot += re.findall(r"\[次bot引导\][^\n]*?食物 (\d+)/(\d+)", sub_logs.tail_text("debugstate.log"))
     if boot:
         targets = sorted({int(t) for _, t in boot})
         ok = all(t <= 60 for t in targets)     # 主 bot: 木头 25 / 食物 120
