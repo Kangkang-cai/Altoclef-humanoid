@@ -428,6 +428,8 @@ jar md5 `a49320369d794c86222d997a58639d49`（4,536,482 B）；⏳ **未部署** 
 
 **待实跑判据（睡眠镜像 + 前置换主线本体，2026-10-06 新）**
 
+> ⚠️ 下文的 `altoclef_diag.log` / `altoclef_debugstate.log` 是**名义名** —— `Debug.logToFile` 的档名参数不生效，实际全部落 `diag.log`（`setDebugState` 落 `debugstate.log`）。§9 脚本按**实际名**读取。
+
 多人服「全员入睡才跳夜」，所以次 bot 必须跟主 bot 一起躺；两边各自 30 秒自检，**无需 bot 间通信**即可同步放弃。
 
 1. **前置跑主线本体**：`altoclef_debugstate.log` 出现 `[次bot引导] 前置(主线智能) 木头 X/8 食物 Y/40`；达标时 `altoclef_diag.log` 出现 `[SUB-BOOT] prep done (wood 8/8, food 40/40), entering follow of <主bot名>`。⚠️ 达标前它跑的是整条主线（造斧/囤木/收食物），**不应**再看到旧版的精简前置痕迹。
