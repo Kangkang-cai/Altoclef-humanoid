@@ -9,7 +9,10 @@
 与 bridge_smoke_test.py 的关系：**复用它的 Bot（HTTP / 限流 / 事件游标），不改它**。
 分工：smoke_test 管"命令回执契约"；本脚本管"多 bot 的行为与几何"。
 
-用法：
+用法（Windows；脚本只用标准库，任何 Python 3.8+ 都行）：
+    推荐直接用托管解释器的绝对路径 —— 它就在 PATH 首位，且与 bridge_smoke_test.py 的文档一致：
+        C:\\Users\\Kangkang\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe
+
     python altoclef/bridge_follow_test.py ^
         --main bot_1=http://127.0.0.1:8761 ^
         --sub  bot_2=http://127.0.0.1:8762 ^
@@ -22,6 +25,9 @@
 
     # 只跑不需要两个 bot 的用例（role / 无效目标）
     python altoclef/bridge_follow_test.py --main bot_1=http://127.0.0.1:8761
+
+⚠️ 别用 PATH 里的 WindowsApps\\python（那通常是微软商店的占位程序，会弹商店而不是执行脚本）。
+   脚本自带 sys.path 修正，所以从哪个目录跑都行。
 
 设计要点
 --------
