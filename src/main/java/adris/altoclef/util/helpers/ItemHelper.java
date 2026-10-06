@@ -730,4 +730,67 @@ public class ItemHelper {
         return getFuelTimeMap().containsKey(item);
     }
 
+    /**
+     * "就近搜刮"的目标物品清单 (2026-08-21 原为 BeatMinecraft2Task.nearbySweepLootableItems,
+     * 2026-10-06 提取为单一来源): 村庄/矿道遗迹箱子里值得顺手拿走的东西。
+     *
+     * <p>与下界传送门专用清单 (金/黑曜石/打火石) 不同, 这里覆盖主循环通用刚需:
+     * 食物、铁、煤、钻石、床 (出生点保险)、工具护甲; 木头存量低时连原木/木板也要
+     * (村庄箱子里常有木板)。
+     *
+     * <p>两个消费方必须口径一致, 故不再各写一份:
+     * <ul>
+     *   <li>{@code BeatMinecraft2Task.nearbySweepLootableItems} —— 主线自己跑时的就近搜刮;</li>
+     *   <li>{@code FollowAndWorkTask.GreedySideWorkPicker} —— 随行时顺手搜刮。</li>
+     * </ul>
+     */
+    public static List<Item> lootableItemsForNearbySweep(AltoClef mod) {
+        List<Item> lootable = new ArrayList<>();
+        // 床: 出生点保险, 有就白拿
+        lootable.addAll(Arrays.asList(BED));
+        // 食物(村庄面包/矿道补给)
+        lootable.add(Items.BREAD);
+        lootable.add(Items.COOKED_BEEF);
+        lootable.add(Items.COOKED_PORKCHOP);
+        lootable.add(Items.COOKED_CHICKEN);
+        lootable.add(Items.COOKED_MUTTON);
+        lootable.add(Items.COOKED_RABBIT);
+        lootable.add(Items.BAKED_POTATO);
+        lootable.add(Items.CARROT);
+        lootable.add(Items.POTATO);
+        lootable.add(Items.APPLE);
+        lootable.add(Items.GOLDEN_APPLE);
+        lootable.add(Items.ENCHANTED_GOLDEN_APPLE);
+        lootable.add(Items.GOLDEN_CARROT);
+        // 材料/矿物
+        lootable.add(Items.IRON_INGOT);
+        lootable.add(Items.GOLD_INGOT);
+        lootable.add(Items.DIAMOND);
+        lootable.add(Items.COAL);
+        lootable.add(Items.OBSIDIAN);
+        lootable.add(Items.EMERALD);
+        lootable.add(Items.REDSTONE);
+        lootable.add(Items.LAPIS_LAZULI);
+        // 工具/实用
+        lootable.add(Items.BUCKET);
+        lootable.add(Items.WATER_BUCKET);
+        lootable.add(Items.FLINT_AND_STEEL);
+        lootable.add(Items.SHEARS);
+        lootable.add(Items.STRING);
+        lootable.add(Items.ARROW);
+        lootable.add(Items.IRON_SWORD);
+        lootable.add(Items.IRON_PICKAXE);
+        lootable.add(Items.IRON_AXE);
+        lootable.add(Items.IRON_SHOVEL);
+        lootable.add(Items.DIAMOND_SWORD);
+        lootable.add(Items.DIAMOND_PICKAXE);
+        lootable.addAll(Arrays.asList(IRON_ARMORS));
+        // 木头存量低: 木板/原木也是"眼前可白拿的木头"
+        if (mod.getItemStorage().getItemCount(LOG) < 16) {
+            lootable.addAll(Arrays.asList(LOG));
+            lootable.addAll(Arrays.asList(PLANKS));
+        }
+        return lootable;
+    }
+
 }

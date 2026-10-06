@@ -212,6 +212,7 @@ final class SceneDigest {
         CLASS_ZH.put("GetToYTask", "上下走");
         CLASS_ZH.put("GetToEntityTask", "靠近");
         CLASS_ZH.put("FollowPlayerTask", "跟随");
+        CLASS_ZH.put("FollowAndWorkTask", "跟随+顺手干活");
         CLASS_ZH.put("EatItemTask", "吃东西");
         CLASS_ZH.put("IdleTask", "待命");
         CLASS_ZH.put("ExploreCaveTask", "探洞");

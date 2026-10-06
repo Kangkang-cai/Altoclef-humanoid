@@ -11,6 +11,7 @@ import adris.altoclef.tasks.entity.GiveItemToPlayerTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
+import adris.altoclef.tasks.movement.FollowAndWorkTask;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.IdleTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
@@ -549,7 +550,8 @@ final class ActionDispatcher {
                     || finished instanceof GetToXZTask
                     || finished instanceof GetToYTask
                     || finished instanceof DefaultGoToDimensionTask;
-            case "follow" -> finished instanceof FollowPlayerTask;
+            case "follow" -> finished instanceof FollowPlayerTask
+                    || finished instanceof FollowAndWorkTask;
             case "give" -> finished instanceof GiveItemToPlayerTask;
             default -> false;
         };

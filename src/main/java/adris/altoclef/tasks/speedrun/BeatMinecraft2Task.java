@@ -2111,54 +2111,13 @@ public class BeatMinecraft2Task extends Task {
      * 东西。与 lootableItems()(下界传送门专用: 金/黑曜石/打火石)不同,
      * 这里覆盖主循环通用刚需: 食物、铁、煤、钻石、床(出生点保险)、工具
      * 护甲; 木头存量低时连原木/木板也要(村庄箱子里常有木板)。
+     *
+     * <p>(2026-10-06 提取) 实现移到 {@link ItemHelper#lootableItemsForNearbySweep},
+     * 与随行顺手搜刮 (FollowAndWorkTask.GreedySideWorkPicker) 共用同一份口径 ——
+     * 两处各写一份会出现"主线拿铁、随行不拿铁"这类漂移。行为零变化。
      */
     private List<Item> nearbySweepLootableItems(AltoClef mod) {
-        List<Item> lootable = new ArrayList<>();
-        // 床: 出生点保险, 有就白拿
-        lootable.addAll(Arrays.asList(ItemHelper.BED));
-        // 食物(村庄面包/矿道补给)
-        lootable.add(Items.BREAD);
-        lootable.add(Items.COOKED_BEEF);
-        lootable.add(Items.COOKED_PORKCHOP);
-        lootable.add(Items.COOKED_CHICKEN);
-        lootable.add(Items.COOKED_MUTTON);
-        lootable.add(Items.COOKED_RABBIT);
-        lootable.add(Items.BAKED_POTATO);
-        lootable.add(Items.CARROT);
-        lootable.add(Items.POTATO);
-        lootable.add(Items.APPLE);
-        lootable.add(Items.GOLDEN_APPLE);
-        lootable.add(Items.ENCHANTED_GOLDEN_APPLE);
-        lootable.add(Items.GOLDEN_CARROT);
-        // 材料/矿物
-        lootable.add(Items.IRON_INGOT);
-        lootable.add(Items.GOLD_INGOT);
-        lootable.add(Items.DIAMOND);
-        lootable.add(Items.COAL);
-        lootable.add(Items.OBSIDIAN);
-        lootable.add(Items.EMERALD);
-        lootable.add(Items.REDSTONE);
-        lootable.add(Items.LAPIS_LAZULI);
-        // 工具/实用
-        lootable.add(Items.BUCKET);
-        lootable.add(Items.WATER_BUCKET);
-        lootable.add(Items.FLINT_AND_STEEL);
-        lootable.add(Items.SHEARS);
-        lootable.add(Items.STRING);
-        lootable.add(Items.ARROW);
-        lootable.add(Items.IRON_SWORD);
-        lootable.add(Items.IRON_PICKAXE);
-        lootable.add(Items.IRON_AXE);
-        lootable.add(Items.IRON_SHOVEL);
-        lootable.add(Items.DIAMOND_SWORD);
-        lootable.add(Items.DIAMOND_PICKAXE);
-        lootable.addAll(Arrays.asList(ItemHelper.IRON_ARMORS));
-        // 木头存量低: 木板/原木也是"眼前可白拿的木头"
-        if (mod.getItemStorage().getItemCount(ItemHelper.LOG) < 16) {
-            lootable.addAll(Arrays.asList(ItemHelper.LOG));
-            lootable.addAll(Arrays.asList(ItemHelper.PLANKS));
-        }
-        return lootable;
+        return ItemHelper.lootableItemsForNearbySweep(mod);
     }
 
     @Override
