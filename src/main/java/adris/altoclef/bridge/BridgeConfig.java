@@ -45,6 +45,24 @@ public class BridgeConfig {
     public String botId = "bot_a";
 
     /**
+     * (2026-10-06 多 bot 随行, 用户拍板) 本实例的 bot 角色: {@code "main"}（主 bot）
+     * 或 {@code "sub"}（次 bot）。
+     *
+     * <p>本字段是角色的<b>唯一来源</b>, 两个消费方向:
+     * <ul>
+     *   <li><b>对端</b>: 经 {@code GET /status} 的 {@code role} 键暴露, chat_and_play
+     *       直接读即可区分主次, 不需要靠 botId 命名或端口去猜。</li>
+     *   <li><b>模组内部</b>: {@link adris.altoclef.util.helpers.BotRole} 读取, 用于把
+     *       <b>木头/食物</b>的囤积目标按比例下调 —— 次 bot 跟着主 bot 走, 只要够自己用,
+     *       不必像主 bot 那样为整局囤货（用户: "要求不要像主 bot 那么高"）。</li>
+     * </ul>
+     *
+     * <p>取值大小写不敏感; 缺失或未知值一律按 {@code "main"} 处理（保守: 不引入
+     * 未预期的降档）。改动后需重连/重载配置生效（与其他配置字段一致）。
+     */
+    public String role = "main";
+
+    /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
      * 其余一律 403。默认 14 条（4 行动 + 2 命名地标读写 + 1 记忆作废 + 2 协调原语
      * + 2 记忆分享开关 + 3 只读），

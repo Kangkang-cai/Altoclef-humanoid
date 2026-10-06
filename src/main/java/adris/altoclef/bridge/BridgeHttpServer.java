@@ -53,6 +53,12 @@ public final class BridgeHttpServer {
     private final AltoClef _mod;
     private final int _port;
     private final String _botId;
+    /**
+     * (2026-10-06 多 bot 随行) 本实例角色 {@code "main"|"sub"}，取自
+     * {@link BridgeConfig#role}。实例级静态配置，不随世界/任务变化 ——
+     * 因此只在这里存一份并在 {@code /status} 输出，不进每帧采样的 BotSnapshot。
+     */
+    private final String _role;
     private final SummaryGenerator _gen = new SummaryGenerator();
     private final EventBuffer _buffer;
     private final EventCollector _collector;
@@ -74,6 +80,7 @@ public final class BridgeHttpServer {
         this._mod = mod;
         this._port = cfg.port;
         this._botId = cfg.botId;
+        this._role = (cfg.role == null || cfg.role.trim().isEmpty()) ? "main" : cfg.role.trim().toLowerCase(java.util.Locale.ROOT);
         this._buffer = new EventBuffer(cfg.botId);
         this._dispatcher = new ActionDispatcher(mod, _buffer);
         this._liveness = new LivenessDigest(mod, _buffer, _dispatcher);
@@ -198,6 +205,9 @@ public final class BridgeHttpServer {
             StringBuilder sb = new StringBuilder(256);
             sb.append('{');
             BridgeJson.str(sb, "bot_id"); sb.append(':'); BridgeJson.str(sb, s.botId);
+            // (2026-10-06 多 bot 随行) 角色: "main" | "sub"。对端据此区分主次 bot
+            // （把"跟着谁走""向谁要料""目标量"这几类决策分开）。取值恒非空, 不省略。
+            sb.append(','); BridgeJson.str(sb, "role"); sb.append(':'); BridgeJson.str(sb, _role);
             sb.append(','); BridgeJson.str(sb, "ts"); sb.append(':'); BridgeJson.str(sb, s.ts);
             sb.append(','); BridgeJson.str(sb, "summary"); sb.append(':'); BridgeJson.str(sb, s.summary);
             sb.append(','); BridgeJson.str(sb, "task"); sb.append(':'); BridgeJson.str(sb, s.task);
