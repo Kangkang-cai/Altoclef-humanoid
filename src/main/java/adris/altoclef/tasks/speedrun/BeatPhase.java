@@ -52,6 +52,28 @@ public enum BeatPhase {
      * 属于眼睛线。若先判泛化词就会被吞错，故合成/末地/要塞/下界这些特化项一律排在
      * WOOD/FOOD/GEAR/MINING 之前。
      */
+    /**
+     * 中文短名 —— 用于次 bot 对端可见的状态文案（{@code SubBotDuty} 的 label），
+     * 比枚举名更易读；不参与任何判定。
+     */
+    public String zh() {
+        return switch (this) {
+            case WOOD -> "囤木头";
+            case GEAR -> "打装备";
+            case MINING -> "挖矿";
+            case FOOD -> "收食物";
+            case PORTAL -> "建传送门/进下界";
+            case FIRE_RES -> "备防火药水";
+            case BLAZE_RODS -> "收烈焰棒";
+            case ENDER_PEARLS -> "收末影珍珠";
+            case CRAFT_EYES -> "合成末影之眼";
+            case STRONGHOLD -> "找要塞";
+            case OPEN_PORTAL -> "开末地门";
+            case END_FIGHT -> "打末影龙";
+            default -> "未知阶段";
+        };
+    }
+
     public static BeatPhase fromDebugState(String s) {
         if (s == null || s.isEmpty()) return UNKNOWN;
 

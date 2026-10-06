@@ -4,6 +4,7 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.bridge.BridgeConfig;
 import adris.altoclef.bridge.LeaderPhaseWatcher;
+import adris.altoclef.bridge.SubBotDuty;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
@@ -198,7 +199,8 @@ public class SubBotBootstrapTask extends Task {
             Debug.logToFile("altoclef_diag.log", m);
             return null;
         }
-        setDebugState("[次bot引导] 前置(主线智能) 木头 " + wood + "/" + woodTarget
+        SubBotDuty.set(SubBotDuty.Mode.PREP, _leader, "为 " + _leader + " 备货（补木头/食物）");
+        setDebugState("[次bot引导] 为 " + _leader + " 备货 · 木头 " + wood + "/" + woodTarget
                 + " 食物 " + food + "/" + foodTarget);
         return cachedPrep(mod, "mainline", BeatMinecraft2Task::new);
     }
@@ -281,7 +283,9 @@ public class SubBotBootstrapTask extends Task {
                 }
             }
         }
-        setDebugState("[次bot引导] 随主bot睡觉 " + _leader);
+        SubBotDuty.set(SubBotDuty.Mode.SLEEP, _leader,
+                "陪 " + _leader + " 睡觉（多人服需全员入睡才跳夜）");
+        setDebugState("[次bot引导] 陪 " + _leader + " 睡觉");
         return _sleepTask;
     }
 
@@ -316,7 +320,9 @@ public class SubBotBootstrapTask extends Task {
 
         long now = System.currentTimeMillis();
         if (now < _retryAfterMs) {
-            setDebugState("[次bot引导] 等待重试随行 " + _leader);
+            SubBotDuty.set(SubBotDuty.Mode.FOLLOW, _leader,
+                    "跟随保护 " + _leader + "（跟丢，等主bot 靠近）");
+            setDebugState("[次bot引导] 跟丢 " + _leader + "，等主bot 靠近");
             return null;
         }
         if (_follow == null) {
@@ -343,7 +349,8 @@ public class SubBotBootstrapTask extends Task {
         if (_followLostSinceMs != 0 && now - _followStartedMs >= FOLLOW_STABLE_MS) {
             _followLostSinceMs = 0;
         }
-        setDebugState("[次bot引导] 随行 " + _leader);
+        SubBotDuty.set(SubBotDuty.Mode.FOLLOW, _leader, "跟随保护 " + _leader);
+        setDebugState("[次bot引导] 跟随保护 " + _leader);
         return _follow;
     }
 
@@ -375,7 +382,11 @@ public class SubBotBootstrapTask extends Task {
                     + " (leader phase=" + LeaderPhaseWatcher.phase() + ")");
             _autoTask = new BeatMinecraft2Task();
         }
-        setDebugState("[次bot引导] 自主主线（主bot " + LeaderPhaseWatcher.phase() + "）");
+        BeatPhase lp = LeaderPhaseWatcher.phase();
+        SubBotDuty.set(SubBotDuty.Mode.COLLECT, _leader,
+                "替 " + _leader + " 备货（主bot 正在" + (lp == null ? "未知阶段" : lp.zh()) + "）");
+        setDebugState("[次bot引导] 替 " + _leader + " 备货（主bot "
+                + (lp == null ? "?" : lp.zh()) + "）");
         return _autoTask;
     }
 
@@ -396,6 +407,8 @@ public class SubBotBootstrapTask extends Task {
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
         // 被顶掉时只丢句柄, 不动 static 闩 —— 前置"只做一次"是跨实例语义。
+        // duty 要清: 被对端 @goto 顶掉后, 次 bot 干的是"对端的事", 不该再对外声称"在帮主 bot"。
+        SubBotDuty.clear();
     }
 
     @Override

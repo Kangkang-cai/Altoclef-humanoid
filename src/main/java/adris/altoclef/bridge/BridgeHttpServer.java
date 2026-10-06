@@ -234,6 +234,16 @@ public final class BridgeHttpServer {
             // 刻意不用 taskDetail 当契约: 那是给人看的显示串、随时会改。非主线在跑时为 UNKNOWN。
             sb.append(','); BridgeJson.str(sb, "phase"); sb.append(':');
             BridgeJson.str(sb, BeatMinecraft2Task.getCurrentPhase().name());
+            // (2026-10-06 23:1x 用户点名) 次 bot 的「当前目的」—— 让对端看出它在为主 bot 做什么:
+            // mode=COLLECT = "流动仓库"（主 bot 缺料就对它发 @give）。只有 role=sub 会写本类,
+            // 主 bot / 空闲时 mode=NONE ⇒ 整键省略（对端据此一眼分清哪台是跟班）。
+            if (SubBotDuty.mode() != SubBotDuty.Mode.NONE) {
+                sb.append(','); BridgeJson.str(sb, "duty"); sb.append(":{");
+                BridgeJson.str(sb, "for"); sb.append(':'); BridgeJson.str(sb, SubBotDuty.forLeader());
+                sb.append(','); BridgeJson.str(sb, "mode"); sb.append(':'); BridgeJson.str(sb, SubBotDuty.mode().name());
+                sb.append(','); BridgeJson.str(sb, "label"); sb.append(':'); BridgeJson.str(sb, SubBotDuty.label());
+                sb.append('}');
+            }
             if (s.mainlineProgress != null && !s.mainlineProgress.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "mainlineProgress"); sb.append(':'); BridgeJson.str(sb, s.mainlineProgress);
             }
