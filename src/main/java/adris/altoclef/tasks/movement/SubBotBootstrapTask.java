@@ -2,9 +2,12 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.bridge.BridgeConfig;
+import adris.altoclef.bridge.LeaderPhaseWatcher;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
+import adris.altoclef.tasks.speedrun.BeatPhase;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
@@ -13,6 +16,8 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 
+import java.util.EnumSet;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -82,6 +87,21 @@ public class SubBotBootstrapTask extends Task {
     /** 跟丢日志节流: 3s 重试 = 每分钟 20 条, 不节流会把聊天刷爆（其余落 diag）。 */
     private static final long LOST_LOG_INTERVAL_MS = 60_000;
 
+    /**
+     * (2026-10-06 22:5x 用户点名) <b>只在这些大阶段跟随主 bot，其余阶段自己跑主线</b> ——
+     * 取代此前"前置完成后全程跟随"。编号对应用户拍板时我列的主线大任务清单。
+     */
+    private static final Set<BeatPhase> FOLLOW_PHASES = EnumSet.of(
+            BeatPhase.FOOD,          //  4 收食物
+            BeatPhase.PORTAL,        //  5 建传送门 / 进下界
+            BeatPhase.BLAZE_RODS,    //  7 找堡垒 / 收烈焰棒
+            BeatPhase.ENDER_PEARLS,  //  8 收末影珍珠
+            BeatPhase.STRONGHOLD,    // 10+11 丢眼定位要塞 + 要塞探索
+            BeatPhase.OPEN_PORTAL);  // 12 插眼开末地门
+
+    /** 主 bot 阶段超过该时长没刷新 = 陈旧（主 bot 关了/卡了）→ 退回保守策略"跟随"。 */
+    private static final long LEADER_PHASE_STALE_MS = 10_000;
+
     /** 睡眠放弃阈值（秒）: 与主线 {@code _inBedNoDawnTimer} / {@code _nightBedFindTimer} 同源。 */
     private static final double SLEEP_GIVEUP_SEC = 30;
 
@@ -109,6 +129,9 @@ public class SubBotBootstrapTask extends Task {
     private long _followStartedMs = 0;
     /** 跟丢日志上次落聊天的时间（其余落 diag，防刷屏）。 */
     private long _lastLostLogMs = 0;
+
+    /** "自主跑主线"时的子任务缓存 —— 同 {@link #_follow}，每拍 new 会打断它自己的进度。 */
+    private Task _autoTask = null;
 
     // ------------------------------------------------------------------ //
     // 睡眠镜像状态
@@ -284,6 +307,13 @@ public class SubBotBootstrapTask extends Task {
     // ------------------------------------------------------------------ //
 
     private Task tickFollow(AltoClef mod) {
+        // (2026-10-06 22:5x 用户要求) 跟随与否由【主 bot 当前大阶段】决定：
+        // 命中 FOLLOW_PHASES 才跟，否则次 bot 自己跑主线 —— 不再"后面全程跟随"。
+        if (!shouldFollowLeaderNow()) {
+            return tickAutonomous(mod);
+        }
+        _autoTask = null;   // 已回到跟随 → 自主任务句柄作废（其实例已被顶掉）
+
         long now = System.currentTimeMillis();
         if (now < _retryAfterMs) {
             setDebugState("[次bot引导] 等待重试随行 " + _leader);
@@ -315,6 +345,38 @@ public class SubBotBootstrapTask extends Task {
         }
         setDebugState("[次bot引导] 随行 " + _leader);
         return _follow;
+    }
+
+    /**
+     * 此刻该跟随还是自主 = 主 bot 当前大阶段是否落在 {@link #FOLLOW_PHASES} 内。
+     *
+     * <p>三种"退回跟随"的保守情形（都返回 true = 跟随）：① 未配 {@code leaderPort}
+     * （功能未启用 ⇒ 旧语义）；② 从未拉到（主 bot 没开 / 对面还是旧 jar）；③ 阶段陈旧
+     * （主 bot 关了或卡住）。一律跟随而非自主 —— 跟随最坏只是贴着他站着，自主会让次 bot
+     * 朝未知方向跑，代价大得多。
+     */
+    private boolean shouldFollowLeaderNow() {
+        int port = BridgeConfig.getInstance().leaderPort;
+        if (port <= 0) return true;
+        LeaderPhaseWatcher.ensureStarted(port);
+        BeatPhase p = LeaderPhaseWatcher.phase();
+        if (p == null || LeaderPhaseWatcher.ageMs() > LEADER_PHASE_STALE_MS) return true;
+        return FOLLOW_PHASES.contains(p);
+    }
+
+    /**
+     * 自主阶段：次 bot 跑自己的主线（{@code role=sub} ⇒ 木头/食物目标已由 {@code BotRole}
+     * 降到 1/3，不会像主 bot 那样为整局囤货）。
+     */
+    private Task tickAutonomous(AltoClef mod) {
+        _follow = null;   // 从跟随切到自主 → 丢掉 follow 句柄（其实例已被顶掉）
+        if (_autoTask == null || _autoTask.isFinished(mod)) {
+            Debug.logToFile("altoclef_diag.log", "[SUB-BOOT] switch to AUTONOMOUS mainline"
+                    + " (leader phase=" + LeaderPhaseWatcher.phase() + ")");
+            _autoTask = new BeatMinecraft2Task();
+        }
+        setDebugState("[次bot引导] 自主主线（主bot " + LeaderPhaseWatcher.phase() + "）");
+        return _autoTask;
     }
 
     /**

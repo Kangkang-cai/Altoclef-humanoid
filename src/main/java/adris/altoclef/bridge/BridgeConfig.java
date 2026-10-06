@@ -76,6 +76,21 @@ public class BridgeConfig {
     public String leader = "";
 
     /**
+     * (2026-10-06 阶段跟随, 用户拍板"第二条路") 主 bot 的 <b>bridge 端口</b>（如 {@code 8761}）。
+     * 次 bot 会定期拉 {@code http://127.0.0.1:<leaderPort>/status} 读对方的 {@code phase}
+     * （主线大阶段枚举 {@link adris.altoclef.tasks.speedrun.BeatPhase}），据此决定此刻
+     * <b>"跟随主 bot" 还是 "自己跑主线"</b>。
+     *
+     * <p><b>为什么需要它</b>：客户端只下发 ~48 格内玩家的<b>位置</b>，看不到对方"在干什么"，
+     * 所以"按大任务决定跟不跟"必须有一个跨进程的信息源 —— 本字段就是它（同机 localhost，
+     * 不对外暴露，与 bridge 服务本身同为 127.0.0.1 绑定）。
+     *
+     * <p>{@code <=0}（默认）= 不启用 ⇒ 次 bot <b>恒跟随</b>（即旧语义，零回归）。
+     * 改动后需重连/重载配置生效。
+     */
+    public int leaderPort = 0;
+
+    /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
      * 其余一律 403。默认 14 条（4 行动 + 2 命名地标读写 + 1 记忆作废 + 2 协调原语
      * + 2 记忆分享开关 + 3 只读），
