@@ -270,4 +270,20 @@ public final class SmoothLookController {
         }
         mod.getClientBaritone().getLookBehavior().updateTarget(null, true);
     }
+
+    /**
+     * (2026-10-07 拉扯修复 v3, 供 {@code LookBehaviorMixin} 调用)
+     * 帧尾清空仍不够: baritone 内部流程 (寻路挖方块/放置等) 每拍在自己的
+     * tick 事件里**重设** target, 随后拍中 PRE 立即应用写朝向 —— 我们的清空
+     * 在帧尾 (PRE 之后), 拦不住"同拍内 重设→应用" (EXT 取证: 仍精确 20Hz,
+     * cur 被拉到 baritone 挖掘 look 方向 pitch≈87°, frameT 恒定)。
+     * 唯一能拦住的点就是 PRE 本身: 帧层持有相机期间 (无 immediate 保留窗口)
+     * 直接 cancel LookBehavior.onPlayerUpdate —— baritone 写朝向路径整体短路,
+     * 相机单一主人 = 帧层。immediate 保留窗口 (_immKeepTicks>0) 放行, 保战斗
+     * 瞄头/MLG 同拍到位。与 v0「任务 lookAt 每拍覆盖 baritone target」的仲裁
+     * 语义一致 (v0 中 baritone 内部 look 同样被覆盖), 仅多出平滑。
+     */
+    public static boolean shouldSuppressBaritoneLook() {
+        return _frameTarget != null && _immKeepTicks <= 0;
+    }
 }

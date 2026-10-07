@@ -13,6 +13,7 @@
     "EntityAccessor",
     "GameOverlayMixin",
     "LightBlockAirMixin",
+    "LookBehaviorMixin",
     "PersistentProjectileEntityAccessor",
     "SlotClickMixin",
     "WorldBlockModifiedMixin"
