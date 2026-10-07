@@ -80,6 +80,11 @@ public class MLGBucketTask extends Task {
         // hold shift while falling.
         // Look down at first, might help
         mod.getPlayer().setPitch(90);
+        // (2026-10-07 拉扯修复) 同步锁定帧层目标, 防止上一任务 lookAt 的 10 拍
+        // 残留窗口把 pitch 拉回 —— MLG 低头是时间敏感动作, 直写保留, 帧层改为
+        // 朝 (当前yaw, 90) 推进而非旧目标。
+        SmoothLookController.stageImmediate(
+                new Rotation(mod.getPlayer().getYaw(), 90f));
     }
 
     @Override

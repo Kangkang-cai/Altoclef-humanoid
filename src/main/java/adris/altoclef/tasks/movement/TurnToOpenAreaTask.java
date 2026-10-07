@@ -84,13 +84,21 @@ public class TurnToOpenAreaTask extends Task {
         _bestYaw = bestYaw;
         _bestScore = (int) bestScore;
         try {
-            mod.getPlayer().setYaw(bestYaw);
-            mod.getPlayer().setPitch(0);
-            // 诊断: 确认转向是否真的生效 (setYaw 后 player.getYaw 应等于 bestYaw;
-            // 若被 baritone/游戏 tick 覆盖, 这里能看到差值)。
+            // (2026-10-07 拉扯修复) 原直写 player.setYaw/setPitch 与转向帧层 20Hz
+            // 打架 — EXT 取证实锤: [TurnOpen] 写入与 [SL-DIAG] EXT 同刻配对
+            // (14:11:26 写 0.0 ↔ cur=(0.0,0.0))。改走 SmoothLookController 单一
+            // 漏斗平滑转向; 帧层不经过 baritone, 背包界面打开时同样真实生效
+            // (2026-09-01 直写的原始理由已失效)。帧层 90° 收敛 <0.15s,
+            // STABLE_TICKS=3 拍(150ms) 内到位, Q 丢弃时机不受影响。
+            // bestYaw 先 wrapDegrees 归一 (取证出现过 yaw 1752.1 多圈累计)。
+            float targetYaw = net.minecraft.util.math.MathHelper.wrapDegrees(bestYaw);
+            adris.altoclef.util.helpers.SmoothLookController.stage(
+                    new baritone.api.utils.Rotation(targetYaw, 0f));
+            // 诊断: 确认转向是否真的生效 (帧层写入后 player.getYaw 应逐步逼近
+            // targetYaw; 若被别处覆盖, 这里能看到差值)。
             Debug.logToFile("altoclef_diag.log",
                     String.format("[TurnOpen] yaw %.1f -> %.1f (score %.0f), playerYawNow=%.1f",
-                            currentYaw, bestYaw, bestScore, mod.getPlayer().getYaw()));
+                            currentYaw, targetYaw, bestScore, mod.getPlayer().getYaw()));
         } catch (Exception ignored) {
             // 设置视角失败也不阻断后续丢东西。
         }
