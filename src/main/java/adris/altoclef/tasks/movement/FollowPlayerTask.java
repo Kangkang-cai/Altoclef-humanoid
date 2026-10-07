@@ -33,6 +33,9 @@ public class FollowPlayerTask extends Task {
     // 空记录提示的节流时间戳 (毫秒)。原先是每 tick 静默刷同一句 debug state。
     private long _lastNoRecordWarnMs;
 
+    // (2026-10-07) 互指退让警告的节流时间戳 (毫秒), 与上面分开计数。
+    private long _lastYieldWarnMs;
+
     // ------------------------------------------------------------------ //
     // (2026-10-07 follow 关系治理) 时长上限 + 互指退让
     // ------------------------------------------------------------------ //
@@ -123,7 +126,7 @@ public class FollowPlayerTask extends Task {
         // (1) (2026-10-07 follow 关系治理) 互指退让：我在跟 X，而 X 也在跟我 ——
         //     除非 X 就是我的 leader（设计关系），否则结束本侧跟随（唯一判定源 FollowRelation）。
         if (shouldYieldMutualFollow(mod)) {
-            mod.logWarning("Mutual follow with \"" + _playerName + "\" detected; yielding on this side ("
+            warnYieldThrottled(mod, "Mutual follow with \"" + _playerName + "\" detected; yielding on this side ("
                     + FollowRelation.describe(_playerName) + "). Returning to the standing task.");
             stop(mod);
             return null;
@@ -296,11 +299,35 @@ public class FollowPlayerTask extends Task {
     }
 
     /**
+     * 互指退让警告的独立节流（(2026-10-07) 与"空记录提示"分开计数，语义不同）。
+     * 退让本身是 one-shot，但若上层每拍重建本任务（give 的接近段），不节流就会 20 条/秒刷屏。
+     */
+    private void warnYieldThrottled(AltoClef mod, String message) {
+        long now = System.currentTimeMillis();
+        if (now - _lastYieldWarnMs < 5000) return;
+        _lastYieldWarnMs = now;
+        mod.logWarning(message);
+    }
+
+    /**
      * (2026-10-07 follow 关系治理) 互指退让判定。判定源 <b>只在</b>
      * {@link FollowRelation#shouldYield} 一处（本方法只负责取"我是谁"）。
      * 未启用坐标共享 / 玩家还没加载 / 对面不是本版 jar ⇒ 一律不退让（保守）。
+     *
+     * <p><b>(2026-10-07 现场修正, 1007 14:10 give 刷屏)</b> 前置门 {@code _announce}：
+     * 只有<b>登记过 {@code /status.following}</b> 的跟随才算"一条跟随关系"，才参与互指退让。
+     * 未登记的那种（{@code GiveItemToPlayerTask} 的"走过去交货"接近段）不登记、也就不是关系，
+     * <b>不参与</b>。
+     *
+     * <p>旧实现漏了这道门，导致设计者已经预判的误伤照样发生：{@link #_announce} 的注释写着
+     * "不登记就不会被判定互指"，但 {@link FollowRelation#mutual} 读的是<b>对端上报</b>的
+     * {@code /status.following}，与本侧登不登记无关 ⇒ 我去交货、对方正跟着我 ⇒ 每 tick 判"互指"
+     * → {@code stop()} 结束子任务 → 父任务下一拍又新建一个 → 卡住 + 20 条/秒红字刷屏
+     * （1007 14:10:28.818~14:10:43 实测固化）。
      */
     private boolean shouldYieldMutualFollow(AltoClef mod) {
+        // 判定源单一化: "本侧没登记" ⇔ "这不是一条跟随关系" ⇒ 不参与互指退让。
+        if (!_announce) return false;
         if (!PeerPosWatcher.enabled()) return false;
         var p = mod.getPlayer();
         if (p == null) return false;
