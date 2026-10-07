@@ -52,7 +52,9 @@ public class AltoClefCommands {
                 new AutoRecordCommand(),
                 // (2026-10-07 交付闭环) 走过去捡起附近地上的指定物品 —— 接收方 bot 侧入口，
                 // 由给方交付完成后经 PeerCommandSender 自动调用 (bridge 白名单)。
-                new PickupCommand()
+                new PickupCommand(),
+                // (2026-10-07 HUD 运行时开关) 临时隐藏左上角任务链 overlay (Alt+H 同效)。
+                new HudCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

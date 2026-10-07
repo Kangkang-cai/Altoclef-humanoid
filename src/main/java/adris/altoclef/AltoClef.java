@@ -1480,6 +1480,14 @@ public class AltoClef implements ModInitializer {
     }
 
     /**
+     * (2026-10-07 HUD 运行时开关) 左上角任务链 overlay 的入口, 供 {@code @hud} 命令
+     * 切换临时隐藏 ({@link CommandStatusOverlay#setHudHidden})。Alt+H 走同一个状态。
+     */
+    public CommandStatusOverlay getCommandStatusOverlay() {
+        return _commandStatusOverlay;
+    }
+
+    /**
      * Butler controller. Keeps track of users and lets you receive user messages
      */
     public Butler getButler() {

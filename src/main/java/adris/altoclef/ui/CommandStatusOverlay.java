@@ -26,12 +26,21 @@ public class CommandStatusOverlay {
     private boolean _altYPrev = false;
     private boolean _altUPrev = false;
 
+    // [HudKeybind] (2026-10-07) Alt+H 临时隐藏左上角任务链 HUD。
+    // 上一 tick Alt+H 是否按下 (同上, 上升沿触发)。
+    private boolean _altHPrev = false;
+    // 运行时隐藏覆盖位: 与配置项 Settings.showTaskChains 是【两层】——
+    // 配置项 = 文件里的默认值 (需 reload 才变); 本字段 = 临时覆盖, 纯内存、
+    // 【不】落盘、不进 altoclef_settings.json, 重启客户端即恢复显示。
+    // Alt+H 与 @hud on/off 共用它。
+    private boolean _hudHidden = false;
+
     //For the ingame timer
     private long _timeRunning;
     private long _lastTime = 0;
 
     public void render(AltoClef mod, MatrixStack matrixstack) {
-        if (mod.getModSettings().shouldShowTaskChain()) {
+        if (!_hudHidden && mod.getModSettings().shouldShowTaskChain()) {
             List<Task> tasks = Collections.emptyList();
             if (mod.getTaskRunner().getCurrentTaskChain() != null) {
                 tasks = mod.getTaskRunner().getCurrentTaskChain().getTasks();
@@ -45,10 +54,12 @@ public class CommandStatusOverlay {
     // [GamerKeybind] 每 tick 检测 Alt+Y (开始) / Alt+U (停止)。用 GLFW 直接
     // 轮询: 左/右 Alt 任一 + Y/U。只要在游戏内就响应 (不进聊天/界面判断 —
     // 键盘快捷键本来就该随时可用; 且 MC 聊天里 Alt+字母一般不会输出文本)。
+    // [HudKeybind] Alt+H 同通路, 切换左上角任务链 HUD 的临时隐藏。
     public void onClientTick(AltoClef mod) {
         if (!mod.inGame()) {
             _altYPrev = false;
             _altUPrev = false;
+            _altHPrev = false;
             return;
         }
         long handle = MinecraftClient.getInstance().getWindow().getHandle();
@@ -56,6 +67,7 @@ public class CommandStatusOverlay {
                 || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS;
         boolean altY = alt && GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_Y) == GLFW.GLFW_PRESS;
         boolean altU = alt && GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_U) == GLFW.GLFW_PRESS;
+        boolean altH = alt && GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_H) == GLFW.GLFW_PRESS;
 
         if (altY && !_altYPrev) {
             startGamer(mod);
@@ -63,8 +75,14 @@ public class CommandStatusOverlay {
         if (altU && !_altUPrev) {
             stopGamer(mod);
         }
+        if (altH && !_altHPrev) {
+            setHudHidden(!_hudHidden);
+            mod.log("[HUD] 左上角任务链显示 = " + (_hudHidden ? "已隐藏" : "已恢复")
+                    + " (Alt+H / @hud 切换, 仅本次运行有效, 不写回配置文件)");
+        }
         _altYPrev = altY;
         _altUPrev = altU;
+        _altHPrev = altH;
     }
 
     // gamer 任务是否在跑: 用户任务链的顶层任务就是 BeatMinecraft2Task。
@@ -90,6 +108,21 @@ public class CommandStatusOverlay {
     private static void stopGamer(AltoClef mod) {
         Debug.logMessage("Gamer keybind: stopping gamer task");
         mod.getUserTaskChain().cancel(mod);
+    }
+
+    // ==== (2026-10-07) 左上角任务链 HUD 运行时开关 (@hud / Alt+H) ====
+
+    /** 当前是否被运行时覆盖为"隐藏"(与配置项 showTaskChains 无关)。 */
+    public boolean isHudHidden() {
+        return _hudHidden;
+    }
+
+    /**
+     * 运行时隐藏/恢复左上角任务链 HUD。只改内存覆盖位, 【不】回写
+     * altoclef_settings.json; 想默认关掉请直接改配置文件的 {@code showTaskChains}。
+     */
+    public void setHudHidden(boolean hidden) {
+        _hudHidden = hidden;
     }
 
     private DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.from(ZoneOffset.of("+00:00"))); // The date formatter
