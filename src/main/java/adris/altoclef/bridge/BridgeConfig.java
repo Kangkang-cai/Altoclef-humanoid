@@ -110,18 +110,20 @@ public class BridgeConfig {
 
     /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
-     * 其余一律 403。默认 14 条（4 行动 + 2 命名地标读写 + 1 记忆作废 + 2 协调原语
+     * 其余一律 403。默认 15 条（5 行动 + 2 命名地标读写 + 1 记忆作废 + 2 协调原语
      * + 2 记忆分享开关 + 3 只读），
      * 见 DESIGN_action_api.md §1.2 A 档 + mod-bridge-landmark.md §4.2 + 1003 协调/记忆原语
      * （sleep / quota / forgetmem，其中 forgetmem 推翻定稿 §7.2 的"记忆永不可经命令删除"，
-     * 理由见 ForgetMemoryCommand 类注释）+ 1005 被动式记忆分享（share / autorecord）。
+     * 理由见 ForgetMemoryCommand 类注释）+ 1005 被动式记忆分享（share / autorecord）
+     * + 1007 交付闭环（pickup：接收方 bot 走过去捡起给方丢下的物品）。
      * 显式置空数组 = 不允许任何行动命令
-     * （关闭行动通道）；字段缺省 = 用默认 14 条。
+     * （关闭行动通道）；字段缺省 = 用默认 15 条。
      * ⚠ 已落盘的旧 bridge.json 若含旧条数数组会盖掉此默认 —— 部署时需同步补三处配置
-     * （定稿 §5）。
+     * （定稿 §5）。1007 14:5x 实测四处 bridge.json <b>都没有</b> allowedCommands 字段，
+     * 故本次加条无需改配置。
      */
     public java.util.List<String> allowedCommands = new java.util.ArrayList<>(java.util.Arrays.asList(
-            "goto", "follow", "give", "idle", "coords", "status", "inventory",
+            "goto", "follow", "give", "pickup", "idle", "coords", "status", "inventory",
             "remember", "forget", "sleep", "quota", "forgetmem", "share", "autorecord"));
 
     /**

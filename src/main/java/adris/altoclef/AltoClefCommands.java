@@ -49,7 +49,10 @@ public class AltoClefCommands {
                 new ForgetMemoryCommand(),
                 // (2026-10-05 被动式记忆分享) 分享/记录否决口 (bridge 白名单)。
                 new ShareCommand(),
-                new AutoRecordCommand()
+                new AutoRecordCommand(),
+                // (2026-10-07 交付闭环) 走过去捡起附近地上的指定物品 —— 接收方 bot 侧入口，
+                // 由给方交付完成后经 PeerCommandSender 自动调用 (bridge 白名单)。
+                new PickupCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

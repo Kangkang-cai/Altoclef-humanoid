@@ -18,6 +18,7 @@ import adris.altoclef.tasks.movement.IdleTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.GetToXZTask;
 import adris.altoclef.tasks.movement.GetToYTask;
+import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
@@ -570,6 +571,8 @@ final class ActionDispatcher {
             case "follow" -> finished instanceof FollowPlayerTask
                     || finished instanceof FollowAndWorkTask;
             case "give" -> finished instanceof GiveItemToPlayerTask;
+            // (2026-10-07 交付闭环) 接收方捡拾 —— 无目标可追时任务自结束，作为 action_done 的正常出口。
+            case "pickup" -> finished instanceof PickupDroppedItemTask;
             default -> false;
         };
     }
