@@ -3,6 +3,7 @@ package adris.altoclef.chains;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
+import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.resources.MineAndCollectTask;
 import adris.altoclef.tasksystem.Task;
@@ -68,6 +69,15 @@ import net.minecraft.util.shape.VoxelShape;
  *      跳过 ⇒ 只剩盲挥 4 tick，对花丛无效。修 = 改用与 baritone
  *      `MovementHelper.canWalkThrough` **同源**的 `isOpaqueFullCube` 排除真墙
  *      (判据同源铁律见 03-consistency.md)。
+ *
+ * (2026-10-07 跟随站定误挥左键, 用户实锤) 现场: 纯 `@follow` 跟随到位站定后,
+ *   bot **周期性(约 5s 冷却)** 挥一次左键, 有时打到就在正前方的队友。根因 = 本链把
+ *   {@link FollowPlayerTask}(属 movement 包)当成"导航类", 而跟随站定 = 水平位移恒 0
+ *   ⇒ 25 tick 后触发; 触发时前方无细方块 ⇒ **盲挥**(不 lookAt, 直接 hold 左键 4 tick)
+ *   ⇒ 准星保持跟随朝向 = 正对队友。修 = {@link #isMiningOrNavigating} 剔除跟随类主任务
+ *   (站定是合法静止, 不是卡住); 跟随"真被楔住"(baritone 强推 + 零位移)仍走
+ *   {@link #isBaritonePushingMovement} 通道, 不丢既有救援能力。
+ *   —— 该 bug 为<b>本链历史遗留</b>(建链起 movement 包判据就覆盖 follow), 并非近期引入。
  */
 public class SwingThroughChain extends TaskChain {
 
@@ -405,11 +415,31 @@ public class SwingThroughChain extends TaskChain {
      * 当前主任务是否为挖掘类/导航类：沿当前正在执行的子任务链向下检查，
      * 命中 MineAndCollectTask / MineDownExploreTask / DestroyBlockTask 或
      * movement 包内任务即视为处于挖掘或导航场景。
+     *
+     * <p><b>(2026-10-07 跟随站定误挥左键, 用户实锤)</b> {@link FollowPlayerTask} 也在
+     * {@link #MOVEMENT_PACKAGE} 里, 于是它一直被当成"导航类" —— 而跟随到位后任务
+     * 进入环形站定（{@code _holdingDistance}, 每拍 return null）, 玩家水平位移恒
+     * &lt; 1 格 ⇒ 连续 {@link #STUCK_WINDOW_TICKS}(25 ≈1.2s) 后命中本链触发条件。
+     * 触发后 {@link #triggerSwing} 优先找"细方块", 找不到就退化成<b>盲挥</b>（前方是
+     * 空气时连 lookAt 都不做, 直接 hold 左键 4 tick）⇒ 准星保持跟随时的朝向 = 正对
+     * 队友 ⇒ 每 5s 冷却到点就朝着队友挥一下, 用户现场看到的就是"站定后周期性左键,
+     * 有时打到队友"。<b>跟随的站定是合法静止, 不是卡住</b>：这里把跟随类主任务从
+     * "挖掘/导航"里剔除（判定源仍是子任务链, 与 {@code FollowAndWorkTask} 的
+     * "偏离态 = 真在干活"语义天然吻合: 偏离态 _sub 是正事任务, 不含 FollowPlayerTask
+     * ⇒ 照常参与判定）。
+     *
+     * <p>剔除后跟随仍保留一条通道: 只有当 baritone 确实在强推移动输入
+     * （{@link #isBaritonePushingMovement}）且 25 tick 零位移 —— 即<b>真被楔住</b> ——
+     * 才继续判卡。纯站定不满足该条件 ⇒ 不再误挥。
      */
     private boolean isMiningOrNavigating(AltoClef mod) {
         if (!mod.getUserTaskChain().isActive()) return false;
         Task main = mod.getUserTaskChain().getCurrentTask();
         if (main == null) return false;
+        // (2026-10-07) 跟随类主任务不算挖掘/导航 —— 站定是合法静止, 见方法头注释。
+        if (main.thisOrChildSatisfies(t -> t instanceof FollowPlayerTask)) {
+            return false;
+        }
         return main.thisOrChildSatisfies(t -> {
             if (t instanceof MineAndCollectTask
                     || t instanceof MineDownExploreTask
