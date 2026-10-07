@@ -460,11 +460,30 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                 // 界面 4 次/秒重开, gridwar 零 [SlotClick], 5 个重建实例 5 次 CraftFill)。
                 // 无活合成任务或其在冷却期时, 仍走独立收货 — 保住 2026-08-28"成品先收"
                 // 修复的原始目的 (合成任务不在场/哑火时的收货路径)。
-                if (thisOrChildSatisfies(task -> task instanceof CraftGenericWithRecipeBooksTask craftTask
+                // (2026-10-07 死循环根修) 旧实现在此 return null, 注释误以为语义是
+                // "框架续 tick 当前 _sub (保持原子树)"。框架真实语义相反:
+                // Task.tickInternal(Task.java:191-198) 对 onTick 返回 null ⇒
+                // canBeInterrupted(:414-439, 子链无 ITaskCanForce.shouldForce 者恒 true)
+                // ⇒ _sub.stop(mod) 且 _sub = null —— 子树被 STOP 并清空。
+                // 现场 20261007-171943 (19:17:31 现做工作台 -427,59,117 之后):
+                //   ① 每拍把配方书任务杀掉 (tasks.log START 16745 次, 每次 STOP took=50ms);
+                //   ② 下一拍"子树里有活配方书任务"不再成立 → 落下方 "Crafting" 分支
+                //      → new CraftGenericWithRecipeBooksTask → 每拍重发一次
+                //      instantFillRecipeViaBook (16734 次 [CraftFill], 稳定 4 次/秒);
+                //   ③ 配方书任务 state 16734 次全为 "Waiting for recipe book click...",
+                //      它自己的收货分支(:161)一次都没跑到;
+                //   ④ 独立收货分支的 500ms 点击防抖 (_lastOutputClickMs) 因实例每拍重建
+                //      恒复位 → 零 CraftClick。成品 iron_pickaxe 滞留工作台输出格
+                //      69 分 24 秒 (snapshot GRID out=iron_pickaxex1)。
+                // 与 detail/30 (0930 现做熔炉) 同一症状 —— 那份"修复"即此行, 方向写反了。
+                // 修法: 返回当前子树根 _sub 自身 (同一引用) ⇒ newSub.isEqual(_sub) 恒命中
+                // ⇒ 框架不 STOP、继续 tick 原树, 由配方书任务自己的 :161 收货分支收成品。
+                Task heldSub = getCurrentSubTask();
+                if (heldSub != null && thisOrChildSatisfies(task -> task instanceof CraftGenericWithRecipeBooksTask craftTask
                         && craftTask.getTarget().getOutputItem() == target.getOutputItem()
                         && !craftTask.isInGiveUpCooldown())) {
                     setDebugState("Getting output (held by live craft task)");
-                    return null;
+                    return heldSub;
                 }
                 setDebugState("Getting output");
                 return new ReceiveCraftingOutputSlotTask(outputSlot, target.getTargetCount());

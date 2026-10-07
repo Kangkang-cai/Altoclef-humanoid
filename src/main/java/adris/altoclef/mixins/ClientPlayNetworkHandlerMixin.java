@@ -1,13 +1,16 @@
 package adris.altoclef.mixins;
 
+import adris.altoclef.Debug;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.events.SoundEventHappenedEvent;
 import adris.altoclef.util.helpers.ClientDamageSensor;
 import adris.altoclef.util.helpers.WorldIdentity;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.network.packet.s2c.play.DeathMessageS2CPacket;
 import net.minecraft.network.packet.s2c.play.GameJoinS2CPacket;
 import net.minecraft.network.packet.s2c.play.HealthUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.OpenScreenS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlayerRespawnS2CPacket;
 import net.minecraft.network.packet.s2c.play.PlaySoundS2CPacket;
 import net.minecraft.text.Text;
@@ -89,5 +92,51 @@ public final class ClientPlayNetworkHandlerMixin {
     )
     private void onDisconnected(Text reason, CallbackInfo ci) {
         WorldIdentity.onServerDisconnected();
+    }
+
+    // [2026-10-07 界面换代取证] 见下方 onOpenScreen 注释。1s 节流 + 压制计数。
+    private static long _lastOpenScreenLogMs = 0;
+    private static int _openScreenSuppressed = 0;
+
+    /**
+     * (2026-10-07 合成界面反复换代取证) 现场 20261007-171943: 合成死循环期间
+     * `StorageHelper.closeScreen()` 零调用 (diag.log `[ScreenClose]` 末条 19:17:31),
+     * 但 craftclick.log `[CraftFill]` 的 syncId 从 47 一路涨到 100 再卷回 1..6
+     * (稳定 4 次/秒) —— 说明 `player.currentScreenHandler` 在被反复替换。
+     * handler 替换在客户端只有一条入口: 服务端下发 `OpenScreenS2CPacket`
+     * (`ClientPlayNetworkHandler.onOpenScreen`)。本注入把换代时刻与 syncId 直接记进
+     * diag.log, 用于判定"谁在反复重开容器"; 配上 tasks.log 的时间戳即可对齐到拍。
+     *
+     * <p>刻意不走 Debug.logMessage (会刷到聊天栏), 只落文件; 1s 节流并用 sup 计数
+     * 保留被压制的实际次数, 既能看出换代频率又不刷爆日志。
+     */
+    @Inject(
+            method = "onOpenScreen",
+            at = @At("HEAD")
+    )
+    private void onOpenScreen(OpenScreenS2CPacket packet, CallbackInfo ci) {
+        try {
+            long now = System.currentTimeMillis();
+            if (now - _lastOpenScreenLogMs < 1000) {
+                _openScreenSuppressed++;
+                return;
+            }
+            String cur = "null";
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.player != null && client.player.currentScreenHandler != null) {
+                cur = client.player.currentScreenHandler.getClass().getSimpleName()
+                        + "#" + client.player.currentScreenHandler.syncId;
+            }
+            Debug.logToFile("altoclef_diag.log",
+                    "[OpenScreen] syncId=" + packet.getSyncId()
+                            + " sup=" + _openScreenSuppressed
+                            + " type=" + packet.getScreenHandlerType()
+                            + " name=" + packet.getName().getString()
+                            + " prevHandler=" + cur);
+            _openScreenSuppressed = 0;
+            _lastOpenScreenLogMs = now;
+        } catch (Throwable ignored) {
+            // 诊断自身抛错不得影响网络线程
+        }
     }
 }

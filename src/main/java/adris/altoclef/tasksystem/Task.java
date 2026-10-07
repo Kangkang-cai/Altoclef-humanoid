@@ -405,6 +405,23 @@ public abstract class Task {
     }
 
     /**
+     * (2026-10-07 合成 hold 根修配套) 只读访问当前子任务实例。
+     *
+     * <p>用途: 子类 onTick 需要"保持当前子树原样、继续 tick 它"时, 必须回传一个能与
+     * {@code _sub} 判等命中的任务实例。而框架对 onTick 返回 {@code null} 的语义是
+     * **STOP 子树并清空** (见 {@code tickInternal}: {@code _sub.stop(mod); _sub = null;}),
+     * 无法表达"保持不变" —— 这正是 20261007 合成死循环的根因
+     * (CraftInTableTask 的 hold 分支误用 return null, 每拍把配方书任务杀掉)。
+     * 回传本访问器取到的同一引用即可让 {@code newSub.isEqual(_sub)} 恒命中,
+     * 框架跳过 STOP 分支直接续 tick 原树。
+     *
+     * <p>纯只读, 不改变任何状态; 返回 null = 当前无子任务。
+     */
+    protected Task getCurrentSubTask() {
+        return _sub;
+    }
+
+    /**
      * Sometimes a task just can NOT be bothered to be interrupted right now.
      * For instance, if we're in mid air and MUST complete the parkour movement.
      */
