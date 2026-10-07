@@ -29,8 +29,17 @@ import java.nio.file.Path;
  *     此时 `getCurrentServerEntry()` 为 null, 不会误判。
  *  2. 专用服务端(多人): 集成服务器恒 null → 用 `ServerInfo.address`(或退化到
  *     `name`), 前缀 `srv:` 标记来源。多人下所有服务器此前共享 "?", 换服不隔离,
- *     且 `WorldStateGuard` 的切世界清档检测永不触发 —— 本次修复。
+ *     且 `WorldStateGuard` 的切世界清档检测永不触发 —— 2026-09-29 修复。
  *  3. 都取不到(主菜单 / 启动早期) → "?"。
+ *  4. (2026-10-07 服务器世界重建) 专用服分支再拼【世界种子标识】:
+ *     `srv:<地址>@<sha256Seed>`。起因: 2) 只认服务器地址, 把服务器存档
+ *     (`world/`) 删掉重建后地址不变 ⇒ key 不变 ⇒ 上个世界的地标/传送门/自挖/
+ *     洞穴/堡垒记忆整份被当成本世界的坐标用 (用户现场实锤: 跑向/挖向旧世界坐标)。
+ *     种子来源 = `GameJoinS2CPacket.sha256Seed`, 服务端由
+ *     `BiomeAccess.hashSeed(ServerWorld.getSeed())` 生成 ⇒ 同种子同值、
+ *     换世界必变, 是客户端唯一拿得到的"世界级"标识 (专用服下存档目录名不可得)。
+ *     注意: 若服务端 `level-seed` 被固定, 重建后种子不变 ⇒ 本手段失效
+ *     (用户当前未设, 每次新建随机)。
  *
  * `srv:` 前缀与单人目录名天然互斥: Windows 存档目录名不含 ':'。
  */
@@ -39,7 +48,38 @@ public final class WorldIdentity {
     /** 多人服条目标识前缀 (见类注释第 2 条)。 */
     private static final String SERVER_TOKEN = "srv:";
 
+    /** 世界种子标识分隔符 (见类注释第 4 条)。与 `MineDownExploreTask` 的 "#v2" 后缀区分开。 */
+    private static final String SEED_TOKEN = "@";
+
+    /**
+     * 最近一次 `GameJoinS2CPacket.sha256Seed`。null = 未知(尚未收到该包 / 已断开)。
+     * 只对专用服务端记录 —— 单人走存档目录名分支, 不需要种子。
+     */
+    private static volatile Long _serverSeed = null;
+
     private WorldIdentity() {
+    }
+
+    /**
+     * (2026-10-07) 客户端收到 `GameJoinS2CPacket` 时调用, 记录本服务器世界种子标识。
+     * 由 `ClientPlayNetworkHandlerMixin#onGameJoin` 注入调用。
+     *
+     * <p>包在每次连接(含重连)时到达; 单人世界同样会收到, 但那时
+     * `getCurrentServerEntry()` 为 null ⇒ 不记录(分支 1 也不消费它)。
+     */
+    public static void onGameJoin(long sha256Seed) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null || mc.getCurrentServerEntry() == null) return;
+        _serverSeed = sha256Seed;
+    }
+
+    /**
+     * (2026-10-07) 断开连接时清空种子缓存, 避免"回主菜单后残留旧服务器种子"
+     * 被下一次连接早期的 `saveDirName()` 误用。由
+     * `ClientPlayNetworkHandlerMixin#onDisconnected` 注入调用。
+     */
+    public static void onServerDisconnected() {
+        _serverSeed = null;
     }
 
     /** 世界标识串: 单人=存档目录名, 多人=`srv:<服务器地址>`。取不到时 "?"。 */
@@ -69,15 +109,23 @@ public final class WorldIdentity {
             }
         } catch (Exception ignored) {
         }
-        // ---- 2) 专用服务端: 服务器地址 ----
+        // ---- 2) 专用服务端: 服务器地址 (+ 世界种子) ----
         try {
             ServerInfo entry = mc.getCurrentServerEntry();
             if (entry != null) {
+                String host = null;
                 if (entry.address != null && !entry.address.isEmpty()) {
-                    return SERVER_TOKEN + entry.address;
+                    host = entry.address;
+                } else if (entry.name != null && !entry.name.isEmpty()) {
+                    host = entry.name;
                 }
-                if (entry.name != null && !entry.name.isEmpty()) {
-                    return SERVER_TOKEN + entry.name;
+                if (host != null) {
+                    // (2026-10-07) 拼上世界种子标识: 服务器存档删除重建后种子必变 ⇒ key 变。
+                    // 种子未知(连接早期)时退回旧口径, 行为与修复前一致。
+                    Long seed = _serverSeed;
+                    return seed == null
+                            ? SERVER_TOKEN + host
+                            : SERVER_TOKEN + host + SEED_TOKEN + Long.toHexString(seed);
                 }
             }
         } catch (Exception ignored) {
