@@ -228,6 +228,12 @@ public final class BridgeHttpServer {
             sb.append(','); BridgeJson.str(sb, "food"); sb.append(':'); BridgeJson.str(sb, s.food);
             sb.append(','); BridgeJson.str(sb, "foodCount"); sb.append(':').append(BridgeJson.i(s.foodCount));
             sb.append(','); BridgeJson.str(sb, "keyItems"); sb.append(':'); BridgeJson.str(sb, s.keyItems);
+            // (2026-10-07) 完整背包【原名】清单（stripItemName 口径 = @give 认的名字）。
+            // ⚠️ keyItems 是中文名（对端做变化检测用），对端发 @give 时必须【从这里照抄】原名，
+            // 不要凭记忆写 ID（"牛排"→steak 是错的，cooked_beef 才对）。空则整键省略。
+            if (s.inventory != null && !s.inventory.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "inventory"); sb.append(':'); BridgeJson.str(sb, s.inventory);
+            }
             // ---- 阶段三感知补全：任务细化 + 环境感知（主线没在跑时省略 mainlineProgress）----
             sb.append(','); BridgeJson.str(sb, "taskDetail"); sb.append(':'); BridgeJson.str(sb, s.taskDetail);
             // (2026-10-06 多 bot 阶段跟随) 主线「大阶段」枚举（BeatPhase）——给次 bot 判"跟不跟"。

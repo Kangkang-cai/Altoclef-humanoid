@@ -10,6 +10,7 @@ import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.trackers.KnowledgeMemory;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -356,6 +357,38 @@ final class SceneDigest {
                 if (!sleeping) continue;
                 if (sb.length() > 0) sb.append(',');
                 sb.append(n);
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * (2026-10-07) 完整背包的<b>原名</b>清单，同名合并计数（{@code "oak_log x12, iron_ingot x3"}）。
+     *
+     * <p>为什么必须有它：{@code keyItems} 是<b>中文</b>名（{@link ItemNames}，供对端做变化检测），
+     * 而 {@code @give <玩家> <物品>} 认的是 {@code blaze_rod} 这类 ID —— 对端拿着"烈焰棒"没法直接用。
+     * 本字段与 {@code @give} 的背包匹配、{@code @inventory} 命令<b>同一来源</b>
+     * （{@code ItemHelper.stripItemName}）⇒ 对端从常规轮询的 /status 里<b>照抄</b>即可发 @give，
+     * 不需要再发一条 {@code @inventory}，也不需要凭记忆写 ID。
+     *
+     * <p>由快照（客户端线程、5s 一次）调用，线程安全；失败返回空串（/status 整键省略）。
+     */
+    static String inventory(AltoClef mod) {
+        try {
+            if (mod.getPlayer() == null) return "";
+            var inv = mod.getPlayer().getInventory();
+            java.util.LinkedHashMap<String, Integer> counts = new java.util.LinkedHashMap<>();
+            for (int i = 0; i < inv.size(); ++i) {
+                ItemStack st = inv.getStack(i);
+                if (st == null || st.isEmpty()) continue;
+                counts.merge(ItemHelper.stripItemName(st.getItem()), st.getCount(), Integer::sum);
+            }
+            StringBuilder sb = new StringBuilder();
+            for (var e : counts.entrySet()) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(e.getKey()).append(" x").append(e.getValue());
             }
             return sb.toString();
         } catch (Throwable t) {

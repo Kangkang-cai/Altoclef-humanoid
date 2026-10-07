@@ -88,6 +88,13 @@ final class BotSnapshot {
     final String onlinePlayers;
     /** 可见范围内正在睡觉的玩家名（逗号分隔）；无人睡则空串。 */
     final String sleepingPlayers;
+    // ---- (2026-10-07 @give 物品名来源) ----
+    /**
+     * 完整背包<b>原名</b>清单（{@code "oak_log x12, iron_ingot x3"}；{@code stripItemName}
+     * 口径 = {@code @give} 认的名字，见 {@link SceneDigest#inventory}）；空则 /status 整键省略。
+     * ⚠️ 与 {@code keyItems}（中文名）口径不同、用途不同，不能互相替代。
+     */
+    final String inventory;
 
     private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
@@ -96,7 +103,8 @@ final class BotSnapshot {
                         String taskDetail, String mainlineProgress, String timeOfDay,
                         String weather, String environment, String biome, int nearbyHostiles,
                         ActiveAction activeAction, String botStatus, String stuckReason,
-                        String landmarks, String onlinePlayers, String sleepingPlayers) {
+                        String landmarks, String onlinePlayers, String sleepingPlayers,
+                        String inventory) {
         this.botId = botId;
         this.ts = ts;
         this.online = online;
@@ -127,6 +135,7 @@ final class BotSnapshot {
         this.landmarks = landmarks;
         this.onlinePlayers = onlinePlayers == null ? "" : onlinePlayers;
         this.sleepingPlayers = sleepingPlayers == null ? "" : sleepingPlayers;
+        this.inventory = inventory == null ? "" : inventory;
     }
 
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
@@ -134,7 +143,7 @@ final class BotSnapshot {
         return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
-                null, "", "", null, "", "");
+                null, "", "", null, "", "", "");
     }
 
     /**
@@ -184,7 +193,8 @@ final class BotSnapshot {
                 SceneDigest.nearbyHostiles(world, p),
                 activeAction, botStatus, stuckReason,
                 NamedLandmarks.snapshotJsonOrNull(pos, mod),
-                SceneDigest.onlinePlayers(mod), SceneDigest.sleepingPlayers(mod));
+                SceneDigest.onlinePlayers(mod), SceneDigest.sleepingPlayers(mod),
+                SceneDigest.inventory(mod));
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */
