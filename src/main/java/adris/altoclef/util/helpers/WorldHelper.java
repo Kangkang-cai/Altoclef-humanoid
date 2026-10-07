@@ -54,6 +54,19 @@ public interface WorldHelper {
         return ((ClientConnectionAccessor) con).getTicks();
     }
 
+    /**
+     * (2026-10-07 口径单源化, 现场 20261007-171943 实锤 bot1 背包攒出 3 水桶+1 空桶)
+     * 背包内桶的三形态合计: 空桶 + 水桶 + 岩浆桶。
+     * 消费方: ConstructNetherPortalBucketTask 预取闸 (预算 = 1 水 + 1 岩浆 = 2 桶容)。
+     * ⚠️ CollectBucketLiquidTask 的 bucketsNeeded 是"单液体任务自需"口径 (空桶 +
+     * 本液体已装桶), 故意不算另一形态已装桶 —— 水桶舀不了岩浆, 不并入本 helper。
+     */
+    static int countTotalBuckets(AltoClef mod) {
+        return mod.getItemStorage().getItemCount(net.minecraft.item.Items.BUCKET)
+                + mod.getItemStorage().getItemCount(net.minecraft.item.Items.WATER_BUCKET)
+                + mod.getItemStorage().getItemCount(net.minecraft.item.Items.LAVA_BUCKET);
+    }
+
     static Vec3d toVec3d(BlockPos pos) {
         if (pos == null) return null;
         return new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);

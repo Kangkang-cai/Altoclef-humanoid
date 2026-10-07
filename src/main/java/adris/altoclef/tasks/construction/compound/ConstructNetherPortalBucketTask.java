@@ -91,6 +91,11 @@ public class ConstructNetherPortalBucketTask extends Task {
     // 同为 8, 即"门应在岩浆旁 5-6 格"的既有设计。
     private static final int PORTAL_REUSE_LAVA_RADIUS = 8;
     private static final int PORTAL_REUSE_LAVA_VERTICAL = 8;
+    /**
+     * (2026-10-07 提常量) 桶预算: 1 水桶 + 1 岩浆桶 = 2 桶容。
+     * 判据本体在 WorldHelper.countTotalBuckets (三形态合计, 单源)。
+     */
+    private static final int PORTAL_BUCKET_BUDGET = 2;
     private final TimerGame _lavaSearchTimer = new TimerGame(5);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
@@ -191,8 +196,10 @@ public class ConstructNetherPortalBucketTask extends Task {
         // (2026-09-18 复用模式豁免) 复用到的框架可能已完整 —— 那就一块都不用浇铸,
         // 却仍要跑去挖铁做两个桶, 纯白跑。复用模式下跳过这道预检; 真缺框时
         // PlaceObsidianBucketTask 内部自己会去拿桶 (自给自足, 见其 onTick L77-83/L146-149)。
-        int bucketCount = mod.getItemStorage().getItemCount(Items.BUCKET, Items.LAVA_BUCKET, Items.WATER_BUCKET);
-        if (!_reuseMode && bucketCount < 2) {
+        // (2026-10-07 口径单源化) 三形态合计口径搬进 WorldHelper.countTotalBuckets,
+        // 全项目桶预算判据只此一份 (现场 20261007-171943: 两处各写一份口径漂移)。
+        int bucketCount = WorldHelper.countTotalBuckets(mod);
+        if (!_reuseMode && bucketCount < PORTAL_BUCKET_BUDGET) {
             setDebugState("Getting buckets");
             _progressChecker.reset();
             // If we have lava/water, get the inverse. Otherwise we dropped a bucket, just get a bucket.

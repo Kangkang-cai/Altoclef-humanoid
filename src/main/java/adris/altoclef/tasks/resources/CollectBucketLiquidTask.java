@@ -238,6 +238,11 @@ public class CollectBucketLiquidTask extends ResourceTask {
         }
 
         // Get buckets if we need em
+        // (2026-10-07 口径注释) 本口径 = "本液体任务自需的桶容": 空桶 + 本液体已装桶,
+        // 【故意】不算另一形态已装桶 (水桶舀不了岩浆) —— 与 ConstructNetherPortalBucketTask
+        // 的三形态总预算 (WorldHelper.countTotalBuckets) 是两层不同的判据, 不合并。
+        // ⚠️ 已知残留: 若包里堆了超额的另一形态已装桶且无空桶, 本任务会再合成新桶
+        // (现场 20261007-171943 实锤攒到 4 桶) —— 真修复需要"倒掉超额水桶"机制, 待立项。
         int bucketsNeeded = _count - mod.getItemStorage().getItemCount(Items.BUCKET) - mod.getItemStorage().getItemCount(_target);
         if (bucketsNeeded > 0) {
             setDebugState("Getting bucket...");
