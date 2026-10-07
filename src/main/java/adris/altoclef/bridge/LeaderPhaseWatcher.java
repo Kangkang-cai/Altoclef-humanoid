@@ -2,16 +2,11 @@ package adris.altoclef.bridge;
 
 import adris.altoclef.Debug;
 import adris.altoclef.tasks.speedrun.BeatPhase;
-import adris.altoclef.util.Dimension;
-import net.minecraft.util.math.Vec3d;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * (2026-10-06 阶段跟随) <b>后台拉取主 bot 的 {@code /status.phase}</b>。
@@ -29,6 +24,16 @@ import java.util.regex.Pattern;
  * <h3>失败语义</h3>
  * 拉取失败（主 bot 没开 / 端口不通 / 超时）<b>保留上次值</b>，由 {@link #ageMs()} 表达陈旧度；
  * 调用方据"陈旧"决定是否退回保守策略（跟随）。这样主 bot 短暂卡顿不会让次 bot 乱切。
+ *
+ * <h3>(2026-10-07) 收窄职责 + 首拉提前</h3>
+ * <ul>
+ *   <li><b>坐标解析已移出</b>：{@code pos} 不再由本类处理，改由 {@link PeerPosWatcher}
+ *       按玩家名维护（通用坐标共享）。同一份 JSON 只允许一个解析源（{@link StatusJson}）。</li>
+ *   <li><b>首拉提前到线程启动时</b>：原实现"先 sleep 2s 再拉第一次"，导致每会话启动后约 2s 内
+ *       {@link #phase()} 恒 {@code null}、{@code pos} 恒不可用 —— 1007 13:11:01 实测
+ *       次 bot 在该窗口落回裸跟随并打印一条 "no coordinates yet"
+ *       （`prep done` 后 53ms）。现在先拉再睡。</li>
+ * </ul>
  */
 public final class LeaderPhaseWatcher {
 
@@ -38,41 +43,10 @@ public final class LeaderPhaseWatcher {
     /** 单次 HTTP 超时 —— 必须远小于轮询间隔，否则线程会被拖满。 */
     private static final int TIMEOUT_MS = 1_500;
 
-    /**
-     * 从 /status JSON 里抠 {@code "phase":"XXX"}。
-     *
-     * <p>只认<b>全大写</b>枚举名（≥3 字符）—— 这恰好避开 {@code activeAction.phase} 那个
-     * 同名键（它的值是 {@code "running"} / {@code "accepted"} 这类小写状态字），不需要写
-     * 完整的 JSON 解析。用正则而不是 Jackson 是为了不给热路径引入解析依赖。
-     */
-    private static final Pattern PHASE_RE = Pattern.compile("\"phase\"\\s*:\\s*\"([A-Z_]{3,})\"");
-
-    /**
-     * (2026-10-07 步骤2) 从同一份 /status 里抠 {@code "pos"} 对象：
-     * {@code "pos":{"x":1.0,"y":2.0,"z":3.0,"dim":"overworld"}}。
-     *
-     * <p>用途：主 bot 走出客户端 ~48 格实体跟踪范围后，次 bot 本地<b>拿不到任何坐标</b>,
-     * {@code FollowPlayerTask} 只能停在 "online but too far" 原地干等。主 bot 上报的坐标
-     * 就是现成的跨进程坐标源（同机 localhost，不新增对外暴露面）。
-     *
-     * <p>{@code f1} 用 {@code Locale.ROOT} 定死点号小数，故正则只认 {@code [0-9.-]}。
-     */
-    private static final Pattern POS_RE = Pattern.compile(
-            "\"pos\"\\s*:\\s*\\{\\s*\"x\"\\s*:\\s*(-?[0-9.]+)\\s*,\\s*\"y\"\\s*:\\s*(-?[0-9.]+)"
-                    + "\\s*,\\s*\"z\"\\s*:\\s*(-?[0-9.]+)\\s*,\\s*\"dim\"\\s*:\\s*\"([a-z_]+)\"");
-
     private static volatile BeatPhase _phase = null;   // null = 从未成功拉到
     private static volatile long _lastOkMs = 0;
     private static volatile int _port = 0;
     private static volatile boolean _started = false;
-
-    // (2026-10-07 步骤2) 主 bot 坐标快照。与 phase 共用同一次轮询，但各自独立打时间戳，
-    // 一方解析失败不清另一方的值（陈旧度分别由 ageMs() / posAgeMs() 表达）。
-    private static volatile double _posX = 0;
-    private static volatile double _posY = 0;
-    private static volatile double _posZ = 0;
-    private static volatile Dimension _posDim = null;   // null = 从未成功拉到
-    private static volatile long _posOkMs = 0;
 
     private LeaderPhaseWatcher() {
     }
@@ -108,29 +82,28 @@ public final class LeaderPhaseWatcher {
 
     private static void loop() {
         while (true) {
+            // (2026-10-07) 先拉再睡：消除"启动后首个 2s 窗口内阶段/坐标均不可用"的假象。
+            int port = _port;
+            if (port > 0) {
+                try {
+                    String json = httpGet("http://127.0.0.1:" + port + "/status");
+                    BeatPhase p = StatusJson.parsePhase(json);
+                    if (p != null) {
+                        if (p != _phase) {
+                            // 边沿落盘（阶段是分钟级变化，不会刷屏），供事后对齐两条时间线。
+                            Debug.logToFile("altoclef_diag.log", "[LEADER-PHASE] -> " + p);
+                        }
+                        _phase = p;
+                        _lastOkMs = System.currentTimeMillis();
+                    }
+                } catch (Throwable ignored) {
+                    // 主 bot 未开/端口不通/超时：保留上次值，陈旧度交给 ageMs()
+                }
+            }
             try {
                 Thread.sleep(POLL_INTERVAL_MS);
             } catch (InterruptedException e) {
                 return;
-            }
-            int port = _port;
-            if (port <= 0) continue;
-            try {
-                String json = httpGet("http://127.0.0.1:" + port + "/status");
-                long now = System.currentTimeMillis();
-                BeatPhase p = parse(json);
-                if (p != null) {
-                    if (p != _phase) {
-                        // 边沿落盘（阶段是分钟级变化，不会刷屏），供事后对齐两条时间线。
-                        Debug.logToFile("altoclef_diag.log", "[LEADER-PHASE] -> " + p);
-                    }
-                    _phase = p;
-                    _lastOkMs = now;
-                }
-                // (2026-10-07 步骤2) 同一份 /status 顺带解析主 bot 坐标。
-                parsePosInto(json, now);
-            } catch (Throwable ignored) {
-                // 主 bot 未开/端口不通/超时：保留上次值，陈旧度交给 ageMs()/posAgeMs()
             }
         }
     }
@@ -147,72 +120,5 @@ public final class LeaderPhaseWatcher {
         } finally {
             c.disconnect();
         }
-    }
-
-    private static BeatPhase parse(String json) {
-        if (json == null || json.isEmpty()) return null;
-        Matcher m = PHASE_RE.matcher(json);
-        if (!m.find()) return null;
-        try {
-            return BeatPhase.valueOf(m.group(1));
-        } catch (IllegalArgumentException e) {
-            // 对面是旧 jar（还没有 phase 键）或枚举不认识的未来值 → 当作未知
-            return null;
-        }
-    }
-
-    // ==================================================================== //
-    // (2026-10-07 步骤2) 主 bot 坐标
-    // ==================================================================== //
-
-    /**
-     * 最近一次成功拉到的主 bot 坐标（世界坐标，非反透视——是主 bot 自己上报的）。
-     * 从未成功 = {@code null}。调用方<b>必须</b>同时看 {@link #posAgeMs()} 与
-     * {@link #posDimension()}：过期的或跨维度的坐标直接拿去导航 = 走向错误地点。
-     */
-    public static Vec3d pos() {
-        return _posDim == null ? null : new Vec3d(_posX, _posY, _posZ);
-    }
-
-    /** 主 bot 上报名所属维度；从未成功 = {@code null}。 */
-    public static Dimension posDimension() {
-        return _posDim;
-    }
-
-    /** 距上次成功拉到坐标的毫秒数；从未成功 = {@link Long#MAX_VALUE}。 */
-    public static long posAgeMs() {
-        long ok = _posOkMs;
-        return ok == 0 ? Long.MAX_VALUE : System.currentTimeMillis() - ok;
-    }
-
-    private static void parsePosInto(String json, long now) {
-        if (json == null || json.isEmpty()) return;
-        Matcher m = POS_RE.matcher(json);
-        if (!m.find()) return;
-        try {
-            double x = Double.parseDouble(m.group(1));
-            double y = Double.parseDouble(m.group(2));
-            double z = Double.parseDouble(m.group(3));
-            Dimension d = dimFromToken(m.group(4));
-            if (d == null) return;
-            _posX = x;
-            _posY = y;
-            _posZ = z;
-            _posDim = d;
-            _posOkMs = now;
-        } catch (NumberFormatException ignored) {
-            // 数值畸形（理论上不会）：保留上次值。
-        }
-    }
-
-    /** /status 的 dim token → 枚举（取值口径与 ActionDispatcher/NamedLandmarks 一致）。 */
-    private static Dimension dimFromToken(String t) {
-        if (t == null) return null;
-        return switch (t.toLowerCase(Locale.ROOT)) {
-            case "overworld" -> Dimension.OVERWORLD;
-            case "nether", "the_nether" -> Dimension.NETHER;
-            case "end", "the_end" -> Dimension.END;
-            default -> null;
-        };
     }
 }

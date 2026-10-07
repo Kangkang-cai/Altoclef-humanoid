@@ -152,6 +152,14 @@ public final class BridgeHttpServer {
 
         Debug.logMessage("[Bridge] 已启动: 127.0.0.1:" + _port + " botId=" + _botId
                 + " (endpoints: GET /status, GET /events?cursor=, POST /command)");
+
+        // (2026-10-07 bot 间坐标共享) 主/次 bot 都启动：主 bot 也可能需要 @follow 某个次 bot。
+        // 自己端口由 PeerPosWatcher 内部排除；peerPorts 留空则用默认窗口 8760~8769。
+        try {
+            PeerPosWatcher.ensureStarted(_port, BridgeConfig.getInstance().peerPorts);
+        } catch (Throwable t) {
+            Debug.logWarning("[PEER-POS] 启动失败（坐标共享不可用，跟随退回 48 格内）: " + t);
+        }
     }
 
     private void stopInternal() {
@@ -206,6 +214,9 @@ public final class BridgeHttpServer {
             StringBuilder sb = new StringBuilder(256);
             sb.append('{');
             BridgeJson.str(sb, "bot_id"); sb.append(':'); BridgeJson.str(sb, s.botId);
+            // (2026-10-07 bot 间坐标共享) 游戏内玩家名 —— 同伴据此把"要跟的人"翻译成
+            // "去哪个端口取坐标"（@follow/@give 都按游戏内名寻址，botId 不行）。
+            sb.append(','); BridgeJson.str(sb, "player"); sb.append(':'); BridgeJson.str(sb, s.player);
             // (2026-10-06 多 bot 随行) 角色: "main" | "sub"。对端据此区分主次 bot
             // （把"跟着谁走""向谁要料""目标量"这几类决策分开）。取值恒非空, 不省略。
             sb.append(','); BridgeJson.str(sb, "role"); sb.append(':'); BridgeJson.str(sb, _role);

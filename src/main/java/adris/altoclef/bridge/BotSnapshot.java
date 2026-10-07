@@ -31,6 +31,13 @@ import java.time.temporal.ChronoUnit;
 final class BotSnapshot {
 
     final String botId;
+    /**
+     * (2026-10-07 bot 间坐标共享) 本 bot 的<b>游戏内玩家名</b>（如 {@code "qiaoqiao"}）——
+     * bridge 侧的 {@code botId}（{@code "bot_1"}）是聊天室身份，{@code @follow}/{@code @give}
+     * 却按游戏内名寻址，两者不是一回事。有这个键，同伴才能把"要跟的人"翻译成"去哪个端口取坐标"
+     * （见 {@link PeerPosWatcher}）。离线 / 未进世界为空串。
+     */
+    final String player;
     /** ISO8601 UTC 字符串，如 {@code "2026-09-30T04:23:22Z"}。 */
     final String ts;
     final boolean online;
@@ -96,7 +103,7 @@ final class BotSnapshot {
      */
     final String inventory;
 
-    private BotSnapshot(String botId, String ts, boolean online, String summary, String task,
+    private BotSnapshot(String botId, String player, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
                         int hunger, int level, String equipment, String holding,
                         String food, int foodCount, String keyItems,
@@ -106,6 +113,7 @@ final class BotSnapshot {
                         String landmarks, String onlinePlayers, String sleepingPlayers,
                         String inventory) {
         this.botId = botId;
+        this.player = player == null ? "" : player;
         this.ts = ts;
         this.online = online;
         this.summary = summary;
@@ -140,7 +148,7 @@ final class BotSnapshot {
 
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
     static BotSnapshot offline(String botId) {
-        return new BotSnapshot(botId, nowIso(), false, "不在游戏里", "离线",
+        return new BotSnapshot(botId, "", nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
                 null, "", "", null, "", "", "");
@@ -183,8 +191,14 @@ final class BotSnapshot {
         } catch (Throwable ignored) {
         }
         String dimTok = SummaryGenerator.dimToken(dim);
+        // (2026-10-07 坐标共享) 游戏内玩家名。取不到（极早期帧）留空 —— 空名不参与寻址。
+        String playerName = "";
+        try {
+            playerName = p.getName().getString();
+        } catch (Throwable ignored) {
+        }
 
-        return new BotSnapshot(botId, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
+        return new BotSnapshot(botId, playerName, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
                 digest.hunger, digest.level, digest.equipment, digest.holding,
                 digest.food, digest.foodCount, digest.keyItems,
                 SceneDigest.taskDetail(mod), SceneDigest.mainlineProgress(mod),

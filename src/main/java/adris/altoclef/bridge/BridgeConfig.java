@@ -91,6 +91,24 @@ public class BridgeConfig {
     public int leaderPort = 0;
 
     /**
+     * (2026-10-07 用户拍板"关键还是让每个 bot 知道别的 bot 的坐标") <b>坐标共享的同伴端口表</b>：
+     * 本机其他 bot 实例的 bridge 端口（如 {@code [8760, 8761, 8762, 8763]}）。
+     *
+     * <p>本 bot 的后台线程会每 2s 轮询这些端口的 {@code /status}，把对方的
+     * {@code player}（游戏内名）+ {@code pos} + {@code dim} 记进
+     * {@link PeerPosWatcher} 的坐标表；此后 {@code @follow <远距玩家>} 与本 bot 的
+     * 自动引导都能借这份表走到 48 格客户端跟踪范围之外的本机 bot 身边。
+     *
+     * <p><b>留空</b>（默认）= 用内置默认窗口 {@code 8760~8769}（与既有四实例端口定档一致），
+     * 不需要为此改配置。只有端口不落在该窗口内才需要显式写。
+     *
+     * <p>注意本字段<b>不含自己</b>（本实例端口会被自动排除）；地址恒为 {@code 127.0.0.1}。
+     * 只对本机跑本模组的 bot 生效 —— 真人玩家不暴露 bridge，仍受 48 格物理限制。
+     * 改动后需重连/重载配置生效。
+     */
+    public java.util.List<Integer> peerPorts = new java.util.ArrayList<>();
+
+    /**
      * AI 行动白名单（阶段三）：只有列在这里的命令允许经 {@code POST /command} 派发，
      * 其余一律 403。默认 14 条（4 行动 + 2 命名地标读写 + 1 记忆作废 + 2 协调原语
      * + 2 记忆分享开关 + 3 只读），

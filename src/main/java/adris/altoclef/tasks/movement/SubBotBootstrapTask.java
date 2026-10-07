@@ -4,13 +4,13 @@ import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.bridge.BridgeConfig;
 import adris.altoclef.bridge.LeaderPhaseWatcher;
+import adris.altoclef.bridge.PeerPosWatcher;
 import adris.altoclef.bridge.SubBotDuty;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
 import adris.altoclef.tasks.speedrun.BeatPhase;
 import adris.altoclef.tasksystem.Task;
-import adris.altoclef.util.Dimension;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.SleepHelper;
@@ -18,7 +18,6 @@ import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -92,23 +91,9 @@ public class SubBotBootstrapTask extends Task {
     /** 跟丢日志节流: 3s 重试 = 每分钟 20 条, 不节流会把聊天刷爆（其余落 diag）。 */
     private static final long LOST_LOG_INTERVAL_MS = 60_000;
 
-    /**
-     * (2026-10-07 步骤2) 远程接近：主 bot 经 /status 上报坐标的可用鲜度上限。超过视为陈旧,
-     * 不拿来当导航目标（2s 轮询, 10s 容忍主 bot 短暂卡顿/网络抖动）。
-     */
-    private static final long REMOTE_POS_MAX_AGE_MS = 10_000;
-
-    /**
-     * (2026-10-07 步骤2) 主 bot 移动超过该距离才重建远程接近目标 —— 否则每 2s 轮询都 new
-     * 一次 GetToBlockTask 会不停打断 baritone 已算好的路径。
-     */
-    private static final double REMOTE_RETARGET_DIST = 8.0;
-
-    /**
-     * (2026-10-07 步骤2) 本地"最后已知坐标"与主 bot 上报坐标之差在此以内 → 认为本地信息够用,
-     * 走常规跟随而非远程补位（防"本地有旧坐标但人已走远"和"边界反复切换"两种抖动）。
-     */
-    private static final double REMOTE_TRUST_LOCAL_DIST = 16.0;
+    // (2026-10-07 13:4x) 远程接近的鲜度上限 / 重建距离 / 信任本地阈值三个常量已上收到
+    // PeerPosWatcher（MAX_AGE_MS / RETARGET_DIST / TRUST_LOCAL_DIST）—— 与
+    // FollowPlayerTask 共用同一份判定源，禁止在调用侧另立阈值。
 
     /**
      * (2026-10-07 步骤2) 远程接近硬上限。超时仍未到达 = 视为跟丢, 结束本次引导（与
@@ -401,41 +386,32 @@ public class SubBotBootstrapTask extends Task {
     }
 
     /**
-     * (2026-10-07 步骤2) 本地不可见时的远程接近。
+     * (2026-10-07 步骤2 / 同日 13:4x 升级为通用坐标共享) 本地不可见时的远程接近。
      *
      * <p><b>为什么需要</b>: 客户端只下发 ~48 格内的其他玩家实体。主 bot 走远后（1007 实测
      * 相距 277 格）次 bot 既看不到人、本地也没有坐标, {@code FollowPlayerTask} 只能停在
-     * "online but too far: no coordinates yet" 原地干等 —— 永远过不去。而
-     * {@link LeaderPhaseWatcher} 本就在每 2s 拉主 bot 的 {@code /status}, 其 {@code pos}
-     * 字段就是现成的跨进程坐标源（同机 localhost, 不新增对外暴露面）。用它做导航目标先把
-     * "过去"补上, 走到 ~48 格内本地就有坐标了, 下一拍自动交回 {@link FollowAndWorkTask}。
+     * "online but too far: no coordinates yet" 原地干等 —— 永远过不去。
      *
-     * <p><b>返回 null 的四种情形</b>（都表示"走常规跟随"）: 无鲜坐标 / 跨维度 / 本地已感知
-     * 主 bot / 本地最后已知坐标与上报坐标足够接近。
+     * <p><b>坐标来源已改为通用的 {@link PeerPosWatcher}</b>（按游戏内玩家名查本机同伴的
+     * {@code /status.pos}），不再用 {@code LeaderPhaseWatcher.pos()} 那种"只有 leaderPort
+     * 那一台"的口径 —— 后者既要依赖 {@code leaderPort} 配置、又存在"配置里的名字与端口
+     * 指向不一致时会朝错的人走"的隐患。
      *
-     * <p>跨维度不做: 同 XZ 坐标在下界与主世界不是同一地点, 乱走是负收益; 留给既有跟丢路径
-     * （维度不符时 {@code FollowPlayerTask} 会自己终态）。
+     * <p><b>"要不要走远程、走哪儿"的判定只在 {@link PeerPosWatcher#remoteNav} 一处</b>
+     * （与 {@code FollowPlayerTask} 共用）；本方法只负责导航任务的重建节流、超时出口与文案。
+     *
+     * @return {@code null} = 走常规跟随（无鲜坐标 / 跨维度 / 本地已感知 / 本地坐标够用）
      */
     private Task tryRemoteApproach(AltoClef mod, long now) {
-        boolean usable = LeaderPhaseWatcher.posAgeMs() <= REMOTE_POS_MAX_AGE_MS;
-        Dimension dim = LeaderPhaseWatcher.posDimension();
-        Vec3d remote = LeaderPhaseWatcher.pos();
-        if (!usable || dim == null || remote == null
-                || dim != WorldHelper.getCurrentDimension()) {
-            clearRemoteApproach();
-            return null;
-        }
-
         // 本地已"感知"到主 bot（当前可见/可听, _playerMap 每拍重建）→ 坐标新鲜, 交常规跟随。
         if (mod.getEntityTracker().isPlayerLoaded(_leader)) {
             clearRemoteApproach();
             return null;
         }
-        // 本地有"最后已知坐标"且离上报坐标不远 → 本地信息够用, 不必远程补位（同时压掉
-        // "本地有旧坐标但人已走远"与"边界反复切换"两类抖动）。
-        Optional<Vec3d> local = mod.getEntityTracker().getPlayerMostRecentPosition(_leader);
-        if (local.isPresent()
-                && local.get().squaredDistanceTo(remote) <= REMOTE_TRUST_LOCAL_DIST * REMOTE_TRUST_LOCAL_DIST) {
+        Optional<PeerPosWatcher.Nav> nav = PeerPosWatcher.remoteNav(_leader,
+                mod.getEntityTracker().getPlayerMostRecentPosition(_leader),
+                WorldHelper.getCurrentDimension());
+        if (nav.isEmpty()) {
             clearRemoteApproach();
             return null;
         }
@@ -451,16 +427,16 @@ public class SubBotBootstrapTask extends Task {
             return null;
         }
 
-        BlockPos target = new BlockPos((int) Math.floor(remote.x), (int) Math.floor(remote.y),
-                (int) Math.floor(remote.z));
+        BlockPos target = nav.get().blockPos();
         if (_remoteApproach == null || _remoteApproachTarget == null
-                || _remoteApproachTarget.getSquaredDistance(target) > REMOTE_RETARGET_DIST * REMOTE_RETARGET_DIST) {
-            _remoteApproach = new GetToBlockTask(target, false, dim);
+                || _remoteApproachTarget.getSquaredDistance(target)
+                        > PeerPosWatcher.RETARGET_DIST * PeerPosWatcher.RETARGET_DIST) {
+            _remoteApproach = new GetToBlockTask(target, false, nav.get().dim());
             _remoteApproachTarget = target;
         }
         // 交出去的 follow 会被框架 stop, 句柄留着会被误判成"终态"。
         _follow = null;
-        double dist = mod.getPlayer() == null ? -1 : remote.distanceTo(mod.getPlayer().getPos());
+        double dist = mod.getPlayer() == null ? -1 : nav.get().pos().distanceTo(mod.getPlayer().getPos());
         SubBotDuty.set(SubBotDuty.Mode.FOLLOW, _leader,
                 "远程接近 " + _leader + "（超出客户端跟踪范围）");
         setDebugState("[次bot引导] 远程接近 " + _leader
