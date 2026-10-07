@@ -82,6 +82,14 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final Direction BED_PLACE_DIRECTION = Direction.UP;
     private final TimerGame _bedInteractTimeout = new TimerGame(12);
     private final TimerGame _inBedTimer = new TimerGame(1);
+    // (2026-10-07 起床站床卡死修复, 现场 10:49:15 / 13:10:50, 详见 memory/detail/50-wake-bed-stuck)
+    // 睡醒捡床: 目标床仍在脚下 (<BED_PICKUP_STANDOFF) 时先走开再拆 —— 否则
+    // DestroyBlockTask 内部"站上方危险→RunAway"与破坏分支随 onGround 抖动每拍乒乓,
+    // 叠加任务层 lookAt(脚下床=站床角退化方向) 抢 baritone PREPPING 的视线,
+    // 表现为原地不动 + 盲挥 10~32s (SWING-BREAK 盲挥放大观感)。
+    private static final double BED_PICKUP_STANDOFF = 2.0;
+    private GetToBlockTask _bedStepOffTask;
+    private BlockPos _bedStepOffTarget;
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(4, true);
     private TimerGame _placeAttemptTimer; // (2026-09-01 放床 3s 超时换区域重扫, 见 Placing bed 段)
     // (2026-09-16 铺地基死循环) 与 _placeAttemptTimer 同理, 但守护"先搭床底平台"段:
@@ -419,6 +427,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
         // (2026-09-24 站位导航计时随实例归零)
         _standNavRegion = null;
         _standNavStartMs = 0;
+        // (2026-10-07 起床站床卡死修复) 离床子任务随实例重置
+        _bedStepOffTask = null;
+        _bedStepOffTarget = null;
 
         // Don't break our bed thing.
         mod.getBehaviour().push();
@@ -619,6 +630,21 @@ public class PlaceBedAndSetSpawnTask extends Task {
                 BlockPos bed = selfBedStillThere(mod, targetBed);
                 if (bed != null) {
                     if (bed.isWithinDistance(mod.getPlayer().getPos(), 8)) {
+                        // (2026-10-07 起床站床卡死修复) 睡醒人还站在床边/床上 → 先走开再拆。
+                        // 铁律: 离床分支必须有出口 —— 找不到落点就回落直接拆 (老行为), 不 hold。
+                        if (bed.isWithinDistance(mod.getPlayer().getPos(), BED_PICKUP_STANDOFF)) {
+                            BlockPos step = pickBedStandoffPos(mod, bed);
+                            if (step != null) {
+                                if (_bedStepOffTask == null || !step.equals(_bedStepOffTarget)) {
+                                    _bedStepOffTarget = step;
+                                    _bedStepOffTask = new GetToBlockTask(step, false);
+                                }
+                                setDebugState("Stepping off my bed before picking it up.");
+                                return _bedStepOffTask;
+                            }
+                        }
+                        _bedStepOffTask = null;
+                        _bedStepOffTarget = null;
                         setDebugState("Picking up my placed bed after sleeping.");
                         return new DestroyBlockTask(bed);
                     }
@@ -1533,6 +1559,35 @@ public class PlaceBedAndSetSpawnTask extends Task {
             }
         }
         return null;
+    }
+
+    /**
+     * (2026-10-07 起床站床卡死修复) 捡床前离床落点: 床周 Chebyshev ring 2→3 逐圈
+     * 找"脚下实心、站位+头顶非实心、非床方块"的格子, 取离玩家最近者。
+     * 找不到返回 null —— 调用方回落直接拆床 (分支必须有出口, 不 hold)。
+     */
+    private BlockPos pickBedStandoffPos(AltoClef mod, BlockPos bed) {
+        if (mod.getPlayer() == null) return null;
+        Vec3d playerPos = mod.getPlayer().getPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int r = 2; r <= 3; ++r) {
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue; // 只取外圈
+                    BlockPos cand = bed.add(dx, 0, dz);
+                    if (mod.getWorld().getBlockState(cand).getBlock() instanceof BedBlock) continue;
+                    if (WorldHelper.isSolid(mod, cand) || WorldHelper.isSolid(mod, cand.up())) continue;
+                    if (!WorldHelper.isSolid(mod, cand.down())) continue;
+                    double dist = Vec3d.ofCenter(cand).squaredDistanceTo(playerPos);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        best = cand;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     /**
