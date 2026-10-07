@@ -109,7 +109,16 @@ public class MobDefenseChain extends SingleTaskChain {
     // (20260915 加入 EndermanEntity) FIGHT 击杀任务按此类别过滤候选, 缺末影人时
     // _fightTargets 非空但 KillEntitiesTask 候选集为空 → wander 空转 20s 挨打
     // (日志实锤 20260915-115534 12:02:23~43, 血量 20→10.4)。
-    public static Class[] HOSTILE_ANNOYING_CLASSES = new Class[]{SkeletonEntity.class, ZombieEntity.class, SpiderEntity.class, CaveSpiderEntity.class, WitchEntity.class, PiglinEntity.class, PiglinBruteEntity.class, HoglinEntity.class, ZoglinEntity.class, BlazeEntity.class, WitherSkeletonEntity.class, PillagerEntity.class, DrownedEntity.class, EndermanEntity.class};
+    // (20261007 加入 ZombieVillager/ZombifiedPiglin) 同类故障复发: _entityMap 按实体
+    // 运行时【精确类】作 key (EntityTracker.updateState entity.getClass(), squash 只压
+    // Player), ZombieVillagerEntity 挂在自身类键下, getClosestEntity(ZombieEntity.class)
+    // 查不到它; 而威胁池 _hostiles 走 instanceof HostileEntity 照收 (EntityTracker:651)
+    // → CONFIDENT FIGHT (enemies=1) 提交批次后 KillEntitiesTask 候选集恒空 →
+    // "Waiting for calculations (wandering)" 原地挨打 (日志实锤 20261007-212359
+    // 21:31:32~21:34:01, 僵尸村民贴身 1~2 格, 血量 20→18.75)。ZombifiedPiglin 同理
+    // (AbstractPiglinEntity 直系, 仅激怒时进威胁池; 非激怒时批次不含它, 不会被追杀)。
+    // ⚠️ 预存问题, 非新引入。批次守卫不变: accept=_fightTargets::contains, 只杀进批次的。
+    public static Class[] HOSTILE_ANNOYING_CLASSES = new Class[]{SkeletonEntity.class, ZombieEntity.class, ZombieVillagerEntity.class, ZombifiedPiglinEntity.class, SpiderEntity.class, CaveSpiderEntity.class, WitchEntity.class, PiglinEntity.class, PiglinBruteEntity.class, HoglinEntity.class, ZoglinEntity.class, BlazeEntity.class, WitherSkeletonEntity.class, PillagerEntity.class, DrownedEntity.class, EndermanEntity.class};
     private final KillAura _killAura = new KillAura();
     private final HashMap<Entity, TimerGame> _closeAnnoyingEntities = new HashMap<>();
     private Entity _targetEntity;
