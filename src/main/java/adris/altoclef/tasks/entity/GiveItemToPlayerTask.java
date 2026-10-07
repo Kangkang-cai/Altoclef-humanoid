@@ -3,12 +3,14 @@ package adris.altoclef.tasks.entity;
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
 import adris.altoclef.TaskCatalogue;
+import adris.altoclef.bridge.PeerCommandSender;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.RunAwayFromPositionTask;
 import adris.altoclef.tasks.slot.ClickSlotTask;
 import adris.altoclef.tasks.squashed.CataloguedResourceTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.ItemTarget;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -186,6 +188,7 @@ public class GiveItemToPlayerTask extends Task {
 
             if (!targetPos.isInRange(mod.getPlayer().getPos(), 4)) {
                 mod.log("Finished giving items.");
+                notifyReceiverToPickUp();
                 stop(mod);
                 return null;
             }
@@ -228,6 +231,27 @@ public class GiveItemToPlayerTask extends Task {
             return Arrays.equals(task._targets, _targets);
         }
         return false;
+    }
+
+    /**
+     * (2026-10-07 交付闭环) 交付完成后，让<b>接收方 bot</b>主动去捡。
+     *
+     * <p>交付只能把物品丢在地上（MC 没有"塞进对方背包"的原语）：真人会自己捡，
+     * 另一个 bot 不会 —— 1007 14:10 现场即"丢了但对方不捡、自动拾取概率极低"。
+     * 这里给对方发一条 {@code @pickup <物品短名>}，由它的 {@code PickupCommand}
+     * 派 {@code PickupDroppedItemTask} 走过去捡。
+     *
+     * <p>物品名用 {@link ItemHelper#stripItemName}（= {@code cooked_porkchop} 这类注册短名），
+     * 与对面 {@code PickupCommand} 的三级解析口径一致。
+     *
+     * <p>对面是真人玩家 / 未开 bridge ⇒ {@link PeerCommandSender} 静默跳过，无副作用；
+     * 多个目标物品时逐个发（实测场景都是单一物品）。
+     */
+    private void notifyReceiverToPickUp() {
+        for (ItemTarget target : _targets) {
+            if (target.getMatches().length == 0) continue;
+            PeerCommandSender.send(_playerName, "@pickup " + ItemHelper.stripItemName(target.getMatches()[0]));
+        }
     }
 
     /**
