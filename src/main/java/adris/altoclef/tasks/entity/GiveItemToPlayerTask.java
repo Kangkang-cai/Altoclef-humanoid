@@ -41,6 +41,12 @@ public class GiveItemToPlayerTask extends Task {
     /** 交付前瞄准对方脚边的视线稳定等待 (毫秒)。平滑转头未稳定就丢，物品会沿旧朝向飞出。 */
     private static final long AIM_SETTLE_MS = 400;
 
+    /** (2026-10-07 恰好数量) 拆堆受阻重试起点 (0 = 未受阻)；超过 {@link #PREP_STUCK_GIVEUP_MS} 放弃本次交付。 */
+    private long _prepStuckSinceMs;
+
+    /** 拆堆受阻放弃阈值 —— 一切 hold/wait 分支必须有出口 (铁律②)。 */
+    private static final long PREP_STUCK_GIVEUP_MS = 3000;
+
     public GiveItemToPlayerTask(String player, ItemTarget... targets) {
         _playerName = player;
         _targets = targets;
@@ -61,6 +67,7 @@ public class GiveItemToPlayerTask extends Task {
         _droppingItems = false;
         _throwTarget.clear();
         _aimStartMs = 0;
+        _prepStuckSinceMs = 0;
     }
 
     @Override
@@ -120,26 +127,59 @@ public class GiveItemToPlayerTask extends Task {
                 _aimStartMs = 0;
             }
 
+            // (2026-10-07 恰好数量) 交付语义 = "恰好给 N 个"。MC 的丢弃只有整堆一条路
+            // (点 slot -999 = 丢光标整堆)，所以必须先【拆堆】把光标收敛到恰好 N 个：
+            //   光标空      → 挑一个堆拿到光标 (优先"≥需求的最小堆"，其次最大堆)
+            //   光标超量    → 右键源槽放回 1 个 (光标非空时右键 = 放 1 个)，逐拍收敛
+            //   光标恰好/不足 → 丢出光标整堆
+            // 全部判定直接读【光标现状】，不存中间态 ⇒ 被抢占恢复后天然幂等 (对照 onStart 注释那类坑)。
+            ItemStack cursor = StorageHelper.getItemStackInCursorSlot();
+
             for (int i = 0; i < _throwTarget.size(); ++i) {
                 ItemTarget target = _throwTarget.get(i);
-                if (target.getTargetCount() > 0) {
-                    Optional<Slot> has = mod.getItemStorage().getSlotsWithItemPlayerInventory(false, target.getMatches()).stream().findFirst();
-                    if (has.isPresent()) {
-                        Slot currentlyPresent = has.get();
-                        if (Slot.isCursor(currentlyPresent)) {
-                            ItemStack stack = StorageHelper.getItemStackInSlot(currentlyPresent);
-                            // Update target
-                            target = new ItemTarget(target, target.getTargetCount() - stack.getCount());
-                            _throwTarget.set(i, target);
-                            Debug.logMessage("THROWING: " + has.get());
-                            // 丢光标物品 = 在玩家窗口外点 slot(-999)。物品沿当前视线方向抛出，
-                            // 上面已瞄向对方脚边 ⇒ 落在脚边，接收方走过去即可自动拾取。
-                            _dropTask = new ClickSlotTask(Slot.UNDEFINED);
-                            return _dropTask;
-                        } else {
-                            _aimStartMs = 0;
-                            return new ClickSlotTask(currentlyPresent);
-                        }
+                if (target.getTargetCount() <= 0) continue;
+
+                // (1) 光标上就是本次要给的物品
+                if (!cursor.isEmpty() && target.matches(cursor.getItem())) {
+                    if (cursor.getCount() <= target.getTargetCount()) {
+                        // 恰好 (或该堆本来就不够需求 = 按实际给) → 丢出光标整堆
+                        int give = cursor.getCount();
+                        _throwTarget.set(i, new ItemTarget(target, target.getTargetCount() - give));
+                        _prepStuckSinceMs = 0;
+                        Debug.logMessage("THROWING " + give + "x " + cursor.getItem().getTranslationKey() + " (exact)");
+                        // 丢光标物品 = 在玩家窗口外点 slot(-999)。物品沿当前视线方向抛出，
+                        // 上面已瞄向对方脚边 ⇒ 落在脚边，接收方走过去即可自动拾取。
+                        _dropTask = new ClickSlotTask(Slot.UNDEFINED);
+                        return _dropTask;
+                    }
+                    // 超量 → 放回 1 个到同类未满堆 (通常是刚被拿空的源槽)
+                    Optional<Slot> back = findSlotToPutBack(mod, cursor);
+                    if (back.isPresent()) {
+                        _prepStuckSinceMs = 0;
+                        return new ClickSlotTask(back.get(), 1);
+                    }
+                    // 理论上"源槽被左键拿空后必有位置放回"，走到这里 = 背包异常。
+                    // 有出口优先: 【不偷偷多给】(用户钦定"恰好")，先记录重试，超过 3s 放弃本次交付并告警。
+                    long stuckNow = System.currentTimeMillis();
+                    if (_prepStuckSinceMs == 0) {
+                        _prepStuckSinceMs = stuckNow;
+                        mod.logWarning("Cannot split stack for \"" + _playerName + "\": no slot to put the "
+                                + cursor.getCount() + "x surplus back. Retrying...");
+                    } else if (stuckNow - _prepStuckSinceMs > PREP_STUCK_GIVEUP_MS) {
+                        mod.logWarning("Giving up exact delivery of "
+                                + cursor.getItem().getTranslationKey() + " x" + cursor.getCount()
+                                + " (inventory full, surplus has nowhere to go).");
+                        stop(mod);
+                        return null;
+                    }
+                    return null;
+                }
+
+                // (2) 光标空 → 挑一个堆拿到光标 (左键 = 拿整堆；MC 没有"拿 N 个")
+                if (cursor.isEmpty()) {
+                    Optional<Slot> src = pickSourceSlotFor(mod, target);
+                    if (src.isPresent()) {
+                        return new ClickSlotTask(src.get());
                     }
                 }
             }
@@ -188,6 +228,53 @@ public class GiveItemToPlayerTask extends Task {
             return Arrays.equals(task._targets, _targets);
         }
         return false;
+    }
+
+    /**
+     * (2026-10-07 恰好数量) 找一个能把光标上这撮物品放回去的槽：优先"同类且未满"的堆
+     * （左键拿空的那个源槽最典型），否则任意能容纳它的槽。找不到 ⇒ 调用方降级直接丢（有出口优先）。
+     */
+    private Optional<Slot> findSlotToPutBack(AltoClef mod, ItemStack cursorStack) {
+        for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, cursorStack.getItem())) {
+            if (Slot.isCursor(slot)) continue;
+            ItemStack at = StorageHelper.getItemStackInSlot(slot);
+            if (!at.isEmpty() && at.getCount() < at.getMaxCount()) {
+                return Optional.of(slot);
+            }
+        }
+        return mod.getItemStorage().getSlotThatCanFitInPlayerInventory(cursorStack, false);
+    }
+
+    /**
+     * (2026-10-07 恰好数量) 挑一个堆拿到光标：优先"数量 ≥ 需求的最小堆"（拆完剩余最少）；
+     * 没有这样的堆时挑<b>最大堆</b> —— 此时该堆本就 &lt; 需求，整堆给出去也不会超过需求，
+     * "恰好"语义天然满足（且绕开了 MC 无法跨堆精确拆分的限制）。
+     */
+    private Optional<Slot> pickSourceSlotFor(AltoClef mod, ItemTarget target) {
+        Slot best = null;
+        int bestCount = -1;
+        boolean bestOver = false;
+        for (Slot slot : mod.getItemStorage().getSlotsWithItemPlayerInventory(false, target.getMatches())) {
+            if (Slot.isCursor(slot)) continue;
+            int count = StorageHelper.getItemStackInSlot(slot).getCount();
+            if (count <= 0) continue;
+            boolean over = count >= target.getTargetCount();
+            if (best == null) {
+                best = slot;
+                bestCount = count;
+                bestOver = over;
+            } else if (over) {
+                if (!bestOver || count < bestCount) {
+                    best = slot;
+                    bestCount = count;
+                    bestOver = true;
+                }
+            } else if (!bestOver && count > bestCount) {
+                best = slot;
+                bestCount = count;
+            }
+        }
+        return Optional.ofNullable(best);
     }
 
     @Override
