@@ -10,14 +10,18 @@ import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
 import adris.altoclef.tasks.speedrun.BeatPhase;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.SleepHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -89,6 +93,31 @@ public class SubBotBootstrapTask extends Task {
     private static final long LOST_LOG_INTERVAL_MS = 60_000;
 
     /**
+     * (2026-10-07 步骤2) 远程接近：主 bot 经 /status 上报坐标的可用鲜度上限。超过视为陈旧,
+     * 不拿来当导航目标（2s 轮询, 10s 容忍主 bot 短暂卡顿/网络抖动）。
+     */
+    private static final long REMOTE_POS_MAX_AGE_MS = 10_000;
+
+    /**
+     * (2026-10-07 步骤2) 主 bot 移动超过该距离才重建远程接近目标 —— 否则每 2s 轮询都 new
+     * 一次 GetToBlockTask 会不停打断 baritone 已算好的路径。
+     */
+    private static final double REMOTE_RETARGET_DIST = 8.0;
+
+    /**
+     * (2026-10-07 步骤2) 本地"最后已知坐标"与主 bot 上报坐标之差在此以内 → 认为本地信息够用,
+     * 走常规跟随而非远程补位（防"本地有旧坐标但人已走远"和"边界反复切换"两种抖动）。
+     */
+    private static final double REMOTE_TRUST_LOCAL_DIST = 16.0;
+
+    /**
+     * (2026-10-07 步骤2) 远程接近硬上限。超时仍未到达 = 视为跟丢, 结束本次引导（与
+     * {@link #FOLLOW_LOST_GIVEUP_MS} 同款出口语义, 上层冷却后重新拉起）—— 保证这条路
+     * 有明确出口, 不会变成无限导航。
+     */
+    private static final long REMOTE_APPROACH_MAX_MS = 5 * 60_000;
+
+    /**
      * (2026-10-06 22:5x 用户点名) <b>只在这些大阶段跟随主 bot，其余阶段自己跑主线</b> ——
      * 取代此前"前置完成后全程跟随"。编号对应用户拍板时我列的主线大任务清单。
      */
@@ -130,6 +159,17 @@ public class SubBotBootstrapTask extends Task {
     private long _followStartedMs = 0;
     /** 跟丢日志上次落聊天的时间（其余落 diag，防刷屏）。 */
     private long _lastLostLogMs = 0;
+
+    // ------------------------------------------------------------------ //
+    // (2026-10-07 步骤2) 远程接近状态
+    // ------------------------------------------------------------------ //
+
+    /** 本地看不到主 bot 时的"远程接近"导航任务；null = 当前不走这条路。 */
+    private Task _remoteApproach = null;
+    /** 远程接近当前导航目标格（用于"移动超阈值才重建"判断）。 */
+    private BlockPos _remoteApproachTarget = null;
+    /** 远程接近起始时刻（0 = 当前不在远程接近）。 */
+    private long _remoteApproachSinceMs = 0;
 
     /** "自主跑主线"时的子任务缓存 —— 同 {@link #_follow}，每拍 new 会打断它自己的进度。 */
     private Task _autoTask = null;
@@ -325,6 +365,12 @@ public class SubBotBootstrapTask extends Task {
             setDebugState("[次bot引导] 跟丢 " + _leader + "，等主bot 靠近");
             return null;
         }
+
+        // (2026-10-07 步骤2) 远程坐标补位：本地看不到主 bot 时, 用主 bot 上报的坐标先把
+        // "过去"这一步补上（详见 tryRemoteApproach）。
+        Task remote = tryRemoteApproach(mod, now);
+        if (remote != null) return remote;
+
         if (_follow == null) {
             _follow = new FollowAndWorkTask(_leader, new FollowAndWorkTask.GreedySideWorkPicker());
             _followStartedMs = now;
@@ -355,6 +401,81 @@ public class SubBotBootstrapTask extends Task {
     }
 
     /**
+     * (2026-10-07 步骤2) 本地不可见时的远程接近。
+     *
+     * <p><b>为什么需要</b>: 客户端只下发 ~48 格内的其他玩家实体。主 bot 走远后（1007 实测
+     * 相距 277 格）次 bot 既看不到人、本地也没有坐标, {@code FollowPlayerTask} 只能停在
+     * "online but too far: no coordinates yet" 原地干等 —— 永远过不去。而
+     * {@link LeaderPhaseWatcher} 本就在每 2s 拉主 bot 的 {@code /status}, 其 {@code pos}
+     * 字段就是现成的跨进程坐标源（同机 localhost, 不新增对外暴露面）。用它做导航目标先把
+     * "过去"补上, 走到 ~48 格内本地就有坐标了, 下一拍自动交回 {@link FollowAndWorkTask}。
+     *
+     * <p><b>返回 null 的四种情形</b>（都表示"走常规跟随"）: 无鲜坐标 / 跨维度 / 本地已感知
+     * 主 bot / 本地最后已知坐标与上报坐标足够接近。
+     *
+     * <p>跨维度不做: 同 XZ 坐标在下界与主世界不是同一地点, 乱走是负收益; 留给既有跟丢路径
+     * （维度不符时 {@code FollowPlayerTask} 会自己终态）。
+     */
+    private Task tryRemoteApproach(AltoClef mod, long now) {
+        boolean usable = LeaderPhaseWatcher.posAgeMs() <= REMOTE_POS_MAX_AGE_MS;
+        Dimension dim = LeaderPhaseWatcher.posDimension();
+        Vec3d remote = LeaderPhaseWatcher.pos();
+        if (!usable || dim == null || remote == null
+                || dim != WorldHelper.getCurrentDimension()) {
+            clearRemoteApproach();
+            return null;
+        }
+
+        // 本地已"感知"到主 bot（当前可见/可听, _playerMap 每拍重建）→ 坐标新鲜, 交常规跟随。
+        if (mod.getEntityTracker().isPlayerLoaded(_leader)) {
+            clearRemoteApproach();
+            return null;
+        }
+        // 本地有"最后已知坐标"且离上报坐标不远 → 本地信息够用, 不必远程补位（同时压掉
+        // "本地有旧坐标但人已走远"与"边界反复切换"两类抖动）。
+        Optional<Vec3d> local = mod.getEntityTracker().getPlayerMostRecentPosition(_leader);
+        if (local.isPresent()
+                && local.get().squaredDistanceTo(remote) <= REMOTE_TRUST_LOCAL_DIST * REMOTE_TRUST_LOCAL_DIST) {
+            clearRemoteApproach();
+            return null;
+        }
+
+        if (_remoteApproachSinceMs == 0) _remoteApproachSinceMs = now;
+        if (now - _remoteApproachSinceMs >= REMOTE_APPROACH_MAX_MS) {
+            // 出口: 长时间走不到 = 跟丢, 结束本次引导（上层冷却后重新拉起）。
+            Debug.logMessage("[SUB-BOOT] 远程接近 " + _leader + " 超 "
+                    + (REMOTE_APPROACH_MAX_MS / 60_000) + " 分钟未到达，本次引导结束");
+            Debug.logToFile("altoclef_diag.log", "[SUB-BOOT] remote approach give up: " + _leader);
+            clearRemoteApproach();
+            _finished = true;
+            return null;
+        }
+
+        BlockPos target = new BlockPos((int) Math.floor(remote.x), (int) Math.floor(remote.y),
+                (int) Math.floor(remote.z));
+        if (_remoteApproach == null || _remoteApproachTarget == null
+                || _remoteApproachTarget.getSquaredDistance(target) > REMOTE_RETARGET_DIST * REMOTE_RETARGET_DIST) {
+            _remoteApproach = new GetToBlockTask(target, false, dim);
+            _remoteApproachTarget = target;
+        }
+        // 交出去的 follow 会被框架 stop, 句柄留着会被误判成"终态"。
+        _follow = null;
+        double dist = mod.getPlayer() == null ? -1 : remote.distanceTo(mod.getPlayer().getPos());
+        SubBotDuty.set(SubBotDuty.Mode.FOLLOW, _leader,
+                "远程接近 " + _leader + "（超出客户端跟踪范围）");
+        setDebugState("[次bot引导] 远程接近 " + _leader
+                + (dist >= 0 ? "（" + (int) dist + " 格外）" : ""));
+        return _remoteApproach;
+    }
+
+    /** 退出远程接近: 丢导航句柄与计时, 回到常规跟随/自主。 */
+    private void clearRemoteApproach() {
+        _remoteApproach = null;
+        _remoteApproachTarget = null;
+        _remoteApproachSinceMs = 0;
+    }
+
+    /**
      * 此刻该跟随还是自主 = 主 bot 当前大阶段是否落在 {@link #FOLLOW_PHASES} 内。
      *
      * <p>三种"退回跟随"的保守情形（都返回 true = 跟随）：① 未配 {@code leaderPort}
@@ -367,7 +488,13 @@ public class SubBotBootstrapTask extends Task {
         if (port <= 0) return true;
         LeaderPhaseWatcher.ensureStarted(port);
         BeatPhase p = LeaderPhaseWatcher.phase();
-        if (p == null || LeaderPhaseWatcher.ageMs() > LEADER_PHASE_STALE_MS) return true;
+        // (2026-10-07 步骤1) UNKNOWN = 主 bot 未跑主线 / 空闲待命 —— 属"不知道他在干嘛"的
+        // 保守情形, 必须跟随（与本方法注释的哲学一致）。此前 UNKNOWN 落在白名单外被当成
+        // "明确不跟", 于是主 bot 一待命次 bot 就抛弃跟随去自主（1007 实测; 用户口径:
+        // "主bot 是我停的/待命, 但次 bot 也要过去呀"）。
+        if (p == null || p == BeatPhase.UNKNOWN || LeaderPhaseWatcher.ageMs() > LEADER_PHASE_STALE_MS) {
+            return true;
+        }
         return FOLLOW_PHASES.contains(p);
     }
 
@@ -377,6 +504,7 @@ public class SubBotBootstrapTask extends Task {
      */
     private Task tickAutonomous(AltoClef mod) {
         _follow = null;   // 从跟随切到自主 → 丢掉 follow 句柄（其实例已被顶掉）
+        clearRemoteApproach();   // 同理丢掉远程接近句柄
         if (_autoTask == null || _autoTask.isFinished(mod)) {
             Debug.logToFile("altoclef_diag.log", "[SUB-BOOT] switch to AUTONOMOUS mainline"
                     + " (leader phase=" + LeaderPhaseWatcher.phase() + ")");
