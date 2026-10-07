@@ -217,6 +217,9 @@ public final class BridgeHttpServer {
             // (2026-10-07 bot 间坐标共享) 游戏内玩家名 —— 同伴据此把"要跟的人"翻译成
             // "去哪个端口取坐标"（@follow/@give 都按游戏内名寻址，botId 不行）。
             sb.append(','); BridgeJson.str(sb, "player"); sb.append(':'); BridgeJson.str(sb, s.player);
+            // (2026-10-07 follow 关系治理) 本 bot 此刻在跟谁（空串 = 没在跟随）。同伴据此检测
+            // "对向跟随"（A 跟 B 且 B 跟 A）并让临时关系一侧退让 —— 见 FollowRelation。
+            sb.append(','); BridgeJson.str(sb, "following"); sb.append(':'); BridgeJson.str(sb, s.following);
             // (2026-10-06 多 bot 随行) 角色: "main" | "sub"。对端据此区分主次 bot
             // （把"跟着谁走""向谁要料""目标量"这几类决策分开）。取值恒非空, 不省略。
             sb.append(','); BridgeJson.str(sb, "role"); sb.append(':'); BridgeJson.str(sb, _role);

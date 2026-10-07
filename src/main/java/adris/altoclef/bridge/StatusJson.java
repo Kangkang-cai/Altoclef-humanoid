@@ -53,6 +53,15 @@ public final class StatusJson {
      */
     private static final Pattern PLAYER_RE = Pattern.compile("\"player\"\\s*:\\s*\"([^\"]{1,32})\"");
 
+    /**
+     * (2026-10-07 follow 关系治理) {@code "following":"qiaoqiao"} —— 本 bot
+     * <b>此刻正在跟随谁</b>；没在跟随为空串（值来源 {@link FollowRegistry}）。
+     *
+     * <p>用途：对向跟随（A 跟 B 且 B 跟 A）的检测 —— 见 {@link FollowRelation#mutual}。
+     * ⚠️ 刻意不用 {@code task} 字段做这件事：那是链名映射的中文短标签，属显示串不是契约。
+     */
+    private static final Pattern FOLLOWING_RE = Pattern.compile("\"following\"\\s*:\\s*\"([^\"]{0,32})\"");
+
     /** {@code pos} 解析结果：世界坐标 + 上报维度。 */
     public record Pos(Vec3d pos, Dimension dim) {
     }
@@ -104,8 +113,21 @@ public final class StatusJson {
         return name.isEmpty() ? null : name;
     }
 
-    /** {@code /status} 的 dim token → 枚举（取值口径与 ActionDispatcher/NamedLandmarks 一致）。 */
-    public static Dimension dimFromToken(String t) {
+    /**
+     * 解析本 bot 当前跟随的玩家名；<b>没在跟随 / 无键</b>返回 {@code null}。
+     *
+     * <p>注意与 {@link #parsePlayer} 的差别：本方法在"键存在但值为空串"时返回 {@code null}
+     * —— 那是"没在跟随"的正常表达，不是解析失败。调用方只需判空即可。
+     */
+    public static String parseFollowing(String json) {
+        if (json == null || json.isEmpty()) return null;
+        Matcher m = FOLLOWING_RE.matcher(json);
+        if (!m.find()) return null;
+        String name = m.group(1).trim();
+        return name.isEmpty() ? null : name;
+    }
+
+    /** {@code /status} 的 dim token → 枚举（取值口径与 ActionDispatcher/NamedLandmarks 一致）。 */    public static Dimension dimFromToken(String t) {
         if (t == null) return null;
         return switch (t.toLowerCase(Locale.ROOT)) {
             case "overworld" -> Dimension.OVERWORLD;

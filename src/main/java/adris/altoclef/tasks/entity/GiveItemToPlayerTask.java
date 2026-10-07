@@ -127,7 +127,10 @@ public class GiveItemToPlayerTask extends Task {
         setDebugState("Going to player...");
         // (2026-10-05) FollowPlayerTask 默认跟随距离改为 3 格; 交付物品必须在
         // 1.5 格内才能触发扔掷 (见上方 isInRange 1.5 判定), 这里显式传近距离。
-        return new FollowPlayerTask(_playerName, 1);
+        // (2026-10-07 follow 关系治理) 后两个参数 = (不限时, 不登记 /status.following)：
+        // 这只是"走过去交货"的一次性位移, 不是跟随关系 —— 若登记会与"对方正跟着我"
+        // 构成假互指, 导致双方互相退让而交货中断。
+        return new FollowPlayerTask(_playerName, 1, 0, false);
     }
 
     @Override

@@ -1,6 +1,7 @@
 package adris.altoclef.commands;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.bridge.FollowRelation;
 import adris.altoclef.commandsystem.Arg;
 import adris.altoclef.commandsystem.ArgParser;
 import adris.altoclef.commandsystem.Command;
@@ -44,9 +45,14 @@ public class FollowCommand extends Command {
             }
         }
         if ("work".equalsIgnoreCase(mode)) {
-            mod.runUserTask(new FollowAndWorkTask(username, new FollowAndWorkTask.GreedySideWorkPicker()), this::finish);
+            mod.runUserTask(new FollowAndWorkTask(username, new FollowAndWorkTask.GreedySideWorkPicker(),
+                    FollowRelation.COMMAND_FOLLOW_MAX_MS), this::finish);
         } else {
-            mod.runUserTask(new FollowPlayerTask(username), this::finish);
+            // (2026-10-07 follow 关系治理) 命令级 follow 一律带 5 分钟上限：到期结束，
+            // 次 bot 由 maybeStartSubBotBootstrap 回到 bootstrap（带阶段跟随），主 bot 经
+            // ActionDispatcher.resumeMainline 回主线 —— 即"最终回归两个次 bot 跟主 bot"。
+            mod.runUserTask(new FollowPlayerTask(username, 3, FollowRelation.COMMAND_FOLLOW_MAX_MS, true),
+                    this::finish);
         }
     }
 }

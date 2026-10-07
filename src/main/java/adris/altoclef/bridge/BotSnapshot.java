@@ -38,6 +38,14 @@ final class BotSnapshot {
      * （见 {@link PeerPosWatcher}）。离线 / 未进世界为空串。
      */
     final String player;
+    /**
+     * (2026-10-07 follow 关系治理) 本 bot <b>此刻正在跟随谁</b>的玩家名；没在跟随为空串。
+     * 来源 {@link FollowRegistry}（由 {@code FollowPlayerTask} 登记/注销）。
+     *
+     * <p>用途：对向跟随（A 跟 B 且 B 跟 A）检测 —— 见 {@link FollowRelation}。
+     * 刻意不用 {@code task} 字段：那是中文显示串，不是契约。
+     */
+    final String following;
     /** ISO8601 UTC 字符串，如 {@code "2026-09-30T04:23:22Z"}。 */
     final String ts;
     final boolean online;
@@ -103,7 +111,7 @@ final class BotSnapshot {
      */
     final String inventory;
 
-    private BotSnapshot(String botId, String player, String ts, boolean online, String summary, String task,
+    private BotSnapshot(String botId, String player, String following, String ts, boolean online, String summary, String task,
                         double x, double y, double z, String dim, double health,
                         int hunger, int level, String equipment, String holding,
                         String food, int foodCount, String keyItems,
@@ -114,6 +122,7 @@ final class BotSnapshot {
                         String inventory) {
         this.botId = botId;
         this.player = player == null ? "" : player;
+        this.following = following == null ? "" : following;
         this.ts = ts;
         this.online = online;
         this.summary = summary;
@@ -148,7 +157,7 @@ final class BotSnapshot {
 
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
     static BotSnapshot offline(String botId) {
-        return new BotSnapshot(botId, "", nowIso(), false, "不在游戏里", "离线",
+        return new BotSnapshot(botId, "", "", nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
                 null, "", "", null, "", "", "");
@@ -198,7 +207,8 @@ final class BotSnapshot {
         } catch (Throwable ignored) {
         }
 
-        return new BotSnapshot(botId, playerName, nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
+        return new BotSnapshot(botId, playerName, FollowRegistry.target() == null ? "" : FollowRegistry.target(),
+                nowIso(), true, r.summary, r.task, x, y, z, dimTok, hp,
                 digest.hunger, digest.level, digest.equipment, digest.holding,
                 digest.food, digest.foodCount, digest.keyItems,
                 SceneDigest.taskDetail(mod), SceneDigest.mainlineProgress(mod),

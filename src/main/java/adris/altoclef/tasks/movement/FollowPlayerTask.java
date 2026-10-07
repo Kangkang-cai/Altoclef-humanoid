@@ -1,6 +1,8 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.bridge.FollowRegistry;
+import adris.altoclef.bridge.FollowRelation;
 import adris.altoclef.bridge.PeerPosWatcher;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
@@ -32,6 +34,36 @@ public class FollowPlayerTask extends Task {
     private long _lastNoRecordWarnMs;
 
     // ------------------------------------------------------------------ //
+    // (2026-10-07 follow 关系治理) 时长上限 + 互指退让
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 本次跟随的总时长上限（毫秒）；{@code 0} = 不限时。
+     *
+     * <p>命令级 follow（{@code @follow} / {@code @follow ... work}）传
+     * {@link FollowRelation#COMMAND_FOLLOW_MAX_MS}（5 分钟）：主 bot 跟次 bot 不能太久、
+     * 次 bot 跟别的次 bot 也不能太久，到期即结束、由上层回到常驻任务（次 bot → bootstrap，
+     * 主 bot → 主线）。
+     *
+     * <p>{@code 0}（不限时）只给两类：① bootstrap 宿主内部的常驻跟随（它的生命周期由宿主
+     * 的跟丢/阶段判定管）；② {@code GiveItemToPlayerTask} 的"走到目标身边"接近段（见
+     * {@code _announce} 注释）。
+     */
+    private final long _maxDurationMs;
+
+    /**
+     * 是否登记进 {@link FollowRegistry}（{@code /status.following}），供同伴检测对向跟随。
+     *
+     * <p>{@code false} 只给 {@code GiveItemToPlayerTask} 的接近段：那只是"走过去交货"的一次性
+     * 位移，不是跟随关系 —— 若也登记，会出现"我去给人送货、对方正跟着我 ⇒ 被判定互指而互相退让"
+     * 的误伤。
+     */
+    private final boolean _announce;
+
+    /** 本次跟随起点（onStart 首次记，interrupt 二次进入不重置）。 */
+    private long _startedMs = 0;
+
+    // ------------------------------------------------------------------ //
     // (2026-10-07 bot 间坐标共享) 远程接近状态
     // ------------------------------------------------------------------ //
 
@@ -49,26 +81,61 @@ public class FollowPlayerTask extends Task {
     /**
      * 远程接近硬上限 —— 必须有出口，否则"同伴一直在动/一直够不到"会变成无限导航
      * （与 {@link SubBotBootstrapTask#REMOTE_APPROACH_MAX_MS} 同款语义）。
+     *
+     * <p>与 {@link #_maxDurationMs} 的分工：本值管<b>"这段远程走法"</b>的出口（给不限时的
+     * 常驻跟随用），{@code _maxDurationMs} 管<b>"整条跟随"</b>的总时限。命令级 follow 两者
+     * 同为 5 分钟 —— 无论哪条先到，都会结束任务，语义一致。
      */
     private static final long REMOTE_APPROACH_MAX_MS = 5 * 60_000;
 
     public FollowPlayerTask(String playerName) {
-        this(playerName, 3);
+        this(playerName, 3, 0, true);
     }
 
     public FollowPlayerTask(String playerName, double followDistance) {
+        this(playerName, followDistance, 0, true);
+    }
+
+    /**
+     * @param maxDurationMs 跟随总时长上限；{@code 0} = 不限时（见字段注释）
+     * @param announce      是否登记 {@code /status.following}（见字段注释）
+     */
+    public FollowPlayerTask(String playerName, double followDistance, long maxDurationMs, boolean announce) {
         _playerName = playerName;
         _followDistance = followDistance;
+        _maxDurationMs = maxDurationMs;
+        _announce = announce;
     }
 
     @Override
     protected void onStart(AltoClef mod) {
         _holdingDistance = false;
         resetRemoteApproach();
+        // interrupt 后会二次 onStart（框架行为）⇒ 起点只记一次，否则时限被无限续期。
+        if (_startedMs == 0) _startedMs = System.currentTimeMillis();
+        if (_announce) FollowRegistry.register(this, _playerName);
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+        long now = System.currentTimeMillis();
+
+        // (1) (2026-10-07 follow 关系治理) 互指退让：我在跟 X，而 X 也在跟我 ——
+        //     除非 X 就是我的 leader（设计关系），否则结束本侧跟随（唯一判定源 FollowRelation）。
+        if (shouldYieldMutualFollow(mod)) {
+            mod.logWarning("Mutual follow with \"" + _playerName + "\" detected; yielding on this side ("
+                    + FollowRelation.describe(_playerName) + "). Returning to the standing task.");
+            stop(mod);
+            return null;
+        }
+
+        // (2) 时长上限：命令级 follow 一律有时限，到期结束（回归常驻任务由上层完成）。
+        if (_maxDurationMs > 0 && now - _startedMs >= _maxDurationMs) {
+            mod.logWarning("Follow \"" + _playerName + "\" hit the " + (_maxDurationMs / 60_000)
+                    + "-min limit; ending (standing task resumes).");
+            stop(mod);
+            return null;
+        }
 
         Optional<Vec3d> lastPos = mod.getEntityTracker().getPlayerMostRecentPosition(_playerName);
 
@@ -228,9 +295,22 @@ public class FollowPlayerTask extends Task {
         mod.logWarning(message);
     }
 
+    /**
+     * (2026-10-07 follow 关系治理) 互指退让判定。判定源 <b>只在</b>
+     * {@link FollowRelation#shouldYield} 一处（本方法只负责取"我是谁"）。
+     * 未启用坐标共享 / 玩家还没加载 / 对面不是本版 jar ⇒ 一律不退让（保守）。
+     */
+    private boolean shouldYieldMutualFollow(AltoClef mod) {
+        if (!PeerPosWatcher.enabled()) return false;
+        var p = mod.getPlayer();
+        if (p == null) return false;
+        return FollowRelation.shouldYield(p.getName().getString(), _playerName);
+    }
+
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
-
+        // 注销 /status.following 登记（token 校验，旧实例不会误清新实例）。
+        if (_announce) FollowRegistry.unregister(this);
     }
 
     @Override

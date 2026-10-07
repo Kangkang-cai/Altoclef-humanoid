@@ -89,7 +89,7 @@ public final class PeerPosWatcher {
         }
     }
 
-    private record Peer(String name, Vec3d pos, Dimension dim, long ts, int port) {
+    private record Peer(String name, Vec3d pos, Dimension dim, long ts, int port, String following) {
         boolean fresh(long now) {
             return now - ts <= MAX_AGE_MS;
         }
@@ -159,6 +159,19 @@ public final class PeerPosWatcher {
     }
 
     /**
+     * (2026-10-07 follow 关系治理) 该玩家<b>此刻正在跟随谁</b>；没有记录 / 上报已陈旧 /
+     * 没在跟随 ⇒ {@code null}。
+     *
+     * <p>⚠️ 鲜度门槛与坐标一致（{@link #MAX_AGE_MS}）：一旦对面 /status 不再刷新，这里返回
+     * {@code null}（= 未知），{@link FollowRelation#shouldYield} 随之判"不互指" ⇒ <b>宁可不退让
+     * 也不误退让</b>。对面是旧 jar（无 {@code following} 键）同样落到 {@code null}。
+     */
+    public static String followingOf(String playerName) {
+        Peer p = fresh(playerName);
+        return p == null ? null : p.following();
+    }
+
+    /**
      * <b>唯一判定源</b>：本地坐标不可用（或明显陈旧）时，是否应改走 peer 上报坐标。
      *
      * <p>返回空（= 走常规跟随）的四种情形：① 无该玩家的新鲜上报（> {@link #MAX_AGE_MS}
@@ -221,7 +234,10 @@ public final class PeerPosWatcher {
                 if (name == null) continue;                 // 旧 jar 还没有 player 键 → 跳过
                 StatusJson.Pos p = StatusJson.parsePos(json);
                 if (p == null) continue;
-                _peers.put(key(name), new Peer(name, p.pos(), p.dim(), System.currentTimeMillis(), port));
+                // (2026-10-07) 顺带带上"它在跟谁"（follow 关系治理用；无键/空串 = null）。
+                String following = StatusJson.parseFollowing(json);
+                long now = System.currentTimeMillis();
+                _peers.put(key(name), new Peer(name, p.pos(), p.dim(), now, port, following));
             } catch (Throwable ignored) {
                 // 端口没人监听 / 对面未在游戏内：跳过（本实例自己的端口已在 ensureStarted 排除）
             }

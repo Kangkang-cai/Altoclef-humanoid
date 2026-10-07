@@ -2,6 +2,7 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.bridge.FollowRelation;
 import adris.altoclef.tasks.container.LootContainerTask;
 import adris.altoclef.tasks.resources.CollectVisibleOresTask;
 import adris.altoclef.tasksystem.Task;
@@ -86,6 +87,15 @@ public class FollowAndWorkTask extends Task {
     private final String _leaderName;
     private final WorkPicker _picker;
 
+    /**
+     * (2026-10-07 follow 关系治理) 跟随总时长上限，透传给内部 {@link FollowPlayerTask}；
+     * {@code 0} = 不限时。
+     *
+     * <p>{@code @follow <名> work}（命令级）传 {@link FollowRelation#COMMAND_FOLLOW_MAX_MS}；
+     * bootstrap 宿主内部用 {@code 0}（常驻，生命周期由宿主的跟丢/阶段判定管）。
+     */
+    private final long _maxDurationMs;
+
     private boolean _init = false;
 
     /** 当前正事; null = 处于跟随态。 */
@@ -102,12 +112,17 @@ public class FollowAndWorkTask extends Task {
     private boolean _terminal = false;
 
     public FollowAndWorkTask(String leaderName) {
-        this(leaderName, null);
+        this(leaderName, null, 0);
     }
 
     public FollowAndWorkTask(String leaderName, WorkPicker picker) {
+        this(leaderName, picker, 0);
+    }
+
+    public FollowAndWorkTask(String leaderName, WorkPicker picker, long maxDurationMs) {
         _leaderName = leaderName;
         _picker = picker;
+        _maxDurationMs = maxDurationMs;
     }
 
     @Override
@@ -154,7 +169,7 @@ public class FollowAndWorkTask extends Task {
             return null;
         }
         if (_follow == null) {
-            _follow = new FollowPlayerTask(_leaderName, FOLLOW_DISTANCE);
+            _follow = new FollowPlayerTask(_leaderName, FOLLOW_DISTANCE, _maxDurationMs, true);
         }
 
         // 探一下有没有顺手的正事。leader 不在加载范围时探测无意义（以 leader 为锚点）。
