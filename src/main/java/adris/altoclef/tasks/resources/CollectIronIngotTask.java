@@ -31,8 +31,8 @@ import net.minecraft.util.math.BlockPos;
  *       floor(粒/9) 个铁锭 — "把所有(可折算的)铁粒做成锭"; 下界有铁粒时
  *       不再为主世界挖矿专门开门。</li>
  *   <li>生铁熔炼: 主世界整额熔炼 (与旧 smelt(iron_ingot <- raw_iron) 口径
- *       一致, 可选铁矿石直接烧); 下界只熔背包现成的生铁 (动态目标, 0824
- *       乒乓修复同款), 烧完仍不足回主世界。</li>
+ *       一致, 可选铁矿石直接烧); 下界只熔"缺口所需"的生铁 (1008 收紧:
+ *       恰好原则, 不再整包全塞), 烧完仍不足回主世界。</li>
  * </ol>
  * 修复背景: importantItems 被磁盘配置覆盖导致 raw_iron 被丢 (见
  * Settings.CODE_PROTECTED_BASELINE), 铁粒此前无任何保护且目录里没有
@@ -119,13 +119,18 @@ public class CollectIronIngotTask extends ResourceTask {
 
         // ---- ② 生铁熔炼 ----
         if (WorldHelper.getCurrentDimension() == Dimension.NETHER) {
-            // 下界: 只熔背包现成的生铁 (生铁是主世界资源, 下界挖不到; 动态目标
-            // 防"材料入炉→计数下降→误派跨维度挖矿"乒乓, 金锭 0824 同款)。
+            // 下界: 只熔"缺口所需"的生铁 (1008 修复, 用户现场确认"只该放3个却塞
+            // 了15个进炉": 旧动态目标 = 背包全部现成生铁, 只需 3 锭时整包 15 个
+            // 全塞进炉, 多出的 12 个赶上 bot 死亡全部滞留下界炉子 — 违反"恰好"
+            // 原则。0824 的防乒乓由 _smeltTask 熔炼锁兜住, 材料入炉导致的背包
+            // 计数下降不会中途改派, 动态整包目标不再必要)。
+            // 生铁是主世界资源, 下界挖不到; 现成生铁少于缺口时烧完仍不足回主世界。
             int rawIron = StorageHelper.countItemInInventoryReal(mod, Items.RAW_IRON);
             if (rawIron > 0) {
+                int smeltCount = Math.min(rawIron, _count - ingots);
                 _smeltTask = new SmeltInFurnaceTask(new SmeltTarget(
-                        new ItemTarget(Items.IRON_INGOT, ingots + rawIron),
-                        new ItemTarget(Items.RAW_IRON, rawIron)));
+                        new ItemTarget(Items.IRON_INGOT, ingots + smeltCount),
+                        new ItemTarget(Items.RAW_IRON, smeltCount)));
                 return _smeltTask;
             }
             return new DefaultGoToDimensionTask(Dimension.OVERWORLD);
