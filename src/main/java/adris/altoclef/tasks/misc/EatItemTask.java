@@ -29,8 +29,15 @@ public class EatItemTask extends Task {
 
     private final TimerGame _timeout;
     private boolean _eating = false;
-    // (2026-09-26 乒乓活锁修复) 开吃前"准星连续干净"确认计数。
-    private int _clearViewTicks = 0;
+    // (2026-10-08 乒乓定罪修复, detail/52) 开吃前"低头到位"确认计数, 取代旧
+    // _clearViewTicks(读 crosshairTarget=渲染帧射线, 落后于 SmoothLookController/
+    // 寻路驱动的相机)。1008 现场 bot2: 右键应用瞬间相机已扫进贴脸熔炉 → 开界面 →
+    // FoodChain 容器闸 -inf 让位 → 冶炼链重启开炉关炉 → Food 再抢, 翻面 418 次/2min
+    // 一口没吃上。改读玩家实际 pitch(相机每帧已应用, 无射线滞后):
+    // |pitch-90|≤3° 连续 2 拍才算稳, 且低头直射脚下, 结构上打不到侧上方贴脸容器。
+    private static final float EAT_PITCH_TOLERANCE_DEG = 3.0f;
+    private static final int EAT_PITCH_SETTLE_TICKS = 2;
+    private int _pitchSettledTicks = 0;
     private long _lastShieldStuckLogMs = 0;
     private long _lastEquipFailLogMs = 0;
     // (2026-09-06 开局即超时修复) SingleTaskChain.onTick 在任务【首次 tick 之前】
@@ -50,7 +57,7 @@ public class EatItemTask extends Task {
     protected void onStart(AltoClef mod) {
         _timeout.reset();
         _eating = false;
-        _clearViewTicks = 0;
+        _pitchSettledTicks = 0;
         _started = true;
         // (2026-09-14 空中禁食配套, 用户"跳跃中途吃东西减速掉下去") 设计意图是
         // "站定吃完", 但被抢占的导航任务若不是 CustomBaritoneGoalTask 系, baritone
@@ -82,6 +89,19 @@ public class EatItemTask extends Task {
             return null;
         }
 
+        // (2026-10-08 乒乓定罪修复) 进食期间低头硬不变量: 相机被寻路/平滑转向扫离
+        // 垂直(>3°) → 立即松键(vanilla 停止进食)并重新低头, 稳定后继续。宁可重吃
+        // 一口, 也不能让 use 射线扫到贴脸容器 —— 那是 1008 乒乓(418 次/2min)根因。
+        if (_eating && !isPitchSettledDown(mod)) {
+            releaseEat(mod);
+            // 俯仰角 90 = 垂直向下; 保持当前 yaw, 避免无谓的水平甩头
+            adris.altoclef.util.helpers.LookHelper.lookAt(mod,
+                    new baritone.api.utils.Rotation(mod.getPlayer().getYaw(), 90f));
+            _pitchSettledTicks = 0;
+            setDebugState("Camera swept during eating, re-looking down");
+            return null;
+        }
+
         // (2026-09-22 熔炉合成卡死修复) 面向容器 / 容器界面开着时右键 = 打开界面
         // 而不是吃。旧设计靠 FoodChain 每 tick 重评闸门让位, 造成 Food↔User Tasks
         // ownership 乒乓 (121524 会话 6.2s 内 50 次, 一口都吃不成, 用户工作台的
@@ -92,8 +112,8 @@ public class EatItemTask extends Task {
             // 俯仰角 90 = 垂直向下; 保持当前 yaw, 避免无谓的水平甩头
             adris.altoclef.util.helpers.LookHelper.lookAt(mod,
                     new baritone.api.utils.Rotation(mod.getPlayer().getYaw(), 90f));
-            // (2026-09-26) 准星命中容器 = 视角不稳定, 确认计数清零。
-            _clearViewTicks = 0;
+            // (2026-10-08) 准星命中容器 = 视角不稳定, 低头确认计数清零。
+            _pitchSettledTicks = 0;
             setDebugState("Facing interactable, looking down before eating");
             return null;
         }
@@ -167,16 +187,30 @@ public class EatItemTask extends Task {
             }
         }
 
-        // (2026-09-26 乒乓活锁修复, 现场 1726 会话 17:56:01~24) 被中断导航的 look
-        // 残留让相机仍在朝容器平滑转动: 当拍 crosshairTarget 还没指到炉子 → 本任务
-        // 当拍 hold 右键 → 右键实际应用时准星已转进炉子 → 误开熔炉界面 → FoodChain
-        // 容器闸门让位 (prio62→50) → 炉卫 "Closing furnace screen to guard" 关界面
-        // → Food 再抢 → 每 tick 互换 344 次、23 秒吃不成一口。修法: 开吃要求准星
-        // 连续 2 拍干净; 相机若正转向容器, 第 2 拍必进上方低头分支 —— 结构上永不
-        // 误开界面。代价: 正常进食晚 1 tick。
-        if (_clearViewTicks < 1) {
-            _clearViewTicks++;
-            setDebugState("Waiting for stable view before eating");
+        // (2026-10-08 乒乓定罪修复) 开吃前低头到位闸门: pitch 稳定在 90°±3° 连续
+        // 2 拍才 hold 右键。取代旧 _clearViewTicks(2026-09-26 方案: hitResult 连续
+        // 2 拍干净 —— 射线滞后一拍, 1008 bot2 现场翻面 418 次/2min 实证拦不住
+        // 贴脸炉)。pitch 是玩家实际视角(相机每帧已应用, 无射线滞后); 低头直射
+        // 脚下, 结构上打不到侧上方贴脸容器。
+        if (!isPitchSettledDown(mod)) {
+            _pitchSettledTicks = 0;
+            adris.altoclef.util.helpers.LookHelper.lookAt(mod,
+                    new baritone.api.utils.Rotation(mod.getPlayer().getYaw(), 90f));
+            setDebugState("Looking down before eating (pitch=" + mod.getPlayer().getPitch() + ")");
+            return null;
+        }
+        if (_pitchSettledTicks < EAT_PITCH_SETTLE_TICKS) {
+            _pitchSettledTicks++;
+            setDebugState("Waiting pitch settle (" + _pitchSettledTicks + "/" + EAT_PITCH_SETTLE_TICKS + ")");
+            return null;
+        }
+
+        // (2026-10-08) 脚下正下方是容器(站在炉/箱上): 低头直射也命中 → 拒绝开吃。
+        // 出口 = eatTaskTimeoutSeconds 超时兜底 (isFinished 强制结束), 不会无限挂。
+        if (adris.altoclef.util.helpers.WorldHelper.isInteractableBlock(
+                mod, mod.getPlayer().getBlockPos().down())) {
+            releaseEat(mod);
+            setDebugState("Standing on interactable block, cannot eat safely");
             return null;
         }
 
@@ -225,6 +259,12 @@ public class EatItemTask extends Task {
             mod.getExtraBaritoneSettings().setInteractionPaused(false);
             _eating = false;
         }
+    }
+
+    // (2026-10-08 乒乓定罪修复配套) pitch 是玩家实际视角 (相机每帧已应用),
+    // 无 crosshairTarget 的渲染射线滞后。Minecraft pitch 90° = 垂直向下。
+    private static boolean isPitchSettledDown(AltoClef mod) {
+        return Math.abs(mod.getPlayer().getPitch() - 90f) <= EAT_PITCH_TOLERANCE_DEG;
     }
 
     // 诊断日志 2s 节流: 卡在等待分支时让 altoclef_diag.log 有迹可循。

@@ -785,7 +785,9 @@ public interface WorldHelper {
                 || block instanceof net.minecraft.block.LightBlock;
     }
 
-    static boolean isInteractableBlock(AltoClef mod, BlockPos pos) {
+    // (2026-10-08 改 public) EatItemTask 开吃前需检查脚下正下方是否容器
+    // (站在炉/箱上低头直射也命中)。判定语义不变, 仅放宽可见性。
+    public static boolean isInteractableBlock(AltoClef mod, BlockPos pos) {
         Block block = mod.getWorld().getBlockState(pos).getBlock();
         return (block instanceof ChestBlock
                 || block instanceof EnderChestBlock
