@@ -169,6 +169,10 @@ public class AltoClef implements ModInitializer {
         // 放在 User Tasks 之上一点点 (52), 用来替代"指望各任务自己消费引导配额"
         // 的隐式契约 —— 详见 chains/SurfaceExitChain 类注释。
         new SurfaceExitChain(_taskRunner);
+        // (2026-10-08 换维度到达出闸) 刚换维度人还压在到达门门块上时, 直连位移
+        // 挪出门块 — 压门 4s 会被 vanilla 弹回 (20261008-162800 bot1 四次弹回实锤,
+        // 到达后 baritone 卡算路冻在门边)。详见 chains/PortalExitChain 类注释。
+        new PortalExitChain(_taskRunner);
 
         // Trackers
         _storageTracker = new ItemStorageTracker(this, _trackerManager, container -> _containerSubTracker = container);

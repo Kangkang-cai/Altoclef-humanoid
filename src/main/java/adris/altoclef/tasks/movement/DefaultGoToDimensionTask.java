@@ -7,11 +7,11 @@ import adris.altoclef.tasks.construction.compound.ConstructNetherPortalObsidianT
 import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.PortalExitHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 
 import java.util.Optional;
 
@@ -346,15 +346,12 @@ public class DefaultGoToDimensionTask extends Task {
      * 门洞即返回 null。落脚点粘滞复用 {@link #_netherExitTarget}, 人离开后清空。
      */
     private Task stepOutOfNetherPortalTask(AltoClef mod) {
-        // (2026-10-08) inside 判定对齐 vanilla 传送口径: NetherPortalBlock#
-        // onEntityCollision 在实体**碰撞箱**与门块相交时触发 setInNetherPortal,
-        // netherPortalTime 累计 80 ticks=4s 后强传 (反编译 1.18.2 实证)。
-        // 旧写法用脚方块 getBlockPos() 判 inside, 玩家贴门框站立时脚方块是隔壁
-        // 空格而碰撞箱横跨门块 → 漏判不撤出。20261008-101824 实锤: 点火后玩家
-        // xyz=(-302.22,62,691.47) 全程未动, 脚方块 -303 恒非门块, 撤出分支没进,
-        // 点亮恰 4s 后被 vanilla 强传进下界, 床闸 (启动比 vanilla 只晚 150ms)
-        // 形同虚设 — 预存在 bug, 非本次新引入。
-        boolean inside = playerIntersectsNetherPortal(mod);
+        // (2026-10-08) inside 判定收口到 PortalExitHelper (唯一判定源, 碰撞箱
+        // 口径 — vanilla NetherPortalBlock#onEntityCollision 按碰撞箱相交触发
+        // 4s 传送计时)。旧脚方块写法漏判贴门框站立, 20261008-101824 实锤:
+        // 点火后玩家 xyz=(-302.22,62,691.47) 全程未动, 脚方块 -303 恒非门块,
+        // 点亮恰 4s 被 vanilla 强传进下界 — 预存在 bug, 非本次新引入。
+        boolean inside = PortalExitHelper.isPlayerIntersectingNetherPortal(mod);
         if (!inside) {
             _netherExitTarget = null;
             return null;
@@ -390,23 +387,6 @@ public class DefaultGoToDimensionTask extends Task {
         }
         setDebugState("Stepping out of nether portal before setting spawn");
         return new GetToBlockTask(safe, false);
-    }
-
-    /**
-     * (2026-10-08) vanilla 口径的"玩家在门洞里"判定: 遍历玩家碰撞箱覆盖的
-     * 方块, 任一为下界门块即算 inside (与 NetherPortalBlock#onEntityCollision
-     * 的触发条件同口径)。单一判定源 — stepOutOfNetherPortalTask 是唯一消费方。
-     */
-    private boolean playerIntersectsNetherPortal(AltoClef mod) {
-        Box box = mod.getPlayer().getBoundingBox();
-        BlockPos min = new BlockPos(box.minX, box.minY, box.minZ);
-        BlockPos max = new BlockPos(box.maxX, box.maxY, box.maxZ);
-        for (BlockPos pos : BlockPos.iterate(min, max)) {
-            if (mod.getWorld().getBlockState(pos).getBlock() == Blocks.NETHER_PORTAL) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private boolean isSafeStandPos(AltoClef mod, BlockPos pos) {
