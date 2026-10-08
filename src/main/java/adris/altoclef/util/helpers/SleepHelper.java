@@ -6,6 +6,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.SleepingChatScreen;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.item.Item;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -109,6 +110,15 @@ public final class SleepHelper {
             }
             if (wasSleeping) {
                 mod.getPlayer().wakeUp(false, false);
+                // (2026-10-08 根修, 现场 bot2 16:35:49 SubBotPeerWait 起床后原地橡皮筋卡死)
+                // 1.18.2 的 ClientPlayerEntity 不重写 wakeUp —— player.wakeUp(false,false)
+                // 只清本地姿态/旗标, 不发任何包。原版客户端通知服务端起床的唯一路径是
+                // SleepingChatScreen(Leave bed 按钮): 发 ClientCommandC2SPacket(STOP_SLEEPING)。
+                // 缺这个包 ⇒ 服务端 isSleeping 恒 true ⇒ ServerPlayNetworkHandler.onPlayerMove
+                // 对睡眠玩家 >1 格位移直接 requestTeleport 拉回床位、其余丢弃(反编译实锤)
+                // ⇒ bot 站床上被服务端橡皮筋, baritone 按前进键也走不出半格床。
+                mod.getPlayer().networkHandler.sendPacket(
+                        new ClientCommandC2SPacket(mod.getPlayer(), ClientCommandC2SPacket.Mode.STOP_SLEEPING));
                 String m = "[" + tag + "] bot was sleeping, woke up";
                 Debug.logMessage(m);
                 Debug.logToFile("altoclef_diag.log", m);
