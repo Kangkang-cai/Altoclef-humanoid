@@ -159,16 +159,26 @@ public class BeatMinecraft2Task extends Task {
      * (2026-08-27 副手/主手的盾也算"已有盾", 用户方向) 盾常拿在副手, 不在背包
      * 里; 只看背包/容器计数会误判"没有盾" → 反复想做一张 (用户实测: 主副手各持
      * 一盾仍跳去合盾)。手上/副手举着盾就算满足盾需求。
+     * (2026-10-09 读数路径换真实背包) itemTargetsMet 走 InventorySubTracker 的
+     * 500ms 缓存层, 缓存从 currentScreenHandler 槽位重建 — 换维度瞬间
+     * (进下界传送门 respawn) player 短暂 null / handler 换新实例 → 缓存清零
+     * 一拍, 真实背包仍可读 (1009 10:22:59.960 实锤: bot 站进门里, 缓存口径
+     * 判"缺剑缺盾" → 重派铁装 → 框架 STOP 掉正在进门的下界任务, 13.6s 处
+     * 被顶掉; 同拍真实计数 ironSword=1 shield=1, 1s 后 RES planks/logs 全归零
+     * = 同一窗口)。按 2026-08-30 "分而治之: 判定关键资源是否真的缺时一律以
+     * 真实背包为准" 换 itemTargetsMetReal (主背包+护甲+副手+光标直扫)。
+     * 换维度最深的 1-2 拍真实读数也会盲, 但那时维度旗已翻、父链走 NETHER
+     * 分支不再评估本闸, 无横跳窗口。
      */
     private static boolean shieldMet(AltoClef mod) {
-        if (StorageHelper.itemTargetsMet(mod, toItemTargets(Items.SHIELD))) return true;
+        if (StorageHelper.itemTargetsMetReal(mod, toItemTargets(Items.SHIELD))) return true;
         return mod.getPlayer() != null
                 && (mod.getPlayer().getMainHandStack().getItem() == Items.SHIELD
                     || mod.getPlayer().getOffHandStack().getItem() == Items.SHIELD);
     }
 
     private static boolean ironGearMinMet(AltoClef mod) {
-        return StorageHelper.itemTargetsMet(mod, toItemTargets(Items.IRON_SWORD)) && shieldMet(mod);
+        return StorageHelper.itemTargetsMetReal(mod, toItemTargets(Items.IRON_SWORD)) && shieldMet(mod);
     }
 
     // (2026-09-12 跨批次对撞闸门) 判据在 MineAndCollectTask.mainlineMiningEngagedOn —
