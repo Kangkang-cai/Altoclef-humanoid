@@ -508,28 +508,31 @@ public class CollectFoodTask extends Task {
             }
         }
 
-        // (2026-10-09 边拆边捡, 用户"能不能优化为和收集木头一样") 根因定罪:
-        // 下方 _currentResourceTask 粘滞槽一旦粘住 DoToClosestBlockTask(拆干草),
-        // 每拍在槽处早退 → hay 分支的 itemDropped(HAY_BLOCK) 检查在拆完整片
-        // 干草垛之前一次都不跑 → 1009 两次现场各 40s 拆 20+ 块零拾取 ("全部
-        // 打完再收集")。修=槽早退之前旁路: 槽内是拆块任务且地上有干草掉落物
-        // (用户确认掉的就是干草块) 且未达标时, 转拾取; 拾取完 Pickup isFinished
-        // → 槽内拆块任务已被框架顶掉 (isActive=false) → 重走发现通道继续拆。
-        // 节奏 = 拆一块 → 捡起 → 拆下一块, 与收木头同款。条件刻意窄:
-        // 只对 DoToClosestBlockTask 生效 + 只认 HAY_BLOCK 掉落 + foodMet=false,
-        // 不影响收麦子/猎杀等其他槽内容与收尾段。
+        // (2026-10-09 边拆边捡 v2, 用户"跟木头的现有机制还是不一样") v1 两个结构缺陷
+        // (20261009-130120 现场): ① 拾取任务只在旁路里 return、不进终端槽 → tracker
+        // itemDropped 逐拍抖动时拆块/拾取隔拍互顶, 拾取任务 50ms 十连发重建, 连
+        // EnsureFreeInventorySlot 腾背包流程都被撕 (11.284); ② 触发判据走 tracker
+        // 注册表 → 低头拆脚下干草堆时掉落物不入册, 13:03:21-47 拆 ~30 块
+        // itemDropped 恒 false, 后半程零拾取 (hasFood 全程 146 不动)。
+        // v2 = 木头同款两机制: ① 掉落感知世界直扫 (getWorld().getEntities(), 与
+        // PickupDroppedItemTask.findClosestDropByScan 同源口径, 不经注册表的
+        // FOV/落地门); ② 拾取任务接管终端槽 (_currentResourceTask 替换), 槽早退
+        // 保护它跑完不被撕 — 捡完 isFinished → 重走发现通道继续拆下一块。
+        // 节奏 = 拆一块 → 捡起 → 拆下一块。条件刻意窄: 只对 DoToClosestBlockTask
+        // 生效 + 只认 HAY_BLOCK 掉落 + foodMet=false, 不影响收麦子/猎杀等槽内容。
         if (!foodMet
                 && _currentResourceTask instanceof DoToClosestBlockTask
                 && _currentResourceTask.isActive()
                 && !_currentResourceTask.isFinished(mod)
-                && mod.getEntityTracker().itemDropped(Items.HAY_BLOCK)) {
+                && nearestHayDrop(mod) != null) {
             if (_hayDropPickupTask == null || !_hayDropPickupTask.isActive()
                     || _hayDropPickupTask.isFinished(mod)) {
                 _hayDropPickupTask = new PickupDroppedItemTask(Items.HAY_BLOCK, Integer.MAX_VALUE);
                 Debug.logToFile("altoclef_diag.log",
-                        "[FOOD-FIX]\t[hayDropPickup]\tinterrupt slot mining -> pick up hay drops");
+                        "[FOOD-FIX]\t[hayDropPickup]\tinterrupt slot mining -> pick up hay drops (world-scan)");
             }
-            return _hayDropPickupTask;
+            _currentResourceTask = _hayDropPickupTask;
+            return _currentResourceTask;
         }
 
         if (_currentResourceTask != null && _currentResourceTask.isActive() && !_currentResourceTask.isFinished(mod)) {
@@ -858,6 +861,30 @@ public class CollectFoodTask extends Task {
     protected String toDebugString() {
         return "Collect " + _unitsNeeded + " units of food."
                 + (_expeditionMode ? " [EXPEDITION]" : "");
+    }
+
+    /**
+     * (2026-10-09 边拆边捡 v2) 世界直扫最近的干草块掉落物, 无则 null。
+     * 不走 EntityTracker 注册表: 注册表过"人类感知(FOV)+已落地"两道门,
+     * 低头拆脚下干草堆时掉落物不入册 (20261009-130120 13:03:21-47 实锤:
+     * 拆 ~30 块 itemDropped 恒 false, 掉落物全部弃地)。口径与
+     * PickupDroppedItemTask.findClosestDropByScan 同源: isAlive + 物品匹配
+     * + 64 格追距上限。
+     */
+    private ItemEntity nearestHayDrop(AltoClef mod) {
+        ItemEntity best = null;
+        double bestSq = 64 * 64;
+        Vec3d origin = mod.getPlayer().getPos();
+        for (Entity e : mod.getWorld().getEntities()) {
+            if (!(e instanceof ItemEntity ie) || !ie.isAlive()) continue;
+            if (ie.getStack().getItem() != Items.HAY_BLOCK) continue;
+            double sq = ie.squaredDistanceTo(origin);
+            if (sq < bestSq) {
+                bestSq = sq;
+                best = ie;
+            }
+        }
+        return best;
     }
 
     /**
