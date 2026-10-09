@@ -5,6 +5,7 @@ import adris.altoclef.Debug;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
+import adris.altoclef.util.helpers.DryGroundHelper;
 import adris.altoclef.util.helpers.PillarJumpHelper;
 import adris.altoclef.util.helpers.LookHelper;
 import adris.altoclef.util.helpers.WaterStandHelper;
@@ -63,6 +64,11 @@ import net.minecraft.util.math.Vec3d;
  *         放置禁区) / 垫方块窗口超时 / 站稳但非本反应所垫 (浅水底,
  *         垫档让位防死结) → 面向当前前进方向 + 按住 FORWARD +
  *         SNEAK (下沉) + SPRINT (加速), 短暂下潜重新咬合水面。
+ *      ③ 就近上岸 (2026-10-09 新增第三档): 连续 3 个【零放置】垫档窗口
+ *         (垫档/下潜都帮不上的贴底水面) → 环扫最近"真干陆地"
+ *         (DryGroundHelper) 强制 前进+跳+疾跑 朝岸游, 出水站稳即收工,
+ *         30s 硬上限出口。现场 20261009-223240 卡水面 10 分 40 秒实锤
+ *         旧阶梯在"水底贴脚 + 水里永不 onGround"场景下垫档空转无出口。
  *    两档都自带冷却, 避免每 tick 狂触发。
  *  - 只加行为+日志，不改任何既有任务/优先级数值/状态机跳转。
  *  - 绝不调用 getPriority()（避开 setTask→getPriority→setTask 递归铁律）。
@@ -111,6 +117,31 @@ public class SwimDiveChain extends TaskChain {
     // 溺水逃生 95 / 战斗 95 (威胁场景仍可随时抢走我们)。
     private static final float DIVE_CONTROL_PRIORITY = 60f;
 
+    // ==== (2026-10-09 卡水面 10 分 40 秒复盘) 垫档空转升级阶梯 ====
+    // 现场 20261009-223240 实锤: bot 卡水面 (106.7,61.6,211.2) 10 分 40 秒零位移。
+    // 机制 = 水底离脚 1 格, probe 恒走"脚下已有实心但 onGround=false" → WAIT 永远
+    // (水里不可能 onGround), 垫档 150 tick 窗口 placed=0 超时 → endPlace 却【不置
+    // _skipPlaceUntilTick】→ 下一窗口仍选垫档 → PLACE_WAIT_PLAYER_BOX 循环,
+    // 下潜档/上岸档永远轮不到 (anomaly 停滞 367s/409s 无守卫能破环)。
+    // 修复三件套:
+    //   ① 零放置窗口收场 ⇒ 让位下潜 (补上 PLACE_NO_SPOT 同款 handoff) + 计数;
+    //   ② WAIT 连续 3s 无一块放置 ⇒ 提前判废 (不等 150 tick 拖满);
+    //   ③ 连续 {@link #PLACE_FAIL_ESCALATE_WINDOWS} 个空转窗口 ⇒ 就近上岸
+    //      (heightmap 环扫 + DryGroundHelper 真干陆地判据, 强制 前进+跳+疾跑),
+    //      30s 硬上限出口; 扫不到岸 ⇒ 回落 triggerDive 直游。
+    /** 连续几个零放置垫档窗口后升级为"就近上岸"。 */
+    private static final int PLACE_FAIL_ESCALATE_WINDOWS = 3;
+    /** WAIT(玩家碰撞箱占格/悬空擦底) 连续多久无放置即提前判废窗口 (3s ≈ 3 个 bob 周期)。 */
+    private static final long PLACE_WAIT_STALE_TICKS = 60;
+    /** 上岸模式硬上限 (30s): 拿着真岸坐标也游不出去 = 有东西挡死, 交回阶梯。 */
+    private static final long SHORE_ESCAPE_MAX_TICKS = 600;
+    /** 上岸期间重扫岸向间隔 (玩家在游, 最近岸可能换边)。 */
+    private static final long SHORE_RESCAN_INTERVAL_TICKS = 40;
+    /** 岸点环扫半径档位 (过河场景岸通常 6~20 格)。 */
+    private static final int[] SHORE_SCAN_DISTANCES = {4, 8, 12, 16, 24, 32};
+    /** 岸点环扫方位数 (16 向 ≈ 22.5° 分辨率, 足够定向)。 */
+    private static final int SHORE_SCAN_BEARINGS = 16;
+
     // 卡住检测窗口起点（游戏 tick + 起点位置）。
     private long _windowStartTick = -1;
     private Vec3d _windowStartPos = null;
@@ -140,6 +171,20 @@ public class SwimDiveChain extends TaskChain {
     // 本轮垫方块统计 (诊断): 已成功垫几块 + 最近一次交互结果。
     private int _placedCount = 0;
     private String _lastPlaceResult = "none";
+
+    // ==== (2026-10-09) 垫档空转计数 + 就近上岸状态 ====
+    // _failedPlaceWindows 故意【不】随 resetState 清零 (同 _standGraceUntilTick):
+    // "这片水垫档帮不上"的记忆要跨过接管/归还周期存续;
+    // 清零只在两处: 垫档真正放上块 (PLACE_PLACED) / 上岸成功 (SHORE_REACHED)。
+    private int _failedPlaceWindows = 0;
+    /** 本垫档窗口内连续 WAIT 的起点 tick (MIN_VALUE = 不在 WAIT)。 */
+    private long _placeWaitSinceTick = Long.MIN_VALUE;
+    /** 上岸模式激活中 (优先级接管同 dive/place)。 */
+    private boolean _escaping = false;
+    private long _escapeStartTick = Long.MIN_VALUE;
+    /** 当前认定的最近岸点 (站立空气格); null = 环扫没找到, 直游兜底。 */
+    private BlockPos _escapeShore = null;
+    private long _escapeLastRescanTick = Long.MIN_VALUE;
 
     // ==== [SWIM-DIVE-DIAG] 2026-09-10 零行为改动诊断 ====
     // 现场：水中卡住全靠 NAV-STUCK/超时兜底，整场日志 0 条 [SWIM-DIVE]。
@@ -199,12 +244,13 @@ public class SwimDiveChain extends TaskChain {
                 releaseAllInjected(mod);
             } catch (Exception ignored) { }
             releaseDive(mod);
+            releaseEscape(mod);
             resetState();
         }
-        // (2026-09-24 持权仲裁) dive/place 激活期临时接管：主任务让位 → baritone
+        // (2026-09-24 持权仲裁) dive/place/escape 激活期临时接管：主任务让位 → baritone
         // 寻路停写强制表 → 本链 setInputForceState 的输入才不会被同 tick 覆盖。
         // 其余时刻恒负无穷，永不与任何链争权（原设计语义保留）。
-        if (_diving || _placing) {
+        if (_diving || _placing || _escaping) {
             return DIVE_CONTROL_PRIORITY;
         }
         return Float.NEGATIVE_INFINITY;
@@ -219,8 +265,15 @@ public class SwimDiveChain extends TaskChain {
         // 屏幕开着（容器/合成/聊天/死亡）不触发。
         if (MinecraftClient.getInstance().currentScreen != null) {
             releaseDive(mod);
+            releaseEscape(mod);
             WaterStandHelper.releaseJump(mod); // riseTick 可能 hold 着跳跃键
             resetState();
+            return;
+        }
+
+        // (2026-10-09) 上岸模式: 每 tick 朝最近岸游 (见 triggerShoreEscape 注释)。
+        if (_escaping) {
+            tickEscape(mod);
             return;
         }
 
@@ -483,9 +536,15 @@ public class SwimDiveChain extends TaskChain {
         // 例外 —— 下方 riseTick 需要跳跃 pillar-jump。
         WaterStandHelper.releaseJump(mod);
         // 超时: 带上已垫块数与最近交互结果, 方便定位"垫不出"的原因。
+        // (2026-10-09) 零放置的超时 = 垫档帮不上 ⇒ 让位下潜 + 计数 (旧实现漏了
+        // handoff, 下一窗口仍选垫档 → 1009 卡水面 10 分 40 秒的直接根源)。
         if (nowTick - _placeStartTick >= PLACE_WINDOW_TICKS) {
-            writeDiag(mod, "PLACE_TIMEOUT placed=" + _placedCount + " last=" + _lastPlaceResult);
-            endPlace(mod);
+            if (_placedCount == 0) {
+                registerPlaceWindowFailure(mod, "PLACE_TIMEOUT placed=0 last=" + _lastPlaceResult);
+            } else {
+                writeDiag(mod, "PLACE_TIMEOUT placed=" + _placedCount + " last=" + _lastPlaceResult);
+                endPlace(mod);
+            }
             return;
         }
         WaterStandHelper.Spot spot = WaterStandHelper.probe(mod, mod.getPlayer());
@@ -528,16 +587,29 @@ public class SwimDiveChain extends TaskChain {
             return;
         }
         if (spot.status == WaterStandHelper.Status.WAIT) {
-            // bob 下浮半程占住目标格, 等上浮再放（窗口内重试, 节流记录）
+            // bob 下浮半程占住目标格, 等上浮再放（窗口内重试, 节流记录）。
+            // (2026-10-09) 门槛降级: 连续 {@link #PLACE_WAIT_STALE_TICKS} 没等来
+            // 一次放置机会 (典型 = 水底贴脚、水里永不 onGround 的"假 bob") ⇒
+            // 提前判废窗口, 不拖满 150 tick。
+            if (_placeWaitSinceTick == Long.MIN_VALUE) _placeWaitSinceTick = nowTick;
+            if (_placedCount == 0
+                    && nowTick - _placeWaitSinceTick >= PLACE_WAIT_STALE_TICKS) {
+                registerPlaceWindowFailure(mod, "PLACE_WAIT_STALE");
+                return;
+            }
             diagGate(mod, "PLACE_WAIT_PLAYER_BOX");
             return;
         }
+        // 非 WAIT: WAIT 计时清零 (放置机会回来了 / 状态翻面)。
+        _placeWaitSinceTick = Long.MIN_VALUE;
         // FOUND: 装备 → 准星甩向垫面 → force-click 放置
         ActionResult r = WaterStandHelper.placeTick(mod, spot.floor);
         _lastPlaceResult = r.toString();
         if (r == ActionResult.SUCCESS) {
             _lastPlacedTick = nowTick;
             _placedCount++;
+            // (2026-10-09) 垫档真的在产出 ⇒ 空转计数清零。
+            _failedPlaceWindows = 0;
             // 不结束: bot 被抬高一格后 bob 上浮会腾出下一格, 继续垫满水柱
             writeDiag(mod, "PLACE_PLACED #" + _placedCount);
         }
@@ -546,8 +618,161 @@ public class SwimDiveChain extends TaskChain {
     /** 垫升收工 (出水/站稳): 宽限 6s 让导航走起来, 再结束本轮。 */
     private void endWithGrace(AltoClef mod, String tag) {
         _standGraceUntilTick = WorldHelper.getTicks() + STAND_GRACE_TICKS;
+        // (2026-10-09) 出水/站稳 = 垫档路线仍然有效, 空转计数清零。
+        _failedPlaceWindows = 0;
         writeDiag(mod, tag + " placed=" + _placedCount);
         endPlace(mod);
+    }
+
+    /**
+     * (2026-10-09) 一次【零放置】垫档窗口的统一收场:
+     * 置垫档冷却 (下一窗口走下潜, 补 PLACE_NO_SPOT 同款 handoff) + 空转计数;
+     * 连续 {@link #PLACE_FAIL_ESCALATE_WINDOWS} 个空转窗口 ⇒ 升级"就近上岸"。
+     */
+    private void registerPlaceWindowFailure(AltoClef mod, String tag) {
+        long nowTick = WorldHelper.getTicks();
+        _failedPlaceWindows++;
+        _skipPlaceUntilTick = nowTick + RE_DIVE_COOLDOWN_TICKS;
+        writeDiag(mod, tag + " failStreak=" + _failedPlaceWindows
+                + "/" + PLACE_FAIL_ESCALATE_WINDOWS);
+        if (_failedPlaceWindows >= PLACE_FAIL_ESCALATE_WINDOWS) {
+            triggerShoreEscape(mod);
+            return; // 内部已置 _escaping, 不再回垫档状态机
+        }
+        endPlace(mod);
+    }
+
+    // ==================================================================== //
+    // (2026-10-09) 就近上岸模式
+    // ==================================================================== //
+
+    /**
+     * 升级"就近上岸": 环扫最近"真干陆地" ({@link DryGroundHelper#isSolidDryGround}),
+     * 持权强制 前进+跳+疾跑 朝岸游 (JUMP=水面抬头+爬 1 格岸沿), 每
+     * {@link #SHORE_RESCAN_INTERVAL_TICKS} 重扫换向, 出水站稳即收工;
+     * 硬上限 {@link #SHORE_ESCAPE_MAX_TICKS}。环扫不到岸 (大湖中心) ⇒ 回落
+     * triggerDive 直游 (游着游着岸可能进入扫描半径, 下轮空转再升级)。
+     */
+    private void triggerShoreEscape(AltoClef mod) {
+        _placing = false;
+        _placeStartTick = Long.MIN_VALUE;
+        _placeWaitSinceTick = Long.MIN_VALUE;
+        WaterStandHelper.releaseJump(mod);
+        // 清 baritone 残留强制态 (同 triggerDive, JUMP=true 是 bob 元凶)。
+        try {
+            mod.getClientBaritone().getPathingBehavior().forceCancel();
+            mod.getClientBaritone().getInputOverrideHandler().clearAllKeys();
+        } catch (Throwable ignored) {}
+        rescanShore(mod);
+        _escaping = true;
+        _escapeStartTick = WorldHelper.getTicks();
+        _escapeLastRescanTick = WorldHelper.getTicks();
+        Task main = mod.getUserTaskChain().getCurrentTask();
+        String m = "[SWIM-DIVE] stuck in water -> swim to nearest shore (take control prio="
+                + (int) DIVE_CONTROL_PRIORITY + "). player=" + mod.getPlayer().getPos()
+                + " shore=" + (_escapeShore != null ? _escapeShore.toShortString() : "none(直游兜底)")
+                + " failStreak=" + _failedPlaceWindows
+                + " task=" + (main == null ? "null" : main.toString());
+        Debug.logMessage(m);
+        Debug.logToFile("altoclef_diag.log", m);
+        if (_escapeShore == null) {
+            // 扫不到岸: 本模式没意义 (只会原地按跳), 立即回落直游下潜档。
+            endEscape(mod, "ESCAPE_NO_SHORE");
+            triggerDive(mod, PLACE_FAIL_ESCALATE_WINDOWS);
+        }
+    }
+
+    /** 上岸单 tick: 压死 baritone → 出水判定 → 超时出口 → 重扫换向 → 注入 前进+跳+疾跑。 */
+    private void tickEscape(AltoClef mod) {
+        long nowTick = WorldHelper.getTicks();
+        if (mod.getPlayer() == null) {
+            resetState();
+            return;
+        }
+        try { mod.getClientBaritone().getPathingBehavior().forceCancel(); } catch (Throwable ignored) {}
+        // 出水即收工 (口径同垫档: 必须 onGround, bob 顶点假出水不算)。
+        if (!mod.getPlayer().isTouchingWater()) {
+            if (mod.getPlayer().isOnGround()) {
+                endEscape(mod, "SHORE_REACHED");
+                return;
+            }
+            diagGate(mod, "ESCAPE_APEX_HOLD");
+        }
+        // 硬上限出口: 拿着真岸坐标也游不出去 = 有东西挡死, 交回既有阶梯
+        // (failStreak 保留在阈值上, 垫档下次空转立即再升级, 不重走 3 窗口)。
+        if (nowTick - _escapeStartTick >= SHORE_ESCAPE_MAX_TICKS) {
+            endEscape(mod, "ESCAPE_TIMEOUT");
+            return;
+        }
+        // 定期重扫: 玩家在游, 最近岸可能换边。
+        if (nowTick - _escapeLastRescanTick >= SHORE_RESCAN_INTERVAL_TICKS) {
+            rescanShore(mod);
+            _escapeLastRescanTick = nowTick;
+        }
+        // 注入: 前进 + 跳 (抬头游/爬岸), 不按潜行; 疾跑走原版层 (同 triggerDive)。
+        var h = mod.getClientBaritone().getInputOverrideHandler();
+        h.setInputForceState(Input.MOVE_FORWARD, true);
+        h.setInputForceState(Input.JUMP, true);
+        h.setInputForceState(Input.SNEAK, false);
+        mod.getInputControls().hold(Input.SPRINT);
+        // 朝岸看 (锁向同 dive, immediate 不进平滑层, 防准星被残留目标甩走)。
+        if (_escapeShore != null) {
+            LookHelper.lookAtImmediate(mod, Vec3d.ofCenter(_escapeShore));
+        }
+    }
+
+    /** 环扫最近岸点 (站立空气格过 DryGroundHelper 真干陆地判据); 没找到 ⇒ null。 */
+    private void rescanShore(AltoClef mod) {
+        BlockPos feet = mod.getPlayer().getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int dist : SHORE_SCAN_DISTANCES) {
+            for (int i = 0; i < SHORE_SCAN_BEARINGS; i++) {
+                double ang = i * (Math.PI / SHORE_SCAN_BEARINGS);
+                int x = feet.getX() + (int) Math.round(Math.cos(ang) * dist);
+                int z = feet.getZ() + (int) Math.round(Math.sin(ang) * dist);
+                BlockPos stand = new BlockPos(x, surfaceYAt(mod, x, z, feet.getY()), z);
+                if (!mod.getChunkTracker().isChunkLoaded(stand)) continue; // 未知 → 不选
+                double d = stand.getSquaredDistance(feet);
+                if (d >= bestDist) continue;
+                if (DryGroundHelper.isSolidDryGround(mod, stand)) {
+                    best = stand.toImmutable();
+                    bestDist = d;
+                }
+            }
+        }
+        _escapeShore = best;
+    }
+
+    /** 列顶 Y (MOTION_BLOCKING_NO_LEAVES, 空壳区块回退 MOTION_BLOCKING; 同 BiasedExploreTask 口径)。 */
+    private static int surfaceYAt(AltoClef mod, int x, int z, int fallbackY) {
+        int bottomPlus1 = mod.getWorld().getBottomY() + 1;
+        int y = mod.getWorld().getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+        if (y > bottomPlus1) return y;
+        y = mod.getWorld().getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING, x, z);
+        return y > bottomPlus1 ? y : fallbackY;
+    }
+
+    /** 上岸收场: 成功 ⇒ 站稳宽限 + 空转计数清零; 其余 tag ⇒ 只退模式交回阶梯。 */
+    private void endEscape(AltoClef mod, String tag) {
+        if (tag.equals("SHORE_REACHED")) {
+            _standGraceUntilTick = WorldHelper.getTicks() + STAND_GRACE_TICKS;
+            _failedPlaceWindows = 0;
+        }
+        writeDiag(mod, tag + " shore=" + (_escapeShore != null ? _escapeShore.toShortString() : "none"));
+        releaseEscape(mod);
+        resetWindow();
+    }
+
+    /** 退出上岸模式: 清全部注入 (强制态 + 原版 SPRINT/JUMP) 与状态。幂等。 */
+    private void releaseEscape(AltoClef mod) {
+        if (!_escaping) return;
+        _escaping = false;
+        _escapeStartTick = Long.MIN_VALUE;
+        _escapeShore = null;
+        _escapeLastRescanTick = Long.MIN_VALUE;
+        releaseAllInjected(mod);
+        WaterStandHelper.releaseJump(mod);
     }
 
     private void endPlace(AltoClef mod) {
@@ -703,12 +928,20 @@ public class SwimDiveChain extends TaskChain {
         _diveTicksLeft = 0;
         _placing = false;
         _placeStartTick = Long.MIN_VALUE;
+        _placeWaitSinceTick = Long.MIN_VALUE;
+        // _escaping 的注入清理走 releaseEscape (需 mod); 此处只对齐状态位,
+        // 防止 resetState 后残留 _escaping=true 却不再有人 tick 它。
+        _escaping = false;
+        _escapeStartTick = Long.MIN_VALUE;
+        _escapeShore = null;
+        _escapeLastRescanTick = Long.MIN_VALUE;
     }
 
     @Override
     protected void onStop(AltoClef mod) {
         // 保险：链停止时松开可能正按住的键 (含 baritone 强制态)。
         releaseDive(mod);
+        releaseEscape(mod);
         WaterStandHelper.releaseJump(mod);
         resetState();
     }
@@ -718,6 +951,7 @@ public class SwimDiveChain extends TaskChain {
         // 让位 (含被战斗/溺水等更高优先级抢走): 必须清强制态, 否则我们写的
         // FORWARD=true 会在 map 里残留, bot 落地后一直往前游。
         releaseDive(mod);
+        releaseEscape(mod);
         WaterStandHelper.releaseJump(mod);
         resetState();
     }
