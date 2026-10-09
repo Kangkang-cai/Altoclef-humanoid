@@ -265,6 +265,9 @@ public class AltoClef implements ModInitializer {
 
         // Tick with the client
         EventBus.subscribe(ClientTickEvent.class, evt -> onClientTick());
+        // (2026-10-09) 容器界面泄漏按住右键守卫: 空+双手空+容器界面开+按住≥300ms ⇒ release。
+        // 现场: 金锭合成 ServerClose 23次/23s 每~200ms 退料重开 (见 ContainerUseGuard 头注)。
+        new ContainerUseGuard(this);
         // Render
         EventBus.subscribe(ClientRenderEvent.class, evt -> onClientRenderOverlay(evt.stack));
 
