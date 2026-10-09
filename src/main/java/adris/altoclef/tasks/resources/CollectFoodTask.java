@@ -609,20 +609,6 @@ public class CollectFoodTask extends Task {
                 }
             }
             // Hay
-            // (2026-10-09 边拆边捡, 用户"能不能优化为和收集木头一样") 旧 bug:
-            // pickupBlockTaskOrNull 的 itemToGrab 传 Items.HAY_BLOCK, 但徒手拆
-            // 干草块掉的是 9 个小麦 (Items.WHEAT) 而非干草块本身 → itemDropped
-            // (HAY_BLOCK) 永远 false, 捡取分支永不触发, 只剩 DoToClosestBlock
-            // 连环拆块, 小麦满地没人捡 (1009 现场: 拆一半被父链顶掉, 掉落全留
-            // 地上)。修法: 拆块前先捡 40 格内小麦掉落物 (与收木头同款节奏 —
-            // 拆一块 → 下一拍转 Pickup 捡完 → 再拆下一块); PickupDroppedItemTask
-            // 自带完成条件与 15s 被困拉黑, 无悬挂风险。
-            Task hayDropTask = this.pickupTaskOrNull(mod, Items.WHEAT, 40);
-            if (hayDropTask != null) {
-                setDebugState("Picking up Wheat from Hay");
-                _currentResourceTask = hayDropTask;
-                return _currentResourceTask;
-            }
             Task hayTask = this.pickupBlockTaskOrNull(mod, Blocks.HAY_BLOCK, Items.HAY_BLOCK, 300);
             if (hayTask != null) {
                 setDebugState("Collecting Hay");
