@@ -102,6 +102,8 @@ public class CollectFoodTask extends Task {
     // → Pickup 分支从未触发。1s 节流打 [HAY-DIAG]: tracker 掉落物总数 + 干草条目数
     // + itemDropped 判定, 定位三道门 (感知登记/落地判定/黑名单) 哪道拦的。定位后拆。
     private final TimerGame _hayDiagTimer = new TimerGame(1);
+    // (2026-10-09 边拆边捡) 干草掉落物拾取实例 (粘滞复用, 见 onTick 旁路注释)。
+    private PickupDroppedItemTask _hayDropPickupTask = null;
     private SmeltInFurnaceTask _smeltTask = null;
     // 终端资源任务槽 (到达型语义): 挖掘/采集/交互/合成/猎杀/拾取 —— 到达(或目的失效)
     // 之前独占 tick, 不被"路边更近的同类目标"打断。打断它 = 白走 + baritone 路径作废
@@ -504,6 +506,30 @@ public class CollectFoodTask extends Task {
                 Debug.logToFile("altoclef_diag.log",
                         "[FoodPick] 10s re-eval: keep running sub task " + _currentResourceTask);
             }
+        }
+
+        // (2026-10-09 边拆边捡, 用户"能不能优化为和收集木头一样") 根因定罪:
+        // 下方 _currentResourceTask 粘滞槽一旦粘住 DoToClosestBlockTask(拆干草),
+        // 每拍在槽处早退 → hay 分支的 itemDropped(HAY_BLOCK) 检查在拆完整片
+        // 干草垛之前一次都不跑 → 1009 两次现场各 40s 拆 20+ 块零拾取 ("全部
+        // 打完再收集")。修=槽早退之前旁路: 槽内是拆块任务且地上有干草掉落物
+        // (用户确认掉的就是干草块) 且未达标时, 转拾取; 拾取完 Pickup isFinished
+        // → 槽内拆块任务已被框架顶掉 (isActive=false) → 重走发现通道继续拆。
+        // 节奏 = 拆一块 → 捡起 → 拆下一块, 与收木头同款。条件刻意窄:
+        // 只对 DoToClosestBlockTask 生效 + 只认 HAY_BLOCK 掉落 + foodMet=false,
+        // 不影响收麦子/猎杀等其他槽内容与收尾段。
+        if (!foodMet
+                && _currentResourceTask instanceof DoToClosestBlockTask
+                && _currentResourceTask.isActive()
+                && !_currentResourceTask.isFinished(mod)
+                && mod.getEntityTracker().itemDropped(Items.HAY_BLOCK)) {
+            if (_hayDropPickupTask == null || !_hayDropPickupTask.isActive()
+                    || _hayDropPickupTask.isFinished(mod)) {
+                _hayDropPickupTask = new PickupDroppedItemTask(Items.HAY_BLOCK, Integer.MAX_VALUE);
+                Debug.logToFile("altoclef_diag.log",
+                        "[FOOD-FIX]\t[hayDropPickup]\tinterrupt slot mining -> pick up hay drops");
+            }
+            return _hayDropPickupTask;
         }
 
         if (_currentResourceTask != null && _currentResourceTask.isActive() && !_currentResourceTask.isFinished(mod)) {
