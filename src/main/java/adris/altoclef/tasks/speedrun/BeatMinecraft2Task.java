@@ -1332,6 +1332,18 @@ public class BeatMinecraft2Task extends Task {
                     // (:461 "To keep the portal build cache"), 被反复 return, `_active` 不会因
                     // 完成而自动归假(只有 stop() 会), 单看 isActive 会永久挡住收床。
                     && !(_goToNetherTask.isActive() && !_goToNetherTask.isFinished(mod))
+                    // (2026-10-09 夜间睡床竞态根修) 收床补白天闸门: 夜里/雷暴绝不收床。
+                    // 现场 20261009-181753 铁证: bot 点击床睡进去后, [SmeltHoldNight]
+                    // (熔炉有熟肉待收, :4483) 让位夜间路由 return null, 任务树落到本
+                    // 分支 —— 而本分支分支名虽写"白天", 条件里却没有白天判据 → 放床
+                    // ~100ms 后即 DestroyBlock 拆床把人踢醒, 夜从未跳过; 同一晚 3 轮
+                    // 循环 (18:19:58 / 18:20:07 / 18:20:16, time=12689→12863→13039
+                    // 一直是夜), [SmeltHoldNight] 与三次收床触发逐毫秒对齐。
+                    // 与 PlaceBedAndSetSpawnTask:624 的收床闸门 (isBrightDaytime)
+                    // 对齐 —— 判定源单一化。夜里床归睡眠路由管 (睡着时 vanilla 时间
+                    // 加速推进, 天亮自醒); 天亮后本分支照常收走, 0928 "睡完照常收走"
+                    // 语义不变, 闸门只是把"照常"限定到白天。出口 = 天亮, 无 hold。
+                    && WorldHelper.isBrightDaytime()
                     && System.currentTimeMillis() >= _bedRecoverGiveUpUntilMs) {
                 // (2026-09-11) 区块未加载时 getBlockState 恒返回空气 → 会误判"床没了"
                 // 并把记忆清掉 (走远再回来 = 丢床)。未加载一律不判定、宽限计时归零,
