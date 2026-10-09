@@ -25,6 +25,7 @@ import net.minecraft.entity.mob.AbstractSkeletonEntity;
 import net.minecraft.entity.mob.BlazeEntity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.EndermanEntity;
+import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.entity.mob.PillagerEntity;
 import net.minecraft.entity.mob.SkeletonEntity;
 import net.minecraft.entity.mob.WitherSkeletonEntity;
@@ -210,6 +211,15 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // (用户"面对卫道士就不要变了") 卫道士是真近战冲刺怪, 会主动贴上来,
         // 维持默认 +1 不动。
         if (entity instanceof PillagerEntity) {
+            return MELEE_HUG_DISTANCE;
+        }
+        // (2026-10-09 用户"打拿弩箭的猪灵距离需要再靠近一格, 不然打不到, 敌人
+        // 也不会主动靠近") 猪灵与掠夺者同型: "+1 格"的前提"怪会主动贴上来补满
+        // 最后一段距离"对持弩猪灵不成立 —— 它是远程怪, 原地射击不走位, bot 停
+        // 4.0 (reach 3.2 之外) 恒不可命中, 只能挨弩箭。持剑猪灵虽是近战, 3.0 仍
+        // 在 reach 内且它会自己走进来, 不会卡死。整类收紧到 MELEE_HUG_DISTANCE
+        // (4.0 - 1 = 3.0)。ZombifiedPiglinEntity 是纯近战冲锋怪, 维持默认 +1。
+        if (entity instanceof PiglinEntity) {
             return MELEE_HUG_DISTANCE;
         }
         // 其余会主动靠近的近战敌怪 (僵尸/蜘蛛/苦力怕/等): +1 格远离。
