@@ -7,7 +7,9 @@ import adris.altoclef.commandsystem.CommandFeedback;
 import adris.altoclef.eventbus.EventBus;
 import adris.altoclef.eventbus.Subscription;
 import adris.altoclef.eventbus.events.TaskFinishedEvent;
+import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.entity.GiveItemToPlayerTask;
+import adris.altoclef.tasks.misc.EquipArmorTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
@@ -98,6 +100,9 @@ final class ActionDispatcher {
     /**
      * 有任务生命期的行动：只有这些命令才登记 pending、才可能在顶层任务结束时回 action_done
      * （B' 口径同集：完成后自动回主线）。
+     * (2026-10-09) get/equip 加入：get 顶层任务=ResourceTask（TaskCatalogue 单/多物品两条
+     * 路径都汇于此，CataloguedResourceTask 亦为其子类）；equip 顶层任务=EquipArmorTask。
+     * 两者完成后自动回主线（B' 同款），失败/参数错走 CommandFeedback 即时 failed。
      *
      * <p>⚠️ 1002 冒烟实锤缺陷：早前实现用"FIFO 取最老 pending"，且 pause/只读类也压了 pending
      * 条目（它们的 done 是同步发的、从不 pop）⇒ 队列残留老条目被后续 TaskFinishedEvent 拿走，
@@ -105,7 +110,7 @@ final class ActionDispatcher {
      * 现在两道闸：①非 TASK_ACTIONS 一律不登记 pending；②关联时必须**语义匹配**
      * （结束的顶层任务类型 == 该 token 期望的任务类型），匹配不上宁可丢弃，交对端超时兜底。
      */
-    private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give");
+    private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give", "get", "equip");
 
     /** 主线干预伪命令 token（不在 CommandExecutor 注册，仅 bridge 识别）。 */
     static final String PAUSE = "pause_main";
@@ -573,6 +578,10 @@ final class ActionDispatcher {
             case "give" -> finished instanceof GiveItemToPlayerTask;
             // (2026-10-07 交付闭环) 接收方捡拾 —— 无目标可追时任务自结束，作为 action_done 的正常出口。
             case "pickup" -> finished instanceof PickupDroppedItemTask;
+            // (2026-10-09) get：TaskCatalogue 单物品(getItemTask→ResourceTask)与多物品
+            // (getSquashedItemTask→CataloguedResourceTask extends ResourceTask) 都汇于 ResourceTask。
+            case "get" -> finished instanceof ResourceTask;
+            case "equip" -> finished instanceof EquipArmorTask;
             default -> false;
         };
     }
@@ -610,7 +619,7 @@ final class ActionDispatcher {
 
     /**
      * 该行动是否"有回执承诺"：结束时 / 被顶替 / 被暂停都会发 action_done。
-     * = 动作三类（goto/follow/give）+ sleep（按住态但**有自然终点**，天亮会发 completed）。
+     * = 动作类（goto/follow/give/get/equip）+ sleep（按住态但**有自然终点**，天亮会发 completed）。
      * 纯按住态 idle 不在内 —— 它没有终点，被顶替时静默清除即可。
      */
     private static boolean hasReceipt(String cmd) {
@@ -636,7 +645,8 @@ final class ActionDispatcher {
         _activeIdleSec = 0; // 任务型行动不带 idle 定时（防上一轮残留误入倒计时/结束分支）
         _activeGotoTarget = "goto".equals(token) ? parseGoto(cmd) : null;
         _activePlayerName = ("follow".equals(token) || "give".equals(token)) ? parseNameArg(cmd) : null;
-        String[] gi = "give".equals(token) ? parseGiveItem(cmd) : null;
+        String[] gi = "give".equals(token) ? parseGiveItem(cmd)
+                : ("get".equals(token) ? parseGetItem(cmd) : null);
         _activeItemToken = gi == null ? null : gi[0];
         _activeItemCount = gi == null ? 1 : parseIntSafe(gi[1], 1);
         long now = System.currentTimeMillis();
@@ -781,6 +791,8 @@ final class ActionDispatcher {
                 case "goto" -> probeGoto(p, prefix);
                 case "follow" -> probeFollow(p, prefix);
                 case "give" -> probeGive(prefix);
+                case "get" -> probeGet(prefix);
+                case "equip" -> new Probe("equip", prefix + "穿戴护甲中", null);
                 default -> null;
             };
         } catch (Throwable t) {
@@ -920,6 +932,22 @@ final class ActionDispatcher {
         return new Probe(key, detail, null);
     }
 
+    /**
+     * get 进度探针：目标物品背包计数（key=计数，变了=在推进）。
+     * 口径与 {@link #probeGive} 的 Collecting 分支一致 —— 计数是唯一可靠进度源，
+     * 长时间不涨（远途找矿/合成排队）会按 BLOCKED_SEC 报 blocked，但不判 failed。
+     */
+    private Probe probeGet(String prefix) {
+        Integer have = countItem(_activeItemToken);
+        if (have == null) {
+            // 多物品方括号形态 / 物品 token 解析失败：退化为通用文案，不判进度。
+            return new Probe("get", prefix + "收集中（TaskCatalogue）", null);
+        }
+        String zh = itemZh(_activeItemToken);
+        return new Probe("get|" + have,
+                prefix + "收集中：" + zh + " " + have + "/" + _activeItemCount, null);
+    }
+
     // ---- 进度探针用的小工具（全部 try/catch，绝不把异常抛进 tick）----
 
     private static String safeDebugState(Task t) {
@@ -1020,6 +1048,19 @@ final class ActionDispatcher {
         if (t.length < 2) return null;
         String count = t.length >= 3 ? t[2] : "1";
         return new String[]{t[1], count};
+    }
+
+    /**
+     * 解析 get 的 (item, count)。语法同 ItemList：{@code @get bread 5} / {@code @get bread}。
+     * 多物品方括号形态（{@code [iron 3, bread 2]}）被 argsOf 空格切分破坏，不解析
+     * （探针退化为"收集中"通用文案，不影响回执）。
+     */
+    private static String[] parseGetItem(String cmd) {
+        String[] t = argsOf(cmd);
+        if (t.length == 0) return null;
+        if (t[0].startsWith("[")) return null;
+        String count = t.length >= 2 ? t[1] : "1";
+        return new String[]{t[0], count};
     }
 
     /** 去掉命令前缀与命令名，取参数数组（并剥掉 ';' 多命令分隔）。 */
