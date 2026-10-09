@@ -58,6 +58,24 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
     // [CraftFill], 供校验"无限目标是否真的走了批量、真实需求是否仍走单份"。
     private String _lastFillLogKey = "";
 
+    // (2026-10-09 收货优先粘滞·止血) 现场 20261009-132123: 金锭 31/32 fill 一次后
+    // 收货点击 38s 零落地, 输出格滞留 gold_ingotx1。根因链: 合成台界面被 ~5次/秒
+    // 反复换代 ([OpenScreen] 实锤, syncId 11→15→…→卷回) → 换代拍客户端把整格读成
+    // EMPTY → 本任务在 fill/receive 两分支间震荡; 震荡期 fill 分支每拍
+    // registerSlotAction() 重置全局 200ms 槽位点击冷却 (SlotHandler._slotActionTimer,
+    // "piggy back" 搭便车), 收货 ClickSlotTask 的 canDoSlotAction() 永远落空 →
+    // 饿死。面包等"界面稳定"场景 fill 只跑一次所以从未触发。
+    // 修法: 输出格读到 EMPTY 但 1s 内刚见过【本配方目标】成品、且真实库存计数
+    // 无增长 (没被任何人收走) ⇒ 判为换代读空, 本拍不重发填充、不碰冷却, 把节奏
+    // 让给收货侧; 下一拍读到成品时收货点击即赢得冷却竞争。宽限有界 (1s), 过期
+    // 或库存增长 (真被收走) 即恢复正常流程 —— 正常多批合成 (收走→库存涨→闩清)
+    // 零减速。
+    private static final long OUTPUT_READ_GRACE_MS = 1000;
+    private Item _outputReadyItem = null;
+    private long _outputReadySinceMs = 0;
+    private int _invCountAtOutputReady = -1;
+    private long _lastGraceLogMs = 0;
+
     public CraftGenericWithRecipeBooksTask(RecipeTarget target) {
         _target = target;
     }
@@ -137,6 +155,25 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         Slot outputSlot = bigCrafting ? CraftingTableSlot.OUTPUT_SLOT : PlayerSlot.CRAFT_OUTPUT_SLOT;
         ItemStack output = StorageHelper.getItemStackInSlot(outputSlot);
 
+        // (2026-10-09 收货优先粘滞·止血) 输出格读到空但刚见过本配方成品且库存没涨
+        // ⇒ 界面换代读空, 让位给收货, 不重发填充不碰冷却。见字段区详注。
+        if (output.isEmpty() && _outputReadyItem != null) {
+            long sinceReady = watchdogNowMs - _outputReadySinceMs;
+            int realNow = mod.getItemStorage().getItemCountReal(_outputReadyItem);
+            if (sinceReady < OUTPUT_READ_GRACE_MS && realNow == _invCountAtOutputReady) {
+                if (watchdogNowMs - _lastGraceLogMs > 1000) {
+                    _lastGraceLogMs = watchdogNowMs;
+                    Debug.logToFile("altoclef_craftclick.log",
+                            String.format("[CraftGrace] output unreadable %.1fs, holding (item=%s, realInv=%d)",
+                                    sinceReady / 1000.0, _outputReadyItem, realNow));
+                }
+                setDebugState("Output briefly unreadable (screen churn), holding receive");
+                return null;
+            }
+            // 宽限过期或成品真被收走 (库存涨) → 清闩走正常流程
+            _outputReadyItem = null;
+        }
+
         // (2026-09-09 停滞看门狗) 签名任一变化即算有进展 (收成品/腾位/清格
         // 都会改变签名, 不会误伤)。
         String progressKey = buildProgressSignature(mod, outputSlot);
@@ -160,6 +197,11 @@ public class CraftGenericWithRecipeBooksTask extends Task implements ITaskUsesCr
         // → 反复派发 ReceiveCraftingOutput(内部读到空 return) 造成 4-5 次反复。
         if (!output.isEmpty() && _target.getOutputItem() == output.getItem() && mod.getItemStorage().getItemCount(_target.getOutputItem()) < _target.getTargetCount()) {
             setDebugState("Getting output");
+            // (2026-10-09 收货优先粘滞) 记录"输出格就绪"锚点: 若随后读到空且库存
+            // 没涨, 判为换代读空进入宽限 hold, 不重发填充 (见字段区详注)。
+            _outputReadyItem = output.getItem();
+            _outputReadySinceMs = watchdogNowMs;
+            _invCountAtOutputReady = mod.getItemStorage().getItemCountReal(output.getItem());
             // [CraftClick] 哑火计时: 真实背包成品计数 4s 不动即告警。
             long nowMs = System.currentTimeMillis();
             int invCountNow = mod.getItemStorage().getItemCountInventoryOnly(_target.getOutputItem());

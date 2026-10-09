@@ -7,6 +7,7 @@ import adris.altoclef.util.helpers.ClientDamageSensor;
 import adris.altoclef.util.helpers.WorldIdentity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
+import net.minecraft.network.packet.s2c.play.CloseScreenS2CPacket;
 import net.minecraft.network.packet.s2c.play.DeathMessageS2CPacket;
 import net.minecraft.network.packet.s2c.play.GameJoinS2CPacket;
 import net.minecraft.network.packet.s2c.play.HealthUpdateS2CPacket;
@@ -135,6 +136,42 @@ public final class ClientPlayNetworkHandlerMixin {
                             + " prevHandler=" + cur);
             _openScreenSuppressed = 0;
             _lastOpenScreenLogMs = now;
+        } catch (Throwable ignored) {
+            // 诊断自身抛错不得影响网络线程
+        }
+    }
+
+    // [2026-10-09 界面换代取证·服务端侧] 服务端主动关屏 (CloseScreenS2CPacket,
+    // 1.18.2 yarn 方法名 onCloseScreen, 经映射 jar javap 核实) —— 客户端静默把
+    // currentScreenHandler 换回 playerScreenHandler, 不经任何 mod 代码。1009 金锭
+    // 现场 [OpenScreen] prevHandler 每次换代前都是 class_1723#0, 若换代由服务端
+    // 关屏驱动则只有这里能看到。与 [OpenScreen]/[CPE-Close] 三路配对, 同款 1s 节流。
+    private static long _lastServerCloseLogMs = 0;
+    private static int _serverCloseSuppressed = 0;
+
+    @Inject(
+            method = "onCloseScreen",
+            at = @At("HEAD")
+    )
+    private void onServerCloseScreen(CloseScreenS2CPacket packet, CallbackInfo ci) {
+        try {
+            long now = System.currentTimeMillis();
+            if (now - _lastServerCloseLogMs < 1000) {
+                _serverCloseSuppressed++;
+                return;
+            }
+            String cur = "null";
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.player != null && client.player.currentScreenHandler != null) {
+                cur = client.player.currentScreenHandler.getClass().getSimpleName()
+                        + "#" + client.player.currentScreenHandler.syncId;
+            }
+            Debug.logToFile("altoclef_diag.log",
+                    "[ServerClose] windowId=" + packet.getSyncId()
+                            + " sup=" + _serverCloseSuppressed
+                            + " prevHandler=" + cur);
+            _serverCloseSuppressed = 0;
+            _lastServerCloseLogMs = now;
         } catch (Throwable ignored) {
             // 诊断自身抛错不得影响网络线程
         }

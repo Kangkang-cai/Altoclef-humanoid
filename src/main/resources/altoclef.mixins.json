@@ -27,6 +27,7 @@
     "ClientBlockBreakMixin",
     "ClientOpenScreenMixin",
     "ClientPlayNetworkHandlerMixin",
+    "ClientPlayerEntityCloseMixin",
     "ClientTickMixin",
     "EntryMixin",
     "LoadChunkMixin",
