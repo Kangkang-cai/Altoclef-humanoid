@@ -116,7 +116,7 @@ public final class TaskSwitchLogger {
      */
     public static void mainTask(TaskChain chain, float priority, Task from, Task to) {
         write("MAIN    [" + name(chain) + " prio=" + priority + "] " + desc(from) + "  ->  " + desc(to));
-        oscillationCheck("MAIN|" + name(chain), name(chain), from, to, "Chain.main");
+        oscillationCheck(chain, "MAIN|" + name(chain), name(chain), from, to, "Chain.main");
         // (2026-09-11 P2 任务环) 周期 >= 3 的循环检测 (周期 2 由抖动检测负责)。
         TaskCycleDetector.observe("MAIN:" + name(chain) + ":"
                 + className(from) + "->" + className(to));
@@ -130,7 +130,7 @@ public final class TaskSwitchLogger {
      */
     public static void subTask(TaskChain chain, float chainPrio, Task parent, Task from, Task to) {
         write("SUB     [" + name(chain) + " prio=" + chainPrio + "] " + desc(parent) + ": " + desc(from) + "  ->  " + desc(to));
-        oscillationCheck("SUB|" + name(chain) + "|" + className(parent), name(chain) + "/" + className(parent), from, to, "Task.sub");
+        oscillationCheck(chain, "SUB|" + name(chain) + "|" + className(parent), name(chain) + "/" + className(parent), from, to, "Task.sub");
         // (2026-09-11 P2 任务环) 周期 >= 3 的循环检测。
         TaskCycleDetector.observe("SUB:" + className(parent) + ":"
                 + className(from) + "->" + className(to));
@@ -190,7 +190,7 @@ public final class TaskSwitchLogger {
      * @param scope 去重域 (where|chain|parentClass), 由调用方构造 —— 抖动只在
      *              同一父任务内部才算, 跨父任务的同名切换不是一回事。
      */
-    private static void oscillationCheck(String scope, String parentDesc, Task from, Task to, String where) {
+    private static void oscillationCheck(TaskChain chain, String scope, String parentDesc, Task from, Task to, String where) {
         // (2026-09-11 口径修正①) null 不是"另一个任务", 是"父级本 tick 没有子任务可派"
         // —— 典型场景是等槽位点击节流 (containerItemMoveDelay=200ms) 或等材料。
         // 这类往返既不代表目的改变, 数量上又恰好是"每次点击两条事件", 计入会让
@@ -231,6 +231,11 @@ public final class TaskSwitchLogger {
                 // 这里只上报, 不再自己 logWarning —— 避免同一件事在两条通道各喊一遍。
                 AnomalyWatchdog.report(new Anomaly(
                         "oscillation", key, AnomalySeverity.WARN, msg, null));
+                // (2026-10-09 横跳软重启) [TaskPingPong] 是横跳死锁的第一手信号: 喂给
+                // StuckTaskRestartGuard 作为第三触发源 (持续 60s 才动手, 配额/取证与
+                // 既有停滞触发共用)。周期 >= 3 的任务环 (TaskCycleDetector) 是低精度
+                // 启发式, 刻意不喂 —— 那边只落盘, 不足以支撑"动手"。
+                adris.altoclef.anomaly.StuckTaskRestartGuard.notifyOscillation(chain, key);
             }
         }
     }

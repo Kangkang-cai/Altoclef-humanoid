@@ -20,7 +20,7 @@ import java.util.HashMap;
  * 本守卫是第一个"动手"的消费者: 时长异常 + 位移停滞双条件成立时, 对用户主任务
  * 做一次软重启。
  *
- * 双条件缺一不可 (这正是"合法长任务不误杀"的关键):
+ * 条件一 + 条件二 缺一不可 (这正是"合法长任务不误杀"的关键):
  * <ul>
  *   <li><b>时长异常</b>: 主任务连续运行超过其任务类的自适应上限
  *       ({@code max(p90×3, 30s)}, 判定源单一: {@link TaskDurationTracker})。
@@ -30,6 +30,14 @@ import java.util.HashMap;
  *       属合法行为, 停滞计时重置 —— 冶炼等待等"站桩但不卡死"场景靠这条豁免。</li>
  * </ul>
  * 在移动的长任务 (远征探索 / fishbone 挖下) 永远不满足第二条件, 不会被杀。
+ *
+ * <p>(2026-10-09) 第三条<b>独立</b>触发线: 任务横跳死锁。信号源 = TaskSwitchLogger
+ * 的 [TaskPingPong] WARN (同键 A&lt;-&gt;B 5s 窗口 &gt;= 6 次; 0911 口径校准后回放
+ * 0 误报), 同键告警经 10s 节流仍持续 &gt;= 60s (约 4 轮) 才动手 —— 瞬时抖动不杀。
+ * 横跳与位移停滞/时长无关 (来回切换时每个子任务都很短, bot 也可能在动), 故为
+ * 独立条件。周期 &gt;= 3 的任务环 (TaskCycleDetector) 是自认低精度的启发式
+ * (只落盘), 刻意不消费。配额与"位移停滞"触发共用同一预算: 同一任务类 10min
+ * 窗口 2 次。
  *
  * 重启杠杆 = {@link Task#interrupt}: 与链抢占恢复完全同一条框架路径 ——
  * 递归 onStop 清理子树、置 _first、保持 active, 下一拍任务重跑 onStart,
@@ -84,6 +92,17 @@ public final class StuckTaskRestartGuard {
     /** 慢变量, 1 秒检查一次 (与 DurationDetector 同频)。 */
     private static final long CHECK_INTERVAL_MS = 1_000;
 
+    /**
+     * (2026-10-09 条件三) 横跳告警间隙: 距上一条 [TaskPingPong] 超过此时长视为
+     * 横跳中断, 重新起算确认窗口。告警按键 10s 节流, 持续横跳约每 10~15s 一条,
+     * 20s 间隙刚好接上不间断的告警流。
+     */
+    private static final long OSC_GAP_MS = 20_000;
+    /** 横跳须持续多久才判"横跳死锁"并重启 (约 4 轮告警, 过滤瞬时抖动)。 */
+    private static final long OSC_CONFIRM_MS = 60_000;
+    /** 取证: 保留最近多少条横跳签名。 */
+    private static final int OSC_KEYS_MAX = 12;
+
     /** 重启后等待多久做"结算" (位移/是否复发)。 */
     private static final long POST_CHECK_MS = 60_000L;
 
@@ -119,6 +138,13 @@ public final class StuckTaskRestartGuard {
 
     private static final HashMap<String, RestartRecord> _records = new HashMap<>();
 
+    /** 横跳信号状态 (条件三, 由 TaskSwitchLogger 喂入; 世界切换/掉线时清零)。 */
+    private static long _oscSinceMs = 0;
+    private static long _lastOscMs = 0;
+    private static int _oscWarnCount = 0;
+    private static String _lastOscKey = null;
+    private static final ArrayDeque<String> _recentOscKeys = new ArrayDeque<>();
+
     private StuckTaskRestartGuard() {
     }
 
@@ -146,6 +172,7 @@ public final class StuckTaskRestartGuard {
         // 合法静止白名单 (与 StallDetector 一致): 命中即重置停滞计时, 不判定。
         if (!ctx.inGame() || ctx.paused() || ctx.playerPos() == null) {
             resetStillness();
+            resetOscillation();
             _posHistory.clear();
             return;
         }
@@ -181,6 +208,77 @@ public final class StuckTaskRestartGuard {
         // ---- 取证: 上一轮重启的 60s 结算 (在任何条件判定之前, 只依赖"到时间了") ----
         if (_pendingPostClass != null && now - _pendingPostAtMs >= POST_CHECK_MS) {
             settlePost(ctx, mainTask, now);
+        }
+
+        // ---- 条件三 (2026-10-09): 横跳死锁 -> 软重启 (独立于条件一/二, 详见类注释) ----
+        // 信号由 TaskSwitchLogger 在 [TaskPingPong] 告警时喂入 (notifyOscillation,
+        // 事件驱动, 不依赖本 tick 的采样); 这里只判"持续足够久 + 配额未耗尽"。
+        // 屏幕开着时上面已 return, 动作顺延到界面关闭的 tick —— 横跳本身常伴随
+        // 界面开关, 告警流不受影响。
+        if (isOscillationThrashing(now)) {
+            RestartRecord rec = _records.computeIfAbsent(cls, k -> new RestartRecord());
+            if (now - rec.lastRestartMs > WINDOW_MS) {
+                rec.count = 0;
+            }
+            if (now - rec.lastRestartMs < MIN_RESTART_INTERVAL_MS) return;
+
+            if (rec.count >= MAX_RESTARTS_PER_WINDOW) {
+                // 出口: 配额耗尽 (与停滞触发共用同一预算) -> 停手, 只节流告警。
+                if (now - rec.lastExhaustedAlertMs > EXHAUSTED_ALERT_MS) {
+                    rec.lastExhaustedAlertMs = now;
+                    String summary = cls + " 横跳持续 (告警 " + _oscWarnCount + " 条), 软重启 "
+                            + rec.count + " 次后仍在横跳 -> 守卫停手, 需人工/上层介入";
+                    Debug.logWarning("[RestartGuard] " + summary);
+                    Debug.logToFile(DIAG_LOG, "[RestartGuard][OSC-EXHAUSTED] " + summary
+                            + " | oscKeys=" + oscKeysDump());
+                    Debug.logToFile(FORENSIC_LOG, oscSnapshot(ctx, cls, now)
+                            + "\n    判定: 横跳软重启 " + rec.count + " 次后依旧 -> 配额耗尽, 守卫停手");
+                    try {
+                        DecisionMemory.put("restartGuardOscExhausted", cls);
+                    } catch (Throwable ignored) {
+                    }
+                    AnomalyWatchdog.report(new Anomaly("oscillation-restart-exhausted", cls,
+                            AnomalySeverity.CRITICAL, summary, "oscKeys=" + oscKeysDump()));
+                }
+                return;
+            }
+
+            // 动作: 软重启主任务 (与停滞触发同一条 interrupt 路径)。
+            rec.count++;
+            rec.lastRestartMs = now;
+            String summary = cls + " 任务横跳持续 " + ((now - _oscSinceMs) / 1000) + "s (告警 "
+                    + _oscWarnCount + " 条) -> 软重启 (" + rec.count + "/"
+                    + MAX_RESTARTS_PER_WINDOW + ")";
+            Debug.logMessage("[RestartGuard] " + summary);
+            Debug.logToFile(DIAG_LOG, "[RestartGuard][OSC-RESTART] " + summary
+                    + " | oscKeys=" + oscKeysDump());
+            Debug.logToFile(FORENSIC_LOG, oscSnapshot(ctx, cls, now)
+                    + "\n    动作: Task.interrupt 软重启 (横跳触发, " + rec.count + "/"
+                    + MAX_RESTARTS_PER_WINDOW + "), " + (POST_CHECK_MS / 1000) + "s 后自动结算");
+            try {
+                DecisionMemory.add("restartGuardOsc", _timeFmt.format(new Date(now))
+                        + " " + cls + " thrash=" + ((now - _oscSinceMs) / 1000) + "s"
+                        + " warns=" + _oscWarnCount);
+            } catch (Throwable ignored) {
+            }
+            try {
+                // interrupt: 递归 onStop 清理子树、置 _first、保持 active;
+                // 下一拍主任务重跑 onStart, 时长计时经 TaskSwitchLogger.taskStarted 归零。
+                mainTask.interrupt(mod, null);
+            } catch (Throwable t) {
+                // 重启动作自身失败不能反噬调度; 本次计数已记, 下个窗口自然重试。
+                Debug.logToFile(DIAG_LOG, "[RestartGuard] interrupt failed: " + t);
+                Debug.logToFile(FORENSIC_LOG, "    ⚠ interrupt 抛异常: " + t);
+                return;
+            }
+            _pendingPostClass = cls;
+            _pendingPostAtMs = now;
+            _pendingPostPos = pos;
+            _pendingPostDim = ctx.dimension();
+            _pendingPostCount = rec.count;
+            AnomalyWatchdog.report(new Anomaly("oscillation-restart", cls,
+                    AnomalySeverity.WARN, summary, "oscKeys=" + oscKeysDump()));
+            return;
         }
 
         // ---- 条件一: 时长异常 (判定源单一: TaskDurationTracker) ----
@@ -279,6 +377,64 @@ public final class StuckTaskRestartGuard {
         _pendingPostCount = rec.count;
         AnomalyWatchdog.report(new Anomaly("duration-restart", cls,
                 AnomalySeverity.WARN, summary, detail));
+    }
+
+    // ------------------------------------------------------------------
+    // 横跳信号 (条件三)
+    // ------------------------------------------------------------------
+
+    /**
+     * TaskSwitchLogger 在每次 [TaskPingPong] WARN 时喂入 (同键 10s 节流后的每次
+     * 告警算一票)。只认 UserTaskChain 的横跳 —— 反射链的抖动不在重启范围。
+     * 距上次告警超过 {@link #OSC_GAP_MS} 视为一轮新横跳, 重新起算确认窗口。
+     */
+    public static void notifyOscillation(TaskChain chain, String key) {
+        if (key == null || !(chain instanceof UserTaskChain)) return;
+        long now = System.currentTimeMillis();
+        if (_oscSinceMs == 0 || now - _lastOscMs > OSC_GAP_MS) {
+            _oscSinceMs = now;
+            _oscWarnCount = 0;
+        }
+        _lastOscMs = now;
+        _oscWarnCount++;
+        if (!key.equals(_lastOscKey)) {
+            if (_recentOscKeys.size() >= OSC_KEYS_MAX) _recentOscKeys.pollFirst();
+            _recentOscKeys.addLast(_timeFmt.format(new Date(now)) + " " + key);
+            _lastOscKey = key;
+        }
+    }
+
+    /** 横跳确认: 告警流未断 (在间隙内) 且本轮已持续 >= {@link #OSC_CONFIRM_MS}。 */
+    private static boolean isOscillationThrashing(long now) {
+        return _oscSinceMs > 0
+                && now - _lastOscMs < OSC_GAP_MS
+                && now - _oscSinceMs >= OSC_CONFIRM_MS;
+    }
+
+    /** 横跳状态清零 (世界切换 / 掉线 / 暂停时)。 */
+    private static void resetOscillation() {
+        _oscSinceMs = 0;
+        _lastOscMs = 0;
+        _oscWarnCount = 0;
+        _lastOscKey = null;
+        _recentOscKeys.clear();
+    }
+
+    /** 最近横跳签名 (取证, 最多 {@link #OSC_KEYS_MAX} 条)。 */
+    private static String oscKeysDump() {
+        if (_recentOscKeys.isEmpty()) return "(空)";
+        return String.join(" || ", _recentOscKeys);
+    }
+
+    /** 横跳事件的现场快照 (多行, 进 restart_guard.log)。不走 snapshot(): 那套
+     *  参数口径是时长/停滞, 横跳触发的 elapsed/stillMs 无意义。 */
+    private static String oscSnapshot(AnomalyContext ctx, String cls, long now) {
+        return "[" + _timeFmt.format(new Date(now)) + "][" + ctx.dimension() + "] " + cls
+                + " 横跳持续=" + ((now - _oscSinceMs) / 1000) + "s 告警数=" + _oscWarnCount
+                + " pos=" + formatPos(ctx.playerPos())
+                + " hp=" + ctx.health() + " food=" + ctx.food()
+                + "\n    stack=" + ctx.stackPath()
+                + "\n    oscKeys=" + oscKeysDump();
     }
 
     // ------------------------------------------------------------------
