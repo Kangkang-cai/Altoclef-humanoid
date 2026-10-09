@@ -97,6 +97,11 @@ public class CollectFoodTask extends Task {
     private long _suspendedAtMs = -1;
     private Task _lastInterruptTask = null;
     private final TimerGame _checkNewOptionsTimer = new TimerGame(10);
+    // (2026-10-09 干草拾取诊断, 1009 bot1 现场) 拆 22 块干草 40s 零拾取, 用户确认
+    // 掉落物就是干草块, 但 pickupBlockTaskOrNull 的 itemDropped(HAY_BLOCK) 恒 false
+    // → Pickup 分支从未触发。1s 节流打 [HAY-DIAG]: tracker 掉落物总数 + 干草条目数
+    // + itemDropped 判定, 定位三道门 (感知登记/落地判定/黑名单) 哪道拦的。定位后拆。
+    private final TimerGame _hayDiagTimer = new TimerGame(1);
     private SmeltInFurnaceTask _smeltTask = null;
     // 终端资源任务槽 (到达型语义): 挖掘/采集/交互/合成/猎杀/拾取 —— 到达(或目的失效)
     // 之前独占 tick, 不被"路边更近的同类目标"打断。打断它 = 白走 + baritone 路径作废
@@ -609,6 +614,22 @@ public class CollectFoodTask extends Task {
                 }
             }
             // Hay
+            // (2026-10-09 诊断埋点) 只写 diag 文件, 不改变任何分支行为。
+            if (_hayDiagTimer.elapsed()) {
+                _hayDiagTimer.reset();
+                int hayDrops = 0, hayAlive = 0, totalDrops = 0;
+                for (ItemEntity ie : mod.getEntityTracker().getDroppedItems()) {
+                    totalDrops++;
+                    if (ie.getStack().getItem() == Items.HAY_BLOCK) {
+                        hayDrops++;
+                        if (ie.isAlive()) hayAlive++;
+                    }
+                }
+                Debug.logToFile("altoclef_diag.log", "[HAY-DIAG]\titemDropped="
+                        + mod.getEntityTracker().itemDropped(Items.HAY_BLOCK)
+                        + " hayDrops(tracker)=" + hayDrops + " alive=" + hayAlive
+                        + " totalDrops=" + totalDrops);
+            }
             Task hayTask = this.pickupBlockTaskOrNull(mod, Blocks.HAY_BLOCK, Items.HAY_BLOCK, 300);
             if (hayTask != null) {
                 setDebugState("Collecting Hay");
