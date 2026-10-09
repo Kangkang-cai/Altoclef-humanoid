@@ -6,6 +6,7 @@ import adris.altoclef.bridge.FollowRelation;
 import adris.altoclef.bridge.PeerPosWatcher;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
+import adris.altoclef.util.helpers.RconPlayerOracle;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.BlockPos;
@@ -91,6 +92,32 @@ public class FollowPlayerTask extends Task {
      */
     private static final long REMOTE_APPROACH_MAX_MS = 5 * 60_000;
 
+    // ------------------------------------------------------------------ //
+    // (2026-10-09 RCON 维度/坐标 oracle) 目标是真人且跨维度/超距的兜底
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 空记录等待多久后开始尝试 RCON 查询（{@link RconPlayerOracle}）。
+     * 10s：给"对方正跑过来、马上进跟踪范围"的正常场景留窗口，不急于开上帝视角。
+     */
+    private static final long RCON_FALLBACK_AFTER_MS = 10_000;
+
+    /**
+     * RCON 接近硬上限（与 {@link #REMOTE_APPROACH_MAX_MS} 同款出口语义）：
+     * "拿着服务端真坐标也长时间走不到" = 目标在动/地形不可达，结束让派发方决策。
+     */
+    private static final long RCON_APPROACH_MAX_MS = 10 * 60_000;
+
+    /** 空记录（onNoPlayerRecord 分支 3）起点；0 = 未在等待。onStart 重置。 */
+    private long _noRecordSinceMs = 0;
+
+    /** RCON 接近当前导航任务（目标移动超过 {@link PeerPosWatcher#RETARGET_DIST} 才重建）。 */
+    private Task _rconApproach = null;
+    /** RCON 接近当前目标格。 */
+    private BlockPos _rconTarget = null;
+    /** RCON 接近起点（0 = 不在 RCON 接近）。 */
+    private long _rconSinceMs = 0;
+
     public FollowPlayerTask(String playerName) {
         this(playerName, 3, 0, true);
     }
@@ -114,6 +141,11 @@ public class FollowPlayerTask extends Task {
     protected void onStart(AltoClef mod) {
         _holdingDistance = false;
         resetRemoteApproach();
+        // (2026-10-09) RCON 兜底计时也随重进重开（interrupt 二次进入是新的一轮等待）。
+        _noRecordSinceMs = 0;
+        _rconApproach = null;
+        _rconTarget = null;
+        _rconSinceMs = 0;
         // interrupt 后会二次 onStart（框架行为）⇒ 起点只记一次，否则时限被无限续期。
         if (_startedMs == 0) _startedMs = System.currentTimeMillis();
         if (_announce) FollowRegistry.register(this, _playerName);
@@ -152,12 +184,21 @@ public class FollowPlayerTask extends Task {
 
         // (2026-10-06) 跨维度守卫：_playerLastCoordinates 故意跨维度不清空，若目标"最后现身"
         // 在另一个维度，那份坐标在本维度里是废坐标 —— 旧实现会照着它走完整趟废路，到地方才
-        // 发现"no idea where they are"。这里提前拦下：目标不在线（未加载）且记录维度 ≠ 当前
-        // 维度 → 立即结束（one-shot 出口），由 bridge 报 failed 让派发方决策（换维度/放弃）。
+        // 发现"no idea where they are"。这里提前拦下。
+        // (2026-10-09 RCON oracle) 拿得到服务端真身维度/坐标 ⇒ 不再"停任务让派发方决策"，
+        // 而是直接跨维度去接（含"到了对方维度再走向其真实坐标"）；RCON 不可达 ⇒ 维持旧语义
+        // （one-shot 停止，由 bridge 报 failed）。注意停止后由父链重建本任务再进来，
+        // 每一轮 stop 都是 one-shot，不构成每拍停-建循环。
         if (!mod.getEntityTracker().isPlayerLoaded(_playerName)) {
             Dimension lastSeenDim = mod.getEntityTracker().getDimensionOfPlayerLastCoordinates(_playerName).orElse(null);
             Dimension currentDim = WorldHelper.getCurrentDimension();
             if (lastSeenDim != null && lastSeenDim != currentDim) {
+                RconPlayerOracle.request(mod, _playerName);
+                Optional<RconPlayerOracle.Snapshot> snap = RconPlayerOracle.snapshotOf(_playerName);
+                if (snap.isPresent()) {
+                    Task rcon = tickRconApproach(mod, snap.get());
+                    return rcon; // 非 null = 继续接近；null = 超时出口已在内部 stop
+                }
                 mod.logWarning("Player \"" + _playerName + "\" was last seen in a different dimension ("
                         + lastSeenDim + ", we are in " + currentDim + "). Not chasing stale coordinates.");
                 stop(mod);
@@ -260,7 +301,9 @@ public class FollowPlayerTask extends Task {
      * <p>
      * 1) 服务器有相似名 (名字打错/大小写/服务器昵称) -&gt; 提示 "你是不是想找 X"
      * 2) tab 列表里根本没这人 -&gt; 报警并结束任务 (不再无限空转)
-     * 3) 在线但超出客户端追踪范围 -&gt; 明确告知, 继续等待其进入范围
+     * 3) 在线但超出客户端追踪范围 -&gt; (2026-10-09) 等 {@link #RCON_FALLBACK_AFTER_MS} 后
+     *    经 {@link RconPlayerOracle} 向服务端 RCON 查真身维度/坐标并导航过去;
+     *    RCON 不可达时维持原语义: 明确告知, 继续等待其进入范围
      * <p>
      * (2026-10-02 用户实锤) 第三方服务器上, 追踪范围外(约等于服务器 view-distance,
      * 默认 160 格)的玩家实体不下发坐标, 客户端拿不到位置就无法导航 —— 这是原版
@@ -284,11 +327,65 @@ public class FollowPlayerTask extends Task {
             setDebugState("Player \"" + _playerName + "\" not found. Did you mean \"" + closest.get() + "\"?");
             return null;
         }
+        // (2026-10-09 RCON oracle) 分支 3 的出口：等 {@link #RCON_FALLBACK_AFTER_MS} 仍拿不到
+        // 任何坐标 ⇒ 向服务端 RCON 查目标真身（维度+坐标）。拿到快照 = 直接导航过去
+        // （跨维度时 {@code GetToBlockTask} 内部先走 {@code DefaultGoToDimensionTask} 过门）；
+        // RCON 不可达（第三方服）⇒ 保留下方原有等待语义，行为与旧版完全一致。
+        if (_noRecordSinceMs == 0) _noRecordSinceMs = System.currentTimeMillis();
+        if (System.currentTimeMillis() - _noRecordSinceMs >= RCON_FALLBACK_AFTER_MS) {
+            RconPlayerOracle.request(mod, _playerName);
+            Optional<RconPlayerOracle.Snapshot> snap = RconPlayerOracle.snapshotOf(_playerName);
+            if (snap.isPresent()) {
+                return tickRconApproach(mod, snap.get()); // null = 超时出口已在内部 stop
+            }
+        }
         warnThrottled(mod, "Player \"" + _playerName + "\" is online but outside the client tracking range; "
                 + "the client has no coordinates for them yet. Waiting for them to come within reach.");
         setDebugState("Player \"" + _playerName + "\" is online but too far: no coordinates yet. "
                 + "Waiting for them to come within tracking range.");
         return null;
+    }
+
+    /**
+     * (2026-10-09 RCON oracle) 拿着服务端真实坐标接近目标（{@link RconPlayerOracle} 快照）。
+     *
+     * <p>两个调用点共用：① 空记录等 10s（目标从未进入跟踪范围，1009 Tseng 在下界实测）；
+     * ② 跨维度守卫处有"最后现身在别的维度"的废坐标（跟丢后对方换维度）。
+     *
+     * <p>出口：目标实体重新进入跟踪范围（onTick 常规路径接管）/ 目标离线（空记录分支 1 停）
+     * / 走不到（{@link #RCON_APPROACH_MAX_MS} 硬上限，内部 stop）。
+     *
+     * @return 接近任务；{@code null} = 已超时 stop，调用方直接返回 null
+     */
+    private Task tickRconApproach(AltoClef mod, RconPlayerOracle.Snapshot snap) {
+        long now = System.currentTimeMillis();
+        if (_rconSinceMs == 0) _rconSinceMs = now;
+        if (now - _rconSinceMs >= RCON_APPROACH_MAX_MS) {
+            mod.logWarning("Gave up RCON-approaching \"" + _playerName + "\" after "
+                    + (RCON_APPROACH_MAX_MS / 60_000) + " min (server coordinates only).");
+            resetRconApproach();
+            stop(mod);
+            return null;
+        }
+        BlockPos target = snap.blockPos();
+        if (_rconApproach == null || _rconTarget == null
+                || _rconTarget.getSquaredDistance(target)
+                        > PeerPosWatcher.RETARGET_DIST * PeerPosWatcher.RETARGET_DIST) {
+            _rconApproach = new GetToBlockTask(target, false, snap.dim());
+            _rconTarget = target;
+        }
+        double dist = mod.getPlayer() == null ? -1
+                : snap.pos().distanceTo(mod.getPlayer().getPos());
+        setDebugState("Approaching \"" + _playerName + "\" via server coordinates ("
+                + snap.dim() + (dist >= 0 ? ", " + (int) dist + " blocks" : "") + ")");
+        return _rconApproach;
+    }
+
+    /** 退出 RCON 接近：丢导航句柄与计时。 */
+    private void resetRconApproach() {
+        _rconApproach = null;
+        _rconTarget = null;
+        _rconSinceMs = 0;
     }
 
     private void warnThrottled(AltoClef mod, String message) {
