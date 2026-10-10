@@ -13,7 +13,7 @@ import java.util.Locale;
 
 public class EquipCommand extends Command {
     public EquipCommand() throws CommandException {
-        super("equip", "Equips armor", new Arg(ItemList.class, "[armors]"));
+        super("equip", "Equips armor (只用背包已有材料: 直接穿或现做, 不外出收集)", new Arg(ItemList.class, "[armors]"));
     }
 
     @Override
@@ -64,7 +64,9 @@ public class EquipCommand extends Command {
 
 
         if(items != null)
-            mod.runUserTask(new EquipArmorTask(items), this::finish); // do not run the equip task with non armor items.
+            // (2026-10-10) inventoryOnly=true: 只用背包已有材料（直接穿/现做），绝不外出挖矿/砍树收集。
+            // 结束时任务自发 "[equip] 穿甲回执"（bridge 侧 action_done 同文）。
+            mod.runUserTask(new EquipArmorTask(true, items), this::finish); // do not run the equip task with non armor items.
         else
             throw new CommandException("You must provide armor items."); //inform the user that they can only use armor items.
         //TODO Possibly add in a variable to tell the user what was wrong. However, this is less helpful if a list of items is wrong.

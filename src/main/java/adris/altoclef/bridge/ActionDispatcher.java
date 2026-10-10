@@ -104,6 +104,8 @@ final class ActionDispatcher {
      * (2026-10-09) get/equip 加入：get 顶层任务=ResourceTask（TaskCatalogue 单/多物品两条
      * 路径都汇于此，CataloguedResourceTask 亦为其子类）；equip 顶层任务=EquipArmorTask。
      * 两者完成后自动回主线（B' 同款），失败/参数错走 CommandFeedback 即时 failed。
+     * (2026-10-10) equip 语义收紧：只用背包已有材料（直接穿/现做），不外出收集矿物/木料；
+     * 回执=逐件结果（EquipArmorTask.getReceiptText），0 件穿上 → failed。
      *
      * <p>⚠️ 1002 冒烟实锤缺陷：早前实现用"FIFO 取最老 pending"，且 pause/只读类也压了 pending
      * 条目（它们的 done 是同步发的、从不 pop）⇒ 队列残留老条目被后续 TaskFinishedEvent 拿走，
@@ -524,6 +526,16 @@ final class ActionDispatcher {
         String text = label.isEmpty() ? "完成" : "完成：" + label;
         String status = "completed";
         String reason = null;
+        // (2026-10-10) equip 专项回执: @equip 改为"只用背包已有材料"(不外出收集)后,
+        // EquipArmorTask(inventoryOnly) 逐件记录 穿上(来源)/跳过(原因), 用它替换默认的
+        // "完成: Equipping armor {[...]}"(对端拿不到结果信息)。一件都没穿上 → failed。
+        if (finished instanceof EquipArmorTask ea && ea.isInventoryOnly()) {
+            text = ea.getReceiptText();
+            if (ea.getWornCount() == 0) {
+                status = "failed";
+                reason = "背包无现成护甲, 且现有材料不足以制作";
+            }
+        }
         // follow 唯一的自然结束路径 = 走到最后已知位置但目标已不在加载范围（FollowPlayerTask 内 stop），
         // 归 failed 而非 completed（"追不到"是终态失败，不是干完了）。
         if ("follow".equals(p.token) && !isPlayerLoaded(_activePlayerName)) {
