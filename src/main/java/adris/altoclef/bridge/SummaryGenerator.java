@@ -1,8 +1,13 @@
 package adris.altoclef.bridge;
 
 import adris.altoclef.AltoClef;
-import adris.altoclef.tasks.movement.IdleTask;
+import adris.altoclef.tasks.entity.*;
+import adris.altoclef.tasks.movement.*;
+import adris.altoclef.tasks.resources.*;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
+import adris.altoclef.tasks.speedrun.KillEnderDragonTask;
+import adris.altoclef.tasks.speedrun.KillEnderDragonWithBedsTask;
+import adris.altoclef.tasks.speedrun.WaitForDragonAndPearlTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
 import adris.altoclef.tasksystem.TaskRunner;
@@ -82,12 +87,82 @@ final class SummaryGenerator {
     }
 
     /**
+     * (1010 补全) User Tasks 链内<b>任务级</b>中文标签。此前链级标签只有"主线任务/行动任务"
+     * 两档，对端看不到"在找要塞/在刷烈焰棒/在躲龙息"这种现场粒度（194 个任务类被压成
+     * 9 种标签，压缩率 20:1）。
+     *
+     * <p>口径：instanceof 自顶向下、先细后粗；只映射高频现场任务，craft/slot 等后台任务
+     * 刻意不映射；未命中返回 {@code null}，由调用方回落"行动任务"。
+     */
+    private static String taskToDetailLabel(Task cur) {
+        // —— 主线（speedrun）——
+        if (cur instanceof BeatMinecraft2Task) return "主线任务";
+        if (cur instanceof KillEnderDragonTask || cur instanceof KillEnderDragonWithBedsTask) return "击杀末影龙";
+        if (cur instanceof WaitForDragonAndPearlTask) return "等龙凑珍珠";
+
+        // —— 要塞/传送门线 ——
+        if (cur instanceof GoToStrongholdPortalTask) return "寻找要塞传送门";
+        if (cur instanceof ExploreStrongholdTask) return "探索要塞";
+        if (cur instanceof LocateStrongholdCoordinatesTask) return "定位要塞坐标";
+        if (cur instanceof EnterNetherPortalTask) return "穿下界传送门";
+        if (cur instanceof DefaultGoToDimensionTask) return "跨维度移动";
+        if (cur instanceof GoToSurfaceTask) return "回地表";
+
+        // —— 下界/堡垒线 ——
+        if (cur instanceof FortressExploreTask) return "探索下界堡垒";
+        if (cur instanceof NetherGoldExpeditionTask) return "下界挖金";
+        if (cur instanceof NetherExpeditionTask) return "下界远征";
+        if (cur instanceof TradeWithPiglinsTask) return "猪灵以物易物";
+        if (cur instanceof CollectBlazeRodsTask) return "刷烈焰棒";
+        if (cur instanceof CollectFireResPotionsTask) return "收防火药水";
+        if (cur instanceof CollectEnderPearlsInForestTask) return "收末影珍珠";
+
+        // —— 资源收集 ——
+        if (cur instanceof CollectFoodTask) return "找吃的";
+        if (cur instanceof CollectObsidianTask || cur instanceof CollectObsidianByBarterTask) return "收黑曜石";
+        if (cur instanceof CollectGoldIngotTask) return "收金锭";
+        if (cur instanceof CollectIronIngotTask) return "收铁锭";
+        if (cur instanceof GetBuildingMaterialsTask) return "收集建材";
+        if (cur instanceof SatisfyMiningRequirementTask) return "凑挖矿装备";
+        if (cur instanceof CollectRecipeCataloguedResourcesTask) return "收集合成材料";
+        if (cur instanceof MineAndCollectTask) return "挖矿收集";
+        if (cur instanceof PickupDroppedItemTask) return "捡掉落物";
+
+        // —— 战斗/走位/应急 ——
+        if (cur instanceof KillEntityTask || cur instanceof KillEntitiesTask
+                || cur instanceof AbstractKillEntityTask || cur instanceof KillAndLootTask) return "击杀";
+        if (cur instanceof GiveItemToPlayerTask) return "交付物品";
+        if (cur instanceof DodgeProjectilesTask) return "躲避弹射物";
+        if (cur instanceof EscapeFromLavaTask) return "逃离岩浆";
+        if (cur instanceof TowerEscapeTask) return "垫塔逃生";
+        if (cur instanceof DigOutEscapeTask) return "挖脱困";
+        if (cur instanceof RunAwayFromCreepersTask) return "躲苦力怕";
+        if (cur instanceof RunAwayFromHostilesTask || cur instanceof ProgressiveRunAwayTask
+                || cur instanceof RunAwayFromEntitiesTask || cur instanceof RunAwayFromPositionTask) return "撤离";
+        if (cur instanceof ShelterAndRecoverTask) return "躲避休整";
+        if (cur instanceof MLGBucketTask) return "落水桶保护";
+
+        // —— 移动兜底 ——
+        if (cur instanceof FollowPlayerTask) return "跟随玩家";
+        if (cur instanceof FollowAndWorkTask) return "跟随作业";
+        if (cur instanceof ExploreCaveTask || cur instanceof SearchChunksExploreTask
+                || cur instanceof SearchWithinBiomeTask
+                || cur instanceof SearchChunkForBlockTask) return "探索搜索";
+        if (cur instanceof MineDownExploreTask || cur instanceof FishboneLevelTask) return "向下挖矿";
+        if (cur instanceof CustomBaritoneGoalTask || cur instanceof GetToBlockTask
+                || cur instanceof GetToXZTask || cur instanceof GetToYTask
+                || cur instanceof GetToChunkTask || cur instanceof GetWithinRangeOfBlockTask
+                || cur instanceof GetCloseToBlockTask) return "赶路";
+        return null;
+    }
+
+    /**
      * (1002 16:5x 对端要求) 细分 {@code task} 标签。链名太粗 —— User Tasks 链里跑
      * {@code @idle} 驻留时也会报"主线任务"，害对端把 idle 误判成"主线在跑"（B4/B5 误判源头）。
      *
      * <p>口径：无任务 → {@code 空闲}；{@code @idle} 驻留 → {@code 待命}；
-     * {@link BeatMinecraft2Task} 在跑 → {@code 主线任务}；其余用户任务（@goto/@follow/@give 等）
-     * → {@code 行动任务}。非 User Tasks 链保持原链名映射。
+     * 其余用户任务先走 {@link #taskToDetailLabel} 任务级映射（1010 补全），
+     * 未命中 → {@code 行动任务}。非 User Tasks 链保持原链名映射。
      */
     private static String refineUserTaskLabel(AltoClef mod, TaskChain chain, String fallback) {
         try {
@@ -98,7 +173,8 @@ final class SummaryGenerator {
                 Task cur = utc.getCurrentTask();
                 if (cur == null) return "空闲";
                 if (cur instanceof IdleTask) return "待命";
-                if (cur instanceof BeatMinecraft2Task) return "主线任务";
+                String detail = taskToDetailLabel(cur);
+                if (detail != null) return detail;
                 return "行动任务";
             }
             if (chain == null || chain.getTasks().isEmpty()) return "空闲";
