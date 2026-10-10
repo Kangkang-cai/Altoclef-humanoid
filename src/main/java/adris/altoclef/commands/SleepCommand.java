@@ -7,14 +7,17 @@ import adris.altoclef.commandsystem.ArgParser;
 import adris.altoclef.commandsystem.Command;
 import adris.altoclef.commandsystem.CommandException;
 import adris.altoclef.commandsystem.CommandFeedback;
+import adris.altoclef.tasks.misc.PlaceBedAndSetSpawnTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.resources.CollectBedTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.SleepHelper;
+import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -37,6 +40,10 @@ import net.minecraft.util.math.BlockPos;
  *       照常挖矿/收集/推进主线"——即主线夜里"跳过睡觉后启动的那条分支"。
  *       <b>下一个白天自动恢复</b>，不会让 bot 永久拒绝睡觉。</li>
  * </ul>
+ *
+ * <p>(2026-10-10) <b>白天语义</b>：主世界晴朗白天收到 {@code @sleep auto|bed-only}
+ * 不派睡觉任务，代表<b>原地设置重生点</b> —— 派 {@link PlaceBedAndSetSpawnTask}
+ * （复用既有任务，右键床即设点、设点成功即收尾，不睡）。skip / wait-dawn 语义不变。
  *
  * <p>⚠️ <b>跳过睡觉 ≠ 天亮</b>：多人服里只要有玩家醒着，夜晚就不会被跳过。skip 的真实效果是
  * "别浪费时间上床，去干活，等真正的天亮（约 7 分钟真实时间）"。
@@ -98,17 +105,23 @@ public class SleepCommand extends Command {
                     finish();
                     return;
                 }
-                String m = "bed-only：用现成的床睡。";
+                boolean day = isDaytimeOverworld();
+                String m = day
+                        ? "bed-only：白天，用现成的床原地设重生点（不睡）。"
+                        : "bed-only：用现成的床睡。";
                 CommandFeedback.ok(m);
                 log(m);
-                mod.runUserTask(new SleepThroughNightTask(), this::finish);
+                mod.runUserTask(day ? new PlaceBedAndSetSpawnTask() : new SleepThroughNightTask(), this::finish);
             }
             case "auto" -> {
                 SleepOverride.clear();
-                String m = "睡觉（有床用床，没床就地找/造）。";
+                boolean day = isDaytimeOverworld();
+                String m = day
+                        ? "白天：原地设重生点（右键床即设点，不睡）。"
+                        : "睡觉（有床用床，没床就地找/造）。";
                 CommandFeedback.ok(m);
                 log(m);
-                mod.runUserTask(new SleepThroughNightTask(), this::finish);
+                mod.runUserTask(day ? new PlaceBedAndSetSpawnTask() : new SleepThroughNightTask(), this::finish);
             }
             default -> {
                 // 未知模式必须显式失败 —— 旧实现把它静默当 auto，AI 以为下的是 bed-only。
@@ -140,6 +153,28 @@ public class SleepCommand extends Command {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    /**
+     * (2026-10-10) 白天 {@code @sleep} = 原地设重生点的闸门。
+     *
+     * <p>白天（主世界晴朗）时 {@code auto/bed-only} 不再派睡觉任务，改派
+     * {@link PlaceBedAndSetSpawnTask}（永久设点模式）：vanilla 1.18.2
+     * {@code ServerPlayerEntity.trySleep} 的 setSpawnPoint 在 isDay 检查【之前】——
+     * 白天右键床重生点已设置，随后才提示"只能在晚上睡觉"（该任务内 2026-09-21
+     * 反编译注释实锤）。设点成功即收尾，不需要睡进去。
+     *
+     * <p>判据与 {@code PlaceBedAndSetSpawnTask} 收床闸门同源（WorldHelper.isBrightDaytime，
+     * 雷暴天除外 —— 雷暴白天也可睡）；只在主世界生效 —— 下界/末地没有昼夜，
+     * isBrightDaytime 口径无意义。全部读取 try/catch，异常按"非白天"回退旧路径。
+     */
+    private static boolean isDaytimeOverworld() {
+        try {
+            return WorldHelper.getCurrentDimension() == Dimension.OVERWORLD
+                    && WorldHelper.isBrightDaytime();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     /** 手里有床，或 24 格内有已知的床方块 → true。全部读取包 try/catch，绝不把异常抛进命令链。 */
