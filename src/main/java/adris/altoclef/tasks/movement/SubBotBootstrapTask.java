@@ -2,21 +2,25 @@ package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.TaskCatalogue;
 import adris.altoclef.bridge.BridgeConfig;
 import adris.altoclef.bridge.LeaderPhaseWatcher;
 import adris.altoclef.bridge.PeerPosWatcher;
 import adris.altoclef.bridge.SubBotDuty;
+import adris.altoclef.tasks.misc.EquipArmorTask;
 import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasks.speedrun.BeatMinecraftConfig;
 import adris.altoclef.tasks.speedrun.BeatPhase;
 import adris.altoclef.tasksystem.Task;
+import adris.altoclef.util.Dimension;
 import adris.altoclef.util.SleepOverride;
 import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.SleepHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.EnumSet;
@@ -37,6 +41,10 @@ import java.util.function.Supplier;
  *       同款 static 闩）—— 之后即使背包丢了也不重做, 缺口按设计由主 bot 用 {@code @give} 补。</li>
  *   <li><b>睡眠镜像</b>: 多人服「全员入睡才跳夜」⇒ 主 bot 躺下时次 bot 也必须躺。详见
  *       {@link #tickMirrorSleep}。</li>
+ *   <li><b>下界金靴前置（2026-10-10）</b>: 主 bot 处于下界向阶段（PORTAL/BLAZE_RODS/
+ *       ENDER_PEARLS）或次 bot 自己已在下界, 而未穿金靴 → 先补靴再跟随（猪灵不攻击的
+ *       通行证）。三态/超时口径与主线 getPreNetherGoldenBootsTask 同源, 详见
+ *       {@link #tickGoldenBoots}。</li>
  *   <li><b>随行</b>: 返回 {@link FollowAndWorkTask}(leader) —— 贴 3 格 + 顺手搜刮/挖矿。</li>
  * </ol>
  *
@@ -173,6 +181,34 @@ public class SubBotBootstrapTask extends Task {
     private Task _autoTask = null;
 
     // ------------------------------------------------------------------ //
+    // (2026-10-10) 下界金靴前置
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 视为"主 bot 正在往/在下界"的大阶段。金靴（猪灵不主动攻击的唯一通行证）必须
+     * 在进下界前穿好；ENDER_PEARLS 也算 —— 主 bot 在下界以物易物收珍珠时次 bot 跟着,
+     * 没金靴一样会被猪灵围殴。
+     */
+    private static final Set<BeatPhase> NETHER_BOUND_PHASES = EnumSet.of(
+            BeatPhase.PORTAL,
+            BeatPhase.BLAZE_RODS,
+            BeatPhase.ENDER_PEARLS);
+
+    /**
+     * 补靴总预算。与主线 {@code BeatMinecraft2Task.PRE_NETHER_BOOTS_TIMEOUT_MS} 同源 3 分钟:
+     * 背包有=秒级, 没有=挖金+合成 4 金锭, 3 分钟凑不齐说明金源太远 —— 跟随途中断不成
+     * 样子, 到点放弃并闩死, 等触发线关闭（回主世界阶段）后重新武装。
+     */
+    private static final long GOLDEN_BOOTS_GIVEUP_MS = 3 * 60_000L;
+
+    /** 金靴子任务缓存（ EquipArmorTask / 收集链每 tick new 会打断自身进度, 同 {@link #_prep}）。 */
+    private Task _bootsTask = null;
+    /** 补靴开始时刻（0 = 当前没在补）。目标达成或放弃时清零。 */
+    private long _bootsSinceMs = 0;
+    /** 本次触发期内已放弃闩（one-shot: 到点只放弃一次并落一条日志, 不反复刷）。 */
+    private boolean _bootsGivenUp = false;
+
+    // ------------------------------------------------------------------ //
     // 睡眠镜像状态
     // ------------------------------------------------------------------ //
 
@@ -203,6 +239,9 @@ public class SubBotBootstrapTask extends Task {
         if (!_prepDone) return tickPrep(mod);
         Task sleep = tickMirrorSleep(mod);
         if (sleep != null) return sleep;
+        // (2026-10-10) 下界金靴前置: 主 bot 要进/在下界而次 bot 光脚时, 先补靴再跟随。
+        Task boots = tickGoldenBoots(mod);
+        if (boots != null) return boots;
         return tickFollow(mod);
     }
 
@@ -342,6 +381,84 @@ public class SubBotBootstrapTask extends Task {
             return false;
         }
         return now - _leaderSleepSeenMs >= LEADER_SLEEP_DEBOUNCE_MS;
+    }
+
+    // ------------------------------------------------------------------ //
+    // 下界金靴前置（2026-10-10, 用户点名"次 bot 没有穿金靴的意识"）
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 主 bot 要进/在下界（{@link #NETHER_BOUND_PHASES}）而次 bot 未穿金靴 → 先补靴再跟随;
+     * 次 bot 自己已在下界（跟随中掉队/传送到半路）同样适用 —— 猪灵敌意不分主次 bot。
+     *
+     * <p><b>三态与主线同款</b>（复用 {@code BeatMinecraft2Task.getPreNetherGoldenBootsTask}
+     * 已验证口径, 不另立语义）: 已穿 → null 放行; 背包有 → {@link EquipArmorTask} 穿上;
+     * 没有 → {@link TaskCatalogue#getItemTask} 收集合成（金靴只耗 4 金锭, 门槛极低）。
+     *
+     * <p><b>出口</b>（铁律: 一切等待必须有出口）: {@link #GOLDEN_BOOTS_GIVEUP_MS} 到点 →
+     * 置 {@link #_bootsGivenUp} 闩 + 放行跟随, 绝不永久阻塞。闩在触发线关闭
+     * （主 bot 回主世界阶段且次 bot 不在下界）时解除 —— 下次进下界重新尝试。
+     *
+     * <p>优先级位于睡眠镜像之后、随行之前: 睡觉不能被换靴打断, 而换靴值得短暂打断跟随
+     * （穿靴秒级, 收集有超时兜底）。
+     *
+     * @return 要执行的金靴子任务, 或 null（已穿/已放弃/触发线未命中 → 交回随行）
+     */
+    private Task tickGoldenBoots(AltoClef mod) {
+        boolean selfInNether = WorldHelper.getCurrentDimension() == Dimension.NETHER;
+        BeatPhase lp = LeaderPhaseWatcher.phase();
+        boolean leaderNetherBound = lp != null
+                && LeaderPhaseWatcher.ageMs() <= LEADER_PHASE_STALE_MS
+                && NETHER_BOUND_PHASES.contains(lp);
+        // 触发线: 自己在下界, 或 主 bot 处于下界向阶段且此刻本就轮到次 bot 跟随。
+        // （自主模式下 leaderNetherBound 不触发 —— 那时次 bot 跑的是主线本体, 装备自管;
+        //   selfInNether 仍然触发: 掉在下界里, 生存优先于自主任务。）
+        boolean trigger = selfInNether || (leaderNetherBound && shouldFollowLeaderNow());
+        if (!trigger) {
+            // 触发线关闭 → 解除放弃闩并清缓存, 下次进下界重新武装（否则一次放弃闩死终身）。
+            _bootsTask = null;
+            _bootsSinceMs = 0;
+            _bootsGivenUp = false;
+            return null;
+        }
+        if (StorageHelper.isArmorEquipped(mod, Items.GOLDEN_BOOTS)) {
+            _bootsTask = null;   // 目标达成, 丢缓存（句柄已终态）
+            _bootsSinceMs = 0;
+            return null;
+        }
+        if (_bootsGivenUp) return null;
+
+        if (_bootsSinceMs == 0) {
+            _bootsSinceMs = System.currentTimeMillis();
+            String m = "[SUB-BOOT] 下界金靴前置: 未穿金靴（leader=" + _leader
+                    + ", phase=" + lp + ", selfInNether=" + selfInNether + "）, 先补靴";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+        }
+        if (System.currentTimeMillis() - _bootsSinceMs > GOLDEN_BOOTS_GIVEUP_MS) {
+            _bootsGivenUp = true;
+            String m = "[SUB-BOOT] 金靴 " + (GOLDEN_BOOTS_GIVEUP_MS / 60_000)
+                    + " 分钟未凑齐 — 本次放弃, 直接跟随（触发线关闭后自动重试）";
+            Debug.logMessage(m);
+            Debug.logToFile("altoclef_diag.log", m);
+            return null;
+        }
+
+        SubBotDuty.set(SubBotDuty.Mode.PREP, _leader, "补金靴（下界前置）");
+        // 背包已有 → 优先直接穿（收集中途凑齐时从"挖金"切到"穿上", 不等收集链走完）。
+        if (mod.getItemStorage().hasItemInventoryOnly(Items.GOLDEN_BOOTS)) {
+            if (!(_bootsTask instanceof EquipArmorTask)) {
+                _bootsTask = new EquipArmorTask(Items.GOLDEN_BOOTS);
+            }
+            setDebugState("[次bot引导] 穿金靴（下界前置）");
+            return _bootsTask;
+        }
+        // 没有 → 收集/合成（粘性实例, 同 cachedPrep 理由）。
+        if (_bootsTask == null || _bootsTask.isFinished(mod)) {
+            _bootsTask = TaskCatalogue.getItemTask(Items.GOLDEN_BOOTS, 1);
+        }
+        setDebugState("[次bot引导] 补金靴（下界前置, 4 金锭）");
+        return _bootsTask;
     }
 
     // ------------------------------------------------------------------ //
