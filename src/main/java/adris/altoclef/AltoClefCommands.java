@@ -54,7 +54,11 @@ public class AltoClefCommands {
                 // 由给方交付完成后经 PeerCommandSender 自动调用 (bridge 白名单)。
                 new PickupCommand(),
                 // (2026-10-07 HUD 运行时开关) 临时隐藏左上角任务链 overlay (Alt+H 同效)。
-                new HudCommand()
+                new HudCommand(),
+                // (2026-10-10) 主线干预伪命令的聊天栏入口：转发 BridgeHttpServer.dispatchPseudoFromChat,
+                // 与 AI 的 HTTP /command 入口走 ActionDispatcher 同一条流水线(人工测试用, 原本聊天栏输入静默失败)。
+                new PauseMainCommand(),
+                new ResumeMainCommand()
                 //new TestMoveInventoryCommand(),
                 //    new TestSwapInventoryCommand()
         );

@@ -127,7 +127,7 @@ final class ActionDispatcher {
     private final AltoClef _mod;
     private final EventBuffer _buffer;
 
-    /** 限流滑动窗口（HTTP 线程独占）。 */
+    /** 限流滑动窗口（HTTP 线程 + 聊天入口线程（客户端线程，2026-10-10）都会记账，并发结构兜底）。 */
     private final ConcurrentLinkedDeque<Long> _actionTimesMs = new ConcurrentLinkedDeque<>();
     /** 待回执行动（HTTP 线程写，客户端线程读/消费）。 */
     private final ConcurrentLinkedDeque<PendingAction> _pending = new ConcurrentLinkedDeque<>();
@@ -222,7 +222,7 @@ final class ActionDispatcher {
         return "a-" + System.currentTimeMillis() + "-" + _seq.incrementAndGet();
     }
 
-    /** 登记待回执行动 + 发同步受理事件（HTTP 线程）。 */
+    /** 登记待回执行动 + 发同步受理事件（HTTP 线程或聊天入口=客户端线程，2026-10-10 起两路共用）。 */
     void accept(String actionId, String token, String cmd) {
         // 只有有任务生命期的行动才进 pending —— pause/resume/只读类的 done 是同步发的，
         // 登记了也没人 pop，只会在队列里残留并污染后续关联（1002 实锤缺陷）。

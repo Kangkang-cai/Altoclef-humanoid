@@ -131,6 +131,46 @@ public final class BridgeHttpServer {
         return s == null ? null : s._buffer;
     }
 
+    /**
+     * 聊天栏入口（2026-10-10）：把 {@code @pause_main} / {@code @resume_main} 伪命令送进
+     * {@link ActionDispatcher} <b>同一条流水线</b>（rateCheck → accept → runOnClientThread），
+     * 保证与 HTTP {@code POST /command} 入口共享同一套状态簿记（{@code _paused} 令牌 /
+     * activeAction 现场状态 / action_accepted+action_done 事件），聊天与 AI 两种来源无行为差异。
+     *
+     * <p>动机（用户 1010）：伪命令按阶段三设计"不在 CommandExecutor 注册"，聊天栏输入
+     * 静默失败（CommandException 只进日志，聊天框无任何回显），人工测试只能 curl。
+     * 现注册两个同名聊天命令（{@code PauseMainCommand}/{@code ResumeMainCommand}）转发到此。
+     *
+     * <p>线程：调用方 = 聊天命令 = 客户端线程；这里仍包一层 {@code client.execute} 与 HTTP
+     * 路径同构（已在客户端线程时立即执行）。限流与 AI 共享同一额度——人工测试高频时也会
+     * 被拦，这是有意的（同一台账才好对账）。
+     *
+     * @param token 伪命令 token（"pause_main" / "resume_main"）
+     * @return 给聊天栏的回执文案；null = token 不是伪命令（调用方不应发生，防御用）
+     */
+    public static String dispatchPseudoFromChat(String token) {
+        BridgeHttpServer s = _instance;
+        if (s == null) {
+            return "bridge 未启动（port<=0 或启动失败），主线干预命令不可用";
+        }
+        boolean pause = ActionDispatcher.PAUSE.equals(token);
+        boolean resume = ActionDispatcher.RESUME.equals(token);
+        if (!pause && !resume) return null;
+        if (!BridgeConfig.getInstance().enablePauseResume) {
+            return "bridge.json enablePauseResume=false，主线干预命令已禁用";
+        }
+        int retryAfterSec = s._dispatcher.rateCheckAndRecord();
+        if (retryAfterSec > 0) {
+            return "限流中：与 AI 行动共享每分钟额度，" + retryAfterSec + "s 后可再试";
+        }
+        String cmd = "@" + token;
+        String actionId = s._dispatcher.allocateActionId(null);
+        s._dispatcher.accept(actionId, token, cmd);
+        MinecraftClient.getInstance().execute(() ->
+                s._dispatcher.runOnClientThread(cmd, token, actionId));
+        return (pause ? "已受理 @pause_main" : "已受理 @resume_main") + " [" + actionId + "]，回执见 /events";
+    }
+
     private void startInternal() throws IOException {
         // 只绑 127.0.0.1：bridge 是 localhost-only 桥，绝不对外暴露。
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
