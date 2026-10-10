@@ -199,10 +199,15 @@ public class FollowPlayerTask extends Task {
                     Task rcon = tickRconApproach(mod, snap.get());
                     return rcon; // 非 null = 继续接近；null = 超时出口已在内部 stop
                 }
-                mod.logWarning("Player \"" + _playerName + "\" was last seen in a different dimension ("
-                        + lastSeenDim + ", we are in " + currentDim + "). Not chasing stale coordinates.");
-                stop(mod);
-                return null;
+                // (2026-10-10 fix A) RCON 拿不到快照时不再 one-shot stop —— 旧行为停在这里，
+                // bootstrap 只会无限"跟丢→3s 重试"，永远跨不过维度。兜底 = 先去对方最后
+                // 现身的维度（DefaultGoToDimensionTask，与 GetToBlockTask 跨维度内部
+                // L51-52 同一套已验证实现，不新写导航）；到场后坐标变同维度，常规逻辑
+                // 接管；RCON 恢复后由本守卫/空记录分支改道真身坐标。
+                warnThrottled(mod, "Player \"" + _playerName + "\" was last seen in a different dimension ("
+                        + lastSeenDim + ", we are in " + currentDim + ") and RCON is unavailable; "
+                        + "heading to last-seen dimension as fallback.");
+                return new DefaultGoToDimensionTask(lastSeenDim);
             }
         }
 
@@ -216,6 +221,17 @@ public class FollowPlayerTask extends Task {
 
         Optional<PlayerEntity> player = mod.getEntityTracker().getPlayerEntity(_playerName);
         if (player.isEmpty()) {
+            // (2026-10-10 fix A) 本地"最后现身坐标"可能是废坐标：对方已死亡重生/换维度后，
+            // 本地感知不到这一点（旧坐标还留在本维度里，照着走 = 在尸体/旧点原地打转，
+            // 1010 14:14 bot2 在下界傻站的结构性根因）。RCON 服务端真身优先 —— 维度不同
+            // = 本地坐标已废，直接转跨维度接近（tickRconApproach → GetToBlockTask(dim)
+            // → DefaultGoToDimensionTask 过门，全部现成已验证件）；同维度/无快照 = 维持
+            // 既有"走向最后位置"。request 内部自带 2s 节流 + 30s 失败退避，每拍调用无害。
+            RconPlayerOracle.request(mod, _playerName);
+            Optional<RconPlayerOracle.Snapshot> snap = RconPlayerOracle.snapshotOf(_playerName);
+            if (snap.isPresent() && snap.get().dim() != WorldHelper.getCurrentDimension()) {
+                return tickRconApproach(mod, snap.get());
+            }
             // Go to last location
             return new GetToBlockTask(new BlockPos((int) target.x, (int) target.y, (int) target.z), false);
         }

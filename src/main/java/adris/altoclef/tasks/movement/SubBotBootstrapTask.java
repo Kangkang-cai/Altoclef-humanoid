@@ -103,6 +103,17 @@ public class SubBotBootstrapTask extends Task {
     private static final long REMOTE_APPROACH_MAX_MS = 5 * 60_000;
 
     /**
+     * (2026-10-10 fix C) 数据断流宽限。peer 上报瞬时失效（超过 {@code MAX_AGE_MS} 未刷新 /
+     * 轮询抖动 / 判定条件单拍翻转）时, 旧实现立刻 {@link #clearRemoteApproach} + 降级
+     * follow —— 而 follow 在"目标不可见且无坐标"的现实里几乎秒死（跨维度守卫 one-shot
+     * stop / 空记录等待）, 于是形成 "导航跑 7~10s → 拆 → follow 秒死 → 3s 冷却 → 重建
+     * 导航重算路径" 的乒乓（1010 14:14 实录: 40s 里 637→495 格, 约 1/3 时间浪费在停顿
+     * +重算, 用户口径"每走一段距离就停下来重新算一遍"）。宽限期内沿用最后目标继续走;
+     * 超过宽限才降级。15s = {@code PeerPosWatcher.MAX_AGE_MS}(10s) + 轮询间隔(2s)×2 余量。
+     */
+    private static final long REMOTE_DATA_GRACE_MS = 15_000;
+
+    /**
      * (2026-10-06 22:5x 用户点名) <b>只在这些大阶段跟随主 bot，其余阶段自己跑主线</b> ——
      * 取代此前"前置完成后全程跟随"。编号对应用户拍板时我列的主线大任务清单。
      */
@@ -155,6 +166,8 @@ public class SubBotBootstrapTask extends Task {
     private BlockPos _remoteApproachTarget = null;
     /** 远程接近起始时刻（0 = 当前不在远程接近）。 */
     private long _remoteApproachSinceMs = 0;
+    /** (2026-10-10 fix C) 最近一次拿到新鲜远程坐标的时刻（宽限计时基准）。 */
+    private long _remoteApproachDataMs = 0;
 
     /** "自主跑主线"时的子任务缓存 —— 同 {@link #_follow}，每拍 new 会打断它自己的进度。 */
     private Task _autoTask = null;
@@ -412,9 +425,21 @@ public class SubBotBootstrapTask extends Task {
                 mod.getEntityTracker().getPlayerMostRecentPosition(_leader),
                 WorldHelper.getCurrentDimension());
         if (nav.isEmpty()) {
+            // (2026-10-10 fix C) 数据断流宽限：瞬时失效不拆正在走的导航, 沿用最后目标
+            // 继续走; 到达/超宽限才降级 follow。_remoteApproachSinceMs 不清零 ——
+            // REMOTE_APPROACH_MAX_MS 硬上限不再被乒乓重置。
+            if (_remoteApproach != null && _remoteApproachTarget != null
+                    && now - _remoteApproachDataMs <= REMOTE_DATA_GRACE_MS
+                    && !_remoteApproach.isFinished(mod)) {
+                SubBotDuty.set(SubBotDuty.Mode.FOLLOW, _leader,
+                        "远程接近 " + _leader + "（坐标断流，保持导航）");
+                setDebugState("[次bot引导] 远程接近 " + _leader + "（坐标断流，保持导航）");
+                return _remoteApproach;
+            }
             clearRemoteApproach();
             return null;
         }
+        _remoteApproachDataMs = now;
 
         if (_remoteApproachSinceMs == 0) _remoteApproachSinceMs = now;
         if (now - _remoteApproachSinceMs >= REMOTE_APPROACH_MAX_MS) {
@@ -449,6 +474,7 @@ public class SubBotBootstrapTask extends Task {
         _remoteApproach = null;
         _remoteApproachTarget = null;
         _remoteApproachSinceMs = 0;
+        _remoteApproachDataMs = 0;   // (2026-10-10 fix C) 宽限计时一并清零
     }
 
     /**
