@@ -80,7 +80,9 @@ public class PlaceBedAndSetSpawnTask extends Task {
     private final Vec3i BED_PLACE_STAND_POS = new Vec3i(-1, 0, 0);
     private final Vec3i BED_PLACE_POS = new Vec3i(0, 0, 0);
     private final Direction BED_PLACE_DIRECTION = Direction.UP;
-    private final TimerGame _bedInteractTimeout = new TimerGame(12);
+    // (2026-10-11 用户) 躺床放弃睡觉阈值 12s → 60s: 给"点到床但当时不能睡"的场景
+    // 更多耐心, 避免过早放弃 (放弃会触发 30s 睡觉冷却)。
+    private final TimerGame _bedInteractTimeout = new TimerGame(60);
     private final TimerGame _inBedTimer = new TimerGame(1);
     // (2026-10-07 起床站床卡死修复, 现场 10:49:15 / 13:10:50, 详见 memory/detail/50-wake-bed-stuck)
     // 睡醒捡床: 目标床仍在脚下 (<BED_PICKUP_STANDOFF) 时先走开再拆 —— 否则
@@ -594,7 +596,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
 
         // (2026-08-26 用户修正: 必须右键点一下床才设重生点, 不能跳过) 进入
         // "去睡床"分支时启动超时 (_sleepTimeoutStarted 独立于 overlay 消息):
-        // 若 12 秒内既没出 "Respawn point set" 消息也没真正睡进去 (白天不能睡 /
+        // 若 60 秒内既没出 "Respawn point set" 消息也没真正睡进去 (白天不能睡 /
         // 右键没生效 / 站错位), 就收尾继续走 — 不再和床死循环交互。已睡进去
         // (isSleeping) 时不触发, 让夜晚正常睡过。
         // (2026-09-21) 右键命中床已直接置 _spawnSet (用户"右键点了就行") →
@@ -771,7 +773,7 @@ public class PlaceBedAndSetSpawnTask extends Task {
             Debug.logMessage("[BedDebug] anyFound(BEDS)=TRUE; knownBeds=" + mod.getBlockTracker().getKnownLocations(BEDS).size() + " player=" + mod.getPlayer().getBlockPos().toShortString());
         }
         if (shouldGoToBed) {
-            // (2026-09-24 换侧机制删除) 首次进入分支启动大超时 12s, 不分 _stayInBed
+            // (2026-09-24 换侧机制删除) 首次进入分支启动大超时 (现 60s, 2026-10-11 用户), 不分 _stayInBed
             // 统一启动 —— 游牧模式原依赖"全侧试完"退出, 现在它是唯一兜底。
             if (!_sleepTimeoutStarted) {
                 _sleepTimeoutStarted = true;
