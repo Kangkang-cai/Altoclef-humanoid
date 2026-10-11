@@ -19,6 +19,7 @@ package adris.altoclef.tasks.speedrun;
  *   6 FIRE_RES       防火药水
  *   7 BLAZE_RODS     找堡垒 / 收烈焰棒    ← 用户要跟
  *   8 ENDER_PEARLS   收末影珍珠（含诡异森林蹲守） ← 用户要跟
+ *  8.5 BARTER        猪灵交易/以物易物（1011 补，次 bot 金靴强制前置） ← 用户要跟
  *   9 CRAFT_EYES     合成烈焰粉 / 末影之眼
  *  10+11 STRONGHOLD  丢眼定位要塞 + 要塞探索 ← 用户要跟
  *  12 OPEN_PORTAL    插眼开末地门        ← 用户要跟
@@ -36,6 +37,7 @@ public enum BeatPhase {
     FIRE_RES,
     BLAZE_RODS,
     ENDER_PEARLS,
+    BARTER,
     CRAFT_EYES,
     STRONGHOLD,
     OPEN_PORTAL,
@@ -66,6 +68,7 @@ public enum BeatPhase {
             case FIRE_RES -> "备防火药水";
             case BLAZE_RODS -> "收烈焰棒";
             case ENDER_PEARLS -> "收末影珍珠";
+            case BARTER -> "猪灵交易";
             case CRAFT_EYES -> "合成末影之眼";
             case STRONGHOLD -> "找要塞";
             case OPEN_PORTAL -> "开末地门";
@@ -94,6 +97,12 @@ public enum BeatPhase {
         // ---- 下界 ----
         if (s.contains("Getting Blaze Rods")) return BLAZE_RODS;
         if (s.contains("Ender Pearls") || s.contains("warped forest") || s.contains("enderman")) return ENDER_PEARLS;
+        // (2026-10-11 交易前置) 猪灵交易/以物易物（珍珠/黑曜石/防火药水的交易分支）——
+        // 次 bot 对本阶段有「金靴强制前置」义务（SubBotBootstrapTask.tickGoldenBoots）。
+        // 必须排在 fire resistance 之前："Getting fire resistance potions (gold + piglin trading)"
+        // 两者都含，交易是当下更具体的活动。
+        String lower = s.toLowerCase();
+        if (lower.contains("piglin") || lower.contains("trad")) return BARTER;
         if (s.contains("fire resistance")) return FIRE_RES;
         if (s.contains("Going to Nether") || s.contains("nether loot")) return PORTAL;
 

@@ -41,10 +41,10 @@ import java.util.function.Supplier;
  *       同款 static 闩）—— 之后即使背包丢了也不重做, 缺口按设计由主 bot 用 {@code @give} 补。</li>
  *   <li><b>睡眠镜像</b>: 多人服「全员入睡才跳夜」⇒ 主 bot 躺下时次 bot 也必须躺。详见
  *       {@link #tickMirrorSleep}。</li>
- *   <li><b>下界金靴前置（2026-10-10）</b>: 主 bot 处于下界向阶段（PORTAL/BLAZE_RODS/
- *       ENDER_PEARLS）或次 bot 自己已在下界, 而未穿金靴 → 先补靴再跟随（猪灵不攻击的
- *       通行证）。三态/超时口径与主线 getPreNetherGoldenBootsTask 同源, 详见
- *       {@link #tickGoldenBoots}。</li>
+ *   <li><b>下界金靴前置（2026-10-10；1011 增强）</b>: 主 bot 处于下界向阶段（PORTAL/
+ *       BLAZE_RODS/ENDER_PEARLS/BARTER）或次 bot 自己已在下界, 而未穿金靴 → 先补靴再跟随
+ *       （猪灵不攻击的通行证）。普通期 10 分钟超时放弃；主 bot 交易（BARTER）时
+ *       <b>强制、无超时</b> —— 必须先完成靴子任务。详见 {@link #tickGoldenBoots}。</li>
  *   <li><b>随行</b>: 返回 {@link FollowAndWorkTask}(leader) —— 贴 3 格 + 顺手搜刮/挖矿。</li>
  * </ol>
  *
@@ -130,6 +130,7 @@ public class SubBotBootstrapTask extends Task {
             BeatPhase.PORTAL,        //  5 建传送门 / 进下界
             BeatPhase.BLAZE_RODS,    //  7 找堡垒 / 收烈焰棒
             BeatPhase.ENDER_PEARLS,  //  8 收末影珍珠
+            BeatPhase.BARTER,        // 8.5 猪灵交易（1010 补：交易时次 bot 金靴前置后跟随）
             BeatPhase.STRONGHOLD,    // 10+11 丢眼定位要塞 + 要塞探索
             BeatPhase.OPEN_PORTAL);  // 12 插眼开末地门
 
@@ -192,14 +193,16 @@ public class SubBotBootstrapTask extends Task {
     private static final Set<BeatPhase> NETHER_BOUND_PHASES = EnumSet.of(
             BeatPhase.PORTAL,
             BeatPhase.BLAZE_RODS,
-            BeatPhase.ENDER_PEARLS);
+            BeatPhase.ENDER_PEARLS,
+            BeatPhase.BARTER);       // (2026-10-11) 猪灵交易——金靴是交易的前置条件
 
     /**
-     * 补靴总预算。与主线 {@code BeatMinecraft2Task.PRE_NETHER_BOOTS_TIMEOUT_MS} 同源 3 分钟:
-     * 背包有=秒级, 没有=挖金+合成 4 金锭, 3 分钟凑不齐说明金源太远 —— 跟随途中断不成
-     * 样子, 到点放弃并闩死, 等触发线关闭（回主世界阶段）后重新武装。
+     * 补靴总预算（1010 实测 3 分钟太紧, 用户点名"放弃时间需要增长" → 10 分钟）:
+     * 背包有=秒级, 没有=挖金+合成 4 金锭。到点放弃并闩死, 等触发线关闭（回主世界阶段）
+     * 后重新武装。⚠️ 例外：主 bot 处于 {@link BeatPhase#BARTER}（猪灵交易）时
+     * <b>不受本超时约束</b> —— 交易必须金靴, 见 {@link #tickGoldenBoots} 强制分支。
      */
-    private static final long GOLDEN_BOOTS_GIVEUP_MS = 3 * 60_000L;
+    private static final long GOLDEN_BOOTS_GIVEUP_MS = 10 * 60_000L;
 
     /** 金靴子任务缓存（ EquipArmorTask / 收集链每 tick new 会打断自身进度, 同 {@link #_prep}）。 */
     private Task _bootsTask = null;
@@ -407,9 +410,13 @@ public class SubBotBootstrapTask extends Task {
     private Task tickGoldenBoots(AltoClef mod) {
         boolean selfInNether = WorldHelper.getCurrentDimension() == Dimension.NETHER;
         BeatPhase lp = LeaderPhaseWatcher.phase();
-        boolean leaderNetherBound = lp != null
-                && LeaderPhaseWatcher.ageMs() <= LEADER_PHASE_STALE_MS
-                && NETHER_BOUND_PHASES.contains(lp);
+        boolean phaseFresh = LeaderPhaseWatcher.ageMs() <= LEADER_PHASE_STALE_MS;
+        boolean leaderNetherBound = lp != null && phaseFresh && NETHER_BOUND_PHASES.contains(lp);
+        // (2026-10-11 用户点名) 主 bot 在猪灵交易（BARTER）→ 金靴前置是硬义务：
+        // 必须先把靴子任务做完（含收集合成），无超时出口 —— 光脚凑到交易现场，
+        // 猪灵围殴既坑自己也搅黄交易。未穿也要先补完再跟。
+        boolean leaderTrading = lp == BeatPhase.BARTER && phaseFresh;
+        boolean mandatory = leaderTrading && shouldFollowLeaderNow();
         // 触发线: 自己在下界, 或 主 bot 处于下界向阶段且此刻本就轮到次 bot 跟随。
         // （自主模式下 leaderNetherBound 不触发 —— 那时次 bot 跑的是主线本体, 装备自管;
         //   selfInNether 仍然触发: 掉在下界里, 生存优先于自主任务。）
@@ -426,25 +433,33 @@ public class SubBotBootstrapTask extends Task {
             _bootsSinceMs = 0;
             return null;
         }
+        if (mandatory && _bootsGivenUp) {
+            // 交易期强制 → 解除此前(非强制期)的放弃闩, 重新起算（强制期无超时）。
+            _bootsGivenUp = false;
+            _bootsSinceMs = 0;
+            Debug.logMessage("[SUB-BOOT] 主 bot 交易中, 金靴前置转为强制（解除放弃闩）");
+        }
         if (_bootsGivenUp) return null;
 
         if (_bootsSinceMs == 0) {
             _bootsSinceMs = System.currentTimeMillis();
             String m = "[SUB-BOOT] 下界金靴前置: 未穿金靴（leader=" + _leader
-                    + ", phase=" + lp + ", selfInNether=" + selfInNether + "）, 先补靴";
+                    + ", phase=" + lp + ", selfInNether=" + selfInNether
+                    + (mandatory ? ", 交易强制" : "") + "）, 先补靴";
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
         }
-        if (System.currentTimeMillis() - _bootsSinceMs > GOLDEN_BOOTS_GIVEUP_MS) {
+        if (!mandatory && System.currentTimeMillis() - _bootsSinceMs > GOLDEN_BOOTS_GIVEUP_MS) {
             _bootsGivenUp = true;
             String m = "[SUB-BOOT] 金靴 " + (GOLDEN_BOOTS_GIVEUP_MS / 60_000)
-                    + " 分钟未凑齐 — 本次放弃, 直接跟随（触发线关闭后自动重试）";
+                    + " 分钟未凑齐 — 本次放弃, 直接跟随（触发线关闭后自动重试；交易期不设超时）";
             Debug.logMessage(m);
             Debug.logToFile("altoclef_diag.log", m);
             return null;
         }
 
-        SubBotDuty.set(SubBotDuty.Mode.PREP, _leader, "补金靴（下界前置）");
+        SubBotDuty.set(SubBotDuty.Mode.PREP, _leader,
+                mandatory ? "补金靴（主bot 交易中, 强制前置）" : "补金靴（下界前置）");
         // 背包已有 → 优先直接穿（收集中途凑齐时从"挖金"切到"穿上", 不等收集链走完）。
         if (mod.getItemStorage().hasItemInventoryOnly(Items.GOLDEN_BOOTS)) {
             if (!(_bootsTask instanceof EquipArmorTask)) {

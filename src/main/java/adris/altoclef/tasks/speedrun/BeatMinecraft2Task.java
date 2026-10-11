@@ -3812,6 +3812,9 @@ public class BeatMinecraft2Task extends Task {
 
     private Task getEnderPearlTask(AltoClef mod, int count) {
         if (_config.barterPearlsInsteadOfEndermanHunt) {
+            // (2026-10-11) 本分支原先不设 debug 状态 → setDebugState 覆写不触发 → /status.phase
+            // 停留在旧值, 次 bot 永远不知道主 bot 在交易。先报阶段（映射到 BARTER）再派子任务。
+            setDebugState("Trading with piglins (barter ender pearls)");
             // Equip golden boots before trading...
             if (!StorageHelper.isArmorEquipped(mod, Items.GOLDEN_BOOTS)) {
                 return new EquipArmorTask(Items.GOLDEN_BOOTS);
