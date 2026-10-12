@@ -276,8 +276,11 @@ final class ActionDispatcher {
     /**
      * 带终态分类的 detail：{@code status ∈ {completed,cancelled,interrupted,failed}}，
      * {@code reason} 仅在需要说明时出现（详见 DESIGN_action_api.md 的终态契约）。
+     * (2026-10-12 M9) {@code errorKind} 仅 status=failed 时出现：
+     * {@code "usage"}=写法/参数错（命令没起任务，对端该改写法），
+     * {@code "exec"}=受理后执行失败（对端该换方案）。
      */
-    static String detailJson(String actionId, String token, String status, String reason) {
+    static String detailJson(String actionId, String token, String status, String reason, String errorKind) {
         StringBuilder sb = new StringBuilder(96);
         sb.append("{\"actionId\":");
         BridgeJson.str(sb, actionId);
@@ -290,6 +293,10 @@ final class ActionDispatcher {
         if (reason != null && !reason.isEmpty()) {
             sb.append(",\"reason\":");
             BridgeJson.str(sb, reason);
+        }
+        if (errorKind != null && !errorKind.isEmpty()) {
+            sb.append(",\"errorKind\":");
+            BridgeJson.str(sb, errorKind);
         }
         sb.append('}');
         return sb.toString();
@@ -348,7 +355,7 @@ final class ActionDispatcher {
             }
             CommandExecutor executor = AltoClef.getCommandExecutor();
             if (executor == null) {
-                emitDone(actionId, token, "命令执行器未就绪", "failed", "命令执行器未就绪");
+                emitDone(actionId, token, "命令执行器未就绪", "failed", "命令执行器未就绪", "exec");
                 return;
             }
             // 会替换手头用户任务的命令（动作三类 + 按住态 idle/sleep）→ 先给旧活跃行动发 cancelled。
@@ -370,7 +377,9 @@ final class ActionDispatcher {
             CommandFeedback.clear();
             executor.execute(cmd, ex -> {
                 Debug.logWarning("[Bridge] command rejected: " + ex.getMessage());
-                CommandFeedback.fail(oneLine(ex.getMessage()));
+                // (2026-10-12 M9) 异常回调 = CommandException = 写法/参数错 → errorKind=usage；
+                // 命令内部 CommandFeedback.fail 自报的语义失败默认 exec。
+                CommandFeedback.fail(oneLine(ex.getMessage()), "usage");
             });
             String fbMsg = CommandFeedback.message();
             if (CommandFeedback.failed()) {
@@ -382,7 +391,9 @@ final class ActionDispatcher {
                 _activeIdleSec = 0;
                 resetProgress();
                 String text = fbMsg == null ? "命令未能执行" : clip(fbMsg, 160);
-                emitDone(actionId, token, text, "failed", text);
+                String kind = CommandFeedback.kind();
+                emitDone(actionId, token, text, "failed", text,
+                        kind != null ? kind : "exec");
                 return;
             }
             // 瞬时命令没有任务生命期，没有 TaskFinishedEvent 可等 —— 受理即完成
@@ -402,7 +413,7 @@ final class ActionDispatcher {
         } catch (Throwable t) {
             Debug.logWarning("[Bridge] action dispatch threw: " + t);
             emitDone(actionId, token, "执行失败：" + t.getClass().getSimpleName(),
-                    "failed", "命令派发异常");
+                    "failed", "命令派发异常", "exec");
         }
     }
 
@@ -577,7 +588,9 @@ final class ActionDispatcher {
         if (resumeMainline()) {
             text += "，已自动回主线";
         }
-        emitDone(p.actionId, p.token, text, status, reason);
+        // (2026-10-12 M9) 任务自然终点的 failed（follow 跟丢 / equip 0 件穿上）都是"受理并
+        // 起跑了但做不到" → exec；completed/cancelled 不带 errorKind。
+        emitDone(p.actionId, p.token, text, status, reason, "failed".equals(status) ? "exec" : null);
         ActiveAction a = _active;
         if (a != null && a.actionId.equals(p.actionId)) {
             _active = null;
@@ -633,8 +646,13 @@ final class ActionDispatcher {
     }
 
     private void emitDone(String actionId, String token, String text, String status, String reason) {
+        emitDone(actionId, token, text, status, reason, null);
+    }
+
+    /** (2026-10-12 M9) 带 errorKind 的终态回执：仅 status=failed 时非空（"usage"|"exec"）。 */
+    private void emitDone(String actionId, String token, String text, String status, String reason, String errorKind) {
         _buffer.emitImmediate("action_done", "[" + actionId + "] " + text, false,
-                detailJson(actionId, token, status, reason));
+                detailJson(actionId, token, status, reason, errorKind));
     }
 
     // ===================== 现场执行状态（1002 C 块：activeAction / botStatus） =====================
@@ -784,7 +802,7 @@ final class ActionDispatcher {
                 : "follow".equals(a.cmd) ? FAIL_FOLLOW_SEC : Long.MAX_VALUE;
         if (probe.hardFailReason != null && stalledSec >= failAfter) {
             _pending.removeIf(e -> e.actionId.equals(a.actionId));
-            emitDone(a.actionId, a.cmd, "做不到，放弃：" + probe.detail, "failed", probe.hardFailReason);
+            emitDone(a.actionId, a.cmd, "做不到，放弃：" + probe.detail, "failed", probe.hardFailReason, "exec");
             _active = null;
             _activeSinceMs = 0;
             resetProgress();

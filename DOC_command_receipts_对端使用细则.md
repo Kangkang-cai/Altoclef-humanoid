@@ -2,7 +2,7 @@
 
 > 面向 chat_and_play 对端：AI 角色下发 `@命令` 后，如何知道"命令被收到没有、在推进吗、做完没有、做不了为什么"。
 > 本文件是注入对端 AI 上下文的权威依据；实现落点全部标注了代码位置，便于联合调试。
-> 契约版本标记：`receipts-v2`（v2 = 1012 新增 action_progress 心跳、deathDrops、pickup 补链、follow 站定豁免）。
+> 契约版本标记：`receipts-v2.1`（v2 = 1012 新增 action_progress 心跳、deathDrops、pickup 补链、follow 站定豁免；v2.1 = 1012 晚 action_done.failed 新增 errorKind、M11 确认 action_progress 四字段恒存在）。
 
 ---
 
@@ -68,8 +68,8 @@ action_done（终态）         ← status ∈ completed / failed / cancelled / 
 | type | strong | 何时发 | detail |
 |---|---|---|---|
 | `action_accepted` | no | 命令过白名单+限流后 | `{actionId, cmd, args?}` |
-| `action_progress` | no | 任务型行动：phase 翻转立即 / running 每 30s | `{actionId, cmd, phase, detail?, sinceSec}` |
-| `action_done` | no | 终态到达（四态见 §3） | `{actionId, cmd, status, reason?}` |
+| `action_progress` | no | 任务型行动：phase 翻转立即 / running 每 30s | `{actionId, cmd, phase, sinceSec}` **恒存在**；`detail?` 仅进度文案可缺省（1012 M11 确认：四字段任何路径都不会缺，`cmd` 不会为空串，对端渲染可硬依赖） |
+| `action_done` | no | 终态到达（四态见 §3） | `{actionId, cmd, status, reason?, errorKind?}` |
 | `death` | yes | 死亡边沿（带死因，最多等 2s 播报包） | — |
 | `death`（跟进，no） | no | 复活 1s 后：掉落结论 | — |
 | `bot_stuck` | yes | 位置+背包+任务签名 30s 全不变 | `{actionId, cmd}`（空串=不是对端指令卡的） |
@@ -95,6 +95,15 @@ action_done（终态）         ← status ∈ completed / failed / cancelled / 
 | `interrupted` | 被 pause 主动叫停 | `被 @pause_main 暂停`（终态，resume 不会自动续跑旧行动，需重下） |
 
 `reason` 仅在需要解释时出现。四值全部来自固定字面量（ActionDispatcher emitDone 各调用点），可 switch。
+
+**errorKind（1012 M9 新增，仅 status=failed 时出现）**：
+
+| errorKind | 含义 | AI 应对 |
+|---|---|---|
+| `usage` | 命令写法/参数错（缺参数、参数类型错、物品名不在目录…），**命令没起任何任务** | 改写法原样重发 |
+| `exec` | 受理并起跑了，但执行中确定做不到（物品不在背包/目标跟丢/算不出路/0 件穿上…） | 换方案，不要原样重发 |
+
+判定来源：`CommandExecutor` 异常回调（CommandException）→ `usage`；命令内部 `CommandFeedback.fail` 自报与任务自然终点的 failed → `exec`。text 仍保留中文现场，但**对端不要再用 text 正则分类**。
 
 ---
 
