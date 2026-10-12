@@ -13,7 +13,9 @@ import net.minecraft.block.Blocks;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Some generic tasks require us to go to the nether/overworld/end.
@@ -56,6 +58,19 @@ public class DefaultGoToDimensionTask extends Task {
     private static final double NETHER_PORTAL_BED_SPAWN_RANGE = 8.0;
     // 门洞里往外撤的粘滞落脚点 (选定后不每 tick 重选, 避免 GetToBlock 目标抖动)
     private BlockPos _netherExitTarget = null;
+
+    // (2026-10-11 熄灭门到场重燃) "紫块不在"≠"门废了": 熄灭门通常黑曜石框完好。
+    // 旧链在 getLastUsedNetherPortal / WorldMemory.getPortalLocations 里把紫块缺失
+    // 的门址直接清除 (内存+落盘), 导致跨维度回家永远不走来时的门, 直接掉进重造链
+    // (用户现场: bot 在下界找人, 回程没走去时的门)。新分支在这两个清除点之前拦截:
+    // 导航到已知门址 → 有打火石点燃 (缺铁锭+燧石现场合, 下界缺料直接放弃防
+    // CollectIronIngotTask→DefaultGoToDimensionTask 递归), 3 分钟超时放弃, 失败
+    // 门址拉黑后回落旧链。出口全部在调用侧 portalRelightTask (本仓"子任务
+    // isFinished 不被框架消费"铁律)。
+    private RelightNetherPortalTask _relightTask = null;
+    // 拉黑集合跨实例存活 (FollowPlayerTask 等调用方可能反复 new 本任务), 上限粗控。
+    private static final Set<BlockPos> _relightFailedSites = new HashSet<>();
+    private static final int RELIGHT_FAILED_SITES_CAP = 64;
 
     public DefaultGoToDimensionTask(Dimension target) {
         _target = target;
@@ -182,6 +197,11 @@ public class DefaultGoToDimensionTask extends Task {
             return new EnterNetherPortalTask(Dimension.NETHER);
         }
 
+        // (2026-10-11) 熄灭门到场重燃: 必须在 getLastUsedNetherPortal 之前 ——
+        // 旧方法会对"紫块缺失"的门址直接清记忆, 这里不拦就永远轮不到重燃。
+        Task relightNether = portalRelightTask(mod, Dimension.NETHER);
+        if (relightNether != null) return relightNether;
+
         Optional<BlockPos> closest = mod.getMiscBlockTracker().getLastUsedNetherPortal(Dimension.NETHER);
         if (closest.isPresent()) {
             setDebugState("Going to last nether portal pos");
@@ -219,6 +239,10 @@ public class DefaultGoToDimensionTask extends Task {
             return new EnterNetherPortalTask(Dimension.NETHER);
         }
 
+        // (2026-10-11) 熄灭门到场重燃, 同 goToOverworldFromNetherTask 口径 (对称方向)。
+        Task relightOverworld = portalRelightTask(mod, Dimension.OVERWORLD);
+        if (relightOverworld != null) return relightOverworld;
+
         Optional<BlockPos> lastUsed = mod.getMiscBlockTracker().getLastUsedNetherPortal(Dimension.OVERWORLD);
         if (lastUsed.isPresent()) {
             setDebugState("Going to last nether portal pos");
@@ -249,6 +273,57 @@ public class DefaultGoToDimensionTask extends Task {
             return closest.isPresent() && closest.get().isWithinDistance(mod.getPlayer().getPos(), 2000);
         }
         return false;
+    }
+
+    /**
+     * (2026-10-11 熄灭门到场重燃) 门址候选 = lastUsed（含熄灭，见
+     * MiscBlockTracker#getLastUsedNetherPortalSiteIncludingExtinguished）∪ 本会话确认
+     * 熄灭的门（WorldMemory lost，按当前维度——调用点仅在对应维度的分支里触发，
+     * dim 恒等于当前维度）。取离玩家最近的未拉黑候选；无候选返回 null 放行旧链。
+     * 出口语义（调用侧消费）：点亮成功 → 放行走旧链自然进门；放弃/超时 → 门址
+     * 拉黑走旧链重造。任务实例粘滞复用，门址变化才重建。
+     */
+    private Task portalRelightTask(AltoClef mod, Dimension dim) {
+        BlockPos site = nearestRelightCandidate(mod, dim);
+        if (site == null) return null;
+        if (_relightTask == null || !_relightTask.isForSite(site)) {
+            _relightTask = new RelightNetherPortalTask(site);
+            Debug.logMessage("(PortalRelight) heading to portal site " + site.toShortString()
+                    + " — purple blocks missing, will relight if frame intact");
+            Debug.logToFile("altoclef_diag.log", "[PortalRelight]\tENGAGE site=" + site.toShortString()
+                    + " dim=" + dim);
+        }
+        if (_relightTask.isFinished(mod)) {
+            if (_relightTask.gaveUp()) {
+                if (_relightFailedSites.size() >= RELIGHT_FAILED_SITES_CAP) _relightFailedSites.clear();
+                _relightFailedSites.add(site);
+                Debug.logToFile("altoclef_diag.log", "[PortalRelight]\tBLACKLIST site=" + site.toShortString());
+            }
+            _relightTask = null;
+            return null; // 点亮 → 旧链 lastUsed/EnterNetherPortalTask 接管；放弃 → 旧链重造
+        }
+        return _relightTask;
+    }
+
+    private BlockPos nearestRelightCandidate(AltoClef mod, Dimension dim) {
+        BlockPos best = null;
+        double bestSq = Double.MAX_VALUE;
+        Optional<BlockPos> used = mod.getMiscBlockTracker()
+                .getLastUsedNetherPortalSiteIncludingExtinguished(dim);
+        if (used.isPresent() && !_relightFailedSites.contains(used.get())) {
+            best = used.get().toImmutable();
+            bestSq = best.getSquaredDistance(mod.getPlayer().getPos());
+        }
+        // WorldMemory lost 按当前维度返回，与本方法 dim 口径一致（调用点已保证）
+        for (BlockPos p : mod.getWorldMemory().getLostPortalLocations()) {
+            if (_relightFailedSites.contains(p)) continue;
+            double distSq = p.getSquaredDistance(mod.getPlayer().getPos());
+            if (distSq < bestSq) {
+                bestSq = distSq;
+                best = p.toImmutable();
+            }
+        }
+        return best;
     }
 
     /**
