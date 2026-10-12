@@ -113,7 +113,12 @@ final class ActionDispatcher {
      * 现在两道闸：①非 TASK_ACTIONS 一律不登记 pending；②关联时必须**语义匹配**
      * （结束的顶层任务类型 == 该 token 期望的任务类型），匹配不上宁可丢弃，交对端超时兜底。
      */
-    private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give", "get", "equip");
+    private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give", "get", "equip",
+            "pickup");
+            // (2026-10-12 回执缺口修补) pickup 补进任务型集合 —— 1012 自查发现 @pickup 此前不在
+            // TASK_ACTIONS/INSTANT/HOLD 任何一个集合：不登记 pending ⇒ 永远收不到 action_done
+            // （pollMatching 的 pickup case 是死代码）、不顶替旧行动、onClientTick 无进度探针。
+            // 现在与 get 同口径：pending/done/supersede/心跳全链生效。
 
     /** 主线干预伪命令 token（不在 CommandExecutor 注册，仅 bridge 识别）。 */
     static final String PAUSE = "pause_main";
@@ -674,7 +679,9 @@ final class ActionDispatcher {
         _activeGotoTarget = "goto".equals(token) ? parseGoto(cmd) : null;
         _activePlayerName = ("follow".equals(token) || "give".equals(token)) ? parseNameArg(cmd) : null;
         String[] gi = "give".equals(token) ? parseGiveItem(cmd)
-                : ("get".equals(token) ? parseGetItem(cmd) : null);
+                : ("get".equals(token) ? parseGetItem(cmd)
+                // (2026-10-12) pickup 语法 = @pickup <item>（无数量），复用 get 的解析取第一参。
+                : ("pickup".equals(token) ? parseGetItem(cmd) : null));
         _activeItemToken = gi == null ? null : gi[0];
         _activeItemCount = gi == null ? 1 : parseIntSafe(gi[1], 1);
         long now = System.currentTimeMillis();
@@ -830,6 +837,8 @@ final class ActionDispatcher {
                 case "follow" -> probeFollow(p, prefix);
                 case "give" -> probeGive(prefix);
                 case "get" -> probeGet(prefix);
+                // (2026-10-12) pickup 与 get 同口径：背包计数即进度（捡到一个涨一个）。
+                case "pickup" -> probePickup(prefix);
                 case "equip" -> new Probe("equip", prefix + "穿戴护甲中", null);
                 default -> null;
             };
@@ -984,6 +993,19 @@ final class ActionDispatcher {
         String zh = itemZh(_activeItemToken);
         return new Probe("get|" + have,
                 prefix + "收集中：" + zh + " " + have + "/" + _activeItemCount, null);
+    }
+
+    /**
+     * (2026-10-12) pickup 进度探针：与 get 同口径 —— 目标物品背包计数（key=计数，捡到即涨）。
+     * 无总目标数（@pickup 语义是"把附近的捡起来"），detail 只报已有数。
+     */
+    private Probe probePickup(String prefix) {
+        Integer have = countItem(_activeItemToken);
+        if (have == null) {
+            return new Probe("pickup", prefix + "捡拾中（附近掉落物）", null);
+        }
+        String zh = itemZh(_activeItemToken);
+        return new Probe("pickup|" + have, prefix + "捡拾中：" + zh + "（背包已有 " + have + "）", null);
     }
 
     // ---- 进度探针用的小工具（全部 try/catch，绝不把异常抛进 tick）----
