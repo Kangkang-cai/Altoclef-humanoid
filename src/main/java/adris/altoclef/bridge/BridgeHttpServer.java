@@ -288,6 +288,10 @@ public final class BridgeHttpServer {
             if (s.inventory != null && !s.inventory.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "inventory"); sb.append(':'); BridgeJson.str(sb, s.inventory);
             }
+            // (2026-10-12 死亡掉落清单) 本次死亡的掉落清单；固定输出不省键 ——
+            // 契约是"空串 = 没掉"（keepInventory 已开 / 死亡时没带东西 / 没死过）。
+            // keepInventory 的说明在 death 跟进事件里，本字段只回答"掉了什么"。
+            sb.append(','); BridgeJson.str(sb, "deathDrops"); sb.append(':'); BridgeJson.str(sb, s.deathDrops);
             // ---- 阶段三感知补全：任务细化 + 环境感知（主线没在跑时省略 mainlineProgress）----
             sb.append(','); BridgeJson.str(sb, "taskDetail"); sb.append(':'); BridgeJson.str(sb, s.taskDetail);
             // (2026-10-06 多 bot 阶段跟随) 主线「大阶段」枚举（BeatPhase）——给次 bot 判"跟不跟"。

@@ -14,8 +14,11 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.registry.Registry;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -63,6 +66,24 @@ final class EventCollector {
     // 写入 holder。挂起最多 40 tick(2s) 等死因, 等不到就发兜底 "死了", 绝不无限等。
     private int _pendingDeathTicks = 0;
     private static final int DEATH_DESC_WAIT_TICKS = 40;
+
+    // ---- (2026-10-12 死亡掉落清单) ----------------------------------------------------
+    // 死亡瞬间快照背包全量，复活后（等 1s 背包同步稳定）对比差集 = 掉落清单。
+    // 服务器开 keepInventory 时客户端拿不到该 gamerule，用"复活后物品一件不少"行为反推，
+    // 在跟进事件里向对端说明（对端据此不再把"复活后背包没变小"当异常）。
+    /** 死亡瞬间的背包全量快照；null = 不在死亡流程中。仅客户端线程读写。 */
+    private Map<Item, Integer> _deathInventory = null;
+    /** 复活边沿起的对比倒计时（tick）；0 = 未在等待。有限值，必有出口。 */
+    private int _deathDropCheckTicks = 0;
+    private static final int RESPAWN_DROP_CHECK_TICKS = 20; // 1s，等服务端背包同步
+    /** /status.deathDrops 数据源：本次死亡的掉落清单（keepInventory/没带东西 = 空串=没掉）。 */
+    private static volatile String _lastDeathDrops = "";
+
+    /** /status 用："本次死亡掉落清单"中文串；空串 = 没掉（keepInventory 已开 / 死亡时没带东西）。 */
+    static String lastDeathDrops() {
+        return _lastDeathDrops;
+    }
+
     private int _tickCounter = 0;
     private static final int INV_SCAN_INTERVAL_TICKS = 10; // 0.5s
 
@@ -227,6 +248,9 @@ final class EventCollector {
             _hasLastCounts = false;
             _wasDead = false;
             _pendingDeathTicks = 0;
+            // (2026-10-12 死亡掉落清单) 离线放弃未决的掉落对比，防跨世界残留。
+            _deathInventory = null;
+            _deathDropCheckTicks = 0;
             return;
         }
         var player = _mod.getPlayer();
@@ -235,6 +259,9 @@ final class EventCollector {
         // 死亡边沿：alive → dead
         boolean dead = player.isDead();
         if (!_wasDead && dead) {
+            // (2026-10-12 死亡掉落清单) 死亡瞬间快照背包全量，复活后对比算掉落。
+            _deathInventory = scanAllInventory(player);
+            _deathDropCheckTicks = 0;
             String desc = PlayerDamageCauseHolder.consumeDeathDescription();
             // 死因描述已就绪 → 直接带死因; 否则挂起等死亡播报包到达(最多 2s)。
             if (desc != null) {
@@ -251,8 +278,22 @@ final class EventCollector {
             } else if (--_pendingDeathTicks == 0) {
                 _buffer.emitImmediate("death", "死了", true);
             }
+        } else if (_wasDead && !dead && _deathInventory != null) {
+            // (2026-10-12 死亡掉落清单) 复活边沿：dead → alive。keepInventory 与否要等
+            // 服务端背包同步稳定才能下结论，挂 1s 后对比 —— 有限值，必有出口。
+            _deathDropCheckTicks = RESPAWN_DROP_CHECK_TICKS;
         }
         _wasDead = dead;
+
+        // (2026-10-12 死亡掉落清单) 复活后倒计时归零 → 对比死亡前快照，出结论（事件 + /status）。
+        if (_deathDropCheckTicks > 0) {
+            if (player.isDead()) {
+                // 等 sync 期间又死了：放弃本次对比，新死亡边沿会重开流程。
+                _deathDropCheckTicks = 0;
+            } else if (--_deathDropCheckTicks == 0) {
+                concludeDeathDrops(player);
+            }
+        }
 
         // (2026-10-04) 睡觉失败原因: bot 点过床但没睡成时, PlaceBedAndSetSpawnTask
         // 在 STOP 边沿自诊断出的原因 (时间窗/床被占/NOT_SAFE 怪) 经此回传对端 LLM,
@@ -316,6 +357,69 @@ final class EventCollector {
         // 只保留白名单的，省内存（removeIf 走 keySet 的活视图，原地删）
         counts.keySet().removeIf(k -> !_watched.containsKey(k));
         return counts;
+    }
+
+    /**
+     * (2026-10-12 死亡掉落清单) 背包<b>全量</b>计数（不过白名单）；LinkedHashMap 保序，
+     * 保证清单输出顺序稳定（主背包→盔甲→副手的槽位序）。
+     */
+    private Map<Item, Integer> scanAllInventory(net.minecraft.client.network.ClientPlayerEntity player) {
+        Map<Item, Integer> counts = new LinkedHashMap<>();
+        var inv = player.getInventory();
+        if (inv == null) return counts;
+        addInto(counts, inv.main);
+        addInto(counts, inv.armor);
+        addInto(counts, inv.offHand);
+        return counts;
+    }
+
+    /**
+     * (2026-10-12 死亡掉落清单) 复活 1s 后对比死亡前快照，得出三选一结论并收口：
+     * <ol>
+     *   <li>死亡时背包是空的 → "没带东西，没有掉落"，/status.deathDrops 置空；</li>
+     *   <li>复活后物品一件不少 → 服务器开着 keepInventory（客户端拿不到该 gamerule，
+     *       行为反推）→ 跟进事件向对端说明，/status.deathDrops 置空（= 没掉）；</li>
+     *   <li>有差集 → 掉落清单进跟进事件与 /status.deathDrops（空=没掉契约的反面）。</li>
+     * </ol>
+     * 必达且必收口：任何路径都清 {@code _deathInventory}，不构成挂起状态。
+     */
+    private void concludeDeathDrops(net.minecraft.client.network.ClientPlayerEntity player) {
+        Map<Item, Integer> before = _deathInventory;
+        _deathInventory = null;
+        if (before == null || before.isEmpty()) {
+            _lastDeathDrops = "";
+            _buffer.emitImmediate("death", "复活完成：死亡时背包是空的，没有物品掉落", false);
+            return;
+        }
+        Map<Item, Integer> after = scanAllInventory(player);
+        List<String> drops = new ArrayList<>();
+        boolean allKept = true;
+        for (Map.Entry<Item, Integer> e : before.entrySet()) {
+            int had = e.getValue();
+            int nowCount = after.getOrDefault(e.getKey(), 0);
+            if (nowCount < had) {
+                allKept = false;
+                drops.add(ItemNames.name(new ItemStack(e.getKey())) + "x" + (had - nowCount));
+            }
+        }
+        if (allKept) {
+            _lastDeathDrops = "";
+            _buffer.emitImmediate("death",
+                    "服务器开着死亡不掉落（keepInventory），物品已全部保留：" + itemZipText(before), false);
+        } else {
+            _lastDeathDrops = String.join("、", drops);
+            _buffer.emitImmediate("death", "死亡掉落：" + _lastDeathDrops + "（已记录，可去死处回收）", false);
+        }
+    }
+
+    /** (2026-10-12) Map 计数 → "铁剑x1、面包x3" 中文清单串（ItemNames 口径）。 */
+    private static String itemZipText(Map<Item, Integer> counts) {
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<Item, Integer> e : counts.entrySet()) {
+            if (e.getValue() == null || e.getValue() <= 0) continue;
+            parts.add(ItemNames.name(new ItemStack(e.getKey())) + "x" + e.getValue());
+        }
+        return String.join("、", parts);
     }
 
     /** 背包全量物品计数和（所有非空栈，不限白名单）——防抖骤降判定的输入。 */

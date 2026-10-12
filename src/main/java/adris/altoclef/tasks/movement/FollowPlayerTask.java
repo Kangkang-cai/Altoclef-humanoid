@@ -67,6 +67,24 @@ public class FollowPlayerTask extends Task {
     /** 本次跟随起点（onStart 首次记，interrupt 二次进入不重置）。 */
     private long _startedMs = 0;
 
+    /**
+     * (2026-10-12 修 bot_stuck 误报) 当前 tick 结束时是否处于"贴身站定"：
+     * 目标实体在视野内且已到保持距离（{@code _holdingDistance}），本任务主动返回 null 停泊子任务。
+     * 这是<b>设计意图的静止</b>，不是卡死 —— {@code LivenessDigest} 据此把这种"不动"排除出
+     * stuck 判据（1011 22:45 实测：铁头贴 kangkang 2.7 格站定 60s 被误报 bot_stuck，
+     * 对端 LLM 又编出"区块没加载"的解释）。
+     *
+     * <p>每拍 onTick 开头重置、只在"到距离站定"分支置真 —— 目标走远重跟/丢失转寻位/远程接近
+     * /RCON 接近/空记录等待等所有其它路径都保持 false，"等目标进范围"仍如实上报卡住。
+     * 仅客户端线程读写。
+     */
+    private boolean _stationaryByDesign = false;
+
+    /** (2026-10-12) 供 {@code LivenessDigest} 判"贴身站定"。见字段注释。 */
+    public boolean isStationaryByDesign() {
+        return _stationaryByDesign;
+    }
+
     // ------------------------------------------------------------------ //
     // (2026-10-07 bot 间坐标共享) 远程接近状态
     // ------------------------------------------------------------------ //
@@ -154,6 +172,8 @@ public class FollowPlayerTask extends Task {
     @Override
     protected Task onTick(AltoClef mod) {
         long now = System.currentTimeMillis();
+        // (2026-10-12) 每拍先重置，只在"到距离站定"分支置真 —— 保证读完的一定是本拍结论。
+        _stationaryByDesign = false;
 
         // (1) (2026-10-07 follow 关系治理) 互指退让：我在跟 X，而 X 也在跟我 ——
         //     除非 X 就是我的 leader（设计关系），否则结束本侧跟随（唯一判定源 FollowRelation）。
@@ -246,6 +266,7 @@ public class FollowPlayerTask extends Task {
             _holdingDistance = false;
         }
         if (_holdingDistance) {
+            _stationaryByDesign = true;
             setDebugState("Following \"" + _playerName + "\" (holding " + (int) Math.round(_followDistance) + " blocks away)");
             return null;
         }

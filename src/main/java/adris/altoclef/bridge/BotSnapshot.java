@@ -103,6 +103,14 @@ final class BotSnapshot {
     final String onlinePlayers;
     /** 可见范围内正在睡觉的玩家名（逗号分隔）；无人睡则空串。 */
     final String sleepingPlayers;
+    // ---- (2026-10-12 死亡掉落清单) ----
+    /**
+     * 本次死亡的掉落清单（中文串，如 {@code "铁剑x1、面包x3"}）；<b>空串 = 没掉</b>
+     * （服务器开了 keepInventory / 死亡时没带东西 / 本次会话没死过）。
+     * keepInventory 的说明走 death 跟进事件（客户端拿不到该 gamerule，行为反推），
+     * 本字段只回答"掉了什么"；来源 {@link EventCollector#lastDeathDrops()}。
+     */
+    final String deathDrops;
     // ---- (2026-10-07 @give 物品名来源) ----
     /**
      * 完整背包<b>原名</b>清单（{@code "oak_log x12, iron_ingot x3"}；{@code stripItemName}
@@ -119,7 +127,7 @@ final class BotSnapshot {
                         String weather, String environment, String biome, int nearbyHostiles,
                         ActiveAction activeAction, String botStatus, String stuckReason,
                         String landmarks, String onlinePlayers, String sleepingPlayers,
-                        String inventory) {
+                        String inventory, String deathDrops) {
         this.botId = botId;
         this.player = player == null ? "" : player;
         this.following = following == null ? "" : following;
@@ -153,6 +161,7 @@ final class BotSnapshot {
         this.onlinePlayers = onlinePlayers == null ? "" : onlinePlayers;
         this.sleepingPlayers = sleepingPlayers == null ? "" : sleepingPlayers;
         this.inventory = inventory == null ? "" : inventory;
+        this.deathDrops = deathDrops == null ? "" : deathDrops;
     }
 
     /** 离线时的占位快照（player 为 null / 未进世界）。环境与现场字段降级为空/省略。 */
@@ -160,7 +169,7 @@ final class BotSnapshot {
         return new BotSnapshot(botId, "", "", nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
-                null, "", "", null, "", "", "");
+                null, "", "", null, "", "", "", "");
     }
 
     /**
@@ -218,7 +227,7 @@ final class BotSnapshot {
                 activeAction, botStatus, stuckReason,
                 NamedLandmarks.snapshotJsonOrNull(pos, mod),
                 SceneDigest.onlinePlayers(mod), SceneDigest.sleepingPlayers(mod),
-                SceneDigest.inventory(mod));
+                SceneDigest.inventory(mod), EventCollector.lastDeathDrops());
     }
 
     /** 当前时刻的 ISO8601 UTC 字符串。 */

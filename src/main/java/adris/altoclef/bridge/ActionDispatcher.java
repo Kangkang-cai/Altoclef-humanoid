@@ -164,6 +164,14 @@ final class ActionDispatcher {
     // ---- 进度判定状态（仅客户端线程读写）----
     private String _progressKey = null;
     private long _progressAtMs = 0;
+    /**
+     * (2026-10-12 行动心跳) 上次发 {@code action_progress} 事件的时刻。0 = 本行动还没发过
+     * （首拍必发一条，对端立刻拿到进度现场）。消除"@get 长任务 10 分钟信息真空"：
+     * 进度本来就在 /status.activeAction 里，但对端不轮询就永远看不到 —— 现在主动推。
+     */
+    private long _lastHeartbeatMs = 0;
+    /** 心跳间隔：running 期每 30s 发一条（phase 翻转不受此限，立即发）。 */
+    private static final long HEARTBEAT_MS = 30_000;
 
     private Subscription<TaskFinishedEvent> _subTask;
 
@@ -782,6 +790,16 @@ final class ActionDispatcher {
             detail = "卡住 " + stalledSec + "s 无进展";
         }
         int sinceSec = (int) ((now - _activeSinceMs) / 1000);
+        // (2026-10-12 行动心跳) phase 翻转立即发一条；running 期每 30s 发一条带进度的
+        // action_progress。对端不轮询 /status 也能看到 @get/goto/follow 在推进还是停滞。
+        // 发送与下面"无变化就不重建"判据独立 —— 心跳恰恰要在"什么都没变"时发。
+        boolean phaseFlip = !phase.equals(a.phase);
+        if (phaseFlip || now - _lastHeartbeatMs >= HEARTBEAT_MS) {
+            _lastHeartbeatMs = now;
+            String hbText = (detail == null || detail.isEmpty()) ? "行动推进中" : detail;
+            _buffer.emitImmediate("action_progress", "[" + a.actionId + "] " + hbText, false,
+                    progressJson(a.actionId, a.cmd, phase, detail, sinceSec));
+        }
         // 无变化就不重建（_active 每 tick 被读，避免 20Hz 分配）
         if (phase.equals(a.phase) && detail.equals(a.detail) && sinceSec == a.sinceSec) {
             return;
@@ -1154,6 +1172,26 @@ final class ActionDispatcher {
     private void resetProgress() {
         _progressKey = null;
         _progressAtMs = 0;
+        // (2026-10-12 行动心跳) 归零 = 下一个行动首拍必发一条（对端立刻拿到进度现场）。
+        _lastHeartbeatMs = 0;
+    }
+
+    /** (2026-10-12 行动心跳) {@code action_progress} 的 detail：actionId/cmd/phase/detail/sinceSec。 */
+    private static String progressJson(String actionId, String cmd, String phase, String detail, int sinceSec) {
+        StringBuilder sb = new StringBuilder(96);
+        sb.append("{\"actionId\":");
+        BridgeJson.str(sb, actionId);
+        sb.append(",\"cmd\":");
+        BridgeJson.str(sb, cmd);
+        sb.append(",\"phase\":");
+        BridgeJson.str(sb, phase);
+        if (detail != null && !detail.isEmpty()) {
+            sb.append(",\"detail\":");
+            BridgeJson.str(sb, detail);
+        }
+        sb.append(",\"sinceSec\":").append(BridgeJson.i(sinceSec));
+        sb.append('}');
+        return sb.toString();
     }
 
     /** goto 目标（从命令文本解析；kind 见常量）。 */

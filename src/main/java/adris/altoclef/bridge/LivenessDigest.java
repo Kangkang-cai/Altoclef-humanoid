@@ -119,6 +119,7 @@ final class LivenessDigest {
                     || (mc != null && mc.isPaused())
                     || p.isSleeping()
                     || !hasTask
+                    || isFollowHolding(stack)
                     || (_dispatcher != null && (_dispatcher.isHolding() || _dispatcher.isPaused()));
             if (legitStill) {
                 // 这些场景下的"不动"合法：静默重置，不发任何事件
@@ -175,6 +176,21 @@ final class LivenessDigest {
             _status = "ok";
             _reason = "";
         }
+    }
+
+    /**
+     * (2026-10-12 修 bot_stuck 误报) follow 贴身站定 = 设计意图的静止：最深任务是
+     * {@code FollowPlayerTask} 且已到保持距离（目标实体在视野内）。这种"不动"是跟随的
+     * 正常形态，不该报 stuck。
+     *
+     * <p>1011 22:45 实测：铁头贴 kangkang 2.7 格站定 60s（三元组全不变）→ 误报 bot_stuck，
+     * 对端 LLM 又自造"区块没加载"的解释。注意只豁免"贴身站定"这一种 —— FollowPlayerTask
+     * 的其它 null 返回路径（空记录等目标进范围/远程接近超时前）仍照常判卡，那是要上报的真停滞。
+     */
+    private static boolean isFollowHolding(List<Task> stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        Task deep = stack.get(stack.size() - 1);
+        return deep instanceof adris.altoclef.tasks.movement.FollowPlayerTask t && t.isStationaryByDesign();
     }
 
     /** 任务态签名：链名 + 最深任务类名 + 其 debugState。 */
