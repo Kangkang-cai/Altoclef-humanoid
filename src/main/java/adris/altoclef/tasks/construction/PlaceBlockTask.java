@@ -83,6 +83,53 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-05 传送门放置硬守卫) 拒绝日志只打一次的标记。
     private boolean _protectedRefusalLogged = false;
 
+    // (2026-10-14 可交互方块「右键抢夺」硬修) vanilla 1.18.2 的 interactBlock
+    // 判定顺序 (已 javap 核 ServerPlayerInteractionManager.interactBlock 字节码,
+    // 服务端/客户端同构):
+    //   boolean cancel = player.shouldCancelInteraction() && (主手或副手非空)
+    //                   ^ PlayerEntity.shouldCancelInteraction() 字节码就是 return isSneaking()
+    //   if (!cancel) { ActionResult r = state.onUse(...); if (r.isAccepted()) return r; }
+    //   ...才轮到 ItemStack.useOnBlock(...)  // ← 放方块在这里
+    // 即: 手持方块右键「工作台/熔炉/箱子」这类有 onUse 的方块时, **潜行以外**
+    // 一律先开容器界面并 return, 放方块那段代码根本不会执行。客户端侧同构 return,
+    // 所以界面可能连画面都没画出来 —— 用户 1014 现场原话"视觉上没有看到任何界面
+    // 弹出, 然后不动", 与此完全吻合 (bot 举着方块对着容器面, 一个 tick 都放不出)。
+    //
+    // 现场 (20261014-140704 会话, snapshot.log + diag.log 交叉取证):
+    //   15:39:08 target=340,63,-715 placeFaces=down,north, north 面 = crafting_table
+    //   15:04:35 target=-49,-16,-74  placeFaces=down,      down  面 = crafting_table  ← 唯一面
+    //   三例都伴随 baritone[builder=true pathing=false path[present=false]] + hSpeed=0
+    //   的原地空转, 直到 ProgressChecker 2s 判负 → 让位 wander → 换点位再来一遍。
+    //
+    // 分工 (javap 核 baritone BuilderProcess 的 place 分支得出):
+    //   · baritone builder 自己**已经**处理了 —— 它在发 CLICK_RIGHT (offset 978)
+    //     之前调了 setInputForceState(SNEAK, true) (offset 892), 抢夺在它那条路上
+    //     是闭环的。所以本类**不能**再去按 sneak: 每拍与它的 InputOverrideHandler
+    //     对冲, 反而可能在它要的 sneak 帧上被我们 release 掉。
+    //   · 真正缺 sneak 的是 tryManualPlace —— 它自己发 interactBlock, 绕过了
+    //     baritone 的全部保护。这就是本次唯一的改动点。
+    // 同族的 PlaceBlockNearbyTask.place() 早就 hold(SNEAK) (注释 "Shift click just
+    // for 100% container security"), 口径本就一致, 本次补齐同族最后一条路。
+    //
+    // 按键生命周期: onTick 开头无条件 release, 只有手动放置分支再 hold。
+    // InputControls.hold() 是**真·跨帧**状态位 (不同于 tryPress 的一帧脉冲),
+    // 必须成对释放, 否则潜行会漏进别的任务 —— 潜行锁边缘掉落且大幅减速。
+    private boolean _placementSneakHeld = false;
+
+    /** 手动放置期按住潜行, 绕开容器 onUse 抢夺 (幂等)。 */
+    private void holdPlacementSneak(AltoClef mod) {
+        if (_placementSneakHeld) return;
+        mod.getInputControls().hold(Input.SNEAK);
+        _placementSneakHeld = true;
+    }
+
+    /** 释放手动放置期潜行 (幂等); 非放置分支与 onStop 都调用。 */
+    private void releasePlacementSneak(AltoClef mod) {
+        if (!_placementSneakHeld) return;
+        mod.getInputControls().release(Input.SNEAK);
+        _placementSneakHeld = false;
+    }
+
     // (2026-09-30 方案A 悬空垫脚) 放置的物理前提 = 目标格至少有一个实心邻格提供
     // 可点击依附面。废墟门悬空缺框场景 (20260930-221044): 模具格 (-255,73,172)
     // 六邻全空气 (placeFaces=NONE), baritone builder 不自主搭脚手架, 放置必然失败
@@ -206,12 +253,22 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         _scaffoldTask = null;
         _scaffoldCell = null;
         _scaffoldGaveUp = false;
+        // (2026-10-14) 跨重启不残留潜行态: 上一次实例若在放置中被打断, 这次进来
+        // 先归零, 避免第一拍就带着一个"幽灵 sneak"去走路。
+        _placementSneakHeld = false;
         // If we get interrupted by another task, this might cause problems...
         //_wanderTask.resetWander();
     }
 
     @Override
     protected Task onTick(AltoClef mod) {
+
+        // (2026-10-14 可交互方块抢夺) 默认收手: 本拍还没进入放置分支, 先把潜行
+        // 释放掉。下面两个真正要发右键的分支各自重新 hold。放在最开头是因为
+        // onTick 有十来个提前 return 的分支 (让位 wander / 擦边 nudge / 垫脚 /
+        // 补材料 / 保护拒绝), 与其每个分支各写一遍释放, 不如"默认释放 + 放置时
+        // 才按住" 这一个收口点 —— 漏一个分支就会带着潜行走路。
+        releasePlacementSneak(mod);
 
         // (2026-09-05 传送门放置硬守卫, 用户"bot 想把熔炉放进下界门内") 放置前
         // 兜底检查: 目标位命中放置保护 (含门体黑名单) → 拒绝交给 Baritone builder。
@@ -412,6 +469,13 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             }
             setDebugState("Letting baritone place a block.");
 
+            // (2026-10-14) 这里**刻意不**按 sneak: javap 核 baritone BuilderProcess
+            // 的 place 分支, 它在发 CLICK_RIGHT (offset 978) 之前自己就调了
+            // setInputForceState(SNEAK, true) (offset 892), 抢夺问题 baritone 侧
+            // 已闭环。我们再插一手只会和它的 InputOverrideHandler 每拍对冲,
+            // 反而可能在我们 release 的那一帧把它要的 sneak 摘掉 → 右键开界面。
+            // 本类唯一缺 sneak 的是下面的 tryManualPlace (自己发 interactBlock)。
+
             // Perform baritone placement
             if (!mod.getClientBaritone().getBuilderProcess().isActive()) {
                 Debug.logInternal("Run Structure Build");
@@ -427,6 +491,10 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
     protected void onStop(AltoClef mod, Task interruptTask) {
         // (2026-09-30 擦边微位移) 任务被打断时 nudge 前进键可能还按着, 必须释放。
         releaseNudge(mod);
+        // (2026-10-14) 同理释放潜行: 放置中被抢占 (吃东西/战斗/开门) 时若不松,
+        // bot 会带着 sneak 去走下一段路 —— 潜行锁边缘掉落且减速, 现场表现是
+        // "吃完饭开始龟速爬"。同 onTick 开头的默认释放构成两道保险。
+        releasePlacementSneak(mod);
         mod.getClientBaritone().getBuilderProcess().onLostControl();
     }
 
@@ -608,6 +676,10 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
         // 手动接管期间 baritone builder 不得抢准星。
         mod.getClientBaritone().getBuilderProcess().onLostControl();
         _progressChecker.reset();
+        // (2026-10-14 可交互方块抢夺) 手动路径同样要潜行, 否则 interactBlock
+        // 会被工作台/熔炉的 onUse 抢先 return。放在"确认要动手"之后立刻按:
+        // 前面的选面/瞄准子步骤不需要潜行, 少按一帧是一帧。
+        holdPlacementSneak(mod);
 
         // 装备: 指定材质优先, 否则 throwaway 清单 (baritone 同款口径)。
         Item[] candidates = _toPlace.length > 0
