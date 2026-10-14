@@ -298,6 +298,13 @@ public class PlaceBlockTask extends Task implements ITaskRequiresGrounded {
             if (System.currentTimeMillis() - _wanderSinceMs > WANDER_GIVEUP_MS) {
                 Debug.logMessage("[PlaceStuck] 让位 wander 超时 " + (WANDER_GIVEUP_MS / 1000)
                         + "s 未产生位移 at " + _target.toShortString() + " (baritone 疑似无路径), 丢弃本轮让位");
+                // (2026-10-14 治点位复现) 让位 8s 走不动 = 此处站不住, 但本任务持有的是
+                // 固定 _target (父链 PlaceBlockNearbyTask 选的), 自己换不了点 ⇒ 唯一
+                // 能做的出路是把该点告诉 BlockTracker 拉黑, 让父链重选时排除它。
+                // 否则父链重选按 distSq 打分, 走开 2 格后原点仍是最优解 ⇒ 原样选回,
+                // 实测 273,65,-766 被重复选 40 次。与 PlaceBlockNearbyTask 同口径
+                // (那条路径本就在判负时拉黑, 只有让位超时分支漏了)。
+                mod.getBlockTracker().requestBlockUnreachable(_target);
                 _wanderTask = new TimeoutWanderTask(3, true);
                 _wanderSinceMs = 0;
                 _progressChecker.reset();

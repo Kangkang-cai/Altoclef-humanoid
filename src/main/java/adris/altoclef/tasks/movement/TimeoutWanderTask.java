@@ -72,6 +72,15 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
     private Task _unstuckTask = null;
     private int _failCounter;
     private double _wanderDistanceExtension;
+    // (2026-10-14 PlanB 死循环硬修) 连续判负切 PlanB 的次数墙。旧实现判负后唯一
+    // 动作是 `_executingPlanB = true` + 重发 CustomGoalProcess(换角度), 而 baritone
+    // 在原地无路可走时换角度同样走不动 ⇒ 每 6s 重复一次, `_failCounter` 永远攒不到
+    // isFinished 要求的 >10 ⇒ 出口形同虚设, 放置让位链实测原地打转 4 分钟
+    // (20261014-140704 会话 15:34~15:38, NAV-STUCK 全程 hSpeed=0.000)。
+    // 这里加一个"连续 PlanB 切换"计数: 达到上限即认定本轮游走无出路, 交回调用方。
+    private int _planBSwitches = 0;
+    /** 连续判负切 PlanB 达此次数 ⇒ 认定无出路 (约 PLANB_WINDOW_S 类判负周期)。 */
+    private static final int MAX_PLANB_SWITCHES = 3;
     // (2026-09-15 统一超时标签) failCounter 判负的边沿标记, 防 isFinished 重复打 [TIMEOUT]。
     private boolean _giveUpLogged = false;
 
@@ -140,6 +149,8 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         }
         _progressChecker.reset();
         _failCounter = 0;
+        // (2026-10-14) 同 onStart: 复用实例重开会话要清 PlanB 计数。
+        _planBSwitches = 0;
         _giveUpLogged = false;
     }
 
@@ -151,6 +162,8 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         }
         _progressChecker.reset();
         _failCounter = 0;
+        // (2026-10-14) 新一轮游走会话: PlanB 死循环计数归零 (跨会话不背旧账)。
+        _planBSwitches = 0;
         _giveUpLogged = false;
         StorageHelper.closeScreen();
     }
@@ -199,7 +212,16 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
 
         //_distanceProgressChecker.setProgress(mod.getPlayer().getPos());
         //if (_distanceProgressChecker.failed()) {
-        if (!_progressChecker.check(mod)) {
+        if (_progressChecker.check(mod)) {
+            // (2026-10-14) 真的动了 ⇒ 之前的"无出路"判定作废, 计数归零重来。
+            // 不清零的话, 一次成功位移就会被前面攒下的次数永久记死。
+            if (_planBSwitches > 0) {
+                _planBSwitches = 0;
+                _giveUpLogged = false;
+            }
+            return null;
+        }
+        {
             // We failed at exploring.
             //_distanceProgressChecker.reset();
             _progressChecker.reset();
@@ -220,6 +242,14 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
                     mod.getClientBaritone().getCustomGoalProcess().onLostControl();
                 }
                 _executingPlanB = true;
+                // (2026-10-14) 换 PlanB 即计一次; 达上限说明"换角度"这条路也走不通,
+                // 再切多少次都一样。计数在真正位移后清零 (见 _progressChecker 通过分支)。
+                _planBSwitches++;
+                if (_planBSwitches >= MAX_PLANB_SWITCHES && !_giveUpLogged) {
+                    _giveUpLogged = true;
+                    Debug.logMessage("[WanderDeadEnd] 连续 " + _planBSwitches
+                            + " 次判负换向仍无位移 (baritone 无出路), 本轮游走交回调用方");
+                }
             }
         }
 
@@ -319,6 +349,13 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
 
         // If we fail 10 times or more, we may as well try the previous task again.
         if (_failCounter > 10) {
+            return true;
+        }
+
+        // (2026-10-14 PlanB 死循环硬修) 连续判负换向达上限 = 本轮游走确认无出路。
+        // 必须早于 _failCounter>10 那道闸: 原地无路时判负每 6s 一次, 攒够 11 次要
+        // 66s+, 而调用方 (放置让位链) 8s 就已判负换点, 永远等不到。
+        if (_planBSwitches >= MAX_PLANB_SWITCHES) {
             return true;
         }
 

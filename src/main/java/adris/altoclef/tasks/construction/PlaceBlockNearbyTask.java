@@ -279,6 +279,17 @@ public class PlaceBlockNearbyTask extends Task {
                         + "s 未产生位移 (baritone 疑似无路径), 丢弃本轮让位并重新选点");
                 _wander = new TimeoutWanderTask(2);
                 _wanderSinceMs = 0;
+                // (2026-10-14 治点位复现) 旧代码只置 _tryPlace = null, 于是下一拍
+                // locateClosePlacePos 按 distSq 打分重新选 —— bot 刚让位走了 2 格, 原来
+                // 那个点**仍是全场最优解**, 于是被原样选回。现场 20261014-140704:
+                // 273,65,-766 一个点位被重复选取 40 次 (165 个放置快照里共 48 个不同
+                // 点位), 表现为"一直卡在原地"。让位超时本就等价于"此处站不下去",
+                // 必须把点位一起拉黑, 否则重选只是重置记忆。
+                // 注意: 判负分支 (_progressChecker.check) 早已调 requestBlockUnreachable,
+                // 只有这条"让位也走不动"的路径漏了 —— 口径不一致才是复现的根因。
+                if (_tryPlace != null) {
+                    mod.getBlockTracker().requestBlockUnreachable(_tryPlace);
+                }
                 _tryPlace = null;              // 强制重新选点, 不复用已被拉黑的旧目标
                 _progressChecker.reset();
             } else {

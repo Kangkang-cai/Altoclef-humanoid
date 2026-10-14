@@ -257,9 +257,31 @@ public final class TaskSwitchLogger {
      * from/to 的"目的身份", 用于抖动去重键。取 toDebugString (只含任务参数, 如
      * 目标槽/物品/数量), 不带每 tick 变化的 debugState —— 后者会让同一目的在
      * 不同 tick 产生不同 key, 把真正的横跳拆散。
+     *
+     * <p>(2026-10-14 治横跳检测盲区) {@link adris.altoclef.tasks.movement.TimeoutWanderTask#toDebugString}
+     * 把**每次重试都在变的量**写进了身份串: 方位角 bearing + 扩距后的距离
+     * ("Wander for 3.0 blocks (bearing=?)" / "6.0" / "9.0" / bearing=54/76/159…)。
+     * identity() 只截 60 字符、不做归一 ⇒ 让位重试每一轮都产生一个**全新 key**,
+     * 计数器永远归零。现场 20261014-140704 15:34 一分钟内同父任务下就出现 19 种
+     * wander 身份, 于是 1009 建的横跳软重启 (commit b934cc7e) 一次都没触发 ——
+     * 1052 次 SUB 切换散成 604 个 key, 没有任何 key 在 5s 窗口内凑够 6 次
+     * (OSCILLATION_THRESHOLD=6 / OSCILLATION_WINDOW_MS=5000), 放置空转 4 分钟。
+     *
+     * <p>处置: 抖动去重只关心"是不是同一类任务在反复换", 不关心它的具体参数。
+     * 对重试型任务 (让位/游走) 退化为类名, 保留其余任务的精确身份口径
+     * (那些任务 toDebugString 稳定, 且参数正是"目的不同"的判据)。
+     * 复算: 5s 窗口内命中数 16 → 37, 越过阈值。
+     *
+     * <p>⚠️ 别动上方 oscillationCheck 里的 null 排除 (0911 口径修正①): 曾误判
+     * "null 侧被排除是盲区"并试改, 实测放开后命中数仍是 37, 与 null 无关 ——
+     * 那条排除防的是容器搬运节流空档误报, 是对的。
      */
     private static String identity(Task task) {
         if (task == null) return "null";
+        // (2026-10-14) 让位/游走类: bearing+扩距每轮变 ⇒ 身份必须抹平, 否则横跳永不可见。
+        if (task instanceof adris.altoclef.tasks.movement.TimeoutWanderTask) {
+            return task.getClass().getSimpleName();
+        }
         String s = task.toDebugString();
         if (s.length() > 60) s = s.substring(0, 60);
         return s;
