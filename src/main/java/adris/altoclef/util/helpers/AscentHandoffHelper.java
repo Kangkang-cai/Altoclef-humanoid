@@ -71,6 +71,18 @@ public final class AscentHandoffHelper {
     private static final double ACQUIRE_TOTAL_SECONDS = 30;
 
     /**
+     * (2026-10-14) 补料"实得核验"最多重派次数。0 = 不核验(旧行为)。
+     *
+     * <p>现场 20261014-214331: {@code acquire done(enough) ... have=0} —— 采集任务
+     * 7.4s 就 clean 结束并报"完成", 但背包里一个垫料都没有 (它挖的 391,60,-613 /
+     * 391,59,-613 早就是空气, tasks.log 连续 "Target already air, nothing to break")。
+     * {@code pumpAcquire} 旧实现只认 {@code isFinished} 就收工 ⇒ 空手继续垫塔 ⇒
+     * 原地跳 107s。上限 2 次: 够容忍"挖不到 dirt 但附近有别的方块"的一次重试,
+     * 又不会在完全无可用方块时无限采集(与本仓"所有 wait 分支必须有出口"铁律一致)。
+     */
+    private static final int MAX_ACQUIRE_RETRY = 2;
+
+    /**
      * 总窗口硬兜底。正常情况下 1.5s×2 段就该有结论,但若 bot "来回挪一格"
      * 每轮都算进展(真的在绕路),需要一条绝对上限防爆。取 90s:每格 1.5s
      * 足够爬 60 格,远超任何真实竖直差距。
@@ -170,6 +182,31 @@ public final class AscentHandoffHelper {
     private boolean _acquireDoneLogged = false;
     /** 已经历的 stall 轮数, 只用于日志。 */
     private int _stallRounds = 0;
+    /** (2026-10-14) 补料实得核验的重派次数 (见 {@link #MAX_ACQUIRE_RETRY})。 */
+    private int _acquireRetries = 0;
+    /**
+     * (2026-10-14 治C 空手原地跳) 空手垫塔的重算次数。
+     *
+     * <p>机理: {@code hasThrowaway=false} ⇒ {@code costOfPlacingAt} 恒 100 万 ⇒ A*
+     * 本该判"此路不通"改走挖/绕。但 {@code hasThrowaway} 是**建路径那一刻的快照**,
+     * 背包随后空了也不会让已算好的 {@code MovementPillar} 作废 ⇒ baritone 一直
+     * 执行它。现场 20261014-214331 21:46:48~21:47:18: {@code path[present=true
+     * segLen=8→23]} 一路增长而 {@code exec[pos=0/23]} 恒 0, {@code onGround=false
+     * mv=MovementPillar hand=wheat_seeds} 原地跳 107s。
+     *
+     * <p>本字段统计"空手期间强制重算"的次数, 达上限即承认重算也救不回来, 走判不可达。
+     */
+    private int _emptyHandRepathCount = 0;
+
+    /**
+     * (2026-10-14 治C) 空手垫塔时强制重算路径的次数上限。
+     *
+     * <p>取 3: 重算是"让 baritone 改走挖/绕"的唯一手段, 但若地形确实是个连
+     * 1x1 竖井都没有的绝壁, 重算几次结果都一样 ⇒ 必须有出口, 否则又是一条
+     * 无限循环(与本仓"所有 wait 分支必须有出口"铁律一致)。3 次 ≈ 4.5s, 远小于
+     * {@link #TOTAL_SECONDS}(90s) 总兜底, 不会掩盖真正的长任务。
+     */
+    private static final int MAX_EMPTYHAND_REPATH = 3;
 
     public AscentHandoffHelper(String tag, Item[] materials) {
         _tag = tag;
@@ -213,6 +250,9 @@ public final class AscentHandoffHelper {
         _acquireTask = null;
         _acquireDoneLogged = false;
         _stallRounds = 0;
+        // (2026-10-14) 新会话: 补料重派计数与空手重算计数归零。
+        _acquireRetries = 0;
+        _emptyHandRepathCount = 0;
         _stallTimer.reset();
         _totalTimer.reset();
         applyGoal(mod);
@@ -220,6 +260,7 @@ public final class AscentHandoffHelper {
                 + " target=" + shortPos(target) + " targetY=" + targetY
                 + " fromY=" + mod.getPlayer().getBlockPos().getY()
                 + " materials=" + PillarJumpHelper.countBaritonePlaceable(mod)
+                + " pillarMat=" + PillarJumpHelper.countPillarMaterial(mod, _materials)
                 + " rawMaterials=" + PillarJumpHelper.countMaterials(mod, _materials)
                 + " (" + reason + ")");
     }
@@ -295,7 +336,41 @@ public final class AscentHandoffHelper {
         }
 
         int have = PillarJumpHelper.countBaritonePlaceable(mod);
-        if (!totalExpired && have == 0 && !_acquireStarted) {
+        // (2026-10-14 治B 口径统一) "有没有垫料"一律走 countPillarMaterial 单一判据
+        // (见该方法注释): 旧代码用 countBaritonePlaceable, 它会逐件过滤
+        // isItemProtected, 与 countMaterials 结论相反 (现场 raw=3 却报 have=0),
+        // 于是明明手里有方块却被判成"一块都没有", 白白跳过补料去空手垫塔。
+        int pillarMat = PillarJumpHelper.countPillarMaterial(mod, _materials);
+        int dirtReal = mod.getItemStorage().getItemCountReal(Items.DIRT);
+
+        // (2026-10-14 治C 空手原地跳) 空手 + 正在垫塔 ⇒ 强制重算路径。
+        //
+        // 机理: hasThrowaway=false ⇒ costOfPlacingAt 恒 100 万 ⇒ A* 本该判"此路不通"
+        // 改走挖/绕。但 hasThrowaway 是**建路径那一刻的快照**, 背包随后空了不会让
+        // 已算好的 MovementPillar 作废。现场 20261014-214331 21:46:48~21:47:18:
+        // path[present=true segLen=8→23] 一路增长而 exec[pos=0/23] 恒 0,
+        // onGround=false mv=MovementPillar hand=wheat_seeds 原地跳 107s。
+        //
+        // 处置: 手上没垫料时**主动作废当前路径并重挂目标**。重算时 A* 重新评估,
+        // 垫塔代价 100 万会被自然排除, baritone 转而选择挖开挡块/绕行 —— 即用户
+        // 期望的"没料时正常挖出去"。已有出口: 重算次数达上限即落回下方判不可达。
+        boolean emptyHanded = pillarMat <= 0 && dirtReal <= 0;
+        if (!totalExpired && emptyHanded
+                && _emptyHandRepathCount < MAX_EMPTYHAND_REPATH) {
+            _emptyHandRepathCount++;
+            // 重挂前先记一次现场, 便于验收"空手原地跳"是否真的消失。
+            Debug.logToFile("altoclef_diag.log",
+                    "[AscentMaterial] 空手垫塔 → 强制重算路径 tag=" + _tag
+                            + " repath=" + _emptyHandRepathCount + "/" + MAX_EMPTYHAND_REPATH
+                            + " y=" + y + " pillarMat=" + pillarMat + " dirt=" + dirtReal
+                            + " mv=" + currentMovementName(mod)
+                            + " target=" + shortPos(_target));
+            applyGoal(mod);
+            _stallTimer.reset();
+            return TickResult.running(null);
+        }
+
+        if (!totalExpired && emptyHanded && !_acquireStarted) {
             // 第二档: 一块垫料都没有 → 补一次。baritone 的 MovementPillar 需要
             // throwaway 方块才能进 A* (`hasThrowaway` false 时 costOfPlacingAt 恒
             // 1_000_000), 没料它只会原地跳到天荒地老, 永远不会自己去找方块。
@@ -308,7 +383,11 @@ public final class AscentHandoffHelper {
         // 第三档: 有料也爬不上去 / 已补过一次 / 建不出采集任务 → 判不可达。
         Debug.logToFile("altoclef_diag.log", "[Ascent] give up tag=" + _tag
                 + " y=" + y + " lastY=" + _lastY
-                + " have=" + have + " acquired=" + _acquireStarted
+                + " have=" + have
+                + " pillarMat=" + PillarJumpHelper.countPillarMaterial(mod, _materials)
+                + " acquireRetries=" + _acquireRetries
+                + " emptyHandRepath=" + _emptyHandRepathCount + "/" + MAX_EMPTYHAND_REPATH
+                + " acquired=" + _acquireStarted
                 + " paused=" + mod.getExtraBaritoneSettings().isInteractionPaused()
                 + (_totalTimer.elapsed() ? " (total window elapsed)" : "")
                 + " target=" + shortPos(_target) + " -> unreachable");
@@ -386,7 +465,9 @@ public final class AscentHandoffHelper {
         // (哨兵 targetCount 陷阱: 收够了也可能判不完)。
         // (2026-09-17 口径统一) 早停也必须用 baritone 口径 —— 用 countMaterials 会在
         // "挖到圆石"时误判达标停下, 而圆石 baritone 放不了 = 白采。
-        if (PillarJumpHelper.countBaritonePlaceable(mod) >= ACQUIRE_WANT
+        // (2026-10-14 治B) 早停判据也走统一口径, 否则会出现"早停说够了、收尾说空了"
+        // 的自相矛盾 (两者读的是同一只背包)。
+        if (PillarJumpHelper.countPillarMaterial(mod, _materials) >= ACQUIRE_WANT
                 || mod.getItemStorage().getItemCountReal(Items.DIRT) >= ACQUIRE_WANT) {
             finishAcquire(mod, "enough");
             return null;
@@ -404,7 +485,33 @@ public final class AscentHandoffHelper {
             finished = true;
         }
         if (finished) {
-            finishAcquire(mod, "finished");
+            // (2026-10-14 治A 补料假成功) isFinished 只说明"采集任务自己觉得完了",
+            // 不代表背包里真有垫料。现场 20261014-214331 实锤: `Mine And Collect:
+            // [[dirt] x 5]` 7.4s clean 结束 → acquire done(enough) have=0, 因为它挖的
+            // 391,60,-613 / 391,59,-613 早就是空气 (tasks.log 连续 "Target already
+            // air, nothing to break")。旧实现照单全收, 空手继续垫塔 ⇒ 原地跳 107s。
+            // 这里核验**实得**: 一块垫料都没有 = 这次采集白跑, 重派一次(有上限)。
+            int have = PillarJumpHelper.countPillarMaterial(mod, _materials);
+            int dirt = mod.getItemStorage().getItemCountReal(Items.DIRT);
+            if (have <= 0 && dirt <= 0 && _acquireRetries < MAX_ACQUIRE_RETRY) {
+                _acquireRetries++;
+                Debug.logToFile("altoclef_diag.log",
+                        "[AscentMaterial] acquire 报完成但实得为0 → 重派 tag=" + _tag
+                                + " retry=" + _acquireRetries + "/" + MAX_ACQUIRE_RETRY
+                                + " mat=" + have + " dirt=" + dirt
+                                + " target=" + shortPos(_target));
+                _acquireTask = null;     // 丢掉旧实例, 重新建一个采集任务
+                _acquireDoneLogged = false;
+                _acquireTimer.reset();
+                Task retry = startAcquire(mod);
+                if (retry != null) {
+                    return retry;
+                }
+                // 建不出采集任务 ⇒ 落回下方 finishAcquire(why=finished), 由调用方判不可达。
+            }
+            finishAcquire(mod, finished && PillarJumpHelper.countPillarMaterial(mod, _materials) <= 0
+                    && mod.getItemStorage().getItemCountReal(Items.DIRT) <= 0
+                    ? "finished-but-empty" : "finished");
             return null;
         }
         return _acquireTask;
@@ -451,10 +558,31 @@ public final class AscentHandoffHelper {
         _acquireDoneLogged = true;
         Debug.logToFile("altoclef_diag.log", "[Ascent] acquire done(" + why + ") tag=" + _tag
                 + " have=" + PillarJumpHelper.countBaritonePlaceable(mod)
+                + " pillarMat=" + PillarJumpHelper.countPillarMaterial(mod, _materials)
+                + " raw=" + PillarJumpHelper.countMaterials(mod, _materials)
                 + " target=" + shortPos(_target));
     }
 
     private static String shortPos(BlockPos pos) {
         return pos == null ? "null" : pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    /**
+     * (2026-10-14 验收埋点) 当前 baritone 正在执行的 movement 名, 只用于日志。
+     * 取不到就返回 "?" —— 纯观测, 任何异常都不得影响主流程。
+     */
+    private static String currentMovementName(AltoClef mod) {
+        try {
+            var exec = mod.getClientBaritone().getPathingBehavior().getCurrent();
+            if (exec == null) return "?";
+            var path = exec.getPath();
+            if (path == null) return "null";
+            int pos = exec.getPosition();
+            var moves = path.movements();
+            if (moves == null || pos < 0 || pos >= moves.size()) return "none";
+            return moves.get(pos).getClass().getSimpleName();
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 }

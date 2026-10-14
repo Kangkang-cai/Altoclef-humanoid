@@ -205,6 +205,71 @@ public final class PillarJumpHelper {
         }
     }
 
+    /**
+     * (2026-10-14) **垫塔可用料**的统一判据 —— 单一来源, 所有消费方必须走这里。
+     *
+     * <p>为什么要有这个: 此前存在两个口径 ——
+     * {@link #countBaritonePlaceable} 走 baritone 的 acceptableThrowawayItems <b>且</b>
+     * 逐件过滤 {@code isItemProtected}, 而 {@link #countMaterials} 只按传入 materials
+     * 计数、<b>不</b>过滤保护物品。同背包同一时刻两者能给出相反结论, 现场
+     * 20261014-214331 实锤: {@code [Ascent] start materials=2 rawMaterials=5} →
+     * 补料结束时 {@code have=0 raw=3} ⇒ 手里明明还有 3 个 raw 方块, 却被判成
+     * "一块垫料都没有", 于是跳过补料闸门直接让 baritone 空手垫塔, 原地跳 107s
+     * (diag.log 21:46:48~21:47:18 全程 {@code onGround=false mv=MovementPillar
+     * hand=wheat_seeds})。
+     *
+     * <p>口径裁定: 垫塔要的是"手上有没有能垫出去的方块", 而 baritone 的放置闸门
+     * ({@code hasThrowaway} → {@code costOfPlacingAt}) 判的是**同一件事**。
+     * 因此凡是要决定"要不要补料/能不能垫塔"的地方, 一律用本方法 ——
+     * 它取 {@code materials} 与 {@code acceptableThrowawayItems} 的交集(任一为空则退化
+     * 为单侧), <b>不过滤 isItemProtected</b>: 被保护的是"不许丢/不许当垃圾丢"
+     * (如用户 importantItems 里的打火石), 不是"不许拿来垫脚"。保护物品拿来垫塔
+     * 会在用掉后从背包消失, 但那是用户自己设定的 importantItems 语义之外的事,
+     * 由 BotBehaviour 决定, 不该在此处静默把垫料判成 0。
+     *
+     * <p>验收指标: 见 {@code [Ascent] acquire done(...)} 与
+     * {@code [AscentMaterial]} 埋点 —— 两者一致即口径统一。
+     */
+    public static int countPillarMaterial(AltoClef mod, Item[] materials) {
+        if (mod.getPlayer() == null || mod.getPlayer().getInventory() == null) return 0;
+        java.util.List<Item> acceptable;
+        try {
+            acceptable = mod.getClientBaritoneSettings().acceptableThrowawayItems.value;
+        } catch (Throwable t) {
+            acceptable = null;
+        }
+        int count = 0;
+        for (ItemStack stack : mod.getPlayer().getInventory().main) {
+            if (stack == null || stack.isEmpty()) continue;
+            if (!isPillarMaterial(stack.getItem(), materials, acceptable)) continue;
+            count += stack.getCount();
+        }
+        ItemStack offhand = mod.getPlayer().getInventory().offHand.get(0);
+        if (offhand != null && !offhand.isEmpty()
+                && isPillarMaterial(offhand.getItem(), materials, acceptable)) {
+            count += offhand.getCount();
+        }
+        return count;
+    }
+
+    /** 交集判据: materials 与 acceptable 都非空时取交集, 否则退化到非空的那一侧。 */
+    private static boolean isPillarMaterial(Item item, Item[] materials,
+                                            java.util.List<Item> acceptable) {
+        boolean byMaterial = materials == null || materials.length == 0;
+        if (!byMaterial) {
+            for (Item m : materials) {
+                if (m == item) return true;
+            }
+            byMaterial = false;
+        }
+        boolean byAcceptable = acceptable == null || acceptable.isEmpty();
+        if (!byAcceptable) {
+            return acceptable.contains(item);
+        }
+        // 两侧都没有可用清单 ⇒ 无法判定, 保守当"不可垫"(旧行为, 免得乱扣方块)。
+        return false;
+    }
+
     /** 松开垫塔期间 hold 的跳跃键 (退出路径必调)。 */
     public static void release(AltoClef mod) {
         mod.getInputControls().release(Input.JUMP);
