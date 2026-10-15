@@ -327,8 +327,24 @@ public abstract class DoStuffInContainerTask extends Task {
             // L202 的距离-blind `isItemOwned(USE)` 一起造成"走去远炉 ↔ 现做炉"
             // 每 1~4 秒横跳 (根因是 isBlockPerceivable 对射程外目标的假阳性,
             // 已在 VisibilityHelper 加距离门; 这里是调用侧的第二道闸)。
+            //
+            // (2026-10-14 治"容器被拉黑仍死循环") 补 WorldHelper.canReach 过滤 ——
+            // 这是三路查找里唯一漏拉黑的一路 (L306 stillThere 走 blockIsValid 滤,
+            // L222 nearest 走 canReach 滤, 只有这里不滤)。现场 20261014-222846
+            // 实锤 1m55s 死循环: 工作台 -35,77,3 在 bot 下方 4 格凹槽里, baritone
+            // pathPresent=false 走不到 → InteractWithBlockTask 判不可达拉黑
+            // (snapshot blacklisted=true) → 本谓词只有距离过滤, 下一拍原样捞回
+            // → 再派再拉黑 → 无限循环, 永远走不到"合成新工作台"分支
+            // (bot 背包有 19 logs, 手工 2x2 就能合成工作台, 却一辈子轮不到)。
+            // 加 canReach 后: 被拉黑容器被滤掉 → trackedExisting 空 → 落到下方
+            // "获取容器物品重造" → 上层合成新台 → 闭环恢复。
+            // ⚠️ 09-08 注释"不带 canReach 过滤, 走到跟前自然能开"的场景是
+            // canReach 对**脚边好炉**的误判(当时根因 isBlockPerceivable 假阳性,
+            // 已修); 脚边可达的炉不在拉黑名单里, canReach 不会误滤它 —— 两个
+            // 场景不冲突, 该口径与 L222 本就该一致。
             Optional<BlockPos> trackedExisting = mod.getBlockTracker()
-                    .getNearestTracking(currentPos, blockPos -> blockPos.getSquaredDistance(currentPos) <= maxWalkSq, _containerBlocks);
+                    .getNearestTracking(currentPos, blockPos -> blockPos.getSquaredDistance(currentPos) <= maxWalkSq
+                                    && WorldHelper.canReach(mod, blockPos), _containerBlocks);
             if (trackedExisting.isPresent()) {
                 setDebugState("Using existing container (tracker knows one)");
                 Debug.logTrace("craft-place-reuse", "复用 tracker 已知容器 " + _containerTarget.toString()
