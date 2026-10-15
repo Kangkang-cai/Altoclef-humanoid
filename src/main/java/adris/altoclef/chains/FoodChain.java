@@ -717,6 +717,14 @@ public class FoodChain extends SingleTaskChain {
                 // 丢弃"解耦 — 正是本处 2026-09-18 修复注释里定的口径。
                 boolean protectedFood = ItemHelper.isStackProtected(mod, stack);
 
+                // (2026-10-15 战略储备粮, 用户"怎么把金苹果吃了") 金苹果/附魔金苹果
+                // 不是普通食物: 20261015-145519 实锤 —— CollectFoodTask 不在场时
+                // 保护罚分不生效, 金苹果凭饱和度乘数 (8×1.2-2=7.6 > 羊肉 6.4) 胜出
+                // 被吃。普通饥饿分支永远垫底 (与保护罚分同款 -1000), 只剩它才吃;
+                // 低血回血分支按 2026-09-23 保命口径放行 (用户 1015 选 B)。
+                boolean strategicReserve = stack.getItem() == Items.GOLDEN_APPLE
+                        || stack.getItem() == Items.ENCHANTED_GOLDEN_APPLE;
+
                 // Ignore spider eyes
                 if (stack.getItem() == Items.SPIDER_EYE) {
                     continue;
@@ -765,7 +773,8 @@ public class FoodChain extends SingleTaskChain {
                     // (2026-09-18 受保护食物兜底进食) 见上方 protectedFood 注释:
                     // 重罚到普通食物之后, 只剩受保护食物时才轮到它 (防饿死)。
                     // (2026-09-23) 仅普通饥饿分支生效; 回血分支保命优先, 不罚。
-                    if (protectedFood) {
+                    // (2026-10-15) 战略储备粮(金苹果)在普通饥饿分支同样垫底。
+                    if (protectedFood || strategicReserve) {
                         score -= _config.foodPickProtectedPenalty;
                     }
                 }
