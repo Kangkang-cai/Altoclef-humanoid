@@ -15,6 +15,7 @@ import adris.altoclef.util.Dimension;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LavaLakeHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.progresscheck.MovementProgressChecker;
@@ -312,6 +313,19 @@ public class ConstructNetherPortalBucketTask extends Task {
                         && SurfaceHelper.isBelowSurfaceDebounced(mod)) {
                     setDebugState("No lava lake found, returning to surface to search");
                     return new GoToSurfaceTask();
+                }
+                // (2026-10-15 兜底出口 — 岩浆桶×8 事故) 本分支把收集任务当"探湖引擎"派发,
+                // 但旧版每 tick 无条件派发 + 子任务 isFinished 不被框架消费 (detail/01)
+                // ⇒ 已持有岩浆桶时仍被无限舀取。20261015-153843 实证: 99 次舀取 vs
+                // 2 次浇铸, 背包攒 8 桶, 且小池被舀瘦成单格源 → isLake 永不过 → 兜底死锁。
+                // 修法: 派发前先查 POSSESS 真实持有 (与 ResourceTask.isFinished 同一份
+                // 判据, 判定源单一化, 不用缓存层 hasItem)。够了就只探不舀 (就地 wander),
+                // 湖锚点重扫 (_lavaSearchTimer) 照常接管。出口: 湖锚点形成 → 进入帧循环
+                // 浇铸; 锚点 100 格外作废 → 回到本分支, 口径一致无悬空。
+                if (StorageHelper.countItemInInventoryReal(mod, Items.LAVA_BUCKET) >= 1) {
+                    setDebugState("No lava lake found, have lava bucket — exploring only (no scooping)");
+                    _progressChecker.reset();
+                    return _wanderTask;
                 }
                 setDebugState("No lava lake found, searching around");
                 return _collectLavaTask;

@@ -15,6 +15,7 @@ import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.LandHelper;
 import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.SurfaceHelper;
 import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
@@ -34,6 +35,7 @@ import net.minecraft.util.registry.Registry;
 import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -201,6 +203,22 @@ public class CollectBucketLiquidTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+
+        // (2026-10-15 兜底自守 — 岩浆桶×8 事故) 数量已满足就不再舀。本任务被父链
+        // 反复派发时 (框架不消费子任务 isFinished, detail/01), 旧版舀取肢每 tick 照跑:
+        // 20261015-153843 实证 99 次舀取 vs 2 次浇铸, 背包攒 8 个岩浆桶。
+        // 判据与 isFinished (ResourceTask POSSESS 真实扫描) 同一份 —— 判定源单一化;
+        // 实时无缓存, 不存在"判断过期" (父链缓存层 hasItem 的 500ms 窗口期间本任务
+        // 最多空转 1-2 tick)。出口: 桶到手后各调用方闸门自然翻转替换本任务
+        // (ConstructNetherPortalBucketTask 兜底分支改用真实持有闸 / PlaceObsidianBucketTask
+        // 的 hasItem 门 ≤500ms 翻转); 期间显式释放拾取闩 (interactionPaused), 防按住悬空 (铁律②)。
+        if (Arrays.stream(_itemTargets).allMatch(target ->
+                StorageHelper.itemTargetOwned(mod, StorageHelper.Ownership.POSSESS, target))) {
+            mod.getExtraBaritoneSettings().setInteractionPaused(false);
+            _progressChecker.reset();
+            setDebugState("Already have enough " + _liquidName + " bucket, idling (no more scooping)");
+            return null;
+        }
 
         // Run one update to prevent the false fail bug?
         _progressChecker.check(mod);
