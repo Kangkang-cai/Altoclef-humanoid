@@ -39,6 +39,15 @@ public class FoodChain extends SingleTaskChain {
     // (2026-09-28 低血量进食豁免) 见 updateLowHealthEatLatch。
     private boolean _lowHealthEatLatched = false;
 
+    // ---- (2026-10-15 前台进食锁存, 链间乒乓终局护栏) ----
+    // 背景: 20261015-111217 会话 hunger=14 时 perfect-fit 判据依赖"受保护惩罚
+    // 重排后的最优食物", CollectFoodTask 保护名单 push/pop 让最优在 金苹果(fills=4,
+    // 判不饿) ↔ cooked_mutton(fills=6, 判饿) 间翻转 → needEat 每 tick 翻转 →
+    // Food(62)↔User Tasks(50) 链间互抢 3453 轮/44min, EatItemTask 一口没吃上。
+    // 判据修复见 needsToEat(存在性判定); 本锁存是兜底: 一旦进入前台进食, 视同
+    // "需要吃"直到明确出口, 不再给任何翻转源机会。与 2026-09-28 低血豁免闩同构。
+    private boolean _foregroundEatLatched = false;
+
     // ---- (2026-09-08 贪婪食物峰值, 用户) ----
     // 库存食物分数一旦达到过 settings.getFoodPeakUnits()(默认 240) 即永久锁存。
     // 锁存后: 吃东西导致分数回落【不再】触发食物收集 (消灭"120 目标吃一口就
@@ -205,6 +214,16 @@ public class FoodChain extends SingleTaskChain {
         boolean needEat = needsToEat(mod);
         _lastNeedsToEat = needEat;
 
+        // (2026-10-15 前台进食锁存) 一旦进入前台进食, 视同"需要吃"直到明确出口
+        // (见 updateForegroundEatLatch), 压住一切判据翻转源。位置在安全闸门之前:
+        // 锁存维护每 tick 照常跑 (出口判定不因闸门让位而漏评), 闸门让位时锁存
+        // 保持 (战斗/空中结束后继续吃, 与 0914/0928 既有语义一致)。
+        _foregroundEatLatched = updateForegroundEatLatch(mod, hasFood);
+        if (_foregroundEatLatched) {
+            needEat = true;
+            _lastNeedsToEat = true;
+        }
+
         boolean combatEatExempt = updateLowHealthEatLatch(mod, hasFood, needEat);
 
         // We're in danger, don't eat now!!
@@ -294,6 +313,8 @@ public class FoodChain extends SingleTaskChain {
                 }
                 stopEat(mod);
                 setTask(new EatItemTask(_config.eatTaskTimeoutSeconds));
+                // (2026-10-15) 前台进食锁存入场: 见 updateForegroundEatLatch。
+                _foregroundEatLatched = true;
                 // (2026-09-28 低血量豁免) 豁免期前台优先级 85: 压过逃跑(80) 才能
                 // 在撤退状态中途停下来吃; 仍让位盾核(90)/must-kill(95)/MLG(100)。
                 logFoodDiag(mod, combatEatExempt ? "foreground-eat(lowhp-exempt)" : "foreground-eat", "");
@@ -404,6 +425,33 @@ public class FoodChain extends SingleTaskChain {
                             ? "none" : String.format("%.1f", MobDefenseChain.nearestHostileDistance(mod))));
         }
         return _lowHealthEatLatched;
+    }
+
+    /**
+     * (2026-10-15 前台进食锁存) 链间乒乓终局护栏, 与 {@link #updateLowHealthEatLatch}
+     * 同构。入场: 前台进食分支 setTask(EatItemTask) 时置位; 置位期间 getPriority 把
+     * needEat 视同 true, 不再让 perfect-fit/排序类判据的任何翻转打断进食。
+     *
+     * 出口 (铁律②"一切 latch 必须有出口", 每 tick 在 getPriority 重评, 全部收敛在此):
+     *   1) 断粮 (!hasFood) —— 没得吃了;
+     *   2) 吃满 (foodLevel >= 20) —— 目标达成;
+     *   3) 前台吃任务已不在链上 (_mainTask 不再是 EatItemTask) —— 覆盖任务自然
+     *      结束 / eatTaskTimeoutSeconds(20s) 超时 / 被其他任务替换三条路, 不存在
+     *      "锁存挂着但没人吃"的悬挂态。
+     *
+     * @return true = 本 tick 锁存有效, needEat 视同 true。
+     */
+    private boolean updateForegroundEatLatch(AltoClef mod, boolean hasFood) {
+        if (!_foregroundEatLatched) return false;
+        boolean eatTaskGone = !(_mainTask instanceof EatItemTask);
+        if (!hasFood || eatTaskGone
+                || mod.getPlayer().getHungerManager().getFoodLevel() >= 20) {
+            Debug.logToFile("altoclef_diag.log", "[FOOD-LATCH] released: hasFood=" + hasFood
+                    + " foodLevel=" + mod.getPlayer().getHungerManager().getFoodLevel()
+                    + " eatTaskGone=" + eatTaskGone);
+            return false;
+        }
+        return true;
     }
 
     @Override
@@ -582,12 +630,24 @@ public class FoodChain extends SingleTaskChain {
             }
         }
 
-        // Eat if we're  units hungry and we have a perfect fit.
-        if (foodLevel < _config.alwaysEatWhenBelowHungerAndPerfectFit && _cachedPerfectFood.isPresent()) {
+        // (2026-10-15 判定源单一化, 链间乒乓 20261015-111217 根因修复) 旧实现用
+        // _cachedPerfectFood（受保护惩罚重排后的"最优"）的 fills 判 perfect-fit:
+        // CollectFoodTask.onStart push 保护名单(金苹果 -1000) → 最优=羊肉(fills 6==6)
+        // →判饿; 抢占触发其 onStop pop → 金苹果脱保 → 最优=金苹果(fills 4≠6) →判不饿。
+        // needEat 随保护名单每 tick 翻转, Food(62)↔User Tasks(50) 互抢 3453 轮/44min。
+        // perfect-fit 的语义是"存在正好填满的食物", 与排序无关 —— 改为直接扫背包
+        // 判存在性（由背包内容决定, 不受任何任务保护名单影响）。口径与蜘蛛眼排除
+        // (calculateFood 同款) 保持一致。
+        if (foodLevel < _config.alwaysEatWhenBelowHungerAndPerfectFit) {
             int need = 20 - foodLevel;
-            Item best = _cachedPerfectFood.get();
-            int fills = (best.getFoodComponent() != null) ? best.getFoodComponent().getHunger() : -1;
-            return fills == need;
+            for (ItemStack stack : mod.getItemStorage().getItemStacksPlayerInventory(true)) {
+                if (!stack.isFood() || stack.getItem() == Items.SPIDER_EYE) continue;
+                FoodComponent fc = stack.getItem().getFoodComponent();
+                if (fc != null && fc.getHunger() == need) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         return false;

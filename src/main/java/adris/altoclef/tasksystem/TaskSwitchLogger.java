@@ -102,6 +102,13 @@ public final class TaskSwitchLogger {
     /** A chain was preempted by a higher-priority chain (task tree suspended). */
     public static void chainSuspended(TaskChain chain, TaskChain by) {
         write("SUSPEND " + name(chain) + " preempted by " + name(by));
+        // (2026-10-15 链间横跳盲区补全, 20261015-111217 实锤) 既有 oscillationCheck
+        // 只挂在 mainTask/subTask（链内任务切换）; 链间所有权乒乓（Food ↔ User Tasks
+        // 每 tick 互换, 44min 3453 轮）时两链各自 _mainTask 全程不变（interrupt→reset
+        // 复用同一实例, EatItemTask.isEqual 按 instanceof 判等 ⇒ setTask 永远去重）,
+        // 链内一个切换事件都没有 → [TaskPingPong]/条件三软重启全程沉默。
+        // 链级抢占事件与链内切换同为"来回跳"的一手信号, 同口径喂入。
+        chainOscillationCheck(chain, by);
     }
 
     /** A chain regained control after preemption. */
@@ -235,6 +242,41 @@ public final class TaskSwitchLogger {
                 // StuckTaskRestartGuard 作为第三触发源 (持续 60s 才动手, 配额/取证与
                 // 既有停滞触发共用)。周期 >= 3 的任务环 (TaskCycleDetector) 是低精度
                 // 启发式, 刻意不喂 —— 那边只落盘, 不足以支撑"动手"。
+                adris.altoclef.anomaly.StuckTaskRestartGuard.notifyOscillation(chain, key);
+            }
+        }
+    }
+
+    /**
+     * (2026-10-15) 链级横跳检测: 与 {@link #oscillationCheck} 同一套窗口/阈值/节流
+     * 常量, 去重键 = 无序链名对（chainSuspended 在抢占双方各触发一次, 落进同一桶）。
+     * 告警走同一条 [TaskPingPong] 通道 + AnomalyWatchdog, 并喂
+     * StuckTaskRestartGuard.notifyOscillation —— 守卫侧只认 UserTaskChain 且自带
+     * 60s 持续确认 + 配额, 告警层误报成本可控（与 0911 校准思路一致: 告警便宜,
+     * 动作有闸）。
+     */
+    private static void chainOscillationCheck(TaskChain chain, TaskChain by) {
+        if (chain == null || by == null) return;
+        String a = name(chain);
+        String b = name(by);
+        if (a.equals(b)) return;
+        String key = "CHAIN|" + (a.compareTo(b) <= 0 ? a + " <-> " + b : b + " <-> " + a);
+        long now = System.currentTimeMillis();
+        ArrayDeque<Long> times = _recentSwitches.computeIfAbsent(key, k -> new ArrayDeque<>());
+        times.addLast(now);
+        while (!times.isEmpty() && now - times.peekFirst() > OSCILLATION_WINDOW_MS) {
+            times.pollFirst();
+        }
+        if (times.size() >= OSCILLATION_THRESHOLD) {
+            Long lastWarn = _lastWarnMs.get(key);
+            if (lastWarn == null || now - lastWarn > WARN_THROTTLE_MS) {
+                _lastWarnMs.put(key, now);
+                String msg = "[TaskPingPong] chains '" + a + "' <-> '" + b + "' "
+                        + times.size() + "x in " + OSCILLATION_WINDOW_MS / 1000
+                        + "s (@chain preempt). Bot is thrashing!";
+                write("!!!! " + msg);
+                AnomalyWatchdog.report(new Anomaly(
+                        "oscillation", key, AnomalySeverity.WARN, msg, null));
                 adris.altoclef.anomaly.StuckTaskRestartGuard.notifyOscillation(chain, key);
             }
         }
