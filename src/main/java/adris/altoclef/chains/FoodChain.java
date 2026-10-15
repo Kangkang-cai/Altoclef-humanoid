@@ -768,6 +768,13 @@ public class FoodChain extends SingleTaskChain {
                     // 16:21 实锤 health=4.5 背包熟肉27块全 [PROT], bot 连吃5个
                     // 甜浆果(+2/个)才补满, 回血窗口被浪费。回血分支只认恢复量。
                     score = saturationGoodScore + gainedHunger;
+                    // (2026-10-15 二次修正, 用户"hp<8 才算低血") 金苹果放行线收紧:
+                    // 上面 0923 的"保命优先不罚"针对的是任务保护的食物; 战略储备粮
+                    // (金苹果) 在 hp<14 的普通回血段仍垫底, 只有 hp<8 才真正放行
+                    // (熟肉足够回血, 金苹果留给真正危急时刻)。
+                    if (strategicReserve && health >= _config.strategicReserveHealHealth) {
+                        score -= _config.foodPickProtectedPenalty;
+                    }
                 } else {
                     score = saturationGoodScore - saturationLossPenalty - hungerLossPenalty - hungerNotFilledPenalty;
                     // (2026-09-18 受保护食物兜底进食) 见上方 protectedFood 注释:
@@ -818,6 +825,9 @@ public class FoodChain extends SingleTaskChain {
         public float eatForegroundPriority = 62;
         // 前台进食任务超时 (秒): 换盾失败/装备失败等异常时兜底退出, 防永久卡死。
         public double eatTaskTimeoutSeconds = 20;
+        // (2026-10-15) 战略储备粮(金苹果)的放行血量线: hp 低于此值回血分支才
+        // 真正放行金苹果 (用户"hp<8 才算低血"); hp 在 8~14 的普通回血段仍垫底。
+        public float strategicReserveHealHealth = 8;
         // ---- (2026-09-28 低血量进食豁免, 用户"12格内无怪才吃, 吃期间怪到几格可接受") ----
         // 触发血量上限: hp 低于此值才允许豁免"战斗中禁食"。
         public float combatExemptEatMaxHealth = 12;
