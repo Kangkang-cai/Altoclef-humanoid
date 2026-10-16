@@ -7,6 +7,7 @@ import adris.altoclef.tasks.InteractWithBlockTask;
 import adris.altoclef.tasks.construction.ClearLiquidTask;
 import adris.altoclef.tasks.construction.ClearRegionTask;
 import adris.altoclef.tasks.construction.PlaceObsidianBucketTask;
+import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.GoToSurfaceTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
 import adris.altoclef.tasks.movement.TimeoutWanderTask;
@@ -100,6 +101,16 @@ public class ConstructNetherPortalBucketTask extends Task {
     private final TimerGame _lavaSearchTimer = new TimerGame(5);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
+    // (2026-10-16 方案 B) "找湖探索"专用实例: 语义归位 —— 无湖兜底的目的是"探索找
+    // 岩浆湖"(有目标导向), 旧派 TimeoutWanderTask 是"无目标脱离"语义 (裸 GoalXZ
+    // 恒向直线, 零水闸, 20261016-101645 实锤走进海洋)。BiasedExploreTask 自带全套
+    // 宽水/海洋/干落点闸门 + 持久航向, 偏置源 = 已知岩浆湖 + 记忆湖锚点 (见
+    // collectLakeBiasCandidates)。实例 isFinished (bias 耗尽/失败 10 步) 后由调用侧
+    // 重建 (框架不消费子任务 isFinished, detail/01); 重建会触发湖锚点重扫, 陈旧
+    // 记忆湖由 validateLavaLakeCenter 连续 3 败 forget 的负反馈自然清出 (1015 已建)。
+    // 非字段 final: isFinished 后要换新实例 (visited/拉黑表随实例重置, 跨实例拉黑
+    // 表 static 不丢)。
+    private BiasedExploreTask _lakeExploreTask = null;
     // Stored here to cache lava blacklist
     // (2026-09-05 回退批量囤4桶, 用户"4桶就必须要4个桶, 没必要") CollectBucketLiquidTask
     // 的 count 语义是"先凑够 N 个空桶"(4 桶=12 铁), 不划算。乱跑问题已由
@@ -325,7 +336,21 @@ public class ConstructNetherPortalBucketTask extends Task {
                 if (StorageHelper.countItemInInventoryReal(mod, Items.LAVA_BUCKET) >= 1) {
                     setDebugState("No lava lake found, have lava bucket — exploring only (no scooping)");
                     _progressChecker.reset();
-                    return _wanderTask;
+                    // (2026-10-16 方案 B 语义归位) 本分支的目的是"探索找湖", 旧派
+                    // TimeoutWanderTask 是"无目标脱离"语义: 裸 GoalXZ 恒向直线、零水闸
+                    // (RIVER-CAP 等全套闸门都在 BiasedExploreTask 选点路径里, wander
+                    // 从不经过), 20261016-101645 实锤 bearing=270 直线向北 470+ 格
+                    // 走进海洋。改派 BiasedExploreTask: ①偏置源 = 已知岩浆(过 isLake)
+                    // + 记忆湖锚点, 先复查已知湖点再盲走; ②无偏置可用时退化为持久
+                    // 航向探索, 但带全套宽水/海洋/干落点闸门。实例 isFinished (bias
+                    // 耗尽/失败 10 步) 框架不消费 (detail/01) → 出口补在调用侧: 完了
+                    // 重建新实例, 重建当拍湖锚点重扫 (_lavaSearchTimer) 照常接管;
+                    // 陈旧记忆湖由锚点重扫的 validateLavaLakeCenter 连续 3 败 forget
+                    // 负反馈自然清出 (1015 已建), 不会死踩干湖。
+                    if (_lakeExploreTask == null || _lakeExploreTask.isFinished(mod)) {
+                        _lakeExploreTask = new BiasedExploreTask(() -> collectLakeBiasCandidates(mod));
+                    }
+                    return _lakeExploreTask;
                 }
                 setDebugState("No lava lake found, searching around");
                 return _collectLavaTask;
@@ -504,6 +529,40 @@ public class ConstructNetherPortalBucketTask extends Task {
         }
 
         return nearestLake;
+    }
+
+    /**
+     * (2026-10-16 方案 B) "找湖探索"的偏置候选池, 供 BiasedExploreTask 选偏置目标:
+     *   ① BlockTracker 已知岩浆 —— 与 findLavaLake 同一把闸 (≤100 格、Δy≤16), 且必须
+     *      过 LavaLakeHelper.isLake 湖判据 (单格源/瀑布不进池, 防偏置带 bot 去舀瘦的
+     *      小池站桩);
+     *   ② KnowledgeMemory 记忆湖锚点 (≤100 格)。
+     * BiasedExploreTask 会先带 bot 复查这些点 (visited/跨实例拉黑防重踩), 全部排除后
+     * 退化为持久航向的守卫式探索。不在这里调 validateLavaLakeCenter(..., record=true):
+     * 那会与 findLavaLake 的 5s 重扫双重计败, 提前误 forget; 陈旧条目由锚点重扫的
+     * 负反馈清出 (连续 3 败 forgetCenter)。isLake 要扫 h8/v4 盒, 但本池仅在
+     * chooseNewTarget 需要新偏置目标时消费 (约每 48 格一次), 开销可接受。
+     */
+    private List<BlockPos> collectLakeBiasCandidates(AltoClef mod) {
+        List<BlockPos> candidates = new ArrayList<>();
+        if (mod.getPlayer() == null) return candidates;
+        BlockPos playerPos = mod.getPlayer().getBlockPos();
+        final int MAX_SEARCH_DISTANCE = 100;
+        double maxSq = MAX_SEARCH_DISTANCE * (double) MAX_SEARCH_DISTANCE;
+        for (BlockPos pos : mod.getBlockTracker().getKnownLocations(Blocks.LAVA)) {
+            if (playerPos.getSquaredDistance(pos) > maxSq) continue;
+            if (Math.abs(pos.getY() - playerPos.getY()) > 16) continue;
+            if (!LavaLakeHelper.isLake(mod, pos)) continue;
+            candidates.add(pos);
+        }
+        for (BlockPos pos : mod.getKnowledgeMemory().getRememberedCenters(
+                adris.altoclef.trackers.KnowledgeMemory.StructureType.LAVA_LAKE,
+                new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
+                        playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
+                MAX_SEARCH_DISTANCE)) {
+            candidates.add(pos);
+        }
+        return candidates;
     }
 
     /**
