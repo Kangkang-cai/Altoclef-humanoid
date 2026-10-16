@@ -276,16 +276,33 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         // death#5: 逃逸 wander 沿锁定方向走出高空崖沿, 摔进岩浆致死 (MLG 无水桶
         // 兜不住)。方向沿线 (≤16 格, 步长 1) 采样: 玩家 y-4..y+2 窗口内有岩浆 →
         // 该方向视为危险, 重新掷向 (至多 8 次); 全方向都危险 (下界岩浆海常见) 时
-        // 保持原方向, 行为同旧版。只拦岩浆不拦水: 涉水已有 RIVER-CAP 闸门管。
-        if (bearingHazardous(mod, p, Math.toRadians(_bearingDeg), distance)) {
-            double alt = pickHazardFreeBearing(mod, p, distance);
+        // 保持原方向, 行为同旧版。
+        // (2026-10-16 补水闸) 旧注释"只拦岩浆不拦水: 涉水已有 RIVER-CAP 闸门管"是
+        // 错误假设 —— RIVER-CAP/No-Ocean/DRY-LANDING 全套水闸都装在 BiasedExploreTask
+        // 的【选点路径】里, 本任务发的是裸 GoalXZ 直线走, 从不经过那些闸门。
+        // 20261016-101645 实锤: 门链"找湖"兜底派本任务 bearing=270, 沿 x=-407
+        // 直线向北 470+ 格走进海洋, 在水边冻结 58s+。修: 已在水里时不拦水 (水中
+        // 交"游向最近陆地"的既有处置, 且四周全水时无向可换), 岸上时沿线
+        // (≤48 格, 与 BiasedExploreTask 的 48 格步长同量级) 采样连续水面, 超过
+        // RIVER_CROSS_MAX_BLOCKS(24) 即视为危险重掷 —— 口径与 RIVER-CAP 完全一致,
+        // 判定函数直接复用 BiasedExploreTask.maxWaterSpanAlongLine (static 包内
+        // 共用, 0926 就为此设计), 不另抄第二份。
+        boolean inWater = mod.getPlayer().isTouchingWater();
+        boolean lavaAhead = bearingHazardous(mod, p, Math.toRadians(_bearingDeg), distance);
+        boolean waterAhead = !inWater
+                && BiasedExploreTask.maxWaterSpanAlongLine(mod, p, Math.toRadians(_bearingDeg),
+                        Math.min(distance, 48)) > BiasedExploreTask.RIVER_CROSS_MAX_BLOCKS;
+        if (lavaAhead || waterAhead) {
+            double alt = pickHazardFreeBearing(mod, p, distance, inWater);
             if (!Double.isNaN(alt)) {
-                String m = String.format("[WANDER-HAZARD] bearing %.0f has lava on path, reroute -> %.0f player=%s",
-                        _bearingDeg, alt, mod.getPlayer().getBlockPos().toShortString());
+                String m = String.format(
+                        "[WANDER-HAZARD] bearing %.0f blocked (lava=%b wideWater=%b), reroute -> %.0f player=%s",
+                        _bearingDeg, lavaAhead, waterAhead, alt, mod.getPlayer().getBlockPos().toShortString());
                 Debug.logToFile("altoclef_diag.log", m);
                 _bearingDeg = alt;
             } else {
-                String m = String.format("[WANDER-HAZARD] bearing %.0f has lava but all 8 rerolls hazardous, keeping course player=%s",
+                String m = String.format(
+                        "[WANDER-HAZARD] bearing %.0f blocked but all 8 rerolls hazardous, keeping course player=%s",
                         _bearingDeg, mod.getPlayer().getBlockPos().toShortString());
                 Debug.logToFile("altoclef_diag.log", m);
             }
@@ -316,11 +333,21 @@ public class TimeoutWanderTask extends Task implements ITaskRequiresGrounded {
         return false;
     }
 
-    /** (2026-09-30 避险) 掷一个无岩浆的替代方位角; 8 次全危险返回 NaN (保持原向)。 */
-    private static double pickHazardFreeBearing(AltoClef mod, Vec3d p, double distance) {
+    /**
+     * (2026-09-30 避险) 掷一个无岩浆的替代方位角; 8 次全危险返回 NaN (保持原向)。
+     * (2026-10-16 补水闸) 岸上 (inWater=false) 时同时要求沿线无超宽连续水面
+     * (复用 BiasedExploreTask.maxWaterSpanAlongLine, 同 RIVER-CAP 口径); 已在水里
+     * 时只躲岩浆不躲水 (水里"游向最近陆地"由既有处置负责, 且全水环境无向可换)。
+     */
+    private static double pickHazardFreeBearing(AltoClef mod, Vec3d p, double distance, boolean inWater) {
         for (int i = 0; i < 8; ++i) {
             double cand = Math.random() * 360.0;
-            if (!bearingHazardous(mod, p, Math.toRadians(cand), distance)) return cand;
+            if (bearingHazardous(mod, p, Math.toRadians(cand), distance)) continue;
+            if (!inWater && BiasedExploreTask.maxWaterSpanAlongLine(mod, p, Math.toRadians(cand),
+                    Math.min(distance, 48)) > BiasedExploreTask.RIVER_CROSS_MAX_BLOCKS) {
+                continue;
+            }
+            return cand;
         }
         return Double.NaN;
     }
