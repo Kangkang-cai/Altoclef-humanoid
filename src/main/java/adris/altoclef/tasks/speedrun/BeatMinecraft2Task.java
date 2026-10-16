@@ -3610,10 +3610,14 @@ public class BeatMinecraft2Task extends Task {
         boolean needsWood = !_woodStockpiled
                 ? logCount < _config.woodLogsTarget()
                 : _restockArmed;
-        // (2026-09-01 用户"地下不触发收集木头, 除非原木跌破水位") 地下且
-        // 不缺木头就就地继续挖矿, 不回地表/不就地砍树。闩锁武装后地下也
-        // 持权(直到攒满), 避免"砍到6又回地下"的旧循环。
-        if (!needsWood && (isUndergroundDebounced(mod) || isInPit(mod))) {
+        // (2026-09-01 用户"地下不触发收集木头, 除非原木跌破水位"; 2026-10-16 口径修正)
+        // 地下豁免线原写 !needsWood(即 ≥囤货目标 25), 但 _woodStockpiled 是实例字段,
+        // runUserTask(new BeatMinecraft2Task()) 任务重启即丢 → 6~25 根在地下也被拽回
+        // 地表收木头 (20261016 实锤: logs=28 woodStockpiled=false deep=true)。
+        // 改为 ≥补货水位(主 6/次 2), 恢复 09-01 原话口径"除非原木跌破水位";
+        // 跌破水位时仍回地表收集(走下方 needsWood 分支), 两分支口径不再互斥。
+        if (logCount >= _config.woodRestockTarget()
+                && (isUndergroundDebounced(mod) || isInPit(mod))) {
             return null;
         }
         // (2026-08-22) 地表资源前置: 树只长在地表。深处矿洞/水下缺木头时先
