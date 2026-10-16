@@ -525,6 +525,12 @@ public class CollectBucketLiquidTask extends ResourceTask {
             // 到达 或 导航结束: 近区若有源, 外层前面的收集分支下一 tick 会接走;
             // 没有则拉黑本锚点重选, 不卡在同一处。
             if (_lakeNavTarget != null) {
+                // (2026-10-15 负反馈) 到达即现势复检 (与入账同一份 isLake 判据),
+                // 失败计入作废闩 (≥3 次自动 forget 知识记忆条目); 原有 TTL 拉黑
+                // 照旧 —— 共享地标条目无法本地作废 (对端会再灌), 靠拉黑防重复白跑。
+                if (close) {
+                    mod.getKnowledgeMemory().validateLavaLakeCenter(_lakeNavTarget, true);
+                }
                 _lakeBlacklist.put(_lakeNavTarget.toImmutable(),
                         System.currentTimeMillis() + LAKE_BLACKLIST_TTL_MS);
                 Debug.logMessage("[LavaMemory] 湖锚点导航结束, 短期拉黑重估 " + _lakeNavTarget.toShortString());

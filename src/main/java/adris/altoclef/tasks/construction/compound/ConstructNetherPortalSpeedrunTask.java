@@ -369,6 +369,9 @@ public class ConstructNetherPortalSpeedrunTask extends adris.altoclef.tasksystem
                     new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
                             playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
                     1.0e7)) {
+                // (2026-10-15 三判据收敛+负反馈) 与 ConstructNetherPortalBucketTask 同款:
+                // 记忆锚点近距复检 (入账同源 isLake), 失败计闩 ≥3 次自动作废过期条目。
+                if (!mod.getKnowledgeMemory().validateLavaLakeCenter(pos, true)) continue;
                 double sqDist = playerPos.getSquaredDistance(pos);
                 if (sqDist < nearestSqDistance) {
                     nearestSqDistance = sqDist;

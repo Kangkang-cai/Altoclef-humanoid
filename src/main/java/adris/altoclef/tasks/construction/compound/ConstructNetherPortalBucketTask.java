@@ -486,6 +486,11 @@ public class ConstructNetherPortalBucketTask extends Task {
                     new net.minecraft.util.math.Vec3d(playerPos.getX() + 0.5,
                             playerPos.getY() + 0.5, playerPos.getZ() + 0.5),
                     MAX_SEARCH_DISTANCE)) {
+                // (2026-10-15 三判据收敛+负反馈) 记忆锚点近距复检: 与入账同一份
+                // LavaLakeHelper.isLake 判据; 失败计入作废闩 (≥3 次自动 forget),
+                // 治"湖被舀瘦后记忆条目永远占位、getPortalableRegion 每次失败"
+                // (20261015-153843 实证)。未加载区块跳过复检, 导航到场后自然把关。
+                if (!mod.getKnowledgeMemory().validateLavaLakeCenter(pos, true)) continue;
                 double sqDist = playerPos.getSquaredDistance(pos);
                 if (sqDist < nearestSqDistance) {
                     nearestSqDistance = sqDist;

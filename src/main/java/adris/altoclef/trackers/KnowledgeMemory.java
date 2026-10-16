@@ -266,9 +266,21 @@ public final class KnowledgeMemory {
         // 已在记住的湖附近 → 不重扫 (getRememberedCenters 含跨会话持久化锚点,
         // 按存档:维度隔离)。
         Vec3d feetCenter = new Vec3d(feet.getX() + 0.5, feet.getY() + 0.5, feet.getZ() + 0.5);
-        if (!getRememberedCenters(StructureType.LAVA_LAKE, feetCenter,
-                StructureType.LAVA_LAKE.mergeDistance).isEmpty()) {
-            return;
+        List<BlockPos> nearbyLakes = getRememberedCenters(StructureType.LAVA_LAKE, feetCenter,
+                StructureType.LAVA_LAKE.mergeDistance);
+        if (!nearbyLakes.isEmpty()) {
+            // (2026-10-15 三判据收敛) 旧版无脑屏蔽重扫: 记忆条目过期/被舀瘦时, 它的
+            // mergeDistance 邻域被永久屏蔽, 真湖永远无法重新入账 (20261015-153843
+            // 实证 -314,63,-1541 占位死锁)。现改为近距复检通过才屏蔽; 复检失败
+            // 【不计数】(20t 热路径, 防浇铸盖水瞬态误杀), 只放行本轮扫描重新找湖。
+            boolean anyValid = false;
+            for (BlockPos c : nearbyLakes) {
+                if (validateLavaLakeCenter(c, false)) {
+                    anyValid = true;
+                    break;
+                }
+            }
+            if (anyValid) return;
         }
         int hSq = LAKE_SCAN_RADIUS_XZ * LAKE_SCAN_RADIUS_XZ;
         List<BlockPos> candidates = new ArrayList<>();
@@ -403,6 +415,8 @@ public final class KnowledgeMemory {
      */
     public static void onWorldBoundary() {
         _centersByKey.clear();
+        // (2026-10-15 湖锚点负反馈) 作废失败计数闩随存档清零, 防跨世界残留 (detail/10)。
+        _lakeStaleFailures.clear();
     }
 
     private static void ensureCentersLoaded() {
@@ -625,6 +639,14 @@ public final class KnowledgeMemory {
 
     /** 重写 knowledge.log：只丢掉属于 (key, type) 的行，其余逐行原样保留。 */
     private static void rewriteCenterFile(String key, StructureType type) {
+        rewriteCenterFile(key, type, null);
+    }
+
+    /**
+     * 重写 knowledge.log：丢 (key, type) 的行；onlyPos != null 时只丢该精确坐标
+     * 那一行（其余同类型行原样保留）。
+     */
+    private static void rewriteCenterFile(String key, StructureType type, BlockPos onlyPos) {
         try {
             java.nio.file.Path f = knowledgeFile();
             if (!java.nio.file.Files.exists(f)) return;
@@ -633,7 +655,11 @@ public final class KnowledgeMemory {
                 String[] parts = adris.altoclef.util.helpers.WorldIdentity.decodeLine(line, 4);
                 if (parts != null && parts[0].equals(key)) {
                     StructureType t = structureTypeByName(parts[1]);
-                    if (t != null && (type == null || t == type)) continue; // 丢弃
+                    boolean posMatch = onlyPos == null
+                            || (parts[2].equals(String.valueOf(onlyPos.getX()))
+                                && parts[3].equals(String.valueOf(onlyPos.getY()))
+                                && parts[4].equals(String.valueOf(onlyPos.getZ())));
+                    if (t != null && (type == null || t == type) && posMatch) continue; // 丢弃
                 }
                 keep.add(line);
             }
@@ -645,6 +671,81 @@ public final class KnowledgeMemory {
         } catch (Exception e) {
             Debug.logMessage("[Knowledge] rewrite " + KNOWLEDGE_FILE + " failed: " + e.getMessage());
         }
+    }
+
+    // ===== (2026-10-15 湖锚点三判据收敛 + 负反馈 — 岩浆桶×8 事故, detail/60) =====
+    // 读路径 (传送门锚点扫描 / 收集任务湖记忆导航 / 本类入账屏蔽) 与入账共用
+    // LavaLakeHelper.isLake 同一份判据做近势复检。近距 (区块已加载) 复检不过 =
+    // 记忆过期或湖被舀瘦, 连续 ≥3 次即作废该条记忆 —— 防"舀瘦的湖永远占着锚点
+    // 候选位"的自反馈死锁 (20261015-153843 实证: -314,63,-1541 被舀成单格源后
+    // isLake 永不过, 但记忆条目每 5s 被选中、getPortalableRegion 每次失败)。
+    // 3 次闩按 5s 重扫 / 到场所达的稀疏节奏计数; 20t 热路径调用一律 countFailure
+    // =false (防浇铸盖水瞬态误杀)。计数闩静态但随 onWorldBoundary 清零 (detail/10)。
+    private static final int LAKE_STALE_FORGET_THRESHOLD = 3;
+    private static final Map<BlockPos, Integer> _lakeStaleFailures = new HashMap<>();
+
+    /**
+     * 记忆湖锚点现势校验。区块未加载 → 判不了, 信任记忆 (true), 导航到场后自然
+     * 复检; 区块已加载 → 必须过 {@link LavaLakeHelper#isLake}。扫盒 ±8 跨块,
+     * 四角块任一未加载也按"判不了"处理 (防邻块未加载导致源计数偏低误杀真湖)。
+     *
+     * @param countFailure false = 纯读不计数 (20t 热路径); true = 失败计入作废闩。
+     * @return false = 该锚点现在不能当湖用 (调用方跳过该候选)。
+     */
+    public boolean validateLavaLakeCenter(BlockPos center, boolean countFailure) {
+        if (center == null || _mod.getWorld() == null) return true;
+        BlockPos p = center.toImmutable();
+        if (!_mod.getChunkTracker().isChunkLoaded(p)) return true; // 判不了 → 信任, 到场复检
+        int r = adris.altoclef.util.helpers.LavaLakeHelper.CONFIRM_RADIUS_XZ;
+        if (!_mod.getChunkTracker().isChunkLoaded(p.add(-r, 0, -r))
+                || !_mod.getChunkTracker().isChunkLoaded(p.add(r, 0, -r))
+                || !_mod.getChunkTracker().isChunkLoaded(p.add(-r, 0, r))
+                || !_mod.getChunkTracker().isChunkLoaded(p.add(r, 0, r))) {
+            return true; // 复检盒不完整 → 信任记忆
+        }
+        if (adris.altoclef.util.helpers.LavaLakeHelper.isLake(_mod, p)) {
+            _lakeStaleFailures.remove(p);
+            return true;
+        }
+        if (!countFailure) return false;
+        int n = _lakeStaleFailures.merge(p, 1, Integer::sum);
+        if (n >= LAKE_STALE_FORGET_THRESHOLD) {
+            int removed = forgetCenter(StructureType.LAVA_LAKE, p);
+            _lakeStaleFailures.remove(p);
+            Debug.logMessage("[Knowledge] 湖锚点 " + p.toShortString() + " 连续 " + n
+                    + " 次近距复检不是湖 (舀瘦/过期), 作废记忆条目"
+                    + (removed > 0 ? "" : " (本地无此条, 可能来自共享地标, 靠拉黑防重复)"));
+        } else {
+            Debug.logMessage("[Knowledge] 湖锚点 " + p.toShortString()
+                    + " 近距复检不是湖 (" + n + "/" + LAKE_STALE_FORGET_THRESHOLD + ")");
+        }
+        return false;
+    }
+
+    /**
+     * (2026-10-15 湖锚点负反馈) 作废单条 (key,type,pos) 记忆。与 {@link #forgetCenters}
+     * 同一套"必须重写文件"语义 (knowledge.log 只追加, 只删内存下次启动会读回来),
+     * 但只精确丢一行 —— 其余条目跨会话保留。
+     *
+     * @return 内存侧实际删除条数 (0 = 本地本无此条)。
+     */
+    public int forgetCenter(StructureType type, BlockPos pos) {
+        ensureCentersLoaded();
+        String key = worldKey();
+        BlockPos p = pos.toImmutable();
+        int removed = 0;
+        Map<StructureType, LinkedHashSet<BlockPos>> byType = _centersByKey.get(key);
+        if (byType != null) {
+            Set<BlockPos> s = byType.get(type);
+            if (s != null) removed += s.remove(p) ? 1 : 0;
+        }
+        Set<BlockPos> session = _knownStructures.get(type);
+        if (session != null) session.remove(p);
+        if (removed > 0) {
+            rewriteCenterFile(key, type, p);
+            _revision++;
+        }
+        return removed;
     }
 
     // ===== (2026-09-17 数据集录制) 记忆只读导出 =====
