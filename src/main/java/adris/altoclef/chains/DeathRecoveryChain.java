@@ -26,6 +26,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -115,6 +116,11 @@ public class DeathRecoveryChain extends SingleTaskChain {
     /** 已就"复活未生效"打过日志的墓(同一墓只首发一次, 之后 5s 节流)。 */
     private BlockPos _preRespawnLoggedGrave = null;
 
+    // (2026-10-16 A 可达性预估, 用户定案) 保守移速估计 (格/秒)。
+    // 冲刺平地 5.6 b/s, 扣除越野/绕障/地形/夜间避险后取 4.0 —— 宁可把
+    // 边缘可达的墓判成"可达"继续 DEFER, 也不误弃其实捡得回来的墓。
+    private static final double REACHABILITY_SPEED_BPS = 4.0;
+
     public DeathRecoveryChain(TaskRunner runner) {
         super(runner);
     }
@@ -152,6 +158,24 @@ public class DeathRecoveryChain extends SingleTaskChain {
         if (maybeGrave.isEmpty()) {
             // No grave.
             if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+            // ------------------------------------------------------------
+            // (2026-10-16 C 维度墓清理, 用户定案) 清掉【非当前维度】的残留墓。
+            //
+            // 现场 20261016-105749 实锤: bot 死在下界 (grave dim=NETHER), 复活
+            // 在主世界 —— 本链只评估当前维度 (上方 getDeathGrave(currentDim)),
+            // 下界墓从此进入静默残留: 无 DEFER 无 ABANDON, 下次进下界还会秒吃
+            // 一条 TOO_OLD。主链当前没有"跨维度收尸"能力, 清掉是诚实行为。
+            // 清理动作只在真有残留时触发一次, 无节流需求; 若将来做跨维度收尸,
+            // 本分支需重开。
+            // ------------------------------------------------------------
+            for (Map.Entry<Dimension, BlockPos> foreign : worldMemory.getForeignDeathGraves(currentDim).entrySet()) {
+                String msg = String.format(
+                        "Foreign-dimension grave cleared (no cross-dim recovery): dim=%s pos=%s currentDim=%s",
+                        foreign.getKey(), foreign.getValue(), currentDim);
+                Debug.logWarning(msg);
+                Debug.logToFile("death_recovery.log", "[ABANDON DIM_MISMATCH] " + msg);
+                worldMemory.clearDeathGrave(foreign.getKey());
+            }
             // (2026-08-30 诊断) 此分支静默返回, 不写任何日志 — 用户实测: 死亡后
             // 掉落物从不拾取, death_recovery.log 只有 [RECORD] 从无 [ACTIVATE]/
             // [DEFER]/[ABANDON], 且文件在 [RECORD] 后不再更新。最可能是复活后
@@ -331,6 +355,33 @@ public class DeathRecoveryChain extends SingleTaskChain {
         boolean taskRunning = getCurrentTask() instanceof DeathRecoveryTask;
         int deferDist = taskRunning ? maxDist + GUARD2_HYSTERESIS : maxDist;
         if (maxDist > 0 && distXZ > deferDist) {
+            // ------------------------------------------------------------
+            // (2026-10-16 A 可达性预估, 用户定案) 物理赶不到的墓立即 ABANDON。
+            //
+            // 现场 20261016-105749 实锤: 墓 dist≈1500, bot 复活后无任何任务驱动
+            // 其靠近, 6 分钟内距离全程 1450+, 直到 361s TOO_OLD 才弃 —— 高价值
+            // 掉落物本来 5 分钟就消失, 占满窗口虚等毫无意义, 还让脏 memory 挂
+            // 满 6 分钟。按"剩余窗口 x 保守移速"预估可达范围, 超出即弃, 主链
+            // 立即接手。边缘可达的墓 (如 dist=266 vs 窗口余量 1420) 仍走原
+            // DEFER 路径, 行为不变。
+            // 注: 本分支只有 maxDist>0 且 Guard 1 已放行 (ageSeconds<=forgetSeconds),
+            // 故 remainSeconds 恒 >= 0; forgetSeconds<=0 (窗口关闭) 时不预估。
+            // ------------------------------------------------------------
+            if (forgetSeconds > 0) {
+                long remainSeconds = forgetSeconds - ageSeconds;
+                double reachableRange = remainSeconds * REACHABILITY_SPEED_BPS;
+                if (distXZ > reachableRange) {
+                    String msg = String.format(
+                            "Grave unreachable: dist=%.0f > remaining %ds x %.1f b/s; abandoning early grave=%s dim=%s",
+                            distXZ, remainSeconds, REACHABILITY_SPEED_BPS, grave.position, currentDim);
+                    Debug.logWarning(msg);
+                    Debug.logToFile("death_recovery.log", "[ABANDON UNREACHABLE] " + msg);
+                    worldMemory.clearDeathGrave(currentDim);
+                    if (getCurrentTask() instanceof DeathRecoveryTask) setTask(null);
+                    _cachedTask = null;
+                    return Float.NEGATIVE_INFINITY;
+                }
+            }
             if (ageTicks % 100L == 0L) {
                 Debug.logToFile("death_recovery.log", String.format(
                         "[GRAVE-FIX][DEFER TOO_FAR] grave=%s dim=%s dist=%.1f > defer %d (max %d%s) age=%ds; keeping memory (will trigger when in range)",

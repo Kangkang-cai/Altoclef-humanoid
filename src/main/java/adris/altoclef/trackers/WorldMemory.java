@@ -767,4 +767,24 @@ public final class WorldMemory {
     public void clearDeathGrave(Dimension dim) {
         _deathGraveMemory.remove(dim);
     }
+
+    /**
+     * (2026-10-16 维度墓清理, 用户定案) 枚举所有【非当前维度】的死亡墓残留。
+     *
+     * <p>只读, 不做任何清理 —— 清理动作与 [ABANDON ...] 日志口径统一由
+     * DeathRecoveryChain 侧执行 (与 TOO_OLD/UNREACHABLE 分支同源)。
+     *
+     * <p>背景: 本链只评估当前维度的墓, 其它维度的墓会静默残留 (20261016
+     * 实锤: 死在下界、复活在主世界, 下界墓连 TOO_OLD 日志都没有)。调用方
+     * 拿到结果后自行 clearDeathGrave(dim)。
+     */
+    public Map<Dimension, BlockPos> getForeignDeathGraves(Dimension currentDim) {
+        Map<Dimension, BlockPos> out = new HashMap<>();
+        for (Map.Entry<Dimension, DeathGraveRecord> e : _deathGraveMemory.entrySet()) {
+            if (e.getKey() != currentDim) {
+                out.put(e.getKey(), e.getValue().position);
+            }
+        }
+        return out;
+    }
 }
