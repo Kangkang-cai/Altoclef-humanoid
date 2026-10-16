@@ -12,13 +12,21 @@ import adris.altoclef.util.helpers.VisibilityHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * (2026-08-22 贪心收集) 顺手挖掉眼前所有可见矿石。
@@ -63,10 +71,23 @@ public class CollectVisibleOresTask extends Task {
     // (2026-09-01 v2 回退, 用户"钻石修改原因错误, 留下排查日志") 曾扩到 16 格+宽松
     // 暴露面判定, 用户判定原因不对。回退到 8 格 + 严格 isBlockPerceivable; 具体为何
     // 钻石 vis=0 用 [GreedyDiag] 日志排查 (范围内不可感知的钻石记位置/距离/失败原因)。
-    private static final int GREEDY_VISIBLE_RANGE = 8;
+    // (2026-10-16 射线化重写, 用户拍板 A) 8 格立方扫描 (4913 次 getBlockState/次)
+    // 两大问题: ① 8~16 格的可见矿永远漏 (20261016-105749 会话实锤: 用户看到钻石
+    // 而 perception 全场零记录 = 钻石在 12 格外, 远场 step=4 稀疏 + 8 格贪婪闸都
+    // 够不着); ② 成本随 r³ 膨胀, 逐格问"你是不是矿"大部分浪费在实心岩石上。
+    // 改为射线扇: 从眼睛发 GREEDY_RAY_COUNT 条斐波那契球面均匀射线 (原生
+    // RaycastContext, 与玩家视线同构), 只查首个命中方块; 命中矿直接计入 (构造上
+    // 已有视线), 命中非矿时对其 6 邻接的矿石补 isBlockPerceivable 闸 (矿脉露头
+    // 常与相邻岩壁共面, 贴着命中点的那块矿其实同样可见; 最终闸门不变, 反透视
+    // 口径一寸不让)。成本 ≈ 400 次 raycast/次 (1s 缓存), 半径扩到 16 不涨价。
+    // 取舍: ≤8 格近乎确定性必中 (射线间距 ≈1.4 格); 8~16 格单块矿变概率事件,
+    // 2~3 块以上矿脉大概率中 — 贪婪本就是机会主义顺手挖, 故意的找矿走主线
+    // BlockTracker 路径, 语义不冲突。
+    private static final int GREEDY_RAY_COUNT = 400;
+    private static final int GREEDY_RAY_RANGE = 16;
 
     // hasAnyVisibleOreWork / onTick 的静态节流缓存: 两者都可能每 tick 被
-    // 调用, 而 countAllVisible 是 12 格暴力扫描 (1 秒一次可接受, 每 tick 不行)。
+    // 调用, 而 countAllVisible 是 400 条射线扫描 (1 秒一次可接受, 每 tick 不行)。
     private static long _lastCheckMs = 0;
     private static boolean _lastHasWork = false;
     private static Map<OrePlan, OreStat> _lastCounts = null;
@@ -85,7 +106,7 @@ public class CollectVisibleOresTask extends Task {
 
     /**
      * 一次扫描里某类矿的判定计数 (用于 [GreedyOre] 诊断)。
-     * 只需 count: 现在是纯 3x3x3 贴身扫描, 没有 bfs/canBreak 中间环节。
+     * 只需 count: (2026-10-16 射线化后) 每块矿过 canBreak/贴液体两道闸再计数。
      */
     private static class OreStat {
         int count = 0;
@@ -145,19 +166,19 @@ public class CollectVisibleOresTask extends Task {
             boolean holding = fin && _active.holdingForGreedyDrop(mod);
             if (capHit || (fin && !holding)) {
                 // (2026-09-13 批次收尾诊断) 用户"矿脉没挖完就回主线"现场取证:
-                // 分清是①达上限正常收工, 还是②近场判无活提前释放 (后者看 vis8 与
+                // 分清是①达上限正常收工, 还是②近场判无活提前释放 (后者看 vis 与
                 // 近场豁免口径能否覆盖矿脉延伸)。每批只打一条, 天然节流。
                 // (2026-09-22) 近场豁免收编为面相邻6块 (原 GREEDY_NEAR_FIELD_RADIUS
                 // 删除), 诊断字段改为固定口径标签。
                 int have = countedItems(mod, _activePlan);
                 OreStat endSt = countAllVisible(mod).get(_activePlan);
                 // (2026-09-22) release 原因分解: capHit=达上限收工; holding=true 不可能
-                // 出现在此(宽限期已保护); 其余为 isFinished 瞬时真 — 看 have/vis8 区分
-                // 正常收尾与抖动拆批。
+                // 出现在此(宽限期已保护); 其余为 isFinished 瞬时真 — 看 have/vis 区分
+                // 正常收尾与抖动拆批。(2026-10-16) 标签 vis8→vis: 扫描已射线化, 半径 16。
                 Debug.logToFile("altoclef_diag.log", "[GreedyBatch] release item="
                         + _activePlan.item() + " capHit=" + capHit
                         + " have=" + have + "/" + _activePlan.cap()
-                        + " vis8=" + (endSt == null ? 0 : endSt.count)
+                        + " vis=" + (endSt == null ? 0 : endSt.count)
                         + " nearField=face-adjacent-6"
                         + " player=" + mod.getPlayer().getBlockPos());
                 _active = null;
@@ -397,13 +418,29 @@ public class CollectVisibleOresTask extends Task {
     }
 
     /**
-     * (2026-08-22 修复) 统计玩家 VISIBLE_RANGE 内"可挖可见"的矿石数量 (按种类)。
+     * (2026-08-22 修复) 统计玩家"可挖可见"的矿石数量 (按种类)。
      *
      * 原实现依赖 BlockTracker 缓存 (getKnownLocations + isBlockPerceivable)。
      * 但贪心检查改成纯静态函数后不再 trackBlock, 煤/铜/金等从未被
      * BlockTracker track → 缓存永远为空 → 顺手挖矿永不触发。改为直接
-     * 扫描世界真实方块, 不依赖任何跟踪状态。调用方用 3 秒冷却兜底性能;
-     * canBreak/isBlockPerceivable 只对命中的少数矿石方块调用。
+     * 扫描世界, 不依赖任何跟踪状态。调用方用 3 秒冷却兜底性能。
+     *
+     * (2026-10-16 射线化重写, 用户"主动发射射线, 只查被射中的第一个方块")
+     * 旧实现扫玩家周围 (2*8+1)³ = 4913 格立方逐格 getBlockState, 成本随 r³
+     * 膨胀, 且 8~16 格的可见矿永远漏 (20261016-105749 会话实锤: 用户看到钻石
+     * 而录制 perception 全场零钻石记录 = 钻石在近场穷举半径外)。现从眼睛发
+     * {@link #GREEDY_RAY_COUNT} 条斐波那契球面均匀射线 (原生 RaycastContext,
+     * ShapeType.COLLIDER + FluidHandling.NONE — 流体无碰撞形状, 射线穿透,
+     * 与既有"矿贴液体不计"的 {@link WorldHelper#isAdjacentToLiquid} 闸配合),
+     * 只处理首个命中方块:
+     * <ul>
+     *   <li>命中矿 → 直接计入 (射线到达其表面 = 构造上已有视线, 天然防透视);</li>
+     *   <li>命中非矿 → 对命中方块 6 邻接的矿石补 {@link VisibilityHelper#isBlockPerceivable}
+     *       闸后计入 (矿脉露头常与相邻岩壁共面, 贴着命中点的那块矿同样可见;
+     *       最终闸门与旧口径同源, 反透视不放松)。</li>
+     * </ul>
+     * 同一块矿被多条射线/邻域重复命中时按 {@code counted} 去重, 每块只计一次
+     * (与旧立方扫描计数口径一致)。
      */
     public static Map<OrePlan, OreStat> countAllVisible(AltoClef mod) {
         long now = System.currentTimeMillis();
@@ -411,31 +448,33 @@ public class CollectVisibleOresTask extends Task {
             return _lastCounts;
         }
         _lastCheckMs = now;
-        BlockPos player = mod.getPlayer().getBlockPos();
-        int r = GREEDY_VISIBLE_RANGE;
-        // (2026-09-01 触发"看见"放宽 + 防透视) 扫玩家近身 r 格, 但每个候选矿必须
-        // 过 isBlockPerceivable (LOS 视线 + isBuriedOre 包裹判定) — 眼前可见的矿
-        // 才计入 vis, 被岩石包住的矿(即使 r 格内)不算, 不透视。LOS 只对命中的
-        // 少数矿石方块执行, 代价极小。
         Map<OrePlan, OreStat> counts = new IdentityHashMap<>();
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    BlockPos pos = player.add(dx, dy, dz);
-                    OrePlan plan = BLOCK_TO_PLAN.get(mod.getWorld().getBlockState(pos).getBlock());
-                    if (plan == null) continue;
-                    if (!VisibilityHelper.isBlockPerceivable(mod, pos)) {
-                        // (2026-09-01 排查日志, 用户"钻石修改原因错误, 留下排查日志")
-                        // 范围内存在目标矿却不可感知时, 记录位置/距离/失败原因 —
-                        // 定位"看见钻石却不触发贪心"的真实原因 (透视为: 范围不够?
-                        // LOS 被挡? isBuriedOre 包裹? 还是根本没扫到)。
-                        logUnperceivableOre(mod, pos, player);
-                        continue;
-                    }
-                    OreStat stat = counts.computeIfAbsent(plan, p -> new OreStat());
-                    if (!WorldHelper.canBreak(mod, pos)) continue;
-                    if (WorldHelper.isAdjacentToLiquid(mod, pos)) continue;
-                    stat.count++;
+        ClientPlayerEntity player = mod.getPlayer();
+        if (player == null || mod.getWorld() == null) {
+            _lastCounts = counts;
+            return counts;
+        }
+        Vec3d eye = player.getCameraPosVec(1.0f);
+        Set<BlockPos> counted = new HashSet<>();
+        for (Vec3d dir : rayDirections()) {
+            Vec3d end = eye.add(dir.x * GREEDY_RAY_RANGE, dir.y * GREEDY_RAY_RANGE, dir.z * GREEDY_RAY_RANGE);
+            BlockHitResult hit = mod.getWorld().raycast(new RaycastContext(eye, end,
+                    RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, player));
+            if (hit.getType() != HitResult.Type.BLOCK) continue;
+            BlockPos hitPos = hit.getBlockPos();
+            // 首个命中方块: 是矿直接计 (射线已到达其表面, 构造上已有视线)。
+            tryCountOreAt(mod, hitPos, counts, counted);
+            // (2026-10-16 命中面邻域补查) 射线打在矿脉旁边的岩壁上时, 贴着命中点
+            // 的那块露头矿同样可见 — 6 邻接做候选, isBlockPerceivable 最终闸兜底;
+            // 不可感知的候选走 [GreedyDiag] 排查日志。
+            for (Direction d : Direction.values()) {
+                BlockPos n = hitPos.offset(d);
+                if (counted.contains(n)) continue;
+                if (!BLOCK_TO_PLAN.containsKey(mod.getWorld().getBlockState(n).getBlock())) continue;
+                if (VisibilityHelper.isBlockPerceivable(mod, n)) {
+                    tryCountOreAt(mod, n, counts, counted);
+                } else {
+                    logUnperceivableOre(mod, n, player.getBlockPos());
                 }
             }
         }
@@ -443,14 +482,51 @@ public class CollectVisibleOresTask extends Task {
         return counts;
     }
 
+    /**
+     * 单个候选矿位的计数入口: 去重 → 确认已知矿种 → canBreak → 不贴液体
+     * (与旧立方扫描完全同源的接受条件, 判定源单一)。
+     */
+    private static void tryCountOreAt(AltoClef mod, BlockPos pos, Map<OrePlan, OreStat> counts, Set<BlockPos> counted) {
+        if (!counted.add(pos)) return;
+        OrePlan plan = BLOCK_TO_PLAN.get(mod.getWorld().getBlockState(pos).getBlock());
+        if (plan == null) return;
+        if (!WorldHelper.canBreak(mod, pos)) return;
+        if (WorldHelper.isAdjacentToLiquid(mod, pos)) return;
+        counts.computeIfAbsent(plan, p -> new OreStat()).count++;
+    }
+
+    /**
+     * 斐波那契球面均匀方向 (惰性初始化, 全向覆盖 — 与旧口径"无 FOV 限制,
+     * 只认视线可达"一致)。相邻射线角间距 ≈ sqrt(4π/N): N=400 时 16 格处
+     * 采样间距 ≈2.8 格, 8 格处 ≈1.4 格。
+     */
+    private static Vec3d[] rayDirections() {
+        if (_rayDirections == null) {
+            Vec3d[] dirs = new Vec3d[GREEDY_RAY_COUNT];
+            double golden = Math.PI * (3.0 - Math.sqrt(5.0));
+            for (int i = 0; i < GREEDY_RAY_COUNT; i++) {
+                double y = 1.0 - (2.0 * (i + 0.5)) / GREEDY_RAY_COUNT;
+                double r = Math.sqrt(Math.max(0.0, 1.0 - y * y));
+                double theta = golden * i;
+                dirs[i] = new Vec3d(Math.cos(theta) * r, y, Math.sin(theta) * r);
+            }
+            _rayDirections = dirs;
+        }
+        return _rayDirections;
+    }
+
+    private static Vec3d[] _rayDirections = null;
+
     // [GreedyDiag] 范围内不可感知的目标矿: 只对【钻石】(用户最关心的)记录, 节流
     // 到最多每 5 秒一条, 避免刷屏。记录距离与 VisibilityHelper.perceivableFailReason
     // (occluded=视线被挡 / 其它), 直接定位"看到却不触发"的原因。
+    // (2026-10-16 盲区修复) 原实现开头 `if (pos.getY() < 0) return;` — bot 常驻
+    // 负 Y 深板岩层, 深板岩钻石不可感知时从不留日志, 本次"看到却不触发"排障
+    // 被迫动用录制数据自证。删除该行 (5s 节流仍在, 不会刷爆)。
     private static long _lastGreedyDiagMs = 0;
     private static final long GREEDY_DIAG_INTERVAL_MS = 5000;
 
     private static void logUnperceivableOre(AltoClef mod, BlockPos pos, BlockPos player) {
-        if (pos.getY() < 0) return;
         net.minecraft.block.Block b = mod.getWorld().getBlockState(pos).getBlock();
         if (b != Blocks.DIAMOND_ORE && b != Blocks.DEEPSLATE_DIAMOND_ORE) return;
         long now = System.currentTimeMillis();
