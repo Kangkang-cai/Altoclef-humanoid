@@ -151,6 +151,28 @@ public class CollectVisibleOresTask extends Task {
         return plan.cap();
     }
 
+    /**
+     * (2026-10-16 钻石选种优先, 用户拍板 A) 钻石 rem>0 且 vis≥1 → 返回钻石计划,
+     * 金/铁让路。语义 = "看得见钻石就先挖钻石"。
+     *
+     * <p>实锤 (20261016-162404 会话 16:28:16): 金 vis=2 &gt; 钻石 vis=1 → 旧数量规则
+     * 选金, 用户目击"看到钻石却去挖金"。钻石此前在"可见块数最多"比较里没有任何
+     * 权重优势, 单块裸露钻石几乎永远输给矿脉。</p>
+     *
+     * <p>闸门不放松: 配额 (rem≤0)、镐位 (MiningRequirement.IRON)、配额期锁矿种
+     * (planAllowed) 任一不满足 → 返回 null, 回落既有"可见块数最多"规则。</p>
+     */
+    private OrePlan diamondPriorityPlan(AltoClef mod, Map<OrePlan, OreStat> counts) {
+        for (OrePlan plan : PLANS) {
+            if (plan.item() != Items.DIAMOND) continue;
+            if (!planAllowed(plan)) return null;
+            if (planExecutable(mod, plan, effectiveCap(plan)) <= 0) return null;
+            OreStat st = counts.get(plan);
+            return (st != null && st.count > 0) ? plan : null;
+        }
+        return null;
+    }
+
     @Override
     protected Task onTick(AltoClef mod) {
         if (_active != null && _activePlan != null) {
@@ -223,6 +245,19 @@ public class CollectVisibleOresTask extends Task {
                             best = plan;
                         }
                     }
+                    // (2026-10-16 钻石选种优先, 用户拍板 A) 刷新路径同样生效: 钻石可见
+                    // → 无视"更丰富"比较直接切钻石 (仍在批间/未接触阶段, engaged 锁上
+                    // 面已拦, 不违反批次原子性)。
+                    OrePlan diamondFirst = diamondPriorityPlan(mod, counts);
+                    if (diamondFirst != null && diamondFirst != _activePlan) {
+                        int dV = counts.get(diamondFirst) == null ? 0 : counts.get(diamondFirst).count;
+                        Debug.logMessage("[GreedyOre] switching " + _activePlan.item()
+                                + " -> " + diamondFirst.item() + " (diamond priority: " + dV + " visible)");
+                        _active = new MineAndCollectTask(new ItemTarget(diamondFirst.item(), 1), diamondFirst.blocks(), diamondFirst.req(), true);
+                        _activePlan = diamondFirst;
+                        setDebugState("Greedy mining " + diamondFirst.item().toString());
+                        return _active;
+                    }
                     if (best != null && best != _activePlan) {
                         OreStat cur = counts.get(_activePlan);
                         int curV = cur == null ? 0 : cur.count;
@@ -246,7 +281,16 @@ public class CollectVisibleOresTask extends Task {
         Map<OrePlan, OreStat> counts = countAllVisible(mod);
         OrePlan best = null;
         int bestCount = 0;
-        for (OrePlan plan : PLANS) {
+        // (2026-10-16 钻石选种优先, 用户拍板 A) 钻石 rem>0 且 vis≥1 → 直接选钻石,
+        // 无视"可见块数最多"。实锤 (20261016-162404 会话 16:28:16): 金 vis=2 >
+        // 钻石 vis=1 → 批次选金, 用户目击"看到钻石却去挖金"。配额/镐位闸门
+        // (planExecutable) 照常生效, 钻石不可见或不可执行时回落数量规则。
+        best = diamondPriorityPlan(mod, counts);
+        if (best != null) {
+            bestCount = counts.get(best) == null ? 0 : counts.get(best).count;
+            setDebugState("Greedy mining " + best.item().toString() + " (diamond priority)");
+        }
+        if (best == null) for (OrePlan plan : PLANS) {
             if (!planAllowed(plan)) continue;
             if (planExecutable(mod, plan, effectiveCap(plan)) <= 0) continue;
             OreStat st = counts.get(plan);

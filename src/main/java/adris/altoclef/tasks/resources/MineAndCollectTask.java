@@ -617,9 +617,14 @@ public class MineAndCollectTask extends ResourceTask {
         return holdGreedyForDrop(mod);
     }
 
+    // (2026-10-16 存在性挂住保底) 掉落物持续被感知时的挂住硬上限 — 防不可达掉落物
+    // 无限挂住 (hold 分支必须有出口)。到头后走既有释放路径 (isFinished 翻真)。
+    private static final long GREEDY_DROP_HOLD_CAP_MS = 30000;
     // (2026-09-11 背包满顺延) scoop/腾格子进行中的宽限顺延上限(总窗口 = GRACE + 此值)。
     private static final long GREEDY_DROP_SCOOP_EXTEND_MS = 5000;
     private long _greedyGraceLogEpisodeMs = 0;
+    // (2026-10-16 存在性挂住) 每事件一条的日志标记 (独立于 scoop 顺延标记)。
+    private long _greedyExistLogEpisodeMs = 0;
 
     private boolean holdGreedyForDrop(AltoClef mod) {
         long brokenMs = _subtask.miningTargetBrokenMs();
@@ -638,6 +643,24 @@ public class MineAndCollectTask extends ResourceTask {
             return false;
         }
         long sinceBroken = now - brokenMs;
+        // (2026-10-16 存在性挂住, 用户拍板"按推荐修") 掉落物【此刻仍在 tracker 里】
+        // (= 还没捡走也没消失确认) 时, 不再受 2.5s 固定宽限约束, 持续挂住到
+        // 捡走/消失确认或 30s 保底。
+        // 实锤 (20261016-162404 会话 16:27:33): 掉落物 3~6 格外导航 >2.5s, 固定宽限
+        // 到期整批被铁套任务打断, 捡拾中途弃捡 → 金掉落物遗落; 且"挖一块→弃捡→
+        // 铁套顶上→3s 冷却后贪婪再触发"形成乒乓 (贪婪↔铁套互抢 22/8 行)。
+        // 语义 = 掉落物存在性 (单一判定源, updateGreedyDropLatch 维护); 旧 2.5s 窗
+        // 仅剩"掉落物尚未落地回册"的短暂窗口职责。30s 保底满足"hold 分支必须有出口"
+        // (掉落物不可达等异常到头放行)。
+        if (_greedyDropSeen && _greedyDropLostSinceMs == 0 && sinceBroken < GREEDY_DROP_HOLD_CAP_MS) {
+            if (_greedyExistLogEpisodeMs != brokenMs) {
+                _greedyExistLogEpisodeMs = brokenMs; // 独立标记, 与 scoop 顺延日志互不踩
+                Debug.logToFile("altoclef_diag.log",
+                        "[GreedyPickup]\tholding — drop still perceived (existence-based, cap "
+                                + (GREEDY_DROP_HOLD_CAP_MS / 1000) + "s)");
+            }
+            return true;
+        }
         boolean withinGrace = sinceBroken < GREEDY_DROP_GRACE_MS;
         // (2026-09-11 背包满顺延, 09:58:56 金矿实锤) scoop 走到破坏点后捡不起来:
         // 背包满, "Ensuring inventory is free" 腾格子耗时超过剩余宽限 → 58.27 宽限
