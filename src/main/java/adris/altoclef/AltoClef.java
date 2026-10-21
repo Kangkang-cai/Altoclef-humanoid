@@ -20,6 +20,7 @@ import adris.altoclef.trackers.storage.ItemStorageTracker;
 import adris.altoclef.ui.CommandStatusOverlay;
 import adris.altoclef.ui.MessagePriority;
 import adris.altoclef.ui.MessageSender;
+import adris.altoclef.ui.PlayerLocatorBarOverlay;
 import adris.altoclef.util.helpers.InputHelper;
 import adris.altoclef.util.RenderThreadWatchdog;
 import adris.altoclef.util.helpers.NavStuckWatchdog;
@@ -111,6 +112,7 @@ public class AltoClef implements ModInitializer {
     private WorldMemory _worldMemory;
     // Renderers
     private CommandStatusOverlay _commandStatusOverlay;
+    private PlayerLocatorBarOverlay _playerLocatorOverlay;
     // Settings
     private adris.altoclef.Settings _settings;
     // Misc managers/input
@@ -186,6 +188,7 @@ public class AltoClef implements ModInitializer {
 
         // Renderers
         _commandStatusOverlay = new CommandStatusOverlay();
+        _playerLocatorOverlay = new PlayerLocatorBarOverlay();
 
         // Misc managers
         _messageSender = new MessageSender();
@@ -484,6 +487,8 @@ public class AltoClef implements ModInitializer {
         // 无帧目标/关闭开关时零开销直接返回。
         SmoothLookController.renderFrame(this);
         _commandStatusOverlay.render(this, matrixStack);
+        // (2026-10-21) 玩家定位栏（模仿 1.21.6 Locator Bar）：经验条槽位显示其他玩家方向。
+        _playerLocatorOverlay.render(this, matrixStack);
     }
 
     /// GETTERS AND SETTERS

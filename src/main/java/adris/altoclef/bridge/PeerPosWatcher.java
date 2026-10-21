@@ -89,6 +89,10 @@ public final class PeerPosWatcher {
         }
     }
 
+    /** (2026-10-21 定位栏) 全量快照条目：玩家名 + 坐标 + 维度。只读展示用。 */
+    public record PeerSnapshot(String name, Vec3d pos, Dimension dim) {
+    }
+
     private record Peer(String name, Vec3d pos, Dimension dim, long ts, int port, String following) {
         boolean fresh(long now) {
             return now - ts <= MAX_AGE_MS;
@@ -142,6 +146,21 @@ public final class PeerPosWatcher {
     public static Optional<Nav> navOf(String playerName) {
         Peer p = fresh(playerName);
         return p == null ? Optional.empty() : Optional.of(new Nav(p.pos(), p.dim()));
+    }
+
+    /**
+     * (2026-10-21 定位栏) 全部<b>新鲜</b>（≤{@link #MAX_AGE_MS}）peer 的快照列表。
+     * 只读、无副作用、按 {@code ConcurrentHashMap} 迭代安全性实现；每渲染帧调用无压力
+     * （条目数 = 本机 bot 数，通常 ≤4）。陈旧条目被静默跳过（渲染层即"对面掉线就消失"）。
+     */
+    public static List<PeerSnapshot> snapshotAll() {
+        List<PeerSnapshot> out = new ArrayList<>();
+        if (!_started) return out;
+        long now = System.currentTimeMillis();
+        for (Peer p : _peers.values()) {
+            if (p.fresh(now)) out.add(new PeerSnapshot(p.name(), p.pos(), p.dim()));
+        }
+        return out;
     }
 
     /** 距该玩家上次上报的毫秒数；无记录 = {@link Long#MAX_VALUE}。用于日志/诊断。 */
