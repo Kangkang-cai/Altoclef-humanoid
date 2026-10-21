@@ -103,6 +103,12 @@ final class BotSnapshot {
     final String onlinePlayers;
     /** 可见范围内正在睡觉的玩家名（逗号分隔）；无人睡则空串。 */
     final String sleepingPlayers;
+    // ---- (2026-10-20 用户位置入真值链) ----
+    /**
+     * 可见范围内其他玩家的位置清单（JSON 数组片段，见 {@link SceneDigest#nearbyPlayersPos}）；
+     * 空串 = 视野内没有其他玩家（/status 整键省略）。
+     */
+    final String nearbyPlayers;
     // ---- (2026-10-12 死亡掉落清单) ----
     /**
      * 本次死亡的掉落清单（中文串，如 {@code "铁剑x1、面包x3"}）；<b>空串 = 没掉</b>
@@ -127,6 +133,7 @@ final class BotSnapshot {
                         String weather, String environment, String biome, int nearbyHostiles,
                         ActiveAction activeAction, String botStatus, String stuckReason,
                         String landmarks, String onlinePlayers, String sleepingPlayers,
+                        String nearbyPlayers,
                         String inventory, String deathDrops) {
         this.botId = botId;
         this.player = player == null ? "" : player;
@@ -160,6 +167,7 @@ final class BotSnapshot {
         this.landmarks = landmarks;
         this.onlinePlayers = onlinePlayers == null ? "" : onlinePlayers;
         this.sleepingPlayers = sleepingPlayers == null ? "" : sleepingPlayers;
+        this.nearbyPlayers = nearbyPlayers == null ? "" : nearbyPlayers;
         this.inventory = inventory == null ? "" : inventory;
         this.deathDrops = deathDrops == null ? "" : deathDrops;
     }
@@ -169,7 +177,7 @@ final class BotSnapshot {
         return new BotSnapshot(botId, "", "", nowIso(), false, "不在游戏里", "离线",
                 0, 0, 0, "overworld", 0, 0, 0, "", "", "", 0, "",
                 "", "", "", "", "", "", 0,
-                null, "", "", null, "", "", "", "");
+                null, "", "", null, "", "", "", "", "");
     }
 
     /**
@@ -227,6 +235,7 @@ final class BotSnapshot {
                 activeAction, botStatus, stuckReason,
                 NamedLandmarks.snapshotJsonOrNull(pos, mod),
                 SceneDigest.onlinePlayers(mod), SceneDigest.sleepingPlayers(mod),
+                SceneDigest.nearbyPlayersPos(mod),
                 SceneDigest.inventory(mod), EventCollector.lastDeathDrops());
     }
 

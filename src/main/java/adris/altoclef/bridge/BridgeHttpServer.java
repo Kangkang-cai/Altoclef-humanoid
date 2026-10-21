@@ -327,6 +327,10 @@ public final class BridgeHttpServer {
             if (s.sleepingPlayers != null && !s.sleepingPlayers.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "sleepingPlayers"); sb.append(':'); BridgeJson.str(sb, s.sleepingPlayers);
             }
+            // ---- (2026-10-20 用户位置入真值链) 可见范围内其他玩家位置，预序列化 JSON 数组 ----
+            if (s.nearbyPlayers != null && !s.nearbyPlayers.isEmpty()) {
+                sb.append(','); BridgeJson.str(sb, "nearbyPlayers"); sb.append(':').append(s.nearbyPlayers);
+            }
             // ---- 阶段三感知补全：现场执行状态（在线时才有意义；离线快照省略）----
             if (s.botStatus != null && !s.botStatus.isEmpty()) {
                 sb.append(','); BridgeJson.str(sb, "botStatus"); sb.append(':'); BridgeJson.str(sb, s.botStatus);

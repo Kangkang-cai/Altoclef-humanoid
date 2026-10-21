@@ -365,6 +365,63 @@ final class SceneDigest {
     }
 
     /**
+     * (2026-10-20 用户位置入真值链) <b>可见范围内其他玩家</b>的位置清单，JSON 数组片段：
+     * {@code [{"name":"kangkang","x":311.2,"y":7.0,"z":206.4,"dim":"overworld"}]}；无人在旁为空串。
+     *
+     * <p>为什么必须有它：此前对端只知道 {@code onlinePlayers} 的<b>名单</b>（无坐标），
+     * 用户（真人主播）站在 bot 贴脸位置时 LLM 上下文里完全没有"用户在旁"的依据，
+     * 只能凭空回答"我怎么没看见你"（1019 22:34 实测：用户站脸上连问三遍谁看到他，
+     * 两个 bot 全说没看见，用户被迫喊"这是一个异常点"）。
+     *
+     * <p>口径与 {@link #sleepingPlayers} 一致 —— 只统计<b>已加载实体</b>（第三方服默认 48 格
+     * 追踪范围）。加载实体必然与本 bot 同维度，dim 取本 bot 当前维度显式写出，
+     * 免得对端再拿 onlinePlayers 名单去猜。self 不进清单（/status 的 pos 就是 self）。
+     * 预序列化 JSON（名字经 {@link BridgeJson#str} 转义），空串时 /status 整键省略。
+     */
+    static String nearbyPlayersPos(AltoClef mod) {
+        try {
+            var et = mod.getEntityTracker();
+            var names = et.getServerPlayerNames();
+            if (names == null || names.isEmpty()) return "";
+            String selfName = "";
+            try {
+                if (mod.getPlayer() != null) selfName = mod.getPlayer().getName().getString();
+            } catch (Throwable ignored) {
+            }
+            String dim = "";
+            try {
+                dim = SummaryGenerator.dimToken(WorldHelper.getCurrentDimension());
+            } catch (Throwable ignored) {
+            }
+            StringBuilder sb = new StringBuilder(64);
+            for (String n : names) {
+                if (n.equals(selfName)) continue;
+                if (!et.isPlayerLoaded(n)) continue;
+                Vec3d pos = null;
+                try {
+                    pos = et.getPlayerEntity(n).map(p -> p.getPos()).orElse(null);
+                } catch (Throwable ignored) {
+                }
+                if (pos == null) continue;
+                if (sb.length() > 0) sb.append(',');
+                sb.append("{\"name\":");
+                BridgeJson.str(sb, n);
+                sb.append(",\"x\":").append(BridgeJson.f1(pos.x))
+                  .append(",\"y\":").append(BridgeJson.f1(pos.y))
+                  .append(",\"z\":").append(BridgeJson.f1(pos.z));
+                if (!dim.isEmpty()) {
+                    sb.append(",\"dim\":");
+                    BridgeJson.str(sb, dim);
+                }
+                sb.append('}');
+            }
+            return sb.length() == 0 ? "" : "[" + sb + "]";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
      * (2026-10-07) 完整背包的<b>原名</b>清单，同名合并计数（{@code "oak_log x12, iron_ingot x3"}）。
      *
      * <p>为什么必须有它：{@code keyItems} 是<b>中文</b>名（{@link ItemNames}，供对端做变化检测），

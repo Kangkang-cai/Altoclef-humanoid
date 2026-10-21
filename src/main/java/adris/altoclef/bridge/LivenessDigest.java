@@ -120,6 +120,7 @@ final class LivenessDigest {
                     || p.isSleeping()
                     || !hasTask
                     || isFollowHolding(stack)
+                    || isFurnaceWaiting(stack)
                     || (_dispatcher != null && (_dispatcher.isHolding() || _dispatcher.isPaused()));
             if (legitStill) {
                 // 这些场景下的"不动"合法：静默重置，不发任何事件
@@ -157,14 +158,17 @@ final class LivenessDigest {
                 _stuck = true;
                 _recoveredUntilMs = 0;
                 String taskName = deepestClass(stack);
+                // (2026-10-20 口径补全) 事件与 reason 都带当前子状态 —— 对端 LLM 拿到的
+                // "卡住"必须能对上身体此刻的真实动作，否则它会照字面演"我动不了"。
                 _buffer.emitImmediate("bot_stuck",
-                        "我在执行的任务卡住了，可能需要重新下指令（" + taskName + " 已 "
-                                + (stillMs / 1000) + "s 无进展）", true, stuckDetail());
+                        "我在执行的任务卡住了，可能需要重新下指令（" + taskName
+                                + deepStateSuffix(stack) + " 已 " + (stillMs / 1000) + "s 无进展）",
+                        true, stuckDetail());
             }
 
             if (_stuck) {
                 _status = "stuck";
-                _reason = "任务 " + deepestClass(stack) + " 卡住 " + (stillMs / 1000) + "s 无进度";
+                _reason = "任务 " + deepestClass(stack) + deepStateSuffix(stack) + " 卡住 " + (stillMs / 1000) + "s 无进度";
             } else if (now < _recoveredUntilMs) {
                 _status = "recovering";
                 _reason = "正在重新寻路/重启子任务";
@@ -193,6 +197,20 @@ final class LivenessDigest {
         return deep instanceof adris.altoclef.tasks.movement.FollowPlayerTask t && t.isStationaryByDesign();
     }
 
+    /**
+     * (2026-10-20 修"守熔炉=卡住"误报) 烧炼等待 = 设计意图的静止：最深任务是
+     * {@code SmeltInFurnaceTask}（开着熔炉 UI 等烧制完成）或 {@code FurnaceSmeltGuardTask}
+     * （守着熔炉扫描周边）。熔炉烧一组要几十秒，期间位置/背包/任务签名全不变，
+     * 三元组判据必然误报 stuck —— 对端 LLM 收到"你卡住了"就跟用户顶牛
+     * "我明明卡住了"（1019 实测：用户连说四遍"你在烧铁不是卡住"，bot 一遍都不认）。
+     */
+    private static boolean isFurnaceWaiting(List<Task> stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        Task deep = stack.get(stack.size() - 1);
+        return deep instanceof adris.altoclef.tasks.container.SmeltInFurnaceTask
+                || deep instanceof adris.altoclef.tasks.container.FurnaceSmeltGuardTask;
+    }
+
     /** 任务态签名：链名 + 最深任务类名 + 其 debugState。 */
     private static String signature(TaskChain chain, List<Task> stack) {
         StringBuilder sb = new StringBuilder(64);
@@ -212,6 +230,18 @@ final class LivenessDigest {
     private static String deepestClass(List<Task> stack) {
         if (stack == null || stack.isEmpty()) return "未知任务";
         return stack.get(stack.size() - 1).getClass().getSimpleName();
+    }
+
+    /** 最深任务 debugState 的展示后缀（"（当前：XXX）"）；取不到/为空返回空串。
+     *  让"卡住"带上身体此刻的真实动作，对端 LLM 不会再照字面演"我动不了"。 */
+    private static String deepStateSuffix(List<Task> stack) {
+        if (stack == null || stack.isEmpty()) return "";
+        try {
+            String st = stack.get(stack.size() - 1).debugState();
+            return (st == null || st.isEmpty()) ? "" : "（当前：" + st + "）";
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private static int inventoryTotal(ClientPlayerEntity p) {
