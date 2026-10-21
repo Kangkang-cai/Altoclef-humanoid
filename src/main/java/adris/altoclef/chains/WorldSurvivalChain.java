@@ -139,6 +139,9 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private Vec3d _drownSwimStartPos = null;
     // (2026-09-22 垂直上浮优先) 只在进入该分支那一下打日志, 避免每 tick 刷屏。
     private boolean _loggedSwimUpOnce = false;
+    // (2026-10-21 压顶 canBreak 判否分类日志) up-scan 里 canBreak=false 每拍都会
+    // 重判, 原因日志必须边沿触发: 只在"从可挖翻转为判否"那一下打, airFrac 复位时清闩。
+    private boolean _loggedUpBlockerReject = false;
 
     // ==== (2026-09-27 用户定案: 统一靠挖头顶逃生 + 弃挖改游门槛) ====
     // 触发阈值 0.7 不变 (DROWN_ESCAPE_AIR_FRACTION)。本次统一的是【逃生动作用什么】:
@@ -743,6 +746,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
         double airFrac = (double) p.getAir() / p.getMaxAir();
         if (airFrac > DROWN_ESCAPE_AIR_FRACTION) {
             _loggedNoBreathable = false;
+            _loggedUpBlockerReject = false;
             _drownSwimTarget = null;
             return Float.NEGATIVE_INFINITY;
         }
@@ -863,7 +867,28 @@ public class WorldSurvivalChain extends SingleTaskChain {
             BlockState cs = mod.getWorld().getBlockState(cell);
             if (cs.isAir() || cs.getBlock() == Blocks.WATER) continue; // 可穿过, 继续往上找
             upBlocker = cell;
-            if (!WorldHelper.canBreak(mod, cell)) upBlockerUnbreakable = true;
+            if (!WorldHelper.canBreak(mod, cell)) {
+                // (2026-10-21) 判否必须分类, 不再一刀切当"不可挖厚顶":
+                // canBreak 四个子条件里只有 hardness<0 / avoidBreaking / not-plausible
+                // 是"真挖不动"; canReach 失败 = tracker 寻路可达性判否 —— 20261020 bot1
+                // 溺死实锤: 水下被卡死时 tracker 对贴脸压顶 (315,39,243) 也判不可达,
+                // 明明头顶一块石头就能通天, 却被当厚顶放弃, 改侧向凿穿活活淹死。
+                // 压顶就在头顶 1~4 格、物理上必然贴脸, reach 判否不成立, 照挖。
+                String fail = WorldHelper.canBreakFailReason(mod, cell);
+                boolean reachOnly = fail != null && fail.startsWith("canReach");
+                if (!reachOnly) {
+                    upBlockerUnbreakable = true;
+                }
+                if (!_loggedUpBlockerReject) {
+                    _loggedUpBlockerReject = true;
+                    String m = "[DROWN-ESCAPE] up-scan canBreak=false reason="
+                            + (fail == null ? "unknown(canBreak=false but failReason=null)" : fail)
+                            + (reachOnly ? " -> reach-only, 按贴脸压顶照挖" : " -> 真不可碎, 走侧向兜底")
+                            + " cell=" + cell.toShortString() + " player=" + feetPos.toShortString();
+                    Debug.logMessage(m);
+                    Debug.logToFile("altoclef_diag.log", m);
+                }
+            }
             break;
         }
         if (upBlocker == null) {
