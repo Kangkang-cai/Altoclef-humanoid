@@ -253,7 +253,8 @@ public class FollowPlayerTask extends Task {
                 return tickRconApproach(mod, snap.get());
             }
             // Go to last location
-            return new GetToBlockTask(new BlockPos((int) target.x, (int) target.y, (int) target.z), false);
+            return new GetToBlockTask(new BlockPos((int) target.x, (int) target.y, (int) target.z), false)
+                    .setNavPurpose("接近同伴 " + _playerName);
         }
 
         // (2026-10-05) 环形跟随: 到距离就站定, 不再继续逼近 (旧实现 goal 半径不生效,
@@ -315,7 +316,8 @@ public class FollowPlayerTask extends Task {
         if (_remoteApproach == null || _remoteTarget == null
                 || _remoteTarget.getSquaredDistance(target)
                         > PeerPosWatcher.RETARGET_DIST * PeerPosWatcher.RETARGET_DIST) {
-            _remoteApproach = new GetToBlockTask(target, false, nav.get().dim());
+            _remoteApproach = new GetToBlockTask(target, false, nav.get().dim())
+                    .setNavPurpose("远程接近同伴 " + _playerName);
             _remoteTarget = target;
         }
         double dist = mod.getPlayer() == null ? -1 : nav.get().pos().distanceTo(mod.getPlayer().getPos());
@@ -408,7 +410,8 @@ public class FollowPlayerTask extends Task {
         if (_rconApproach == null || _rconTarget == null
                 || _rconTarget.getSquaredDistance(target)
                         > PeerPosWatcher.RETARGET_DIST * PeerPosWatcher.RETARGET_DIST) {
-            _rconApproach = new GetToBlockTask(target, false, snap.dim());
+            _rconApproach = new GetToBlockTask(target, false, snap.dim())
+                    .setNavPurpose("跨维度接近同伴 " + _playerName);
             _rconTarget = target;
         }
         double dist = mod.getPlayer() == null ? -1

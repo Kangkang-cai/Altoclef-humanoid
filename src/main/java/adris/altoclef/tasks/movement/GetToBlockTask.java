@@ -18,6 +18,12 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
     // (2026-09-30 方案A) 严格到达: 必须真正站进目标格 (禁用父类"≤2 格 holding"
     // 豁免)。step-out 让位场景必开, 否则 1.4 格外停走会让位永不完成。
     private final boolean _strictCellArrivalFlag;
+    // (2026-10-22 赶路带目的) 导航任务自身的语义目的。背景: FollowPlayerTask/
+    // SubBotBootstrapTask 的远程接近都是【裸派】GetToBlockTask 当顶层任务,
+    // 任务栈上没有任何语义父任务 → HUD 左上角只剩叶子("先到相邻区块"),
+    // 对端 LLM 摘要只剩"赶路", 不知道为什么往那边走(1021/1022 用户两度点名)。
+    // 目的由派发方注入, 随任务走 —— 栈上有没有父任务都能被摘要/HUD 读到。
+    private String _navPurpose = null;
 
     public GetToBlockTask(BlockPos position, boolean preferStairs) {
         this(position, preferStairs, null);
@@ -98,12 +104,24 @@ public class GetToBlockTask extends CustomBaritoneGoalTask implements ITaskRequi
 
     @Override
     protected String toDebugString() {
-        return "Getting to block " + _position + (_dimension != null ? " in dimension " + _dimension : "");
+        return "Getting to block " + _position + (_dimension != null ? " in dimension " + _dimension : "")
+                + (_navPurpose != null ? "【" + _navPurpose + "】" : "");
     }
 
     /** (2026-10-05 逃逸出口) 目标格只读访问：chain 层无路径看门狗按目标做否决窗口。 */
     public BlockPos getTargetPos() {
         return _position;
+    }
+
+    /** (2026-10-22 赶路带目的) 链式注入目的（HUD toDebugString + 对端摘要都读它）。 */
+    public GetToBlockTask setNavPurpose(String purpose) {
+        _navPurpose = purpose;
+        return this;
+    }
+
+    /** (2026-10-22 赶路带目的) 只读访问；null = 派发方没给目的。 */
+    public String getNavPurpose() {
+        return _navPurpose;
     }
 
 

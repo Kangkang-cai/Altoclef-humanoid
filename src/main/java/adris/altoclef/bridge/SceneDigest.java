@@ -126,9 +126,24 @@ final class SceneDigest {
      */
     private static String purposeFor(List<Task> stack, Task deep) {
         try {
+            // (2026-10-22 赶路带目的) 导航叶子自带目的优先 —— FollowPlayerTask/
+            // SubBotBootstrapTask 的远程接近是【裸派】GetToBlockTask 当顶层任务,
+            // 栈上没有语义父任务可走, 目的只能随任务本身走 (1022 用户实锤:
+            // HUD 只剩"先到相邻区块", 对端只看到"赶路")。
+            if (deep instanceof adris.altoclef.tasks.movement.GetToBlockTask dg
+                    && dg.getNavPurpose() != null) {
+                return dg.getNavPurpose();
+            }
             // 第一遍：显式目的任务（外层优先，见方法注释）
             for (int i = 0; i <= stack.size() - 2; i++) {
                 Task a = stack.get(i);
+                if (a instanceof adris.altoclef.tasks.movement.GetToBlockTask ag
+                        && ag.getNavPurpose() != null) {
+                    return ag.getNavPurpose();
+                }
+                if (a instanceof adris.altoclef.tasks.movement.SubBotBootstrapTask sub) {
+                    return "接近领队 " + sub.getLeaderName();
+                }
                 if (a instanceof TradeWithPiglinsTask tw) {
                     Item[] m = ItemTarget.getMatches(tw.getItemTargets());
                     if (m != null && m.length > 0) {

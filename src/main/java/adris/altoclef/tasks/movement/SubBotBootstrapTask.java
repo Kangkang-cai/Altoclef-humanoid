@@ -593,7 +593,8 @@ public class SubBotBootstrapTask extends Task {
         if (_remoteApproach == null || _remoteApproachTarget == null
                 || _remoteApproachTarget.getSquaredDistance(target)
                         > PeerPosWatcher.RETARGET_DIST * PeerPosWatcher.RETARGET_DIST) {
-            _remoteApproach = new GetToBlockTask(target, false, nav.get().dim());
+            _remoteApproach = new GetToBlockTask(target, false, nav.get().dim())
+                    .setNavPurpose("接近领队 " + _leader);
             _remoteApproachTarget = target;
         }
         // 交出去的 follow 会被框架 stop, 句柄留着会被误判成"终态"。

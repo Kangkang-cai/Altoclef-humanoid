@@ -165,6 +165,12 @@ final class SummaryGenerator {
     private static String findNavPurpose(TaskChain chain) {
         try {
             List<Task> tasks = chain.getTasks();
+            // (2026-10-22) 叶子自带目的优先 —— 远程接近是裸派 GetToBlockTask,
+            // 栈上没有语义父任务（1022 用户实锤）。
+            Task cur2 = tasks.isEmpty() ? null : tasks.get(tasks.size() - 1);
+            if (cur2 instanceof GetToBlockTask g && g.getNavPurpose() != null) {
+                return g.getNavPurpose();
+            }
             for (int i = tasks.size() - 1; i >= 0; i--) {
                 Task t = tasks.get(i);
                 if (t instanceof SubBotBootstrapTask sub) return "接近领队 " + sub.getLeaderName();
