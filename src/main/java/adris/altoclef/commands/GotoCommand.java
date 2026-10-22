@@ -27,9 +27,13 @@ public class GotoCommand extends Command {
     }
 
     public static Task getMovementTaskFor(GotoTarget target) {
+        // (2026-10-22 赶路带目的) @goto 是裸派导航任务（玩家和对端 LLM 共用入口），
+        // 栈上没有语义父任务 —— 目的=命令本身，随任务走（HUD + 对端摘要读）。
         return switch (target.getType()) {
-            case XYZ -> new GetToBlockTask(new BlockPos(target.getX(), target.getY(), target.getZ()), target.getDimension());
-            case XZ -> new GetToXZTask(target.getX(), target.getZ(), target.getDimension());
+            case XYZ -> new GetToBlockTask(new BlockPos(target.getX(), target.getY(), target.getZ()), target.getDimension())
+                    .setNavPurpose("前往坐标 " + target.getX() + "," + target.getY() + "," + target.getZ());
+            case XZ -> new GetToXZTask(target.getX(), target.getZ(), target.getDimension())
+                    .setNavPurpose("前往坐标 " + target.getX() + "," + target.getZ());
             case Y -> new GetToYTask(target.getY(), target.getDimension());
             case NONE -> new DefaultGoToDimensionTask(target.getDimension());
         };

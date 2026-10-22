@@ -12,6 +12,9 @@ public class GetToXZTask extends CustomBaritoneGoalTask {
 
     private final int _x, _z;
     private final Dimension _dimension;
+    // (2026-10-22 赶路带目的) 与 GetToBlockTask 同款：@goto 命令裸派本任务时
+    // 栈上无语义父任务，目的由派发方注入（HUD/对端摘要读）。
+    private String _navPurpose = null;
 
     public GetToXZTask(int x, int z) {
         this(x, z, null);
@@ -20,6 +23,17 @@ public class GetToXZTask extends CustomBaritoneGoalTask {
         _x = x;
         _z = z;
         _dimension = dimension;
+    }
+
+    /** (2026-10-22 赶路带目的) 链式注入目的；不进 isEqual（纯元数据）。 */
+    public GetToXZTask setNavPurpose(String purpose) {
+        _navPurpose = purpose;
+        return this;
+    }
+
+    /** (2026-10-22 赶路带目的) 只读访问；null = 未注入。 */
+    public String getNavPurpose() {
+        return _navPurpose;
     }
     @Override
     protected Task onTick(AltoClef mod) {
@@ -50,6 +64,7 @@ public class GetToXZTask extends CustomBaritoneGoalTask {
 
     @Override
     protected String toDebugString() {
-        return "Getting to (" + _x + "," + _z + ")" + (_dimension != null ? " in dimension " + _dimension : "");
+        return "Getting to (" + _x + "," + _z + ")" + (_dimension != null ? " in dimension " + _dimension : "")
+                + (_navPurpose != null ? "【" + _navPurpose + "】" : "");
     }
 }

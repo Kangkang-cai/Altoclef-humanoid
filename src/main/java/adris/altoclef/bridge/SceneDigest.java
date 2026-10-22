@@ -134,6 +134,10 @@ final class SceneDigest {
                     && dg.getNavPurpose() != null) {
                 return dg.getNavPurpose();
             }
+            if (deep instanceof adris.altoclef.tasks.movement.GetToXZTask dgxz
+                    && dgxz.getNavPurpose() != null) {
+                return dgxz.getNavPurpose();
+            }
             // 第一遍：显式目的任务（外层优先，见方法注释）
             for (int i = 0; i <= stack.size() - 2; i++) {
                 Task a = stack.get(i);
@@ -200,6 +204,15 @@ final class SceneDigest {
         // (1005 20:1x 用户纠正) 金子→猪灵交易→防火药水→打烈焰人：药水是手段，
         // 打烈焰人才是目的，写成完整链
         PURPOSE_ZH.put("CollectFireResPotionsTask", "备防火药水打烈焰人");
+        // (2026-10-22 补全) 「跨区块前往记忆中的地点」各流的语义祖先 ——
+        // 导航叶子（去记忆传送门/家基地/坟墓/熄灭门）的父任务在栈上但此前
+        // 没映射 → 对端摘要回落成裸「赶路」。
+        PURPOSE_ZH.put("DefaultGoToDimensionTask", "过门跨维度");
+        PURPOSE_ZH.put("DeathRecoveryTask", "回坟墓捡尸");
+        PURPOSE_ZH.put("RelightNetherPortalTask", "去重燃传送门");
+        PURPOSE_ZH.put("FastTravelTask", "快速旅行赶路");
+        PURPOSE_ZH.put("GoToStrongholdPortalTask", "去要塞传送门");
+        PURPOSE_ZH.put("EnterNetherPortalTask", "进下界门");
     }
 
     /** 任务类名前缀 → 中文动词（粗粒度动作词）。 */

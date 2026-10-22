@@ -171,9 +171,21 @@ final class SummaryGenerator {
             if (cur2 instanceof GetToBlockTask g && g.getNavPurpose() != null) {
                 return g.getNavPurpose();
             }
+            if (cur2 instanceof GetToXZTask gxz && gxz.getNavPurpose() != null) {
+                return gxz.getNavPurpose();
+            }
             for (int i = tasks.size() - 1; i >= 0; i--) {
                 Task t = tasks.get(i);
                 if (t instanceof SubBotBootstrapTask sub) return "接近领队 " + sub.getLeaderName();
+                // (2026-10-22 补全) 「跨区块前往记忆中的地点」各流的语义祖先：
+                // 导航叶子（去记忆传送门/家基地/坟墓/熄灭门）的父任务在栈上，
+                // 但此前没映射 → 回落成裸「赶路」。
+                if (t instanceof DefaultGoToDimensionTask) return "过门跨维度";
+                if (t instanceof DeathRecoveryTask) return "回坟墓捡尸";
+                if (t instanceof RelightNetherPortalTask) return "去重燃传送门";
+                if (t instanceof FastTravelTask) return "快速旅行赶路";
+                if (t instanceof GoToStrongholdPortalTask) return "去要塞传送门";
+                if (t instanceof EnterNetherPortalTask) return "进下界门";
                 if (t instanceof FollowPlayerTask) return "跟随同伴";
                 if (t instanceof SearchChunksExploreTask
                         || t instanceof SearchWithinBiomeTask) return "搜索区域";
