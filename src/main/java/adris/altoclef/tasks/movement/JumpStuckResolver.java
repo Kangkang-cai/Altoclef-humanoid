@@ -214,6 +214,36 @@ public final class JumpStuckResolver {
     /** 共享 wander 任务 (强制脱离用)。 */
     private static final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(5);
 
+    // ===== (2026-10-22 水面短窗豁免 + 水中挖障会话配额) =====
+    //
+    // 现场 20261020-220030 (bot2 20261020 22:36~23:29 被困水区 53 分钟, WATER-EXIT 49 次,
+    // 净位移≈0): 两个反应层缺陷互相喂招, 把"本可游过去的水路"拆成死循环 ——
+    //
+    //  缺陷① (本节修复): 2026-09-12 的水面豁免判据是【瞬时】isTouchingWater()。bot 在
+    //  水面进出抖动时 (SWIM-DIVE 日志 gate=NOT_IN_WATER_BOB_AIRBORNE ↔ inWater=true 交替),
+    //  出水瞬间豁免失效, "零速+强制前进"证据 1 秒攒满 → forceCancel() 撤销刚算好的路径。
+    //  日志实锤 23:29:00~04 每 1.2s 一次 "no obstruction -> forceCancel to re-route"。
+    //  修法: 豁免改为【短窗口曾在水中】—— 1.5s 内碰过水就算"水相关状态", 抖动出水
+    //  不再触发撤路。真上岸奔跑 (水平速度正常) 不会攒满证据, 不受影响。
+    //
+    //  缺陷② (下一段): 水边有实体障碍 (岸缝石) 时派 DestroyBlockTask, 而它内建
+    //  "泡水挖矿慢 25 倍 → 先上岸"闩锁 → 上岸 → 导航重建又下水 → 同一块石头 → 乒乓。
+    //  旧的同格计数 (_lastDigPos) 只认【连续】同格, 岸边 2~3 块候选障碍轮着派
+    //  (303,19,89 → 296,18,91 → 291,18,92 → 303,19,89) 永远凑不满 SAME_POS_DIG_LIMIT。
+    //  修法: 水中挖障改【会话配额】—— 窗口期内水中派障 ≥4 次就整体冷却 60s 不再派,
+    //  交给上层导航自己游/重算; 配额与冷却都 static (实例频繁重建会绕过实例层状态, 20de6b0c 教训)。
+    private static int _lastInWaterTick = Integer.MIN_VALUE + 1;
+    /** 出水后多久仍视为"水相关状态" (1.5s, 覆盖水面抖动的出水半周期)。 */
+    private static final int WATER_MEMORY_TICKS = 30;
+    private static int _waterDigSessionCount = 0;
+    private static int _waterDigWindowStartTick = 0;
+    /** 水中挖障会话窗口 (2min) 与配额 (4 次)。 */
+    private static final int WATER_DIG_WINDOW_TICKS = 2400;
+    private static final int WATER_DIG_SESSION_LIMIT = 4;
+    /** 配额耗尽后的水中挖障冷却 (60s, 时间出口 —— hold/refuse 分支必须有出口)。 */
+    private static final int WATER_DIG_COOLDOWN_TICKS = 1200;
+    private static int _waterDigCooldownUntilTick = 0;
+
     /**
      * 每 tick 调用 (放在任务 onTick 最前面)。
      *
@@ -225,6 +255,11 @@ public final class JumpStuckResolver {
      *         TimeoutWanderTask); null = 无事发生 / 只做了 forceCancel 换路 / 冷却中。
      */
     public static Task tick(AltoClef mod) {
+        // (2026-10-22) 水状态追踪必须放在所有提前 return 之前 —— 挖掘/岩浆/垫柱豁免
+        // 分支都会先 return, 若放在它们之后, 水面抖动期间的"曾在水"记忆会断档。
+        if (mod.getPlayer().isTouchingWater()) {
+            _lastInWaterTick = WorldHelper.getTicks();
+        }
         // (2026-09-21) Y 增益追踪必须放在所有提前 return 之前 —— 挖掘/岩浆豁免
         // 分支会先 return null, 若追踪放在它们之后, 豁免期间 (正是跳跃/上浮推进中)
         // 的 Y 增益会丢失, 回到主流程时 bestY 已过期。
@@ -377,13 +412,43 @@ public final class JumpStuckResolver {
         //   ② 挡路物是"baritone 认为可穿过"的植物类 (树叶/azalea/草):
         //      builder 拒挖、物理上却挡人, 只能直挖。
         BlockPos obstacle = JumpObstructionHelper.findObstruction(mod);
-        if (mod.getPlayer().isTouchingWater()
+        // (2026-10-22) 豁免判据从瞬时 isTouchingWater 改为"短窗口曾在水中":
+        // 水面进出抖动的出水瞬间不再攒满证据 → 不再每 1.2s forceCancel 撤销路线
+        // (现场 20261020-220030 实锤节奏)。ascentCapped/实体障碍例外保持不变。
+        if (recentlyInWater(mod)
                 && !ascentCapped(mod)
                 && !(obstacle != null && isBaritonePassable(mod, obstacle))) {
             return null;
         }
 
         if (obstacle != null) {
+            // (2026-10-22 水中挖障会话配额) —— 治"挖障×上岸"乒乓的调用侧出口。
+            // 岸缝 2~3 块候选障碍轮着派, 旧【连续】同格计数永远凑不满; 这里按
+            // "短窗口曾在水中"口径计数, 窗口内派障 ≥4 次 → 60s 冷却不再派障,
+            // forceCancel 交还导航自己重算/游过 (配额与冷却均 static, 时间出口)。
+            if (recentlyInWater(mod)) {
+                int wNow = WorldHelper.getTicks();
+                if (wNow < _waterDigCooldownUntilTick) {
+                    resetStreak();
+                    return null;
+                }
+                if (wNow - _waterDigWindowStartTick > WATER_DIG_WINDOW_TICKS) {
+                    _waterDigWindowStartTick = wNow;
+                    _waterDigSessionCount = 0;
+                }
+                _waterDigSessionCount++;
+                if (_waterDigSessionCount > WATER_DIG_SESSION_LIMIT) {
+                    _waterDigCooldownUntilTick = wNow + WATER_DIG_COOLDOWN_TICKS;
+                    _waterDigSessionCount = 0;
+                    Debug.logToFile("altoclef_diag.log", "[JumpStuck] water-dig x"
+                            + WATER_DIG_SESSION_LIMIT + " within " + (WATER_DIG_WINDOW_TICKS / 20)
+                            + "s window -> forceCancel + water-dig cooldown "
+                            + (WATER_DIG_COOLDOWN_TICKS / 20) + "s at " + mod.getPlayer().getBlockPos());
+                    mod.getClientBaritone().getPathingBehavior().forceCancel();
+                    resetStreak();
+                    return null;
+                }
+            }
             // 有明确挡路的方块。
             boolean passable = isBaritonePassable(mod, obstacle);
             // (2026-09-23) 植物类障碍不再单点 InstantBreak: 实锤 (会话 20260923-081029)
@@ -522,6 +587,16 @@ public final class JumpStuckResolver {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /**
+     * (2026-10-22) "短窗口曾在水中"：正在水中，或 1.5s 内碰过水。
+     * 水面抖动 (进出水交替) 的出水半周期里仍算水相关状态，供水面豁免与
+     * 水中挖障配额共用 —— 判定源单一化，两个消费方一个口径。
+     */
+    private static boolean recentlyInWater(AltoClef mod) {
+        return mod.getPlayer().isTouchingWater()
+                || WorldHelper.getTicks() - _lastInWaterTick <= WATER_MEMORY_TICKS;
     }
 
     /**
