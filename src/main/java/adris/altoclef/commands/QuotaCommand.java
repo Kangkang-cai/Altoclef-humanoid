@@ -57,7 +57,10 @@ public class QuotaCommand extends Command {
         }
         Item item = resolve(token);
         if (item == null) {
-            String m = "认不出物品 id —— " + token + "（示例：blaze_rod / ender_pearl / ender_eye）";
+            // (2026-10-22 物品名容错) 失败文案附最接近候选，AI 拿到能自纠重发。
+            String sugg = adris.altoclef.commandsystem.ItemNameResolver.suggestions(token, 3);
+            String m = "认不出物品 id —— " + token + "（示例：blaze_rod / ender_pearl / ender_eye）"
+                    + (sugg.isEmpty() ? "" : "；最接近的可用名字：" + sugg);
             CommandFeedback.fail(m);
             log("quota：" + m);
             finish();
@@ -77,9 +80,12 @@ public class QuotaCommand extends Command {
     /** 物品 id 解析：支持 "blaze_rod" 与 "minecraft:blaze_rod" 两种写法。 */
     private static Item resolve(String token) {
         try {
+            // (2026-10-22 物品名容错) 规范化：AI 写 "Blaze Rod" / "blaze-rod" 也能吃下。
+            String normalized = adris.altoclef.commandsystem.ItemNameResolver.normalize(token);
+            if (normalized.isEmpty()) return null;
             Identifier id = token.contains(":")
                     ? new Identifier(token)
-                    : new Identifier("minecraft", token);
+                    : new Identifier("minecraft", normalized);
             Item it = Registry.ITEM.get(id);
             return it == Items.AIR ? null : it;
         } catch (Throwable t) {

@@ -51,7 +51,10 @@ public class PickupCommand extends Command {
         Item item = resolveItem(mod, itemName);
         if (item == null) {
             // 未起任务 → 必须自报失败，否则 bridge 的 action_done 永不会来（同 GiveCommand 口径）
-            CommandFeedback.fail("做不到：认不出物品 \"" + itemName + "\"（物品名可能拼错）。");
+            // (2026-10-22 物品名容错) 失败文案附最接近候选，AI 拿到能自纠重发。
+            String sugg = adris.altoclef.commandsystem.ItemNameResolver.suggestions(itemName, 3);
+            CommandFeedback.fail("做不到：认不出物品 \"" + itemName + "\"（物品名可能拼错）。"
+                    + (sugg.isEmpty() ? "" : "最接近的可用名字：" + sugg + "。"));
             finish();
             return;
         }
@@ -72,13 +75,16 @@ public class PickupCommand extends Command {
      */
     private static Item resolveItem(AltoClef mod, String itemName) {
         if (itemName == null || itemName.isBlank()) return null;
-        if (TaskCatalogue.taskExists(itemName)) {
-            ItemTarget target = TaskCatalogue.getItemTarget(itemName, 1);
+        // (2026-10-22 物品名容错) 入口先规范化：大小写/空格/连字符/minecraft: 前缀统一，
+        // 目录层与注册表层都用同一口径比对。
+        String normalized = adris.altoclef.commandsystem.ItemNameResolver.normalize(itemName);
+        if (normalized.isEmpty()) return null;
+        if (TaskCatalogue.taskExists(normalized)) {
+            ItemTarget target = TaskCatalogue.getItemTarget(normalized, 1);
             if (target != null && target.getMatches().length > 0) {
                 return target.getMatches()[0];
             }
         }
-        String normalized = itemName.trim().toLowerCase();
         for (Item item : Registry.ITEM) {
             String shortName = ItemHelper.stripItemName(item);
             if (shortName != null && shortName.equalsIgnoreCase(normalized)) return item;

@@ -1,6 +1,5 @@
 package adris.altoclef.commandsystem;
 
-import adris.altoclef.TaskCatalogue;
 import adris.altoclef.util.ItemTarget;
 
 import java.util.HashMap;
@@ -34,11 +33,11 @@ public class ItemList {
                         throw new CommandException("Failed to parse count for array element \"" + part + "\".");
                     }
                 }
-                if (TaskCatalogue.taskExists(item)) {
-                    items.put(item, items.getOrDefault(item, 0) + count);
-                } else {
-                    throw new CommandException("Item not catalogued: " + item);
-                }
+                // (2026-10-22 物品名容错) 原来直接 taskExists 硬失败，AI 拼错一个字母
+                // 就整个命令作废。改走 ItemNameResolver：规范化 → 别名 → 模糊自动修正
+                // → 都不行才抛（错误文案附最接近候选，AI 拿到回执能自纠重发）。
+                String resolved = ItemNameResolver.resolve(item);
+                items.put(resolved, items.getOrDefault(resolved, 0) + count);
             }
             if (items.size() != 0) {
                 return new ItemList(items.entrySet().stream().map(entry -> new ItemTarget(entry.getKey(), entry.getValue())).toArray(ItemTarget[]::new));
@@ -47,10 +46,8 @@ public class ItemList {
             // We must be of type "item <?count>"
             String[] items = line.split(" ");
             if (items.length >= 1) {
-                String name = items[0];
-                if (!TaskCatalogue.taskExists(name)) {
-                    throw new CommandException("Item not catalogued: " + name);
-                }
+                // (2026-10-22 物品名容错) 同数组分支：解析失败时错误文案带最接近候选。
+                String name = ItemNameResolver.resolve(items[0]);
                 int count = 1;
                 if (items.length == 2) {
                     try {
