@@ -641,6 +641,9 @@ public class DestroyBlockTask extends Task implements ITaskRequiresGrounded {
                         && LandHelper.isFloatingInWater(mod)
                         && WaterExitHelper.hasReachableAirExit(mod)) {
                     _waterExitLatched = true;
+                    // (2026-10-22) 喂给 WaterTrapEscapeChain 的水困证据计数
+                    // （守卫判据之一：窗口内 WATER-EXIT ≥2 次）。
+                    adris.altoclef.util.helpers.WaterRouteBlacklist.noteWaterExit();
                     if (_toLand != null) {
                         _toLand.reset();
                     } else {
