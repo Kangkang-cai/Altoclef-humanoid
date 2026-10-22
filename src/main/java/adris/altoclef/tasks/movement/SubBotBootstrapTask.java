@@ -232,6 +232,11 @@ public class SubBotBootstrapTask extends Task {
         _leader = leader;
     }
 
+    /** (2026-10-22) 对端文案用（SummaryGenerator 赶路带目的）：只读领队名。 */
+    public String getLeaderName() {
+        return _leader;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
     }

@@ -157,6 +157,30 @@ final class SummaryGenerator {
     }
 
     /**
+     * (2026-10-22 赶路带目的) 从 User Tasks 任务栈叶子向上找最近的语义父任务，
+     * 给「赶路」补目的。导航类叶子（GetToBlock/GetToChunk/GoalXZ 等）自身没有
+     * 语义，目的在上层派发者手里 —— 如 {@code SubBotBootstrapTask} 的远程接近。
+     * 未命中返回 {@code null}（调用方回落纯「赶路」）。
+     */
+    private static String findNavPurpose(TaskChain chain) {
+        try {
+            List<Task> tasks = chain.getTasks();
+            for (int i = tasks.size() - 1; i >= 0; i--) {
+                Task t = tasks.get(i);
+                if (t instanceof SubBotBootstrapTask sub) return "接近领队 " + sub.getLeaderName();
+                if (t instanceof FollowPlayerTask) return "跟随同伴";
+                if (t instanceof SearchChunksExploreTask
+                        || t instanceof SearchWithinBiomeTask) return "搜索区域";
+                if (t instanceof BiasedExploreTask || t instanceof TimeoutWanderTask) return "探索";
+                if (t instanceof CollectFoodTask) return "寻找食物";
+                if (t instanceof PickupDroppedItemTask) return "捡掉落物";
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
      * (1002 16:5x 对端要求) 细分 {@code task} 标签。链名太粗 —— User Tasks 链里跑
      * {@code @idle} 驻留时也会报"主线任务"，害对端把 idle 误判成"主线在跑"（B4/B5 误判源头）。
      *
@@ -174,7 +198,16 @@ final class SummaryGenerator {
                 if (cur == null) return "空闲";
                 if (cur instanceof IdleTask) return "待命";
                 String detail = taskToDetailLabel(cur);
-                if (detail != null) return detail;
+                if (detail != null) {
+                    // (2026-10-22 赶路带目的) 用户口径："显示给对端 LLM 需要对应文字
+                    // 说明目的，不然 LLM 不知道自己为什么往那边赶路。" 从任务栈向上
+                    // 找最近的语义父任务，把「赶路」升级成「赶路：接近领队 X」等。
+                    if ("赶路".equals(detail)) {
+                        String purpose = findNavPurpose(chain);
+                        return purpose == null ? "赶路" : "赶路：" + purpose;
+                    }
+                    return detail;
+                }
                 return "行动任务";
             }
             if (chain == null || chain.getTasks().isEmpty()) return "空闲";
