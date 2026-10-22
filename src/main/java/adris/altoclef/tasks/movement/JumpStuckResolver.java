@@ -489,7 +489,20 @@ public final class JumpStuckResolver {
                     + " player=" + mod.getPlayer().getBlockPos()
                     + " -> DestroyBlockTask");
             mod.getClientBaritone().getPathingBehavior().forceCancel();
-            return issue(mod, new DestroyBlockTask(obstacle));
+            // (2026-10-22 二修) 岸台类障碍跳过 WATER-EXIT 上岸闩锁。现场 20261022-172232:
+            // 同一水口袋 5 轮乒乓每轮 ~20s（挖障派出→0.2s 后被闩锁切去上岸→走回来→重挖）
+            // 共白烧 ~110s；而障碍在水面之上（上方非水），挖它吃不到 25x 水中减速，
+            // 闩锁在此纯属误伤。判据三条缺一不可：recentlyInWater（游泳场景）+
+            // 障碍在脚位以上 + 障碍上方非水（挖掘面在空气里）。真正的水下障碍
+            // （上方还是水）保持闩锁，配额冷却仍作兜底。
+            boolean swimLipDig = recentlyInWater(mod)
+                    && obstacle.getY() > mod.getPlayer().getBlockPos().getY()
+                    && mod.getWorld().getBlockState(obstacle.up()).getFluidState().isEmpty();
+            if (swimLipDig) {
+                Debug.logToFile("altoclef_diag.log", "[JumpStuck] swim-lip dig (skip WATER-EXIT latch) at "
+                        + obstacle.toShortString());
+            }
+            return issue(mod, new DestroyBlockTask(obstacle, swimLipDig));
         }
 
         // (2026-09-23) 无单点障碍, 但近场有植物 (脚下草丛/双格植物下半截等
