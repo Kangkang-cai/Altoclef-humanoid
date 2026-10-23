@@ -7,7 +7,7 @@ import adris.altoclef.tasks.entity.KillEntityTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.helpers.CombatMemory;
-import adris.altoclef.util.helpers.LookHelper;
+import adris.altoclef.util.helpers.HumanoidGaze;
 import adris.altoclef.util.helpers.StorageHelper;
 import adris.altoclef.util.helpers.WorldHelper;
 import adris.altoclef.util.time.TimerGame;
@@ -18,6 +18,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Optional;
 
@@ -46,8 +47,6 @@ public class FurnaceSmeltGuardTask extends Task {
     // 无威胁驻留时长: 到点重开熔炉收货/补料。产物最多在炉里多躺一个周期,
     // 这是"不盯界面"的固有代价。
     private static final double DWELL_SECONDS = 6;
-    // 扫视间隔: 每 2s 随机转向一次, 模拟真人警戒环视。
-    private static final double SCAN_INTERVAL_SECONDS = 2;
     // 离炉超过这个距离就先走回来 (追击杀完怪后可能站得远)。
     private static final double RETURN_TO_FURNACE_DISTANCE = 4;
     // (2026-09-07 击杀承诺粘性) 承诺的杀目标从感知列表消失超过该 tick 数
@@ -71,7 +70,12 @@ public class FurnaceSmeltGuardTask extends Task {
         return _activeGuardedPos;
     }
     private final TimerGame _dwellTimer = new TimerGame(DWELL_SECONDS);
-    private final TimerGame _scanTimer = new TimerGame(SCAN_INTERVAL_SECONDS);
+    // (2026-10-23 拟人头部观察) 替换旧 _scanTimer"每 2s 随机瞬转": 旧
+    // LookHelper.randomOrientation 在 yaw∈[0,360)/pitch∈[-90,90] 全域均匀随机,
+    // 会随机盯脚/盯天 + 大角度甩头, 观感呆滞 (用户点名"太呆了")。改 HumanoidGaze:
+    // 限幅平滑扫视 + 优先看附近玩家/bot/生物 + 小概率瞄一眼炉子。
+    // 锚点在 onStart 里按 _furnacePos 初始化 (构造参数可能为 null, 字段延迟赋值)。
+    private HumanoidGaze _gaze = null;
     private boolean _screenClosed = false;
     // 当前承诺击杀的目标 (killGiveUpSeconds 超时放弃后由 CombatMemory 冷却解除)。
     private Entity _committedKill = null;
@@ -85,7 +89,8 @@ public class FurnaceSmeltGuardTask extends Task {
     protected void onStart(AltoClef mod) {
         _screenClosed = false;
         _dwellTimer.reset();
-        _scanTimer.reset();
+        // (2026-10-23 拟人头部观察) 锚点 = 熔炉中心; _furnacePos 理论上可空, 空则退化纯扫视。
+        _gaze = new HumanoidGaze(_furnacePos == null ? null : Vec3d.ofCenter(_furnacePos));
         _committedKill = null;
         _committedLastSeenTick = Long.MIN_VALUE;
         _activeGuardedPos = _furnacePos;
@@ -154,13 +159,15 @@ public class FurnaceSmeltGuardTask extends Task {
             return new GetToBlockTask(_furnacePos, true);
         }
 
-        // ⑤ 扫视: 周期性随机转向, 让视觉感知覆盖四周。
-        if (_scanTimer.elapsed()) {
-            LookHelper.randomOrientation(mod);
-            _scanTimer.reset();
+        // ⑤ 扫视: (2026-10-23 拟人头部观察) HumanoidGaze 每 tick 重登记注视目标,
+        // 由 SmoothLookController 帧级平滑驱动 —— 平视扫视覆盖四周 (视觉感知语义
+        // 不变, EntityTracker 靠看到东西注册威胁), 时不时看向附近玩家/bot/生物,
+        // 小概率瞄一眼炉子。打斗/威胁派杀分支在前面已 return, 不会抢视线。
+        if (_gaze != null) {
+            _gaze.tick(mod);
         }
 
-        setDebugState("Guarding furnace, scanning surroundings");
+        setDebugState("Guarding furnace, " + (_gaze != null ? _gaze.describe() : "scanning surroundings"));
         return null;
     }
 
