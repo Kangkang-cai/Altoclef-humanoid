@@ -59,6 +59,30 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
     // BaseTimer 初始 _prevTime=0 会误判 elapsed —— onStart 没跑过绝不判完成。
     private boolean _started = false;
 
+    // ===== (2026-10-26 逃生收尾判据三条腿) "逃出来 != 安全" =====
+    // 现场 20261025-232203 (bot2 跟随 kangkang, death #2, cause=onFire)：
+    //   23:21:48 落岩浆 (inLava 瞬时 true) → 23:21:51 僵持 forceCancel →
+    //   23:21:52.499 采样 onFire=true / inLava=false / pathing=false / 零水平位移 →
+    //   23:21:53 isFinished 判 "!isInLava && !isOnFire" → Completing goal →
+    //   让位给跟随任务 → 23:22:03 死亡，坐标仍是 (88,-54,183) **一格未挪**。
+    //   23:27:46~23:28:02 同型第二次 (128,-54,205 → 204)，两次都死在原地。
+    // 两条结构性缺陷：
+    //   ① 脚下仍浸岩浆 (方块口径 inLava=false、但该格接触岩浆面) 时, MC 会周期性
+    //      重新点燃 ⇒ isOnFire 在 tick 之间抖成 false。瞬时判据把"灭了一瞬"当脱险，
+    //      与 0920 灵魂沙那次"判据被瞬时值骗过"同源；
+    //   ② 完成判据里完全没有"站位是否还危险"这一维 —— EscapeFromLavaGoal 早就把
+    //      "自身格 + 四邻无岩浆"写成了 goal，却只喂 baritone、不参与收尾（判定源分裂，
+    //      违反"判定源单一化"）。
+    // 现在：身体(不着火·不在岩浆) ∧ 站位(goal.isInGoal) ∧ 持续 OUT_OF_LAVA_GRACE_S。
+    /**
+     * 站位危险但火已灭时的硬顶：四面被岩浆围死、baritone 无路可走时，继续占 prio 100
+     * 只会把跟随/进食等链全饿死。该时刻已不掉血，放手不会造成"交回跟随任务再烧死"。
+     * 45s = 覆盖 15s 火 tick 复燃窗 + 多轮 forceCancel/垫块尝试。
+     */
+    private static final long LAVA_ESCAPE_STANCE_CAP_MS = 45000;
+    /** 连续站位危险的起点时刻（火已灭口径）；0 = 当前不处于该状态。 */
+    private long _stanceUnsafeSinceMs = 0;
+
     // ===== (2026-09-20 灵魂沙边缘浸岩浆) "贴地锚点" latch =====
     // 危险判据 (EscapeFromLavaGoal) 必须跑在一个**稳定**的坐标上。用
     // player.getBlockPos() 会撞上"瞬时判据横跳":
@@ -123,6 +147,7 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
         _started = true;
         _outOfLavaTimer.reset();
         _anchor = null;
+        _stanceUnsafeSinceMs = 0;
     }
 
     @Override
@@ -291,20 +316,46 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
-        // (2026-09-14 防火岩浆自救) 有 FIRE_RESISTANCE 时出了岩浆身上仍会带着火
-        // (防火不阻止着火状态, 只免疫伤害) → 旧的 isOnFire 判据会让任务粘着不放,
-        // prio 100 长占主链。有防火时"离开岩浆"即完成 —— 但要滞回: 游动 bob 浮出
-        // 水面的半秒不算逃生, 持续离场 OUT_OF_LAVA_GRACE_S 才收尾 (横跳修复,
-        // 见字段区注释)。无防火维持原语义: 要继续到火灭 (火还在掉血)。
+        // ===== 三条腿同时成立才收尾 (见字段区 LAVA_ESCAPE_STANCE_CAP_MS 上方注释) =====
+        // ① 身体硬闸：泡在岩浆里 —— 无论有没有防火，逃出去之前一律不算完成。
         if (mod.getPlayer().isInLava()) {
             _outOfLavaTimer.reset();
+            _stanceUnsafeSinceMs = 0;
             return false;
         }
         if (!_started) return false; // onStart 前计时器不可信 (BaseTimer 初始态)
-        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
-            return _outOfLavaTimer.elapsed();
+        // ② 身体硬闸：身上还在着火 = 还在按秒掉血，一律不算完成。
+        //    旧实现只有在"有防火"时才走滞回，无防火直接 `return !isOnFire()` —— 那
+        //    正是 20261025 两次死亡的口子：浸脚格反复点燃，抖出一个 false 帧就放行。
+        if (mod.getPlayer().isOnFire()) {
+            _outOfLavaTimer.reset();
+            _stanceUnsafeSinceMs = 0;
+            return false;
         }
-        return !mod.getPlayer().isOnFire();
+        // ③ 站位闸：自己这一格或水平四邻仍是岩浆 ⇒ 一放开就会被跟随任务带回原格
+        //    (两次现场都是"完成后一格未挪、8 秒后复燃致死")。baritone 的目标本来就是
+        //    这样的格，用它当收尾判据 = 目标与完成条件同源，不再分裂。
+        BlockPos here = standingAnchor(mod);
+        boolean stanceSafe = here != null
+                && newGoal(mod).isInGoal(here.getX(), here.getY(), here.getZ());
+        if (!stanceSafe) {
+            _outOfLavaTimer.reset();
+            long now = System.currentTimeMillis();
+            if (_stanceUnsafeSinceMs == 0) _stanceUnsafeSinceMs = now;
+            if (now - _stanceUnsafeSinceMs >= LAVA_ESCAPE_STANCE_CAP_MS) {
+                String where = here == null ? "?" : here.toShortString();
+                Debug.logMessage("[LavaEscape] 火已灭但站位仍贴岩浆 "
+                        + ((now - _stanceUnsafeSinceMs) / 1000) + "s 走不出去, 硬顶放手 at " + where);
+                Debug.logToFile("altoclef_diag.log", "[LavaEscape-Exit] stance-unsafe "
+                        + ((now - _stanceUnsafeSinceMs) / 1000) + "s, give up (onFire=false, 不掉血) at "
+                        + where + " inLava=" + mod.getPlayer().isInLava());
+                return true;
+            }
+            return false;
+        }
+        _stanceUnsafeSinceMs = 0;
+        // ④ 滞回：全场景统一 1.5s（旧行为只有防火时有，无防火走瞬时值）
+        return _outOfLavaTimer.elapsed();
     }
 
     @Override

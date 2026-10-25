@@ -49,6 +49,15 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 100, 任务连续; 而 EscapeFromLavaTask.isFinished 的离场判据不变, 真上岸后
     // 自然让位。4s 里 bot 若真上岸, 任务空转几秒无害 (isFinished 会因火灭/离场收尾)。
     private final TimerGame _wasInLavaTimer = new TimerGame(4);
+    // ===== (2026-10-26 逃出岩浆后仍被烧死) 无防火场景的整段火 tick 接管窗 =====
+    // 现场 20261025-232203 / 232802 (bot2 跟随 kangkang, death #2/#3, cause=onFire)：
+    //   两次都是"确实逃出了岩浆"(inLava=false) 但身上还在烧，血量 7.0→2.0 匀速
+    //   -1.0/次 走到 0。上面这个 4s 窗口是为"已有防火、只为吃掉游动 bob 的横跳"定的，
+    //   而**岩浆点燃的 fire ticks 是 15s** —— 4s 一过本链就不再认领，isInFire 又只认
+    //   "贴身有火方块"，于是"人还在烧、血还在掉"却没有任何保命分支接管。
+    //   修法：无防火时改用覆盖整段燃烧的窗口（20s = 15s fire ticks + 5s 余量）。
+    //   有防火维持 4s（防火不掉血，长占 prio 100 反而挡住正常任务）。
+    private final TimerGame _lavaFireBurnTimer = new TimerGame(20);
     // (2026-09-14 防火岩浆自救取证) 逃岩浆任务运行期 2s 一条诊断节流 (static:
     // 链实例重建不洗掉)。
     private static long _lastLavaEscapeLogMs = 0;
@@ -1357,9 +1366,16 @@ public class WorldSurvivalChain extends SingleTaskChain {
     private boolean isInLavaOhShit(AltoClef mod) {
         if (mod.getPlayer().isInLava()) {
             _wasInLavaTimer.reset();
+            _lavaFireBurnTimer.reset();
             return true;
         }
-        return mod.getPlayer().isOnFire() && !_wasInLavaTimer.elapsed();
+        if (!mod.getPlayer().isOnFire()) return false;
+        // 有防火：火不掉血，只吃掉游动 bob 的横跳即可（4s）。
+        if (mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+            return !_wasInLavaTimer.elapsed();
+        }
+        // 无防火：岩浆点燃 15s，必须整段接管（见 _lavaFireBurnTimer 注释）。
+        return !_lavaFireBurnTimer.elapsed();
     }
     private boolean isInFire(AltoClef mod) {
         if (mod.getPlayer().isOnFire() && !mod.getPlayer().hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
