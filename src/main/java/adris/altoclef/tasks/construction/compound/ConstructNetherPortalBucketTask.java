@@ -98,6 +98,20 @@ public class ConstructNetherPortalBucketTask extends Task {
      * 判据本体在 WorldHelper.countTotalBuckets (三形态合计, 单源)。
      */
     private static final int PORTAL_BUCKET_BUDGET = 2;
+
+    // ===== (2026-10-25 续建锚定 — 岩浆桶×8 待办#4, detail/60) =====
+    // 丢锚前的施工点记忆: 原点 100 格作废 (2026-08-23 "就近重选") 时保留, 供
+    // tryResumePartialPortal 做"供需匹配续建"。湖被自己浇瘦是主路径必然
+    // (PORTAL_FRAME=10 格 vs 湖判据下限 12 源, 每格净耗 1 源 —— 舀走=源消失,
+    // 浇出变黑曜石不回流), 丢锚后常规搜索 (复用只扫玩家附近 + isLake 过不了)
+    // 永远回不去半成品。跨维度由 _lastOriginDim 闸住 (穿越自己造的门进下界时,
+    // 旧维度原点不得续建)。
+    private BlockPos _lastOrigin;
+    private int _lastRotation;
+    private Dimension _lastOriginDim;
+    /** 续建折返上限: 超过则放弃半成品走新建 (对齐 CANDIDATE_MAX_DISTANCE 量级)。 */
+    private static final int RESUME_MAX_DISTANCE = 192;
+
     private final TimerGame _lavaSearchTimer = new TimerGame(5);
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker(5);
     private final TimeoutWanderTask _wanderTask = new TimeoutWanderTask(25);
@@ -191,6 +205,13 @@ public class ConstructNetherPortalBucketTask extends Task {
         // 建造 — 传送门与刚收集的岩浆位置脱节 (实测: 岩浆 722,64,414 但原点
         // 在 317,34,84, 相距 400+ 格)。改成 100 格, bot 远离原点后重新就近选点。
         if (_portalOrigin != null && !_portalOrigin.isWithinDistance(mod.getPlayer().getPos(), 100)) {
+            // (2026-10-25 续建锚定) 作废前保留施工点: 100 格作废的本意是"就近重选",
+            // 但 findReusablePortalStructure 只扫玩家附近 —— 丢锚后 bot 必然在
+            // 100 格外, 半成品门对它不可见。_lastOrigin 供 tryResumePartialPortal
+            // 做"供需匹配续建" (20261025 待办#4)。
+            _lastOrigin = _portalOrigin.toImmutable();
+            _lastRotation = _portalRotation;
+            _lastOriginDim = WorldHelper.getCurrentDimension();
             _portalOrigin = null;
             // 原点作废 => 复用判定与朝向一并作废, 下轮重新决定。
             _reuseMode = false;
@@ -267,6 +288,9 @@ public class ConstructNetherPortalBucketTask extends Task {
                 if (reusable != null) {
                     // 判定明细 (frames/missing) 已由 findReusablePortalStructure 打点
                     _portalOrigin = reusable;
+                    _lastOrigin = reusable.toImmutable();
+                    _lastRotation = _portalRotation;
+                    _lastOriginDim = WorldHelper.getCurrentDimension();
                     _reuseMode = true;
                     foundSpot = true;
                     // (2026-10-01 施工认领) 这扇门已归本任务施工 → 清掉它的残留
@@ -303,6 +327,9 @@ public class ConstructNetherPortalBucketTask extends Task {
                             _portalOrigin = foundPortalRegion.add(PORTAL_ORIGIN_RELATIVE_TO_REGION);
                             _reuseMode = false;
                             _portalRotation = 0;
+                            _lastOrigin = _portalOrigin;
+                            _lastRotation = 0;
+                            _lastOriginDim = WorldHelper.getCurrentDimension();
                             foundSpot = true;
                         }
                     } else {
@@ -324,6 +351,14 @@ public class ConstructNetherPortalBucketTask extends Task {
                         && SurfaceHelper.isBelowSurfaceDebounced(mod)) {
                     setDebugState("No lava lake found, returning to surface to search");
                     return new GoToSurfaceTask();
+                }
+                // (2026-10-25 续建锚定 — 待办#4) 复用 (只扫玩家附近) 与湖搜索都未命中
+                // 时, 先试"供需匹配续建"丢锚前的半成品门: 剩余门框 ≤ 附近可舀源 + 手中
+                // 岩浆桶就折返收尾, 不再要求 isLake —— 湖被自己浇瘦是主路径必然
+                // (PORTAL_FRAME=10 格, 每格净耗 1 源, 见 tryResumePartialPortal 头注)。
+                // 命中后 foundSpot=true 直接进帧循环; 供给不足留证日志走新建。
+                if (tryResumePartialPortal(mod)) {
+                    foundSpot = true;
                 }
                 // (2026-10-15 兜底出口 — 岩浆桶×8 事故) 本分支把收集任务当"探湖引擎"派发,
                 // 但旧版每 tick 无条件派发 + 子任务 isFinished 不被框架消费 (detail/01)
@@ -746,6 +781,63 @@ public class ConstructNetherPortalBucketTask extends Task {
             case 3:  return new Vec3i(-v.getZ(), v.getY(), v.getX());
             default: return v;
         }
+    }
+
+    /**
+     * (2026-10-25 续建锚定 — 岩浆桶×8 待办#4, detail/60) 丢锚后半成品的"供需匹配"续建。
+     *
+     * 背景: PORTAL_FRAME=10 格、每格净耗 1 个湖源 (舀走=源消失, 浇出变黑曜石不回流),
+     * 而湖判据下限是 12 源 ⇒ 任何 12~22 源的湖浇到中途必然跌破 isLake。正常施工靠
+     * _portalOrigin 持久撑过 (帧循环只看 hasItem, 不看湖判据), 但原点 100 格作废后:
+     * 复用搜索 (findReusablePortalStructure 只扫玩家附近) 看不见 100 格外的半成品,
+     * 湖搜索又过不了 isLake → 只能弃建重建 (浪费已浇门框与铁桶)。
+     *
+     * 本方法 = 在作废前保留的施工点上, 以世界方块为 ground truth 核验门框现状,
+     * 满足"有半成品 (1≤已浇<10) 且剩余需求 ≤ 附近可舀供给 + 手中岩浆桶"就重新锚定
+     * 折返收尾 —— 判据从"形态匹配 (isLake)"收敛到"供需匹配"。供给不足则不折返
+     * (折返到一半也会干, 留证走新建); 已完整门 (10/10) 交给复用路径, 不在此处理。
+     *
+     * 与 1015/1016 修复的衔接: 续建不依赖湖记忆 (它会被 validateLavaLakeCenter
+     * 负反馈作废, 属预期), 也不依赖兜底收集 (帧循环自会按需舀取, 数量由帧数决定)。
+     *
+     * @return true = 已重新锚定 (_portalOrigin/_portalRotation 已落), 调用方置
+     *         foundSpot 直接进帧循环; false = 无半成品 / 跨维度 / 超折返距离 /
+     *         供给不足 (留证日志), 走常规搜索。
+     */
+    private boolean tryResumePartialPortal(AltoClef mod) {
+        if (_lastOrigin == null || _lastOriginDim != WorldHelper.getCurrentDimension()) return false;
+        BlockPos origin = _lastOrigin;
+        if (mod.getPlayer().getBlockPos().getSquaredDistance(origin)
+                > (double) RESUME_MAX_DISTANCE * RESUME_MAX_DISTANCE) {
+            return false;
+        }
+        // 门框现状核验: ground truth = 世界方块, 不信记忆进度 (可能被炸/被拆/被浇)
+        int obsidian = 0;
+        for (Vec3i frameOff : PORTAL_FRAME) {
+            if (mod.getWorld().getBlockState(origin.add(rotateY(frameOff, _lastRotation)))
+                    .getBlock() == Blocks.OBSIDIAN) {
+                obsidian++;
+            }
+        }
+        if (obsidian == 0 || obsidian >= PORTAL_FRAME.length) return false;
+        int remaining = PORTAL_FRAME.length - obsidian;
+        // 供需匹配: 附近可舀源 + 手中岩浆桶 ≥ 剩余门框。供给以原点为中心的
+        // CONFIRM 盒计 (门距湖 5-8 格, 盒必盖住湖面)。
+        int supply = LavaLakeHelper.countExposedLavaSourcesAround(mod, origin);
+        int buckets = mod.getItemStorage().getItemCount(Items.LAVA_BUCKET);
+        if (remaining > supply + buckets) {
+            Debug.logMessage("(Portal resume declined: site " + origin.toShortString()
+                    + " frames=" + obsidian + "/" + PORTAL_FRAME.length
+                    + " but supply=" + supply + " buckets=" + buckets + " — build new)");
+            return false;
+        }
+        _portalOrigin = origin;
+        _portalRotation = _lastRotation;
+        _reuseMode = false;
+        Debug.logMessage("(Lava anchor: resume partial portal at " + origin.toShortString()
+                + " rot=" + _lastRotation + " frames=" + obsidian + "/" + PORTAL_FRAME.length
+                + " supply=" + supply + " buckets=" + buckets + ")");
+        return true;
     }
 
     /**
