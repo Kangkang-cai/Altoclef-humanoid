@@ -1022,8 +1022,28 @@ public class AltoClef implements ModInitializer {
     private boolean _lavaNavSuppressActive = false;
     private boolean _lavaNavNoBlockWarned = false;
 
-    /** 本保险是否适用: 下界全程 + 主世界深层 (y ≤ LAVA_NAV_OVERWORLD_MAX_Y); 末地无岩浆。 */
-    private boolean lavaNavApplies() {
+    // ===== (2026-10-26 bot2 走边缘失足掉岩浆) 谨慎走位闸 =====
+    // 上面那条"关斜向升格"有垫料门槛（≥8 块，否则会把 bot 冻在原地），于是
+    // **空手/垫料不足的子 bot 即使在岩浆边也照旧斜跳 + 疾跑 + 跑跳** —— 现场
+    // 20261025 bot2 (Fabric-2, role=sub) diag 里 23:14:17~19 连续 6 条
+    // "danger detected but fewer than 8 baritone-placeable blocks — keeping diagonal
+    // ascend ON"，而它正是"跟着 kangkang、老在路线边缘掉进岩浆"的那台。
+    // 关疾跑/跑跳**不依赖垫块**（不需要替代路线，只是走得稳），所以单独一条闸：
+    // 判据与"关斜跳"同源（danger = 内圈岩浆 ∨ 路径斜跳落点危险），但不设垫料门槛。
+    // 代价：危险区赶路变慢（约 30%）—— 与"掉进岩浆必死"相比可接受。
+    // 只在**边沿**请求重算：baritone 只在算路时读这三个开关，已算好的路径不会变。
+    private boolean _lavaNavCautiousActive = false;
+
+    /**
+     * (2026-10-26) 危险区谨慎走位是否生效。供其它**也写 allowSprint** 的任务
+     * ({@code CustomBaritoneGoalTask} 的上/下水切换与 onStop 恢复) 做与门 ——
+     * 否则它们写回的 true 会在同一 tick 内把本闸的 false 冲掉。
+     */
+    public boolean isLavaNavCautious() {
+        return _lavaNavCautiousActive;
+    }
+
+    /** 本保险是否适用: 下界全程 + 主世界深层 (y ≤ LAVA_NAV_OVERWORLD_MAX_Y); 末地无岩浆。 */    private boolean lavaNavApplies() {
         adris.altoclef.util.Dimension dim = adris.altoclef.util.helpers.WorldHelper.getCurrentDimension();
         if (dim == adris.altoclef.util.Dimension.NETHER) return true;
         return dim == adris.altoclef.util.Dimension.OVERWORLD
@@ -1071,7 +1091,6 @@ public class AltoClef implements ModInitializer {
             if (!pathHit) {
                 _lavaNavReplanStreak = 0;
             }
-
             boolean suppress = _lavaNavSuppressActive;
             // 三类"不需要保守导航"的情形:
             //   ① 有防火效果 (2026-09-19 17:20 用户"喝药水的情况就不要惩罚");
@@ -1085,6 +1104,16 @@ public class AltoClef implements ModInitializer {
             boolean building = adris.altoclef.tasks.resources.CollectBlazeRodsTask.isEnclosureBuildWorkActive();
             boolean flying = getPlayer().getAbilities().flying || getPlayer().isCreative();
             boolean exempt = fireRes || building || flying;
+            // ===== (2026-10-26) 谨慎走位闸：关疾跑/跑跳，**不设垫料门槛** =====
+            // 与下面"关斜跳"同判据 (danger)，但刻意不共用 suppress：关斜跳需要 ≥8 块
+            // 垫料替代路线，而关疾跑/跑跳什么都不需要 —— 空手子 bot 正是"该走稳却照旧
+            // 冲过边缘"的那批 (见字段区 _lavaNavCautiousActive 注释的 23:14 现场)。
+            // 只喂给 baritone 下一次算路，所以边沿要主动请求重算。
+            boolean cautious = danger && !exempt;
+            if (cautious && !_lavaNavCautiousActive) {
+                requestLavaNavReplan();
+            }
+            _lavaNavCautiousActive = cautious;
             if (!suppress) {
                 if (danger && !exempt) {
                     if (adris.altoclef.util.helpers.PillarJumpHelper.countBaritonePlaceable(this) >= LAVA_NAV_MIN_PLACEABLE) {
@@ -1140,6 +1169,15 @@ public class AltoClef implements ModInitializer {
         getClientBaritoneSettings().allowDiagonalAscend.value =
                 !(_lavaNavSuppressActive
                         || adris.altoclef.util.helpers.DiagonalJumpFailDetector.isSuppressing());
+        // (2026-10-26) 谨慎走位：危险区同时降级疾跑与跑跳，减少"走/冲过方块边缘"的
+        // 惯性溢出。与上一条同样每 tick 强制写，防任务栈 applyState 写回旧值。
+        // 写 allowSprint 时必须连带尊重"在水中"(CustomBaritoneGoalTask 的既有语义)——
+        // 否则危险解除那一拍会把水中疾跑一起打开，属于本闸新引入的绕过。
+        boolean cautiousNav = _lavaNavCautiousActive;
+        boolean inWaterNav = getPlayer() != null && getPlayer().isTouchingWater();
+        getClientBaritoneSettings().allowSprint.value = !cautiousNav && !inWaterNav;
+        getClientBaritoneSettings().allowParkour.value = !cautiousNav;
+        getClientBaritoneSettings().allowParkourAscend.value = !cautiousNav;
     }
 
     /**

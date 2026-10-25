@@ -175,7 +175,9 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         _strictWalkBestDist = Double.MAX_VALUE;
         _wasInWater = mod.getPlayer().isTouchingWater();
         // (2026-08-26 游泳疾跑) 上/下水状态统一由 onTick 切换 allowSprint。
-        mod.getClientBaritoneSettings().allowSprint.value = !_wasInWater;
+        // (2026-10-26) 与 LavaNav 谨慎走位做与门：危险区不允许这里写回 true。
+        mod.getClientBaritoneSettings().allowSprint.value =
+                !_wasInWater && !mod.isLavaNavCautious();
     }
 
     @Override
@@ -192,7 +194,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         boolean inWater = mod.getPlayer().isTouchingWater();
         if (inWater != _wasInWater) {
             _wasInWater = inWater;
-            mod.getClientBaritoneSettings().allowSprint.value = !inWater;
+            mod.getClientBaritoneSettings().allowSprint.value =
+                    !inWater && !mod.isLavaNavCautious();
         }
         if (inWater) {
             mod.getInputControls().release(Input.SPRINT);
@@ -460,7 +463,8 @@ public abstract class CustomBaritoneGoalTask extends Task implements ITaskRequir
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();
         // (2026-08-26 游泳疾跑) 恢复 baritone 疾跑 (防停在水中时 allowSprint
         // 停留在 false, 上岸后不能疾跑)。
-        mod.getClientBaritoneSettings().allowSprint.value = true;
+        // (2026-10-26) 危险区不恢复：本任务结束时 LavaNav 可能正处在谨慎走位态。
+        mod.getClientBaritoneSettings().allowSprint.value = !mod.isLavaNavCautious();
         _wasInWater = false;
     }
 
