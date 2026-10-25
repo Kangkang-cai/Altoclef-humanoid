@@ -773,8 +773,69 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         }
         // Every direction we tried was failed/water: count it as a failed step so
         // we eventually give up instead of spinning in place forever.
+        //
+        // ===== (2026-10-26 bot1 原地 25 分钟零位移) 短步逃生兜底 =====
+        // 现场 20261025-222222 (Fabric-1 / bot1)：玩家恒定 (92,66,405)，每 0.55s 一轮
+        // "Task STOP/START <Biased exploration> took≈550ms"。550ms ≈ 11 tick，正好是
+        // _failCounter 每 tick +1 涨过 MAX_FAIL_COUNT(10) 的时长 —— isFinished →
+        // KillAndLootTask 重建【全新实例】(isEqual 是 identity, 状态清零) → 再全灭，
+        // 25 分钟零位移（restart_guard 记 横跳持续=1504s）。
+        // diag 实锤：DRY-LANDING 45347 条 / RIVER-CAP 44882 条，候选全在 48 格外且
+        // 是水（span=40~42 > 24 一律拒）—— 48 格尺度上这片区域确实没有干目标。
+        // 兜底：步长退到 8/12/16 近距离重采，两级放宽：
+        //   ① 先要求落点列在步行高度窗内无水（与 maxWaterSpanAlongLine 同口径）；
+        //   ② ① 全灭时才允许"湿但非海洋" —— 站在水中央窄岛/海岸上，不下水就永远
+        //      出不去。海洋闸（0916 定论"下海=无效探索"）与宽水闸在 ① 不放宽，
+        //      ② 仍拒海洋，只放开"窄水/浅滩"。
+        // 目的单一：让 bot 至少挪一步，打破"原地必失败 → 重建 → 同样失败"的自激环。
+        BlockPos shortStep = findShortEscapeStep(mod, pos);
+        if (shortStep != null) {
+            _failCounter = 0; // 有可行近点 = 这一步有效，不推向"放弃"
+            return shortStep;
+        }
+        // 兜底也全灭：该位置确实被水围死。记一条跨实例可见的站点失败，便于
+        // 事后定位（每轮重建只打一次，不刷屏）。
+        Debug.logToFile("altoclef_diag.log", "[EXPLORE-BLOCKED] no target at any scale from "
+                + mod.getPlayer().getBlockPos().toShortString() + " y=" + pos.y);
         _failCounter++;
         Debug.logMessage("Explore found no dry target direction, counting as a failed step.");
+        return null;
+    }
+
+    /** 短步逃生兜底的步长表（远→近只影响命中率，从小到大扫）。 */
+    private static final double[] SHORT_ESCAPE_STEPS = {8, 12, 16};
+
+    /**
+     * (2026-10-26) 兜底选点：见调用处注释。返回 null = 8/12/16 三档 × 8 方向 ×
+     * 两级放宽全部无解。不写 {@code _failedTargets}：真正的到达判定由 {@code _currentTarget}
+     * 负责，写进去反而会把后续同方向近点永久拉黑。
+     */
+    private BlockPos findShortEscapeStep(AltoClef mod, Vec3d pos) {
+        int yRef = (int) Math.floor(pos.y);
+        for (boolean allowWet : new boolean[]{false, true}) {
+            for (double d : SHORT_ESCAPE_STEPS) {
+                for (int i = 0; i < 8; ++i) {
+                    double a = i * (Math.PI / 4);
+                    int x = (int) Math.floor(pos.x + Math.cos(a) * d);
+                    int z = (int) Math.floor(pos.z + Math.sin(a) * d);
+                    BlockPos probe = new BlockPos(x, yRef, z);
+                    if (!mod.getChunkTracker().isChunkLoaded(probe)) continue;
+                    if (!allowWet && columnWetNearY(mod, x, z, yRef)) continue;
+                    int y = _foodExplore
+                            ? surfaceYNoLeavesAt(mod, x, z, yRef)
+                            : surfaceYAt(mod, x, z, yRef);
+                    BlockPos cand = new BlockPos(x, y, z);
+                    if (_failedTargets.contains(cand) || isUnreachable(cand)) continue;
+                    if (isTargetOcean(mod, cand)) continue;
+                    Debug.logToFile("altoclef_diag.log",
+                            "[EXPLORE-SHORT-STEP] d=" + (int) d + " bearing="
+                                    + (int) Math.toDegrees(a) + " wet=" + allowWet
+                                    + " -> " + cand.toShortString()
+                                    + " player=" + mod.getPlayer().getBlockPos().toShortString());
+                    return cand;
+                }
+            }
+        }
         return null;
     }
 
