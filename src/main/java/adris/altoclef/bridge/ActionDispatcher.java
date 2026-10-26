@@ -15,6 +15,9 @@ import adris.altoclef.tasks.misc.SleepThroughNightTask;
 import adris.altoclef.tasks.misc.WaitForDawnTask;
 import adris.altoclef.tasks.movement.DefaultGoToDimensionTask;
 import adris.altoclef.tasks.movement.FollowAndWorkTask;
+import adris.altoclef.tasks.movement.GoToStrongholdPortalTask;
+import adris.altoclef.tasks.movement.LocateDesertTempleTask;
+import adris.altoclef.tasks.movement.ShelterAndRecoverTask;
 import adris.altoclef.tasks.movement.SubBotBootstrapTask;
 import adris.altoclef.tasks.movement.FollowPlayerTask;
 import adris.altoclef.tasks.movement.IdleTask;
@@ -22,6 +25,7 @@ import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasks.movement.GetToXZTask;
 import adris.altoclef.tasks.movement.GetToYTask;
 import adris.altoclef.tasks.movement.PickupDroppedItemTask;
+import adris.altoclef.tasks.resources.CollectFoodTask;
 import adris.altoclef.tasks.speedrun.BeatMinecraft2Task;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.tasksystem.TaskChain;
@@ -114,7 +118,7 @@ final class ActionDispatcher {
      * （结束的顶层任务类型 == 该 token 期望的任务类型），匹配不上宁可丢弃，交对端超时兜底。
      */
     private static final Set<String> TASK_ACTIONS = Set.of("goto", "follow", "give", "get", "equip",
-            "pickup");
+            "pickup", "food", "shelter", "locate_structure");
             // (2026-10-12 回执缺口修补) pickup 补进任务型集合 —— 1012 自查发现 @pickup 此前不在
             // TASK_ACTIONS/INSTANT/HOLD 任何一个集合：不登记 pending ⇒ 永远收不到 action_done
             // （pollMatching 的 pickup case 是死代码）、不顶替旧行动、onClientTick 无进度探针。
@@ -628,6 +632,13 @@ final class ActionDispatcher {
             // (getSquashedItemTask→CataloguedResourceTask extends ResourceTask) 都汇于 ResourceTask。
             case "get" -> finished instanceof ResourceTask;
             case "equip" -> finished instanceof EquipArmorTask;
+            // (2026-10-26) food：CollectFoodTask 本身即用户任务根（子任务在内部 return）。
+            case "food" -> finished instanceof CollectFoodTask;
+            // (2026-10-26) shelter：ShelterAndRecoverTask 无参、三阶段硬超时，必定结束。
+            case "shelter" -> finished instanceof ShelterAndRecoverTask;
+            // (2026-10-26) locate_structure：LocateStructureCommand 的两个分支根任务。
+            case "locate_structure" -> finished instanceof GoToStrongholdPortalTask
+                    || finished instanceof LocateDesertTempleTask;
             default -> false;
         };
     }
@@ -858,6 +869,10 @@ final class ActionDispatcher {
                 // (2026-10-12) pickup 与 get 同口径：背包计数即进度（捡到一个涨一个）。
                 case "pickup" -> probePickup(prefix);
                 case "equip" -> new Probe("equip", prefix + "穿戴护甲中", null);
+                // (2026-10-26) 第二批通用探针：任务自报的 debugState 变 = 在推进。
+                case "food" -> probeGeneric("food", prefix, "收集食物中");
+                case "shelter" -> probeGeneric("shelter", prefix, "就地避难中");
+                case "locate_structure" -> probeGeneric("locate_structure", prefix, "寻找结构中");
                 default -> null;
             };
         } catch (Throwable t) {
@@ -1024,6 +1039,27 @@ final class ActionDispatcher {
         }
         String zh = itemZh(_activeItemToken);
         return new Probe("pickup|" + have, prefix + "捡拾中：" + zh + "（背包已有 " + have + "）", null);
+    }
+
+    /**
+     * (2026-10-26) 通用任务探针：以任务自报的 debugState 作为进度键。
+     * food / shelter / locate_structure 没有像背包计数那样稳定的量纲（食物种类不定、
+     * 避难是 BUILD→HEAL→OPEN 三阶段、找结构本身是长途寻路），debugState 已覆盖各任务的
+     * 关键阶段（"Shelter: building wall 3/5" / "recovering (health 14)" / "Collecting food"
+     * / 寻路细节）—— 变了即视为在推进。长时间不变按 BLOCKED_SEC 报 blocked，不判 failed
+     * （远征找不到食物/结构是常态，留给对端超时与 LLM 决策）。
+     */
+    private Probe probeGeneric(String token, String prefix, String zhLabel) {
+        Task top = null;
+        try {
+            var chain = _mod.getUserTaskChain();
+            top = chain == null ? null : chain.getCurrentTask();
+        } catch (Throwable ignored) {
+        }
+        String state = top == null ? "" : safeDebugState(top);
+        String shown = clip(state, 40);
+        String detail = prefix + zhLabel + (shown == null || shown.isEmpty() ? "" : "（" + shown + "）");
+        return new Probe(token + "|" + state, detail, null);
     }
 
     // ---- 进度探针用的小工具（全部 try/catch，绝不把异常抛进 tick）----

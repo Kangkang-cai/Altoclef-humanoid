@@ -53,6 +53,8 @@ public class AltoClefCommands {
                 // (2026-10-07 交付闭环) 走过去捡起附近地上的指定物品 —— 接收方 bot 侧入口，
                 // 由给方交付完成后经 PeerCommandSender 自动调用 (bridge 白名单)。
                 new PickupCommand(),
+                // (2026-10-26) 就地封墙避难 + 回血再开洞 (ShelterAndRecoverTask, bridge 白名单)。
+                new ShelterCommand(),
                 // (2026-10-07 HUD 运行时开关) 临时隐藏左上角任务链 overlay (Alt+H 同效)。
                 new HudCommand(),
                 // (2026-10-10) 主线干预伪命令的聊天栏入口：转发 BridgeHttpServer.dispatchPseudoFromChat,
