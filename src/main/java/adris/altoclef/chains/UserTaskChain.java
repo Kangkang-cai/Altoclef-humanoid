@@ -83,6 +83,14 @@ public class UserTaskChain extends SingleTaskChain {
         if (!BotRole.isSub()) return;
         String leader = BridgeConfig.getInstance().leader;
         if (leader == null || leader.isBlank()) return;
+        // (2026-10-29 审查补充) 这条自启路径【不经】ActionDispatcher.resumeMainline,
+        // 而那边才是 36f27ba3 挂的解闩点; 但 TaskRunner.disable() 的上闩是无条件的
+        // (每次任务结束都置 true)。不在这里补一次, 就会出现"bot 重新跑起来、录制
+        // 永久停"——即 36f27ba3 想修的那个症状换一条入口复现。
+        try {
+            adris.altoclef.record.RecordManager.onBotResumed();
+        } catch (Throwable ignored) {
+        }
         runTask(mod, new SubBotBootstrapTask(leader.trim()), null);
     }
 

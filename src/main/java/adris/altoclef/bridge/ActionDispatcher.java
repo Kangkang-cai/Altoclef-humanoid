@@ -472,8 +472,9 @@ final class ActionDispatcher {
                 }
                 _paused = false;
                 // (2026-10-29) 按住态(idle/sleep)结束 → 上一步的 TaskRunner.disable()
-                // 已经把录制收尾并上了"停 bot"闩；这里要回主线，等于"会话继续"，
-                // 必须同步解闩，否则主线跑起来、录制永久停（现场 20261025-222222）。
+                // 已经把录制收尾并上了"停 bot"闩；这里要回主线，必须同步解闩，
+                // 否则主线跑起来、录制永久停（现场 20261025-222222）。
+                // 注意: 解闩后是【切新 -rN 段】而非续写同一会话（见 RecordManager.onBotResumed）。
                 adris.altoclef.record.RecordManager.onBotResumed();
                 _mod.runUserTask(new SubBotBootstrapTask(leader.trim()));
                 return true;

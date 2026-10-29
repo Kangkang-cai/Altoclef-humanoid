@@ -404,6 +404,13 @@ public final class RecordManager {
      *
      * 与 {@code @stop} 的区别：{@code @stop}/Alt+U 不走 resumeMainline ⇒ 仍上闩，
      * 09-17 的原始意图（停 bot 不切分会话）不变。
+     *
+     * <p><b>(2026-10-29 审查修正) 措辞纠正</b>：解闩<b>不等于"会话继续"</b>。
+     * {@link #onBotStopped()} 已经调过 {@link #onSessionEnd()} 把 {@code _frames} 收尾，
+     * 所以解闩后下一个 tick 走 {@link #tick()} → {@link #startSession()}，
+     * {@code _sessionIndex++} ⇒ 记录落到<b>新的 {@code -rN} 目录</b>，{@code _seq} 从 0 重来。
+     * 真实语义是"恢复录制，但切新段"，不是"续写同一会话"。依赖"单目录=单次运行"的
+     * 离线收割脚本要注意这一点。</p>
      */
     public static void onBotResumed() {
         _pausedAfterStop = false;

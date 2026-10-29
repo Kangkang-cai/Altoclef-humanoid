@@ -88,9 +88,21 @@ AltoClef.onClientTick()
 13 分钟空任务 (16183 帧全是 `User Tasks` 无叶子)。
 
 所以收尾与自动开录是解耦的: `TaskRunner.disable()` 走 `RecordManager.onBotStopped()`
-(= 收尾 + 上 `_pausedAfterStop` 闩), 闩着时 `tick()` 直接返回。解除闩只有两条路:
-`@record on` (`clearDisabled`) 或离开世界再进 (`!inGame()` 分支会清闩) —— 后者语义不变:
-**一个世界访问 = 一个会话**。
+(= 收尾 + 上 `_pausedAfterStop` 闩), 闩着时 `tick()` 直接返回。
+
+解除闩的四条路 (2026-10-29 更新, 原为两条):
+
+| 出口 | 触发 | 结果 |
+|---|---|---|
+| `@record on` (`clearDisabled`) | 人工 | 开新会话段 |
+| 离开世界再进 (`!inGame()` 清闩) | 人工 | 开新会话段, **一个世界访问 = 一个会话** |
+| `ActionDispatcher.resumeMainline()` 两个分支 | `@idle`/`@sleep` 到期、桥命令动作完成 | 解闩 → **切新 `-rN` 段** |
+| `UserTaskChain.maybeStartSubBotBootstrap()` | 次 bot 自启 (每 tick 检查) | 解闩 → **切新 `-rN` 段** |
+
+⚠ 关键语义: 后两条解闩**不是"续写同一会话"**。`onBotStopped()` 已经 `onSessionEnd()`
+收尾, 解闩后下一 tick 必 `startSession()`、`_sessionIndex++`, `_seq` 从 0 重来。
+所以"停一次 bot 再自动恢复"必然多一个 `-rN` 目录; 依赖「单目录 = 单次运行」的离线
+收割脚本要按 `meta.json` 的会话序号聚合, 不能按目录数计运行次数。
 
 ---
 
