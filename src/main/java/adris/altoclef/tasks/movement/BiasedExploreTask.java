@@ -108,6 +108,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private static final int MAX_FAIL_COUNT = 10;
     // Distance to consider a step "arrived".
     private static final double ARRIVED_DISTANCE = 3;
+    // (2026-10-29 审查) 锥内全灭后"只能靠短步挪"的连续轮数阈值: 到这一步才认定
+    // 该 bias 目标不值得再追。见 chooseNewTarget 尾部注释 —— 拉黑原先写在短步
+    // 兜底之前, 会把"48 格尺度没落点、绕一下其实能到"的可达目标提前封 5 分钟。
+    private static final int CONE_FAIL_ROUNDS_BEFORE_BLACKLIST = 3;
 
     // ===== (2026-09-17 目标作废时机 + 步长截断 + 多步逼近) 见类注释第三节 =====
     // 判定"真的走到 bias 目标了"的距离。只有玩家进到这个距离内, 才把该目标记为已访问。
@@ -230,6 +234,9 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private int _biasHops;
     private Vec3d _origin;
     private int _failCounter;
+    // 锥内全灭、但还能靠短步挪开时的连续轮数 (biased 步成功即清零)。
+    // 只有连续 CONE_FAIL_ROUNDS_BEFORE_BLACKLIST 轮都这样, 才判该目标过不去。
+    private int _coneFailRounds;
     private boolean _lastWasBiased;
     // True once we steered towards at least one bias target. Used to tell
     // "no targets ever existed" (keep random-exploring) apart from "all targets
@@ -276,6 +283,24 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 + " player=" + (mod.getPlayer() != null ? mod.getPlayer().getBlockPos().toShortString() : "?"));
     }
 
+    /**
+     * 锥内全灭判定某 bias 目标够不着: 写 static 拉黑表 + 清空逼近状态。
+     * 只清 _currentBiasTarget 不够 —— _currentBiasTier/_biasHops/_lastWasBiased 必须
+     * 一起清, 否则 [BiasStep] 会打出 "biased target=none" 这种自相矛盾的行
+     * (与 surface-exit 分支的规范清空写法对齐)。
+     */
+    private void blacklistBiasTarget(AltoClef mod, String reason) {
+        if (_currentBiasTarget == null) return;
+        markUnreachable(_currentBiasTarget, mod);
+        // 带 reason 的 [BiasStep] 行: 区分"锥内全灭"与"步超时"两种拉黑来源 (验证用)。
+        logBiasStep(mod, _currentBiasTarget, -1, -1, reason + ", bias target blacklisted");
+        _currentBiasTarget = null;
+        _currentBiasTier = null;
+        _biasHops = 0;
+        _lastWasBiased = false;
+        _coneFailRounds = 0;
+    }
+
     /** 该目标是否仍在拉黑期内。过期即顺手移除 (惰性清理)。 */
     private static boolean isUnreachable(BlockPos target) {
         if (target == null || _unreachableTargets.isEmpty()) return false;
@@ -307,6 +332,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _origin = mod.getPlayer().getPos();
         _progressChecker.reset();
         _failCounter = 0;
+        _coneFailRounds = 0;
         _currentTarget = null;
         _currentBiasTarget = null;
         _currentBiasTier = null;
@@ -783,6 +809,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
             // (2026-09-17) 只有真的朝 bias 目标走的步才算一跳 (随机抖动步不计),
             // 跳数到 BIAS_MAX_HOPS_PER_TARGET 就作废当前目标 (见 onTick 到达分支)。
             if (_lastWasBiased) ++_biasHops;
+            _coneFailRounds = 0; // 成功朝目标走了一步 ⇒ 锥内仍有可行方向, 重新计数
             logBiasStep(mod, candidate, biasDist, stepLen, locked ? "locked" : null);
             return candidate;
         }
@@ -809,19 +836,35 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         // 目标、同一个 24° 扇区"。现场 20261025-222222 的 12 次 attempt 全部是
         // toTarget ± BIAS_ANGLE_DEG(12°) 生成的 —— 12 个候选其实挤在 24° 里，全灭
         // 的语义是"这个目标沿这个方向确实过不去"，不是"随便换条路就行"。
-        // 全灭时把它记进 static 拉黑表（TTL 6000t=5min，上限 512），父任务 0.55s 后
-        // 重建出的【新实例】pickBiasedTarget 就会跳过它 → 换目标 = 换方向。
+        // 判定为"目标过不去"时才记进 static 拉黑表（TTL 6000t=5min，上限 512），父任务
+        // 0.55s 后重建出的【新实例】pickBiasedTarget 就会跳过它 → 换目标 = 换方向。
         // 保留 TTL 是因为目标本身可能可达（绕路过河），5 分钟后允许重试。
-        if (_lastWasBiased && _currentBiasTarget != null) {
-            markUnreachable(_currentBiasTarget, mod);
-            _currentBiasTarget = null;
-            _currentBiasTier = null;
-            _biasHops = 0;
-        }
+        //
+        // (2026-10-29 审查修正) 拉黑原先写在短步兜底【之前】—— 但"12 次全灭"只证明
+        // "48 格尺度上这条锥里没有干落点", 不证明目标到不了: 候选被拒的原因里混着
+        // AIR-TARGET / RIVER-CAP / _failedTargets 这些【落点尺度】闸门。可达目标被
+        // 提前封 5 分钟会连续误伤, 每 0.55s 重建一次就可能新增一个键(上限 512),
+        // 几分钟就能把整池目标抽干。现改成两级判定:
+        //   ① 短步兜底(8/12/16)也全灭 ⇒ 该位置真被围死 ⇒ 立刻拉黑;
+        //   ② 短步能走, 但连续 CONE_FAIL_ROUNDS_BEFORE_BLACKLIST 轮都只能靠短步挪
+        //      ⇒ 目标仍然过不去 ⇒ 也拉黑(否则目标永不放弃, bot 退化成碎步乱走)。
+        boolean coneExhausted = _lastWasBiased && _currentBiasTarget != null;
         BlockPos shortStep = findShortEscapeStep(mod, pos);
         if (shortStep != null) {
+            if (coneExhausted) {
+                if (++_coneFailRounds >= CONE_FAIL_ROUNDS_BEFORE_BLACKLIST) {
+                    blacklistBiasTarget(mod, "cone exhausted " + _coneFailRounds
+                            + " rounds, short-step only");
+                }
+            } else {
+                _coneFailRounds = 0;
+            }
             _failCounter = 0; // 有可行近点 = 这一步有效，不推向"放弃"
             return shortStep;
+        }
+        // 短步也全灭 ⇒ 该位置确实被围死, 目标确实过不去, 立即拉黑。
+        if (coneExhausted) {
+            blacklistBiasTarget(mod, "cone exhausted, no short step either");
         }
         // 兜底也全灭：该位置确实被水围死。记一条跨实例可见的站点失败，便于
         // 事后定位（每轮重建只打一次，不刷屏）。
