@@ -389,6 +389,26 @@ public final class RecordManager {
         onSessionEnd();
     }
 
+    /**
+     * (2026-10-29) 按住态自然结束、回主线之前调用：只解"停 bot"闩，不动
+     * {@code _disabled}/{@code _errors}（那是出错自禁用，与"人有没有停 bot"无关）。
+     *
+     * 为什么需要它：{@code @idle}/{@code @sleep} 是"按住态但有自然终点"。到期时
+     * {@code UserTaskChain.onTaskFinish} 判 {@code shouldIdle=false}（idleCommand 为空）
+     * → {@code TaskRunner.disable()} → 本类 {@link #onBotStopped()} 上闩；随后
+     * {@code ActionDispatcher} 才 resumeMainline 把主线拉起来。顺序上 disable 恒在
+     * resume 之前 ⇒ 主线回来了、录制却永久停（闩只在 {@code @record on} 或离开世界时清）。
+     * 现场 20261025-222222: 乔乔 22:52:08 发 {@code @idle 5}，22:52:13
+     * "[Record] 会话结束 frames=22282"，之后主线自启却 36 分钟零帧，正好错过 bot1
+     * 零位移卡死段（22:59:47–23:29:00）。
+     *
+     * 与 {@code @stop} 的区别：{@code @stop}/Alt+U 不走 resumeMainline ⇒ 仍上闩，
+     * 09-17 的原始意图（停 bot 不切分会话）不变。
+     */
+    public static void onBotResumed() {
+        _pausedAfterStop = false;
+    }
+
     /** 会话收尾: 排空队列、补齐 gzip 尾部、写 meta 的结束统计。幂等。 */
     public static void onSessionEnd() {
         if (_frames == null) return;

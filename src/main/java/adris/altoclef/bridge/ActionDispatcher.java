@@ -471,6 +471,10 @@ final class ActionDispatcher {
                     return false;
                 }
                 _paused = false;
+                // (2026-10-29) 按住态(idle/sleep)结束 → 上一步的 TaskRunner.disable()
+                // 已经把录制收尾并上了"停 bot"闩；这里要回主线，等于"会话继续"，
+                // 必须同步解闩，否则主线跑起来、录制永久停（现场 20261025-222222）。
+                adris.altoclef.record.RecordManager.onBotResumed();
                 _mod.runUserTask(new SubBotBootstrapTask(leader.trim()));
                 return true;
             }
@@ -480,6 +484,8 @@ final class ActionDispatcher {
             return false;
         }
         _paused = false;
+        // (2026-10-29) 同上：回主线前解录制的"停 bot"闩。
+        adris.altoclef.record.RecordManager.onBotResumed();
         _mod.runUserTask(new BeatMinecraft2Task());
         return true;
     }
