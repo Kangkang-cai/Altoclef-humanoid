@@ -788,6 +788,20 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         //      出不去。海洋闸（0916 定论"下海=无效探索"）与宽水闸在 ① 不放宽，
         //      ② 仍拒海洋，只放开"窄水/浅滩"。
         // 目的单一：让 bot 至少挪一步，打破"原地必失败 → 重建 → 同样失败"的自激环。
+        //
+        // ===== (2026-10-29 bot1 锥内全灭 → bias 目标拉黑) =====
+        // 上一条短步兜底只解决"本 tick 挪一步"，解决不了"下一轮重建后仍然选回同一个
+        // 目标、同一个 24° 扇区"。现场 20261025-222222 的 12 次 attempt 全部是
+        // toTarget ± BIAS_ANGLE_DEG(12°) 生成的 —— 12 个候选其实挤在 24° 里，全灭
+        // 的语义是"这个目标沿这个方向确实过不去"，不是"随便换条路就行"。
+        // 全灭时把它记进 static 拉黑表（TTL 6000t=5min，上限 512），父任务 0.55s 后
+        // 重建出的【新实例】pickBiasedTarget 就会跳过它 → 换目标 = 换方向。
+        // 保留 TTL 是因为目标本身可能可达（绕路过河），5 分钟后允许重试。
+        if (_lastWasBiased && _currentBiasTarget != null) {
+            markUnreachable(_currentBiasTarget, mod);
+            _currentBiasTarget = null;
+            _biasHops = 0;
+        }
         BlockPos shortStep = findShortEscapeStep(mod, pos);
         if (shortStep != null) {
             _failCounter = 0; // 有可行近点 = 这一步有效，不推向"放弃"
