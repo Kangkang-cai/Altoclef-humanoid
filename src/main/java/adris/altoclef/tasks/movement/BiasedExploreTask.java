@@ -179,6 +179,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
     private int _foodBiomeEmptyLogCounter = 0;
     // 各池数量签名 "plains/rich/birch/dark", 变化时才打日志。
     private String _lastBiomeSignature = null;
+    // (2026-10-29 [FOOD-BIOME] S8 可证伪性) 最近一次 pickBiasedTarget 选中目标所属的
+    // 【档位标签】: plains / memory / richForest / birch / darkForest, null = 无 bias 目标。
+    // 为什么需要它: [FOOD-BIOME] 那行里的 "(tier: plains > ... )" 是静态排序说明 (源码常量),
+    // 不是运行时值 —— 事后拿日志只能证明"扫到了各档各几个点", 无法证明"这一步真的按森林档
+    // 兜底走了" (平原池空 + 森林池非空时, BiasStep 的 target 坐标不带群系信息, 只能靠坐标
+    // 反推 biome)。档位由选点处写入, 由 [BiasStep] 每步打印 tier=, 一次 grep 即可证伪。
+    private String _currentBiasTier = null;
 
     private final MovementProgressChecker _progressChecker = new MovementProgressChecker();
     private final Set<BlockPos> _failedTargets = new HashSet<>();
@@ -302,6 +309,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         _failCounter = 0;
         _currentTarget = null;
         _currentBiasTarget = null;
+        _currentBiasTier = null;
         _biasHops = 0;
         _hadBiasOnce = false;
         _biasExhausted = false;
@@ -374,11 +382,13 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                     _visitedBiasTargets.add(_currentBiasTarget);
                     logBiasStep(mod, _currentTarget, -1, -1, "bias target REACHED, next");
                     _currentBiasTarget = null;
+                    _currentBiasTier = null;
                     _biasHops = 0;
                 } else if (_biasHops >= BIAS_MAX_HOPS_PER_TARGET) {
                     _visitedBiasTargets.add(_currentBiasTarget);
                     logBiasStep(mod, _currentTarget, -1, -1, "bias target GIVE UP after hop cap");
                     _currentBiasTarget = null;
+                    _currentBiasTier = null;
                     _biasHops = 0;
                 }
             }
@@ -427,6 +437,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 markUnreachable(_currentBiasTarget, mod);
                 logBiasStep(mod, _currentTarget, -1, -1, "step timed out, bias target blacklisted");
                 _currentBiasTarget = null;
+                _currentBiasTier = null;
                 _biasHops = 0;
             }
             Debug.logMessage("Explore step failed, picking a new direction.");
@@ -484,6 +495,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         StringBuilder sb = new StringBuilder("[BiasStep] ");
         sb.append(_lastWasBiased ? "biased" : "random");
         sb.append(" target=").append(_currentBiasTarget == null ? "none" : _currentBiasTarget.toShortString());
+        // (2026-10-29 S8) 运行时档位: 事后可直接判定"这一步是不是森林档兜底选的"。
+        sb.append(" tier=").append(_currentBiasTier == null ? "none" : _currentBiasTier);
         sb.append(" dist=").append(biasDist >= 0 ? String.valueOf((int) Math.round(biasDist)) : "-");
         sb.append(" hop=").append(_biasHops).append("/").append(BIAS_MAX_HOPS_PER_TARGET);
         sb.append(" step=").append(stepLen < 0 ? "-" : String.valueOf((int) Math.round(stepLen)));
@@ -507,6 +520,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 _lastWasBiased = false;
                 // (审查 Low-6) 显式清空 bias 逼近线程, 不依赖布尔组合防误访问/误标记。
                 _currentBiasTarget = null;
+                _currentBiasTier = null;
                 _biasHops = 0;
                 logBiasStep(mod, safe, -1, -1, "surface-exit forced landing");
             }
@@ -559,6 +573,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 _heading = angle;
                 // 游泳是另一套模式 (朝最近陆地), 与记忆目标无关: 清掉逼近线程。
                 _currentBiasTarget = null;
+                _currentBiasTier = null;
                 _biasHops = 0;
                 _lastWasBiased = false;
             } else if (biased.isPresent() && Math.random() < (_foodExplore ? P_BIASED_FOOD : P_BIASED)) {
@@ -800,6 +815,7 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         if (_lastWasBiased && _currentBiasTarget != null) {
             markUnreachable(_currentBiasTarget, mod);
             _currentBiasTarget = null;
+            _currentBiasTier = null;
             _biasHops = 0;
         }
         BlockPos shortStep = findShortEscapeStep(mod, pos);
@@ -1085,8 +1101,10 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
         //   ③ 橡木/花森林点 —— 动物齐全+橡苹果, 森林里最富;
         //   ④ 白桦系点 —— 动物密度偏低且无苹果, ③ 扫不到才去;
         //   ⑤ 深色橡木林点 —— 遮光无动物/白天刷怪/只有蘑菇, 最低档兜底。
+        // (2026-10-29 S8) 每一级都用 pickTier(...) 落 _currentBiasTier, 供 [BiasStep] 打印。
+        _currentBiasTier = null;
         if (_foodExplore) {
-            Optional<BlockPos> plains = nearestEligible(_plainsTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
+            Optional<BlockPos> plains = pickTier(_plainsTargets, TIER_PLAINS, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (plains.isPresent()) return plains;
         }
 
@@ -1096,18 +1114,38 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                 Collection<BlockPos> candidates = source == null ? null : source.get();
                 if (candidates != null) sourcePoints.addAll(candidates);
             }
-            Optional<BlockPos> remembered = nearestEligible(sourcePoints, pos);
+            Optional<BlockPos> remembered = pickTier(sourcePoints, TIER_MEMORY, pos, 0.0);
             if (remembered.isPresent()) return remembered;
         }
 
         if (_foodExplore) {
-            Optional<BlockPos> rich = nearestEligible(_richForestTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
+            Optional<BlockPos> rich = pickTier(_richForestTargets, TIER_RICH_FOREST, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (rich.isPresent()) return rich;
-            Optional<BlockPos> birch = nearestEligible(_birchTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
+            Optional<BlockPos> birch = pickTier(_birchTargets, TIER_BIRCH, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
             if (birch.isPresent()) return birch;
-            return nearestEligible(_darkForestTargets, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
+            return pickTier(_darkForestTargets, TIER_DARK_FOREST, pos, FOODBIOME_MIN_BIAS_TARGET_DIST);
         }
         return Optional.empty();
+    }
+
+    // (2026-10-29 S8) 档位标签常量: 只进日志, 不参与任何判定。
+    private static final String TIER_PLAINS = "plains";
+    private static final String TIER_MEMORY = "memory";
+    private static final String TIER_RICH_FOREST = "richForest";
+    private static final String TIER_BIRCH = "birch";
+    private static final String TIER_DARK_FOREST = "darkForest";
+
+    /**
+     * (2026-10-29 [FOOD-BIOME] S8) 单级选点 + 记录命中档位。命中则 {@code _currentBiasTier}
+     * 置为该级标签, 未命中保持 null (下一级覆盖)。语义与原 {@code nearestEligible(...)}
+     * 完全一致, 只是多带一个可证伪标签。
+     */
+    private Optional<BlockPos> pickTier(List<BlockPos> pool, String tier, Vec3d pos, double minDist) {
+        Optional<BlockPos> found = minDist > 0
+                ? nearestEligible(pool, pos, minDist)
+                : nearestEligible(pool, pos);
+        _currentBiasTier = found.isPresent() ? tier : null;
+        return found;
     }
 
     /**
@@ -1232,7 +1270,8 @@ public class BiasedExploreTask extends Task implements ITaskRequiresGrounded {
                                 + " richForest=" + richForests.size() + "@" + fmtNearest(richForests, mod)
                                 + " birch=" + birch.size() + "@" + fmtNearest(birch, mod)
                                 + " darkForest=" + darkForests.size() + "@" + fmtNearest(darkForests, mod)
-                                + " (tier: plains > animal memory > richForest > birch > darkForest)");
+                                + " (order: plains > animal memory > richForest > birch > darkForest;"
+                                + " 实际命中档位见 [BiasStep] tier=)");
             }
         } else {
             _foodBiomeEmptyLogCounter++;
