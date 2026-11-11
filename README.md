@@ -1,67 +1,58 @@
-# altoclef
+# AltoClef Humanoid
 
-Plays block game.
+A **human-like Minecraft bot** that autonomously plays and beats the game — an enhanced fork of [AltoClef](https://github.com/gaucho-matrero/altoclef) (powered by [Baritone](https://github.com/cabaletta/baritone)) with **multi-bot coordination** and a **command bridge designed for LLM/AI directors**.
 
-Powered by Baritone.
+[中文文档（README.zh-CN.md）](README.zh-CN.md)
 
-A client side bot that can accomplish any Minecraft task that is relatively simple and can be split into smaller tasks. "Relatively Simple" is a vague term, so check the list of current capabilities to see examples.
+**Target:** Minecraft **1.18.2** (Fabric, client-side mod)
 
-Became [the first bot to beat Minecraft fully autonomously](https://youtu.be/baAa6s8tahA) on May 24, 2021.
+## What is this?
 
-**Join the [Discord Server](https://discord.gg/JdFP4Kqdqc)** for discussions/updates/goofs & gaffs
+[AltoClef](https://github.com/gaucho-matrero/altoclef) became [the first bot to beat Minecraft fully autonomously](https://youtu.be/baAa6s8tahA) (May 2021). This fork continues from that baseline and turns it into a **long-running, unattended multi-bot survival system** that can be directed by an external AI (e.g. an LLM "director" agent) over an HTTP bridge and in-game chat commands — with hundreds of robustness fixes accumulated from real, continuous play sessions.
 
-## How it works
+## Key features (this fork vs upstream)
 
-Take a look at this [Guide from the wiki](https://github.com/gaucho-matrero/altoclef/wiki/1:-Documentation:-Big-Picture) or this [Video explanation](https://youtu.be/q5OmcinQ2ck?t=387)
+| Area | What's added |
+|---|---|
+| **Multi-bot coordination** | Leader + follower sub-bot architecture: duty system (`PREP` / `FOLLOW` / `COLLECT` / `SLEEP`), cross-bot coordinate sharing, follow-relationship governance to prevent two bots following each other in a deadlock |
+| **AI/LLM command bridge** | HTTP `/status` JSON endpoint (task state, inventory, nearby players, digests) + a structured command protocol (`@follow`, `@give`, `@equip`, `@quota`, ...) with machine-readable receipts and fuzzy item-name correction — designed so an external AI director can reliably drive the bot |
+| **Human-like presentation** | Humanoid gaze scheduler (smooth head movement, looks at nearby entities/players instead of staring at feet or sky), configurable player glow highlights |
+| **Survival robustness** | Death recovery chain, lava-escape (pillar-up) maneuver, nether portal relight & portal-exit handling, stuck-task soft-restart guard, food expeditions, furnace smelting chain, trash-dropping / inventory management policies |
 
-## Current capabilities, Examples:
-- Obtain 400+ Items from a fresh survival world, like diamond armor, cake, and nether brick stairs
-- Dodge mob projectiles and force field mobs away while accomplishing arbitrary tasks
-- Collect + smelt food from animals, hay, & crops
-- Receive commands from chat whispers via /msg. Whitelist + Blacklist configurable (hereby dubbed the Butler System). Here's a [Butler system demo video](https://drive.google.com/file/d/1axVYYMJ5VjmVHaWlCifFHTwiXlFssOUc/view?usp=sharing)
-- Simple config file that can be reloaded via command (check .minecraft directory)
-- Beat the entire game on its own (no user input.)
-- Print the entire bee movie script with signs in a straight line, automatically collecting signs + bridging materials along the way.
-- Become the terminator: Run away from players while unarmed, gather diamond gear in secret, then return and wreak havoc.
+See [DOC_bridge_commands.md](DOC_bridge_commands.md) for the full bridge command protocol, and [RECORDING.md](RECORDING.md) for the built-in input/behavior recording system used for debugging bot behavior.
 
-## Download
+## Build
 
-**Note:** After installing, please move/delete your old baritone configurations if you have any. Preexisting baritone configurations will interfere with altoclef and introduce bugs. This will be fixed in the future.
+```bash
+./gradlew build
+# output: build/libs/altoclef-*.jar
+```
 
-### Alternate Versions (Recommended) (Unofficial)
+Requires JDK 17 (the project targets Java 17 / Minecraft 1.18.2).
 
-If you are looking for 1.19.2 - 1.19.4 support, check out this [gist](https://gist.github.com/JustaSqu1d/171df3ff386859da31d37534122d3b10). Note that these projects are forks of this original project and not directly affliated with Alto Clef. It is also more up-to-date with bug fixes and features.
+## Install
 
-#### (old) Nightly Release
+1. Copy the built `altoclef-*.jar` into your `.minecraft/mods/` folder (works for isolated version folders too, e.g. `versions/1.18.2-Fabric/mods/`).
+2. Copy a Baritone **fabric 1.18.2** jar (`baritone-unoptimized-fabric-1.18.2.jar`) from the [Baritone releases](https://github.com/cabaletta/baritone/releases) into the same folder.
+3. If you have old Baritone config files, move/delete them first — preexisting configs can interfere with AltoClef.
 
-Start by downloading [the Latest Long Term Release](https://github.com/gaucho-matrero/altoclef/releases), then [Download the Nightly](https://nightly.link/gaucho-matrero/altoclef/workflows/gradle/main/Artifacts.zip) & replace `altoclef-4.0-SNAPSHOT.jar`.
+## Usage
 
-If the Nightly Link doesn't work, check the latest [Build Action](https://github.com/gaucho-matrero/altoclef/actions) that succeeded and download `Artifacts.zip` (you must be signed into GitHub). Replace your existing `altoclef-4.0-SNAPSHOT.jar` with the one found in `Artifacts.zip`
+- Single bot: chat commands prefixed with `@` — see the [Usage Guide](usage.md) (`@gamer` beats the whole game by itself, `@get`, `@food`, `@equip`, ...).
+- Multi-bot / AI director mode: read [DOC_bridge_commands.md](DOC_bridge_commands.md) — it documents the `/status` JSON schema, the follow/duty lifecycle, and the exact command receipt format.
 
-Then, copy `altoclef-4.0-SNAPSHOT.jar` from `Artifacts.zip` to `./mods`.
+## Documentation
 
-Then, copy the `baritone-unoptimized-fabric-1.XX.X.jar` from the long term release zip file to `./mods`
+| Doc | Content |
+|---|---|
+| [usage.md](usage.md) | Single-bot chat commands |
+| [DOC_bridge_commands.md](DOC_bridge_commands.md) | Multi-bot bridge: `/status` schema, command protocol, receipts |
+| [RECORDING.md](RECORDING.md) | Built-in behavior recording for debugging |
+| [develop.md](develop.md) | Development setup (IntelliJ, JDK) |
+| [AltoClef wiki](https://github.com/gaucho-matrero/altoclef/wiki/1:-Documentation:-Big-Picture) | Upstream architecture guide (task chains, Baritone integration) |
 
-#### (old) Long Term Release
+## Credits & License
 
-[Check releases](https://github.com/gaucho-matrero/altoclef/releases). Note you will need to copy over both jar files for the mod to work.
-
-#### (old) Meloweh's Extra Features Release (Unofficial)
-
-Has some schematic support, command macros and a few utility features. Will eventually be merged, but if you can try it out now if you'd like:
-
-- [AltoClef jar](https://github.com/Meloweh/altoclef/releases)
-- [Baritone jar](https://github.com/Meloweh/baritone/releases)
-
-### Versions
-
-This is a **fabric only** mod, currently only available for **Minecraft 1.18**.
-
-For older MC versions, try [multiconnect](https://www.curseforge.com/minecraft/mc-mods/multiconnect) (NOTE: multiconnect is untested and not affiliated with altoclef, use at your own risk!)
-
-
-## [Usage Guide](usage.md)
-
-## [TODO's/Future Features](todos.md)
-
-## [Development Guide](develop.md)
+- Upstream project: [AltoClef](https://github.com/gaucho-matrero/altoclef) by Adris Jautakas (gaucho-matrero) — MIT License.
+- Pathfinding & world interaction: [Baritone](https://github.com/cabaletta/baritone) — GNU LGPL-3.0.
+- This fork: MIT License (see [LICENSE](LICENSE)); upstream copyright notice retained.

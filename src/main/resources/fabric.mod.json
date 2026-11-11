@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "id": "altoclef",
   "version": "0.4.1a",
-  "name": "Alto Clef",
-  "description": "Plays Block Game",
+  "name": "AltoClef Humanoid",
+  "description": "Human-like Minecraft bot that autonomously beats the game, with multi-bot coordination and an LLM command bridge. Fork of AltoClef.",
   "authors": [
     "TacoTechnica",
-    "James Green"
+    "James Green",
+    "Kangkang Cai"
   ],
   "contact": {
-    "homepage": "https://fabricc.net/",
-    "sources": "https://github.com/FabricMC/fabric-example-mod"
+    "homepage": "https://github.com/Kangkang-cai/altoclef-humanoid",
+    "sources": "https://github.com/Kangkang-cai/altoclef-humanoid"
   },
-  "license": "CC0-1.0",
+  "license": "MIT",
   "icon": "assets/altoclef/icon.png",
   "environment": "client",
   "entrypoints": {
