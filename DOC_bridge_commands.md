@@ -262,7 +262,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 | `phase` | string | 主线「大阶段」稳定枚举（`BeatPhase`，如 `BLAZE_RODS`）；非主线在跑为 `UNKNOWN`。见 §5.1 阶段跟随 |
 | `duty` | object | **仅次 bot**：`{for, mode, label}` —— 它此刻在为主 bot 做什么（`PREP`/`FOLLOW`/`COLLECT`/`SLEEP`）。见 §5.1 |
 | `inventory` | string | **完整背包原名清单**（`"oak_log x12, iron_ingot x3"`）。⚠️ 发 `@give` 前从这里**照抄**物品名 —— `keyItems` 是中文名、`@give` 不认。空则整键省略 |
-| `player` | string | **游戏内玩家名**（如 `"qiaoqiao"`）。不是 `botId` —— `@follow`/`@give` 按游戏内名寻址。离线为空串。见 §5.2 |
+| `player` | string | **游戏内玩家名**（如 `"alice"`）。不是 `botId` —— `@follow`/`@give` 按游戏内名寻址。离线为空串。见 §5.2 |
 | `following` | string | 本 bot **此刻正在跟随谁**的玩家名；没在跟随为空串（**恒存在**）。用途=对向跟随检测。见 §5.3 |
 
 > ⚠️ `sleepingPlayers` 只统计**已加载实体**的玩家（第三方服默认**48 格**追踪范围外拿不到姿态）。
@@ -284,12 +284,12 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
   "port": 8762,
   "botId": "bot_b",
   "role": "sub",
-  "leader": "qiaoqiao"
+  "leader": "alice"
 }
 ```
 
 - `role` 缺省 / 未知值 = `main`（保守：不会意外降档）。
-- `leader` = **主 bot 的 MC 游戏内玩家名**，**不是 `botId`** —— `@follow` 按玩家名寻址，`bot_2` 和 `jingjing` 不是一回事。改完需重连客户端生效。
+- `leader` = **主 bot 的 MC 游戏内玩家名**，**不是 `botId`** —— `@follow` 按玩家名寻址，`bot_2` 和 `bob` 不是一回事。改完需重连客户端生效。
 
 **`role=sub` 且 `leader` 非空 ⇒ 次 bot 全自动**（2026-10-06 新增，**对端不需要发任何命令**）：
 
@@ -321,7 +321,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
   "port" : 8762,
   "botId" : "bot_2",
   "role" : "sub",
-  "leader" : "qiaoqiao",
+  "leader" : "alice",
   "leaderPort" : 8761
 }
 ```
@@ -345,15 +345,15 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 次 bot 的每个状态都自带"我在为主 bot 做什么"，**只有 `role=sub` 输出**（主 bot / 空闲时整键省略）：
 
 ```json
-"duty": { "for": "qiaoqiao", "mode": "COLLECT", "label": "替 qiaoqiao 备货（主bot 正在收烈焰棒）" }
+"duty": { "for": "alice", "mode": "COLLECT", "label": "替 alice 备货（主bot 正在收烈焰棒）" }
 ```
 
 | `mode` | 何时 | `label` 示例 |
 |---|---|---|
-| `PREP` | 开局前置补料 | `为 qiaoqiao 备货（补木头/食物）` |
-| `FOLLOW` | 主 bot 处于跟随集合内的阶段 | `跟随保护 qiaoqiao` |
-| `COLLECT` | 主 bot 处于其余阶段（次 bot 在外自主） | `替 qiaoqiao 备货（主bot 正在收烈焰棒）` |
-| `SLEEP` | 睡眠镜像期间 | `陪 qiaoqiao 睡觉（多人服需全员入睡才跳夜）` |
+| `PREP` | 开局前置补料 | `为 alice 备货（补木头/食物）` |
+| `FOLLOW` | 主 bot 处于跟随集合内的阶段 | `跟随保护 alice` |
+| `COLLECT` | 主 bot 处于其余阶段（次 bot 在外自主） | `替 alice 备货（主bot 正在收烈焰棒）` |
+| `SLEEP` | 睡眠镜像期间 | `陪 alice 睡觉（多人服需全员入睡才跳夜）` |
 
 **`mode=COLLECT` 是给对端的钩子**：读到它 = "这台次 bot 现在是流动仓库"，主 bot 缺料就直接 `@give <次bot名> <物品> <数量>`。**不需要**新增 bot 间通道。
 
@@ -372,7 +372,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 
 ### 5.2 `player` + bot 间坐标共享（2026-10-07 新）
 
-**问题**：客户端只下发 ~48 格内其他玩家的**实体**，超出后本地**连坐标都拿不到**。1007 13:15 实测：对端给次 bot 发 `@follow kangkang`，目标在 ~180 格外 ⇒ 任务停在 `Player "kangkang" is online but too far: no coordinates yet` **原地干等 6 分钟**（`@give` 同理，报 `no coordinates to navigate to`）。此前 11:0x 的"远程接近"只写在次 bot 自动引导内部、且只认 `leaderPort` 那一台 ⇒ 换个人跟就失效。
+**问题**：客户端只下发 ~48 格内其他玩家的**实体**，超出后本地**连坐标都拿不到**。1007 13:15 实测：对端给次 bot 发 `@follow charlie`，目标在 ~180 格外 ⇒ 任务停在 `Player "charlie" is online but too far: no coordinates yet` **原地干等 6 分钟**（`@give` 同理，报 `no coordinates to navigate to`）。此前 11:0x 的"远程接近"只写在次 bot 自动引导内部、且只认 `leaderPort` 那一台 ⇒ 换个人跟就失效。
 
 **机制**：每个实例的 `/status` 新增 `player`（游戏内玩家名），并在 bridge 启动时开一个后台线程，每 2 秒轮询**本机同伴端口**的 `/status`，把 `player` + `pos` + `dim` 记成一张坐标表。此后 `@follow <远距本机 bot>` 与次 bot 自动引导都能借它走过去（走到 ~48 格内本地就有坐标，自动交回常规跟随）。
 
@@ -383,7 +383,7 @@ bot 会自动记住"亲眼确认过"的结构中心（跨会话落盘）。记�
 | 坐标鲜度 | 10 秒；超时视为对面关了/卡了，不算 |
 | 跨维度 | **不追**（同 XZ 在不同维度不是同一地点）⇒ 落回既有"跨维度不追"语义 |
 | 出口 | 远程接近 5 分钟未到达 ⇒ 结束任务交给上层（**不会无限导航**） |
-| 日志 | 启动：`[PEER-POS] 坐标共享已启用: self=8762, peers=[8760, 8761, 8763]`；命中：`Approaching "kangkang" via peer coordinates (47 blocks)` / `[次bot引导] 远程接近 kangkang（47 格外）` |
+| 日志 | 启动：`[PEER-POS] 坐标共享已启用: self=8762, peers=[8760, 8761, 8763]`；命中：`Approaching "charlie" via peer coordinates (47 blocks)` / `[次bot引导] 远程接近 charlie（47 格外）` |
 
 - ⚠️ **只对本机跑本模组的 bot 生效**。真人玩家不暴露 bridge ⇒ 仍受 48 格物理限制（原版协议没有"按名字查坐标"的请求包）。
 - ✅ **对端无需改任何代码**：`player` 是新增键，旧解析不受影响。若编排想让某台次 bot 去跟**第三台** bot，直接 `@follow <那台的游戏内名>` 即可，模组自己找坐标。
@@ -572,7 +572,7 @@ jar md5 `a49320369d794c86222d997a58639d49`（4,536,482 B）；✅ **已部署四
 3. 主 bot 阶段 ∈ 跟随集合 → 次 bot `taskDetail` = `跟随+顺手干活`；∉ 集合 → `taskDetail` = `自主主线（主bot XXX）`，且 `diag.log` 有 `[SUB-BOOT] switch to AUTONOMOUS mainline (leader phase=XXX)`。
 4. **把主 bot 关掉** → 次 bot 应在 10 秒内退回"跟随"（保守策略），**不应**朝未知方向跑。
 5. **不配 `leaderPort`** → 次 bot 行为与本版之前逐字一致（恒跟随，零回归）。
-6. **`duty` 字段**：次 bot `GET /status` 出现 `"duty":{"for":"qiaoqiao","mode":"…","label":"…"}`，`mode` ∈ `PREP`/`FOLLOW`/`COLLECT`/`SLEEP`；主 bot 的 `/status` **不应**出现 `duty` 键。次 bot 聊天里 `[次bot引导]` 后应变成"跟随保护 qiaoqiao" / "替 qiaoqiao 备货（主bot 收烈焰棒）" / "陪 qiaoqiao 睡觉" / "为 qiaoqiao 备货" —— 不再是"随行 / 自主主线"。
+6. **`duty` 字段**：次 bot `GET /status` 出现 `"duty":{"for":"alice","mode":"…","label":"…"}`，`mode` ∈ `PREP`/`FOLLOW`/`COLLECT`/`SLEEP`；主 bot 的 `/status` **不应**出现 `duty` 键。次 bot 聊天里 `[次bot引导]` 后应变成"跟随保护 alice" / "替 alice 备货（主bot 收烈焰棒）" / "陪 alice 睡觉" / "为 alice 备货" —— 不再是"随行 / 自主主线"。
 
 > 主线干预伪命令 `@pause_main` / `@resume_main` 的 `action_done` 同样带 `status`（`completed`），与上表口径一致。
 
@@ -640,7 +640,7 @@ python altoclef/bridge_smoke_test.py --destructive
 python altoclef/bridge_follow_test.py \
   --main bot_1=http://127.0.0.1:8761 \
   --sub  bot_2=http://127.0.0.1:8762 \
-  --leader <主bot的MC玩家名，如 qiaoqiao> \
+  --leader <主bot的MC玩家名，如 alice> \
   --gamedir-main "D:/minecraft/.minecraft/versions/1.18.2-Fabric-1" \
   --gamedir-sub  "D:/minecraft/.minecraft/versions/1.18.2-Fabric-2"
 
@@ -648,7 +648,7 @@ python altoclef/bridge_follow_test.py --list          # 只列用例
 python altoclef/bridge_follow_test.py --skip-geometry # 只跑不需要两个 bot 的用例
 ```
 
-> ⚠️ `--leader` 要填 **MC 玩家名**（`qiaoqiao`），不是 bridge 的 `botId`（`bot_1`）——
+> ⚠️ `--leader` 要填 **MC 玩家名**（`alice`），不是 bridge 的 `botId`（`bot_1`）——
 > `@follow` 按游戏内玩家名寻址，两者不是一回事。
 
 | 用例 | 断言什么 | 靠什么观测 |

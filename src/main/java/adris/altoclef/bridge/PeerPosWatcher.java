@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 客户端只下发 ~48 格内其他玩家的<b>实体</b>（{@code entity-tracking-range.players}），
  * 超过就<b>连坐标都拿不到</b>。于是：
  * <ul>
- *   <li>对端 {@code @follow kangkang}（13:15:29 实测）→ 裸 {@link
+ *   <li>对端 {@code @follow charlie}（13:15:29 实测）→ 裸 {@link
  *       adris.altoclef.tasks.movement.FollowPlayerTask} 停在
  *       "online but too far: no coordinates yet"，<b>持续 6 分钟原地干等</b>；</li>
  *   <li>1007 11:0x 的远程接近只写在 {@link adris.altoclef.tasks.movement.SubBotBootstrapTask}

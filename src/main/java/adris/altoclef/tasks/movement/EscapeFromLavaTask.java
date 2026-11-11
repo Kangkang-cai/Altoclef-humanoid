@@ -60,7 +60,7 @@ public class EscapeFromLavaTask extends CustomBaritoneGoalTask {
     private boolean _started = false;
 
     // ===== (2026-10-26 逃生收尾判据三条腿) "逃出来 != 安全" =====
-    // 现场 20261025-232203 (bot2 跟随 kangkang, death #2, cause=onFire)：
+    // 现场 20261025-232203 (bot2 跟随 charlie, death #2, cause=onFire)：
     //   23:21:48 落岩浆 (inLava 瞬时 true) → 23:21:51 僵持 forceCancel →
     //   23:21:52.499 采样 onFire=true / inLava=false / pathing=false / 零水平位移 →
     //   23:21:53 isFinished 判 "!isInLava && !isOnFire" → Completing goal →

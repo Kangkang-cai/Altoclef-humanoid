@@ -45,7 +45,7 @@ public final class StatusJson {
                     + "\\s*,\\s*\"z\"\\s*:\\s*(-?[0-9.]+)\\s*,\\s*\"dim\"\\s*:\\s*\"([a-z_]+)\"");
 
     /**
-     * (2026-10-07) {@code "player":"qiaoqiao"} —— 本 bot 的<b>游戏内玩家名</b>。
+     * (2026-10-07) {@code "player":"alice"} —— 本 bot 的<b>游戏内玩家名</b>。
      *
      * <p>坐标共享的寻址键：{@code @follow}/{@code @give} 都按游戏内名字寻址，
      * 而 bridge 端口只知道 {@code botId}（{@code "bot_1"}），两者不是一回事，
@@ -54,7 +54,7 @@ public final class StatusJson {
     private static final Pattern PLAYER_RE = Pattern.compile("\"player\"\\s*:\\s*\"([^\"]{1,32})\"");
 
     /**
-     * (2026-10-07 follow 关系治理) {@code "following":"qiaoqiao"} —— 本 bot
+     * (2026-10-07 follow 关系治理) {@code "following":"alice"} —— 本 bot
      * <b>此刻正在跟随谁</b>；没在跟随为空串（值来源 {@link FollowRegistry}）。
      *
      * <p>用途：对向跟随（A 跟 B 且 B 跟 A）的检测 —— 见 {@link FollowRelation#mutual}。

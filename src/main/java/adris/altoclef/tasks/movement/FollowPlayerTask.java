@@ -71,7 +71,7 @@ public class FollowPlayerTask extends Task {
      * (2026-10-12 修 bot_stuck 误报) 当前 tick 结束时是否处于"贴身站定"：
      * 目标实体在视野内且已到保持距离（{@code _holdingDistance}），本任务主动返回 null 停泊子任务。
      * 这是<b>设计意图的静止</b>，不是卡死 —— {@code LivenessDigest} 据此把这种"不动"排除出
-     * stuck 判据（1011 22:45 实测：铁头贴 kangkang 2.7 格站定 60s 被误报 bot_stuck，
+     * stuck 判据（1011 22:45 实测：铁头贴 charlie 2.7 格站定 60s 被误报 bot_stuck，
      * 对端 LLM 又编出"区块没加载"的解释）。
      *
      * <p>每拍 onTick 开头重置、只在"到距离站定"分支置真 —— 目标走远重跟/丢失转寻位/远程接近
@@ -279,7 +279,7 @@ public class FollowPlayerTask extends Task {
      *
      * <p><b>为什么需要</b>：客户端只下发 ~48 格内其他玩家实体，超出后本地<b>连坐标都没有</b>，
      * 旧实现只能停在 "online but too far: no coordinates yet" 原地干等（1007 13:15
-     * 实测对端 {@code @follow kangkang} 卡死 6 分钟）。而本机每个 bot 的
+     * 实测对端 {@code @follow charlie} 卡死 6 分钟）。而本机每个 bot 的
      * {@code /status.pos} 就是现成的跨进程坐标源（同机 localhost）。
      *
      * <p><b>"要不要走远程、走哪儿"的判断只在 {@link PeerPosWatcher#remoteNav} 一处</b>

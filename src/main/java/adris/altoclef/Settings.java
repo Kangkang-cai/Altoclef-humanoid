@@ -836,11 +836,11 @@ public class Settings implements IFailableConfigFile {
     private boolean forceGlowing = true;
 
     /**
-     * (2026-10-03 13:4x) 发光描边排除名单 (玩家名, 忽略大小写)。用户拍板:
-     * 画面里所有玩家都挂描边, 但 "kangkang"(用户本人) 不发光。
-     * 留空 = 不排除任何人。
+     * (2026-10-03 13:4x) 发光描边排除名单 (玩家名, 忽略大小写)。
+     * 画面里所有玩家都挂描边, 但名单内玩家 (如操作者本人) 不发光。
+     * 留空 = 不排除任何人。可在 settings.json 里配置成自己的玩家名。
      */
-    private String forceGlowingExcludePlayer = "kangkang";
+    private String forceGlowingExcludePlayer = "";
 
     /**
      * (2026-10-03) 隐形光源照明: bot 处于方块光照不足的环境 (洞穴/下界) 时, 由服务端

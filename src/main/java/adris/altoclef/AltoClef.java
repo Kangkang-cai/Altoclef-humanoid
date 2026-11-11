@@ -341,7 +341,7 @@ public class AltoClef implements ModInitializer {
             // 用夜视而非 gamma, 是因为 gamma 在光影下会被覆盖 (详见方法注释)。
             tickPermanentNightVision();
             // (2026-10-03 永久发光) 客户端常挂 Glowing 描边, 纯视觉: 画面里所有玩家
-            // (排除 kangkang) 都有轮廓。注意发光不是光源, 不照亮周围环境。
+            // (排除 charlie) 都有轮廓。注意发光不是光源, 不照亮周围环境。
             tickPermanentGlowing();
             // (2026-10-03 隐形光源) 方块光照不足时经 RCON 由服务端在脚下/前方连放
             // minecraft:light (隐形、亮度 15), 默认不回收 (用户拍板)。真实方块光照,
@@ -714,7 +714,7 @@ public class AltoClef implements ModInitializer {
         // 本项把散块/废弃传送门结构/哭泣黑曜石一起拔到"寻路不值得挖"的量级。
         getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.OBSIDIAN);
         getClientBaritoneSettings().blocksToAvoidBreaking.value.add(Blocks.CRYING_OBSIDIAN);
-        // (2026-10-05 事故修复, 新引入问题) bot2(jingjing) 收到队友共享地标
+        // (2026-10-05 事故修复, 新引入问题) bot2(bob) 收到队友共享地标
         // 「烈焰刷怪笼」-109,70,321 后, GetToBlockTask → GoalBlock 要求"站进
         // 目标格", 而 spawner 有碰撞箱 ⇒ baritone 为到达把它当挡路方块挖掉
         // (BetterTool 19:09:07.345 为 spawner 切木镐, 刷怪笼被拆)。
@@ -1027,7 +1027,7 @@ public class AltoClef implements ModInitializer {
     // **空手/垫料不足的子 bot 即使在岩浆边也照旧斜跳 + 疾跑 + 跑跳** —— 现场
     // 20261025 bot2 (Fabric-2, role=sub) diag 里 23:14:17~19 连续 6 条
     // "danger detected but fewer than 8 baritone-placeable blocks — keeping diagonal
-    // ascend ON"，而它正是"跟着 kangkang、老在路线边缘掉进岩浆"的那台。
+    // ascend ON"，而它正是"跟着 charlie、老在路线边缘掉进岩浆"的那台。
     // 关疾跑/跑跳**不依赖垫块**（不需要替代路线，只是走得稳），所以单独一条闸：
     // 判据与"关斜跳"同源（danger = 内圈岩浆 ∨ 路径斜跳落点危险），但不设垫料门槛。
     // 代价：危险区赶路变慢（约 30%）—— 与"掉进岩浆必死"相比可接受。
@@ -1328,14 +1328,14 @@ public class AltoClef implements ModInitializer {
         }
     }
 
-    // ==== 永久发光 (2026-10-03; 13:4x 起对象=除 kangkang 外的所有玩家) ====
+    // ==== 永久发光 (2026-10-03; 13:4x 起对象=除 charlie 外的所有玩家) ====
     // 记录我们挂过描边的实体: 关开关时只撤我们自己挂的 (药水/服务器给的发光不归开关管)。
     private final java.util.Set<java.util.UUID> _glowingAppliedByUs = new java.util.HashSet<>();
 
     /**
      * 客户端侧常挂发光 (Glowing 实体描边)。1003 13:4x 用户调整: 对象从"bot 自己"
      * 改为"本客户端画面里的所有玩家, 排除配置 {@code forceGlowingExcludePlayer}
-     * (默认 "kangkang", 用户本人不发光)"。
+     * (默认 "charlie", 用户本人不发光)"。
      *
      * <p>【边界】发光不是光源, 不照亮环境; 主流光影包会吃掉描边 (outline 是独立
      * 后处理 pass)。注意: 其他玩家的 flags 字节由服务端同步 (疾跑/着火等 flag

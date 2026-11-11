@@ -50,7 +50,7 @@ public class WorldSurvivalChain extends SingleTaskChain {
     // 自然让位。4s 里 bot 若真上岸, 任务空转几秒无害 (isFinished 会因火灭/离场收尾)。
     private final TimerGame _wasInLavaTimer = new TimerGame(4);
     // ===== (2026-10-26 逃出岩浆后仍被烧死) 无防火场景的整段火 tick 接管窗 =====
-    // 现场 20261025-232203 / 232802 (bot2 跟随 kangkang, death #2/#3, cause=onFire)：
+    // 现场 20261025-232203 / 232802 (bot2 跟随 charlie, death #2/#3, cause=onFire)：
     //   两次都是"确实逃出了岩浆"(inLava=false) 但身上还在烧，血量 7.0→2.0 匀速
     //   -1.0/次 走到 0。上面这个 4s 窗口是为"已有防火、只为吃掉游动 bob 的横跳"定的，
     //   而**岩浆点燃的 fire ticks 是 15s** —— 4s 一过本链就不再认领，isInFire 又只认

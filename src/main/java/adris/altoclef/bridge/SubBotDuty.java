@@ -49,7 +49,7 @@ public final class SubBotDuty {
      *
      * @param mode     角色枚举
      * @param forLeader 服务对象 = 主 bot 的 MC 玩家名
-     * @param label    给人/LLM 看的自然语言说明（如 "替 qiaoqiao 备货（主bot 正在收烈焰棒）"）
+     * @param label    给人/LLM 看的自然语言说明（如 "替 alice 备货（主bot 正在收烈焰棒）"）
      */
     public static void set(Mode mode, String forLeader, String label) {
         _mode = (mode == null) ? Mode.NONE : mode;

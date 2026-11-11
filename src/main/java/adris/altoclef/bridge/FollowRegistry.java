@@ -4,8 +4,8 @@ package adris.altoclef.bridge;
  * (2026-10-07 follow 关系治理) <b>本实例"当前正在跟随谁"的单一来源</b>。
  *
  * <h3>为什么需要</h3>
- * 1007 13:15 实测出现过<b>对向跟随</b>：bot_2(jingjing) 被命令 follow kangkang，
- * 而 kangkang 同时在 follow jingjing —— 两边都朝对方走，谁也到不了"目的地"。
+ * 1007 13:15 实测出现过<b>对向跟随</b>：bot_2(bob) 被命令 follow charlie，
+ * 而 charlie 同时在 follow bob —— 两边都朝对方走，谁也到不了"目的地"。
  * 要打破这种局面，每台 bot 必须能知道<b>别人在跟谁</b>；而 {@code /status.task}
  * 是按链名映射的<b>中文短标签</b>（{@code SummaryGenerator} 口径，随时会改），
  * 拿它做判据等于把显示串当契约。所以新增 {@code /status.following} 键，值取自本类。

@@ -31,7 +31,7 @@ public final class PlayerDamageCauseHolder {
     // ---------- (2026-10-04 bridge 死因事件) 死亡播报原文快照 ----------
     // 为什么需要: bridge 的 death 事件目前只有字面 "死了"(EventCollector 的 isDead 边沿),
     // 对端拿不到死因。而死因的权威来源就是死亡播报包(DeathMessageS2CPacket)的原文
-    // ("kangkang被北极熊杀死了"), onDeathMessage 时刻顺手记一份, 消费方读走即清。
+    // ("charlie被北极熊杀死了"), onDeathMessage 时刻顺手记一份, 消费方读走即清。
     // 时序: 边沿检测(HealthUpdate 血量归零)可能先于死亡播报包到达, 消费方(bridge)须
     // 短暂重试; 保险起见读走即清 + 每次死亡必定覆盖, 不会串场。
     private static volatile String lastDeathDescription = null;

@@ -394,7 +394,7 @@ final class SceneDigest {
 
     /**
      * (2026-10-20 用户位置入真值链) <b>可见范围内其他玩家</b>的位置清单，JSON 数组片段：
-     * {@code [{"name":"kangkang","x":311.2,"y":7.0,"z":206.4,"dim":"overworld"}]}；无人在旁为空串。
+     * {@code [{"name":"charlie","x":311.2,"y":7.0,"z":206.4,"dim":"overworld"}]}；无人在旁为空串。
      *
      * <p>为什么必须有它：此前对端只知道 {@code onlinePlayers} 的<b>名单</b>（无坐标），
      * 用户（真人主播）站在 bot 贴脸位置时 LLM 上下文里完全没有"用户在旁"的依据，

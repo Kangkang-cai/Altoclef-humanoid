@@ -390,7 +390,7 @@ def main():
                                                       ["认不出物品 id"], args.timeout)))
         sq = check_status_fields(live[1], results)
         if sq and first_status:
-            # 注意：onlinePlayers 里是 **MC 用户名**（如 qiaoqiao/kangkang），不是 bridge 的 botId，
+            # 注意：onlinePlayers 里是 **MC 用户名**（如 alice/charlie），不是 bridge 的 botId，
             # 所以不能拿 botId 去比对。判据改为：两边看到的名单一致 且 公共玩家 ≥2
             # （同一服务器且都在线时，必然互相看见）。
             op1 = set(x for x in (first_status.get("onlinePlayers") or "").split(",") if x)

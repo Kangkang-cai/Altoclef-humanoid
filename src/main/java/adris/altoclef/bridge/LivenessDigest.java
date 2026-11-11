@@ -187,7 +187,7 @@ final class LivenessDigest {
      * {@code FollowPlayerTask} 且已到保持距离（目标实体在视野内）。这种"不动"是跟随的
      * 正常形态，不该报 stuck。
      *
-     * <p>1011 22:45 实测：铁头贴 kangkang 2.7 格站定 60s（三元组全不变）→ 误报 bot_stuck，
+     * <p>1011 22:45 实测：铁头贴 charlie 2.7 格站定 60s（三元组全不变）→ 误报 bot_stuck，
      * 对端 LLM 又自造"区块没加载"的解释。注意只豁免"贴身站定"这一种 —— FollowPlayerTask
      * 的其它 null 返回路径（空记录等目标进范围/远程接近超时前）仍照常判卡，那是要上报的真停滞。
      */

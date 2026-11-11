@@ -16,7 +16,7 @@
     python altoclef/bridge_follow_test.py ^
         --main bot_1=http://127.0.0.1:8761 ^
         --sub  bot_2=http://127.0.0.1:8762 ^
-        --leader <主bot的MC玩家名，如 qiaoqiao> ^
+        --leader <主bot的MC玩家名，如 alice> ^
         --gamedir-sub "D:/minecraft/.minecraft/versions/1.18.2-Fabric-2" ^
         --gamedir-main "D:/minecraft/.minecraft/versions/1.18.2-Fabric-1"
 

@@ -32,7 +32,7 @@ final class BotSnapshot {
 
     final String botId;
     /**
-     * (2026-10-07 bot 间坐标共享) 本 bot 的<b>游戏内玩家名</b>（如 {@code "qiaoqiao"}）——
+     * (2026-10-07 bot 间坐标共享) 本 bot 的<b>游戏内玩家名</b>（如 {@code "alice"}）——
      * bridge 侧的 {@code botId}（{@code "bot_1"}）是聊天室身份，{@code @follow}/{@code @give}
      * 却按游戏内名寻址，两者不是一回事。有这个键，同伴才能把"要跟的人"翻译成"去哪个端口取坐标"
      * （见 {@link PeerPosWatcher}）。离线 / 未进世界为空串。

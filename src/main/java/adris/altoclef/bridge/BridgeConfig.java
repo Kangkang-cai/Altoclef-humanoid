@@ -66,7 +66,7 @@ public class BridgeConfig {
 
     /**
      * (2026-10-06 次 bot 自动引导, 用户拍板"leader 从 bridge.json 读") 主 bot 的
-     * <b>MC 游戏内玩家名</b>（如 {@code "qiaoqiao"}），<b>不是</b> bridge 的 {@link #botId}
+     * <b>MC 游戏内玩家名</b>（如 {@code "alice"}），<b>不是</b> bridge 的 {@link #botId}
      * （{@code "bot_1"}）—— {@code @follow} 按游戏内玩家名寻址，两者不是一回事。
      *
      * <p>只有 {@link #role} 为 {@code "sub"} 且本字段非空时，次 bot 才会启用自动引导：

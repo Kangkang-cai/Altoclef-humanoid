@@ -252,7 +252,7 @@ public interface WorldHelper {
      *
      * <p>本项目此前选床只判"从某站侧能不能点到床方块"({@code bedHasClickableLine}),
      * 不判占用 ⇒ 对着别人正睡的床无限重点 (现场 20261004: 三 bot 抢一张床,
-     * kangkang 在 (-886,66,563) 连点 15 次 / 30s 未睡)。占用判据单一源, 供
+     * charlie 在 (-886,66,563) 连点 15 次 / 30s 未睡)。占用判据单一源, 供
      * {@code PlaceBedAndSetSpawnTask}(选床睡) 与 {@code CollectBedTask}(选床拆) 共用。
      *
      * <p>两半块都查: vanilla onUse 会先 offset 到 HEAD 再读该块属性, 但不同实现可能
