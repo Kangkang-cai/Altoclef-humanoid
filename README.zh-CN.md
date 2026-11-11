@@ -1,6 +1,6 @@
 # AltoClef Humanoid（拟人化 Minecraft 通关机器人）
 
-一个**拟人化 Minecraft 自动通关机器人** —— 基于 [AltoClef](https://github.com/gaucho-matrero/altoclef)（寻路由 [Baritone](https://github.com/cabaletta/baritone) 驱动）的增强分支，新增**多 bot 协作**与**面向 LLM/AI 导演的指令桥**。
+一个**拟人化 Minecraft 自动通关机器人** —— 基于 [AltoClef](https://github.com/gaucho-matrero/altoclef)（寻路由 [Baritone](https://github.com/cabaletta/baritone) 驱动）的增强分支。它以**拟人的感知方式**游玩：不开透视、不作弊感知，只知道自己亲眼看到、能记住的东西；像人一样探索，像人一样观察和移动。
 
 [English (README.md)](README.md)
 
@@ -8,18 +8,29 @@
 
 ## 这是什么？
 
-[AltoClef](https://github.com/gaucho-matrero/altoclef) 是 2021 年 5 月[第一个完全自主通关 Minecraft 的机器人](https://youtu.be/baAa6s8tahA)。本分支在该基线上继续演进，把它改造成一个**可长期无人值守运行的多 bot 生存系统**：外部 AI（例如 LLM「导演」智能体）可以通过 HTTP 桥接接口和游戏内聊天指令指挥 bot 行动，并从大量真实连续游玩会话中沉淀了数百项健壮性修复。
+[AltoClef](https://github.com/gaucho-matrero/altoclef) 是 2021 年 5 月[第一个完全自主通关 Minecraft 的机器人](https://youtu.be/baAa6s8tahA)。但和大多数 Minecraft 机器人一样，它在感知上是作弊的：它能"知道"墙后和整个加载范围内的一切。本分支的主线工作就是拿掉这份不公平优势，让 bot 真正**像人一样玩游戏**——并沉淀了数百项来自真实长时间无人值守游玩的健壮性修复。
 
-## 本分支相对上游的增强
+## 拟人化在哪里
 
-| 领域 | 新增内容 |
-|---|---|
-| **多 bot 协作** | 主 bot + 次 bot 架构：职责系统（`PREP` 备料 / `FOLLOW` 跟随 / `COLLECT` 自主收集 / `SLEEP` 睡眠镜像）、跨 bot 坐标共享、跟随关系治理（防止两台 bot 互跟死锁） |
-| **AI/LLM 指令桥** | HTTP `/status` JSON 端点（任务状态、背包、附近玩家、场景摘要）+ 结构化指令协议（`@follow`、`@give`、`@equip`、`@quota`…），带机器可读回执与物品名模糊纠错 —— 专为外部 AI 导演可靠指挥而设计 |
-| **拟人化表现** | 拟人视线调度器（头部平滑转动、会看向附近实体/玩家而非盯脚盯天）、可配置的玩家发光描边 |
-| **生存健壮性** | 死亡恢复链、岩浆逃生（垫塔）机动、下界传送门重燃与到场出闸处理、卡死任务软重启守卫、食物远征、熔炉熔炼链、丢垃圾/背包管理策略 |
+### 1. 不透视：感知只限于亲眼看到过的东西
 
-完整桥接指令协议见 [DOC_bridge_commands.md](DOC_bridge_commands.md)；内置的行为录制系统（用于调试 bot 行为）见 [RECORDING.md](RECORDING.md)。
+bot 保留一份拟人风格的**经验记忆**（`KnowledgeMemory`）：只记住自己**亲眼见过**（经视线验证）的结构，并据此推断附近可能有资源——就像玩家瞥见村庄一角就会猜测附近有箱子。关键在于：这些推断一律标注为**猜测而非观测**（由内置录制系统强制），bot 永远不会基于它不可能合法获得的信息行动。
+
+### 2. 拟人化探索策略
+
+不用全知式搜索扫地图，而是**带方向偏置的拟人化探索**（`BiasedExploreTask`）：带方向门的远征、朝向粘滞、记住已搜过的区域、像玩家一样放弃死路、拿到目标就收队。
+
+### 3. 拟人化表现
+
+**拟人视线调度器**（`HumanoidGaze` + `SmoothLookController`）：相机大部分时间平视扫视周围环境，不盯脚也不盯天，时不时看向附近的玩家/bot/生物并平滑跟随，帧级平滑转头而非机器人式瞬间甩头。玩家发光描边可配置（可排除操作者本人）。bot 还会**像人一样睡觉**（夜间在服务器上与其他玩家同步入睡）。
+
+### 4. 长时间会话的生存健壮性
+
+死亡恢复链、岩浆逃生（垫塔）机动、下界传送门重燃与到场出闸处理、卡死任务软重启守卫、食物远征、熔炉熔炼链、背包/丢垃圾策略——这些是让它能无人值守连续游玩数小时的修复。
+
+### 5. 实验性：多 bot 协作与 LLM 导演桥（边缘设施，不完善）
+
+另有 HTTP `/status` 端点 + 聊天/桥接指令协议（`@follow`、`@give`…）与跨 bot 坐标共享，用于多 bot 协作和外部 AI 导演指挥。**这部分是边缘设施，尚未打磨**——本分支的重心是上面的拟人化行为。想深究可读 [DOC_bridge_commands.md](DOC_bridge_commands.md)。
 
 ## 构建
 

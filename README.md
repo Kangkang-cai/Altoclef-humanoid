@@ -1,6 +1,6 @@
 # AltoClef Humanoid
 
-A **human-like Minecraft bot** that autonomously plays and beats the game — an enhanced fork of [AltoClef](https://github.com/gaucho-matrero/altoclef) (powered by [Baritone](https://github.com/cabaletta/baritone)) with **multi-bot coordination** and a **command bridge designed for LLM/AI directors**.
+A **human-like Minecraft bot** that autonomously plays and beats the game — an enhanced fork of [AltoClef](https://github.com/gaucho-matrero/altoclef) (powered by [Baritone](https://github.com/cabaletta/baritone)). It plays with **human-like perception**: no x-ray, no wall-hacks, no radar — the bot only knows what a player could see and remember, explores like a human would, and looks and moves like a player.
 
 [中文文档（README.zh-CN.md）](README.zh-CN.md)
 
@@ -8,18 +8,29 @@ A **human-like Minecraft bot** that autonomously plays and beats the game — an
 
 ## What is this?
 
-[AltoClef](https://github.com/gaucho-matrero/altoclef) became [the first bot to beat Minecraft fully autonomously](https://youtu.be/baAa6s8tahA) (May 2021). This fork continues from that baseline and turns it into a **long-running, unattended multi-bot survival system** that can be directed by an external AI (e.g. an LLM "director" agent) over an HTTP bridge and in-game chat commands — with hundreds of robustness fixes accumulated from real, continuous play sessions.
+[AltoClef](https://github.com/gaucho-matrero/altoclef) became [the first bot to beat Minecraft fully autonomously](https://youtu.be/baAa6s8tahA) (May 2021). Like most Minecraft bots, though, it cheats on perception: it "knows" what is behind walls and everywhere in the loaded world. This fork's main line of work is removing that unfair advantage and making the bot actually play **like a human** — plus hundreds of robustness fixes accumulated from real, long-running unattended play sessions.
 
-## Key features (this fork vs upstream)
+## What's human-like about it
 
-| Area | What's added |
-|---|---|
-| **Multi-bot coordination** | Leader + follower sub-bot architecture: duty system (`PREP` / `FOLLOW` / `COLLECT` / `SLEEP`), cross-bot coordinate sharing, follow-relationship governance to prevent two bots following each other in a deadlock |
-| **AI/LLM command bridge** | HTTP `/status` JSON endpoint (task state, inventory, nearby players, digests) + a structured command protocol (`@follow`, `@give`, `@equip`, `@quota`, ...) with machine-readable receipts and fuzzy item-name correction — designed so an external AI director can reliably drive the bot |
-| **Human-like presentation** | Humanoid gaze scheduler (smooth head movement, looks at nearby entities/players instead of staring at feet or sky), configurable player glow highlights |
-| **Survival robustness** | Death recovery chain, lava-escape (pillar-up) maneuver, nether portal relight & portal-exit handling, stuck-task soft-restart guard, food expeditions, furnace smelting chain, trash-dropping / inventory management policies |
+### 1. No x-ray: perception limited to what the bot has actually seen
 
-See [DOC_bridge_commands.md](DOC_bridge_commands.md) for the full bridge command protocol, and [RECORDING.md](RECORDING.md) for the built-in input/behavior recording system used for debugging bot behavior.
+The bot keeps a human-style **experience memory** (`KnowledgeMemory`): it only remembers structures it has **personally seen** (visibility-filtered), and infers candidate resource areas near them — the way a player who spots the corner of a village assumes chests are nearby. Critically, those inferences are labeled as **guesses, never observations** (enforced by the built-in recording system), so the bot never acts on information it couldn't legitimately have.
+
+### 2. Human-like exploration strategies
+
+Instead of sweeping the world with omniscient searches, the bot uses **biased, human-style exploration** (`BiasedExploreTask`): direction-gated expeditions with bearing stickiness, remembering where it has already searched, giving up dead ends the way a player would, and turning back once it has what it came for.
+
+### 3. Human-like presentation
+
+A **humanoid gaze scheduler** (`HumanoidGaze` + `SmoothLookController`): the camera mostly scans the surroundings at eye level, never stares at its feet or the sky, occasionally looks at nearby players/bots/mobs and smoothly follows them, with frame-level smoothing instead of instant robotic snaps. Optional player glow highlights are configurable (and excluded for the operator). The bot also **mirrors human sleep** (sleeps at night like other players on a server).
+
+### 4. Long-session survival robustness
+
+Death recovery chain, lava-escape (pillar-up) maneuver, nether portal relight & portal-exit handling, stuck-task soft-restart guard, food expeditions, furnace smelting chain, and inventory/trash-dropping policies — the fixes that let it run unattended for hours.
+
+### 5. Experimental: multi-bot & LLM director bridge (edge facility, not polished)
+
+There is also an HTTP `/status` endpoint plus a chat/bridge command protocol (`@follow`, `@give`, ...) with cross-bot coordinate sharing, built to let multiple bots cooperate and be driven by an external AI director. **This part is a peripheral facility and is not polished** — the human-like behavior above is the focus of this fork. See [DOC_bridge_commands.md](DOC_bridge_commands.md) if you want to dig in anyway.
 
 ## Build
 

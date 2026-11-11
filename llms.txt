@@ -1,6 +1,6 @@
 # AltoClef Humanoid
 
-> A human-like Minecraft bot (1.18.2 Fabric, fork of AltoClef/Baritone) that autonomously beats the game, supports multi-bot coordination (leader + follower sub-bots), and exposes an HTTP `/status` + chat command bridge designed for LLM/AI directors.
+> A human-like Minecraft bot (1.18.2 Fabric, fork of AltoClef/Baritone) that autonomously beats the game without x-ray or wall-hacks: perception limited to what it has actually seen (visibility-filtered experience memory), human-like biased exploration strategies, and human-like gaze/presentation. Experimental multi-bot + LLM director bridge exists but is a peripheral, unpolished facility.
 
 - Repo: https://github.com/Kangkang-cai/altoclef-humanoid
 - License: MIT (upstream AltoClef by Adris Jautakas; pathfinding by Baritone, LGPL-3.0)

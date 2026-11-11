@@ -3,7 +3,7 @@
   "id": "altoclef",
   "version": "0.4.1a",
   "name": "AltoClef Humanoid",
-  "description": "Human-like Minecraft bot that autonomously beats the game, with multi-bot coordination and an LLM command bridge. Fork of AltoClef.",
+  "description": "Human-like Minecraft bot that autonomously beats the game without x-ray: visibility-filtered memory, human-like exploration and gaze. Fork of AltoClef.",
   "authors": [
     "TacoTechnica",
     "James Green",
