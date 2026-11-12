@@ -617,6 +617,16 @@ public class BeatMinecraft2Task extends Task {
     private final PlaceBedAndSetSpawnTask _setBedSpawnTask = new PlaceBedAndSetSpawnTask();
     private final GoToStrongholdPortalTask _locateStrongholdTask;
     private final Task _goToNetherTask = new DefaultGoToDimensionTask(Dimension.NETHER); // To keep the portal build cache.
+    // (2026-11-12 进下界前石材一次性检查, 用户"进入下界前才检查一次, 不够就收集一下,
+    // 不影响别的任务优先级"): 圆石家族合计 ≥64 且镐≥石质; 不够就补一轮即放行。
+    // 依据 (20261112 bot2 实锤): 第 2 次带 3 圆石+木镐进下界, 木镐打空后 20 分钟无镐可铸 —
+    // 下界没有圆石/深板岩圆石, 黑石依地形生成, 石材在下界不可靠补给。
+    // 一次性语义: 补齐轮结束 (达标或中途放弃) 闩死放行, 不卡进门主线;
+    // 维度翻转 (进入 NETHER) 时复位 (见 onTick 顶部), 下次进门重新检查。
+    private static final int PRE_NETHER_STONE_STOCK = 64;
+    private boolean _preNetherStoneStockDone = false;
+    private boolean _preNetherStoneSawNetherDim = false;
+    private Task _preNetherStoneTask = null;
     private boolean _collectingEyes;
     // (2026-09-21) 重心估算被拒的一次性诊断 latch, 防每 tick 刷屏。
     private boolean _centroidEstimateRejectedLogged;
@@ -1192,6 +1202,14 @@ public class BeatMinecraft2Task extends Task {
         // (:2388 钻石合成分支 / :2487 preNetherPhase) 不一定还会经过
         // recordDiamondCollectActive, 放那里水合不到。
         hydrateDecisionsFromLedger(mod);
+        // (2026-11-12 PreNetherStone) 维度翻转复位: 一旦进入 NETHER 即复位石材闸
+        // (一次性闸只覆盖一次进门), 回主世界后再进门时重新检查。
+        boolean inNetherNow = WorldHelper.getCurrentDimension() == Dimension.NETHER;
+        if (inNetherNow != _preNetherStoneSawNetherDim) {
+            _preNetherStoneSawNetherDim = inNetherNow;
+            _preNetherStoneStockDone = false;
+            _preNetherStoneTask = null;
+        }
         // (2026-09-23 战后补扫) 自检 onTick 空档: 两次 onTick 间隔超过
         // RESUME_GAP_TICKS 说明 beat 曾被高优链抢占挂起过 → 恢复后强制补一次
         // 贪心探针 (见 _greedyProbeLatch 字段注释)。
@@ -2740,6 +2758,11 @@ public class BeatMinecraft2Task extends Task {
                         if (preNetherShield != null) {
                             return preNetherShield;
                         }
+                        // (2026-11-12 进下界前石材一次性检查, 见 getPreNetherStoneStockTask)
+                        Task preNetherStone = getPreNetherStoneStockTask(mod);
+                        if (preNetherStone != null) {
+                            return preNetherStone;
+                        }
                         setDebugState("Giving up diamond gear, proceeding forward (limit reached)");
                         return _goToNetherTask;
                     }
@@ -3105,6 +3128,11 @@ public class BeatMinecraft2Task extends Task {
                         if (preNetherFood != null) {
                             return preNetherFood;
                         }
+                        // (2026-11-12 进下界前石材一次性检查, 见 getPreNetherStoneStockTask)
+                        Task preNetherStone = getPreNetherStoneStockTask(mod);
+                        if (preNetherStone != null) {
+                            return preNetherStone;
+                        }
                         setDebugState("Giving up diamond gear, proceeding to Nether (limit reached)");
                         return _goToNetherTask;
                     }
@@ -3127,6 +3155,11 @@ public class BeatMinecraft2Task extends Task {
                 Task preNetherShield = getPreNetherShieldTask(mod);
                 if (preNetherShield != null) {
                     return preNetherShield;
+                }
+                // (2026-11-12 进下界前石材一次性检查, 见 getPreNetherStoneStockTask)
+                Task preNetherStone = getPreNetherStoneStockTask(mod);
+                if (preNetherStone != null) {
+                    return preNetherStone;
                 }
                 setDebugState("Going to Nether");
                 return _goToNetherTask;
@@ -3409,6 +3442,76 @@ public class BeatMinecraft2Task extends Task {
         }
         setDebugState("Collecting food before Nether (" + (int) score + "/" + need + " units)");
         return _foodTask;
+    }
+
+    /**
+     * (2026-11-12 进下界前石材一次性检查, 用户"进入下界前才检查一次, 不够就收集一下,
+     * 不影响别的任务优先级") 进下界 (_goToNetherTask) 前的一次性闸:
+     * ① 镐 < 石质 → 先合石镐 (挖石头本身需要镐, 镐闸必须先行; 金镐挖掘等级=木镐不算);
+     * ② 圆石家族 (cobblestone + cobbled_deepslate + blackstone) 合计 < PRE_NETHER_STONE_STOCK
+     *    → 补差额一轮 (镐缺时 squash 成"石镐+圆石"同轮)。
+     * 达标 → null 放行。一次性语义: 补齐轮结束 (达标或中途放弃) 无论结果闩死放行,
+     * 绝不阻塞进门主线; 维度翻转 (进入 NETHER) 时由 onTick 顶部复位, 下次进门重新检查。
+     * 计数走 countItemInInventoryReal (不走 tracker 缓存, 0925 镐假计数事故教训)。
+     */
+    private Task getPreNetherStoneStockTask(AltoClef mod) {
+        if (_preNetherStoneStockDone) return null;
+        boolean stonePick = hasStoneOrBetterPickaxeReal(mod);
+        int have = countStoneFamilyReal(mod);
+        if (stonePick && have >= PRE_NETHER_STONE_STOCK) {
+            _preNetherStoneStockDone = true;
+            return null;
+        }
+        if (_preNetherStoneTask == null || _preNetherStoneTask.isFinished(mod)) {
+            if (_preNetherStoneTask != null) {
+                // 补齐轮已结束 (达标或中途放弃): 一次性语义, 无论结果放行。
+                Debug.logMessage("[PreNetherStone] one-shot restock round ended (stoneFamily=" + have
+                        + "/" + PRE_NETHER_STONE_STOCK + ", stonePick=" + stonePick + ") — proceeding to Nether.");
+                _preNetherStoneStockDone = true;
+                _preNetherStoneTask = null;
+                return null;
+            }
+            Debug.logMessage("[PreNetherStone] stoneFamily=" + have + "/" + PRE_NETHER_STONE_STOCK
+                    + " stonePick=" + stonePick + " — one-shot restock before entering Nether.");
+            Debug.logToFile("altoclef_diag.log",
+                    "[MAIN-FIX]\t[PreNetherStone]\tstoneFamily=" + have + "/" + PRE_NETHER_STONE_STOCK
+                            + " stonePick=" + stonePick + " -> one-shot restock before Nether");
+            if (stonePick) {
+                _preNetherStoneTask = TaskCatalogue.getItemTask(Items.COBBLESTONE, PRE_NETHER_STONE_STOCK);
+            } else {
+                // 先做石镐再收石头, 两项合并为同一轮 (挖石头需要镐)。
+                _preNetherStoneTask = TaskCatalogue.getSquashedItemTask(
+                        new ItemTarget(Items.STONE_PICKAXE, 1),
+                        new ItemTarget(Items.COBBLESTONE, PRE_NETHER_STONE_STOCK));
+            }
+        }
+        setDebugState("Pre-Nether stone restock (stoneFamily=" + have + "/" + PRE_NETHER_STONE_STOCK
+                + ", stonePick=" + stonePick + ")");
+        return _preNetherStoneTask;
+    }
+
+    /** 真实背包口径 (countItemInInventoryReal) 的单物品计数; 异常时返回 0。 */
+    private static int countStoneFamilyItemReal(AltoClef mod, Item item) {
+        try {
+            return StorageHelper.countItemInInventoryReal(mod, item);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /** 圆石家族合计 (cobblestone + cobbled_deepslate + blackstone), 真实背包口径。 */
+    private static int countStoneFamilyReal(AltoClef mod) {
+        return countStoneFamilyItemReal(mod, Items.COBBLESTONE)
+                + countStoneFamilyItemReal(mod, Items.COBBLED_DEEPSLATE)
+                + countStoneFamilyItemReal(mod, Items.BLACKSTONE);
+    }
+
+    /** 是否持有石质或更好的镐 (真实背包口径; 金镐挖掘等级=木镐, 不计入)。 */
+    private static boolean hasStoneOrBetterPickaxeReal(AltoClef mod) {
+        return countStoneFamilyItemReal(mod, Items.STONE_PICKAXE) > 0
+                || countStoneFamilyItemReal(mod, Items.IRON_PICKAXE) > 0
+                || countStoneFamilyItemReal(mod, Items.DIAMOND_PICKAXE) > 0
+                || countStoneFamilyItemReal(mod, Items.NETHERITE_PICKAXE) > 0;
     }
 
     /**
