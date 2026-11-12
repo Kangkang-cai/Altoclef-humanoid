@@ -212,8 +212,14 @@ public class SatisfyMiningRequirementTask extends Task {
                     // 镐, 石镐更快/耐久 131 vs 59, 同样满足 WOOD 档) — 与上方
                     // "钻石优先/铁镐优先"同族的跳档判定。口径用含打开容器可达计数,
                     // 与 shouldPreferIronPickaxe 一致 (防配方中间态翻假)。
-                    if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE) >= 3) {
-                        setDebugState("Preferring STONE pickaxe (cobblestone at hand, skip wooden tier)");
+                    // (2026-11-12 口径修正, 用户"有石头不做石镐") 圆石计数升级为圆石
+                    // 家族 (cobblestone + cobbled_deepslate + blackstone): 20261112
+                    // 160336 场次实锤 — 铁镐挖穿后背包深板岩圆石×43+黑石×1, 旧口径
+                    // 只数 COBBLESTONE=0 → 判"没有石头" → 做木镐 (耐久 59, 下界挖
+                    // 地狱岩几分钟就穿)。石镐配方同日已升级为家族槽 (TaskCatalogue
+                    // toolsFamily), 判定与配方口径对齐。
+                    if (countStoneFamilyAccessible(mod) >= 3) {
+                        setDebugState("Preferring STONE pickaxe (cobblestone-family at hand, skip wooden tier)");
                         return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
                     }
                     return TaskCatalogue.getItemTask(Items.WOODEN_PICKAXE, 1);
@@ -238,8 +244,9 @@ public class SatisfyMiningRequirementTask extends Task {
                     // (2026-10-01 同根因修正) 圆石 ≥3 时直接石镐: 木镐的意义是"挖到
                     // 圆石", 圆石已够则石镐严格更优 (更快/更耐久), 同样解锁石头挖掘。
                     // 石镐不满足 IRON 档 → 拿到后本任务继续走铁镐链, 此时破石已解锁。
-                    if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE) >= 3) {
-                        setDebugState("No pickaxe at all — crafting STONE pickaxe first (cobblestone at hand)");
+                    // (2026-11-12) 圆石口径升级为家族, 见上方 WOOD 档同日修正。
+                    if (countStoneFamilyAccessible(mod) >= 3) {
+                        setDebugState("No pickaxe at all — crafting STONE pickaxe first (cobblestone-family at hand)");
                         return TaskCatalogue.getItemTask(Items.STONE_PICKAXE, 1);
                     }
                     setDebugState("No pickaxe at all — crafting WOODEN pickaxe first (unblocks stone breaking for furnace route)");
@@ -300,6 +307,18 @@ public class SatisfyMiningRequirementTask extends Task {
             if (StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, log) >= 1) return true;
         }
         return false;
+    }
+
+    /**
+     * (2026-11-12) 圆石家族 (cobblestone + cobbled_deepslate + blackstone) 可及计数,
+     * 含打开容器/2x2 合成格口径 (与配方判定一致, 防"材料在格子里被判缺失"横跳)。
+     * 用于 WOOD/IRON 档的"该降级做石镐"判定 — 石镐配方 (TaskCatalogue toolsFamily)
+     * 同日升级为家族槽, 判定与配方口径必须对齐: 家族任一 ≥3 即可合成石镐。
+     */
+    private static int countStoneFamilyAccessible(AltoClef mod) {
+        return StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE)
+                + StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLED_DEEPSLATE)
+                + StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.BLACKSTONE);
     }
 
     /**

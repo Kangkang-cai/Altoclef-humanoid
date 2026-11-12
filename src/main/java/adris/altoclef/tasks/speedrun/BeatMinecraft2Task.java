@@ -627,6 +627,14 @@ public class BeatMinecraft2Task extends Task {
     private boolean _preNetherStoneStockDone = false;
     private boolean _preNetherStoneSawNetherDim = false;
     private Task _preNetherStoneTask = null;
+    // (2026-11-12 镐不变量, 用户"铁镐用完才没镐"实锤 20261112-160336) 石材闸
+    // 一次性放行后, 造门/收尾期间镐仍可能挖穿 (本次: 放行时 stonePick=true,
+    // 16:06-16:08 之间镐耗尽 → 无镐进下界, 前 5 分钟烧生铁救场)。镐是进下界的
+    // 硬前提, 不属于"一次性"范围: 任何时刻 (含闩死后) 真实背包镐数=0 → 先补镐
+    // (家族≥3 石镐, 否则木镐), 上限 3 次防理论死锁, 不违反一次性精神 (石块数量
+    // 才是 one-shot, 镐是廉价的生存必需品)。
+    private Task _preNetherPickaxeInvariantTask = null;
+    private int _preNetherPickaxeAttempts = 0;
     private boolean _collectingEyes;
     // (2026-09-21) 重心估算被拒的一次性诊断 latch, 防每 tick 刷屏。
     private boolean _centroidEstimateRejectedLogged;
@@ -1209,6 +1217,8 @@ public class BeatMinecraft2Task extends Task {
             _preNetherStoneSawNetherDim = inNetherNow;
             _preNetherStoneStockDone = false;
             _preNetherStoneTask = null;
+            _preNetherPickaxeInvariantTask = null;
+            _preNetherPickaxeAttempts = 0;
         }
         // (2026-09-23 战后补扫) 自检 onTick 空档: 两次 onTick 间隔超过
         // RESUME_GAP_TICKS 说明 beat 曾被高优链抢占挂起过 → 恢复后强制补一次
@@ -3455,6 +3465,25 @@ public class BeatMinecraft2Task extends Task {
      * 计数走 countItemInInventoryReal (不走 tracker 缓存, 0925 镐假计数事故教训)。
      */
     private Task getPreNetherStoneStockTask(AltoClef mod) {
+        // (2026-11-12 镐不变量) 无镐先补镐 — 含石材闸已闩死放行后的阶段: 本次
+        // 160336 场次实锤, 闸放行 (当时 stonePick=true) 后造门期间镐挖穿 → 无镐
+        // 进下界。镐是进下界硬前提, 不在"一次性"范围内; 上限 3 次防理论死锁。
+        if (countAnyPickaxeReal(mod) == 0) {
+            if (_preNetherPickaxeInvariantTask == null || _preNetherPickaxeInvariantTask.isFinished(mod)) {
+                if (_preNetherPickaxeAttempts >= 3) {
+                    Debug.logWarning("[PreNetherStone] pickaxe invariant: 3 attempts exhausted, releasing anyway (should not happen)");
+                    return null;
+                }
+                _preNetherPickaxeAttempts++;
+                boolean stone = countStoneFamilyReal(mod) >= 3;
+                _preNetherPickaxeInvariantTask = TaskCatalogue.getItemTask(
+                        stone ? Items.STONE_PICKAXE : Items.WOODEN_PICKAXE, 1);
+                Debug.logMessage("[PreNetherStone] pickaxe invariant: no pickaxe in inventory -> crafting "
+                        + (stone ? "STONE" : "WOODEN") + " pickaxe (attempt " + _preNetherPickaxeAttempts + "/3)");
+            }
+            setDebugState("Pre-Nether pickaxe invariant (no pickaxe in inventory)");
+            return _preNetherPickaxeInvariantTask;
+        }
         if (_preNetherStoneStockDone) return null;
         boolean stonePick = hasStoneOrBetterPickaxeReal(mod);
         int have = countStoneFamilyReal(mod);
@@ -3512,6 +3541,16 @@ public class BeatMinecraft2Task extends Task {
                 || countStoneFamilyItemReal(mod, Items.IRON_PICKAXE) > 0
                 || countStoneFamilyItemReal(mod, Items.DIAMOND_PICKAXE) > 0
                 || countStoneFamilyItemReal(mod, Items.NETHERITE_PICKAXE) > 0;
+    }
+
+    /** 全等级镐总数 (真实背包口径, 含木/金镐) — 进下界硬前提检查。 */
+    private static int countAnyPickaxeReal(AltoClef mod) {
+        return countStoneFamilyItemReal(mod, Items.WOODEN_PICKAXE)
+                + countStoneFamilyItemReal(mod, Items.STONE_PICKAXE)
+                + countStoneFamilyItemReal(mod, Items.IRON_PICKAXE)
+                + countStoneFamilyItemReal(mod, Items.GOLDEN_PICKAXE)
+                + countStoneFamilyItemReal(mod, Items.DIAMOND_PICKAXE)
+                + countStoneFamilyItemReal(mod, Items.NETHERITE_PICKAXE);
     }
 
     /**

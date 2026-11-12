@@ -378,7 +378,13 @@ public class TaskCatalogue {
             shapedRecipe2x2("chiseled_deepslate", Items.CHISELED_DEEPSLATE, 1, "cobbled_deepslate_slab", o, "cobbled_deepslate_slab", o);
             /// TOOLS
             tools("wooden", "planks", Items.WOODEN_PICKAXE, Items.WOODEN_SHOVEL, Items.WOODEN_SWORD, Items.WOODEN_AXE, Items.WOODEN_HOE);
-            tools("stone", "cobblestone", Items.STONE_PICKAXE, Items.STONE_SHOVEL, Items.STONE_SWORD, Items.STONE_AXE, Items.STONE_HOE);
+            // (2026-11-12 用户"有石头(深板岩圆石43个)却做木镐") 石制工具接受圆石家族
+            // (vanilla 1.16+ #stone_crafting_materials: 圆石/黑石/深板岩圆石)。旧配方只认
+            // 圆石 → 下界只有黑石/带进来的深板岩圆石时, SatisfyMiningReq 即便判"该做石镐"
+            // 也派不出可用配方 (CollectRecipeResources 会去挖下界不存在的圆石)。
+            // 熔炉配方 2026-08-25 已有同款先例 (ItemTarget 家族槽)。
+            toolsFamily("stone", new ItemTarget(new Item[]{Items.COBBLESTONE, Items.BLACKSTONE, Items.COBBLED_DEEPSLATE}),
+                    Items.STONE_PICKAXE, Items.STONE_SHOVEL, Items.STONE_SWORD, Items.STONE_AXE, Items.STONE_HOE);
             tools("iron", "iron_ingot", Items.IRON_PICKAXE, Items.IRON_SHOVEL, Items.IRON_SWORD, Items.IRON_AXE, Items.IRON_HOE);
             tools("golden", "gold_ingot", Items.GOLDEN_PICKAXE, Items.GOLDEN_SHOVEL, Items.GOLDEN_SWORD, Items.GOLDEN_AXE, Items.GOLDEN_HOE);
             tools("diamond", "diamond", Items.DIAMOND_PICKAXE, Items.DIAMOND_SHOVEL, Items.DIAMOND_SWORD, Items.DIAMOND_AXE, Items.DIAMOND_HOE);
@@ -934,6 +940,22 @@ public class TaskCatalogue {
         shapedRecipe3x3(toolMaterialName + "_sword", swordItem, 1, o, m, o, o, m, o, o, s, o);
         shapedRecipe3x3(toolMaterialName + "_axe", axeItem, 1, m, m, o, m, s, o, o, s, o);
         shapedRecipe3x3(toolMaterialName + "_hoe", hoeItem, 1, m, m, o, o, s, o, o, s, o);
+    }
+
+    /**
+     * (2026-11-12 石制工具圆石家族) 与 {@link #tools} 相同, 但材料槽是 ItemTarget
+     * 家族 (圆石/黑石/深板岩圆石任一可填)。参见熔炉配方 2026-08-25 先例与
+     * CollectRecipeCataloguedResourcesTask 的"多重匹配槽任选可收集变体"逻辑。
+     */
+    private static void toolsFamily(String toolMaterialName, ItemTarget material, Item pickaxeItem, Item shovelItem, Item swordItem, Item axeItem, Item hoeItem) {
+        ItemTarget s = new ItemTarget(Items.STICK);
+        ItemTarget o = ItemTarget.EMPTY;
+        ItemTarget m = material;
+        shapedRecipe3x3Targets(toolMaterialName + "_pickaxe", pickaxeItem, 1, m, m, m, o, s, o, o, s, o);
+        shapedRecipe3x3Targets(toolMaterialName + "_shovel", shovelItem, 1, o, m, o, o, s, o, o, s, o);
+        shapedRecipe3x3Targets(toolMaterialName + "_sword", swordItem, 1, o, m, o, o, m, o, o, s, o);
+        shapedRecipe3x3Targets(toolMaterialName + "_axe", axeItem, 1, m, m, o, m, s, o, o, s, o);
+        shapedRecipe3x3Targets(toolMaterialName + "_hoe", hoeItem, 1, m, m, o, o, s, o, o, s, o);
     }
 
     private static void armor(String armorMaterialName, String material, Item helmetItem, Item chestplateItem, Item leggingsItem, Item bootsItem) {
