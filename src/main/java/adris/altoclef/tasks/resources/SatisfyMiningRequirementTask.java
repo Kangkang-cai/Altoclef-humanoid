@@ -310,15 +310,18 @@ public class SatisfyMiningRequirementTask extends Task {
     }
 
     /**
-     * (2026-11-12) 圆石家族 (cobblestone + cobbled_deepslate + blackstone) 可及计数,
-     * 含打开容器/2x2 合成格口径 (与配方判定一致, 防"材料在格子里被判缺失"横跳)。
-     * 用于 WOOD/IRON 档的"该降级做石镐"判定 — 石镐配方 (TaskCatalogue toolsFamily)
-     * 同日升级为家族槽, 判定与配方口径必须对齐: 家族任一 ≥3 即可合成石镐。
+     * (2026-11-12) 圆石家族 (cobblestone + cobbled_deepslate + blackstone) 可即时
+     * 合成量: 真实背包 + 2x2 合成格合计 (与收集器/合成链的材料口径对齐)。
+     * 口径教训: 此判定若用含"打开容器"的宽口径 (首版实现), MineAndCollect 收集
+     * 家族材料时的嵌套 SatisfyMiningReq 会拿着同一宽口径反复偏好石镐 → 派收集
+     * → 又嵌套 → 任务树 depth=128 递归爆炸 (20261112-183557 实锤)。宽口径的
+     * "打开容器槽位"材料不在此判定的语义内 — 那些材料拿不到手里就合不成镐,
+     * 该降级木镐就降级 (木镐链不依赖家族材料, 必然终止)。
      */
     private static int countStoneFamilyAccessible(AltoClef mod) {
-        return StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLESTONE)
-                + StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.COBBLED_DEEPSLATE)
-                + StorageHelper.countItemsAccessibleIncludingOpenContainer(mod, Items.BLACKSTONE);
+        return StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.COBBLESTONE)
+                + StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.COBBLED_DEEPSLATE)
+                + StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, Items.BLACKSTONE);
     }
 
     /**

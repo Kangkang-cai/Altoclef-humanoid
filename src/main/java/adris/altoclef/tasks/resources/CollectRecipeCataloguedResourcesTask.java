@@ -13,6 +13,8 @@ import org.apache.commons.lang3.ArrayUtils;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 // Collects everything that's catalogued for a recipe.
 public class CollectRecipeCataloguedResourcesTask extends Task {
@@ -84,6 +86,9 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
         // Stuff to get, both catalogued + individual items.
         HashMap<String, Integer> catalogueCount = new HashMap<>();
         HashMap<Item, Integer> itemCount = new HashMap<>();
+        // (2026-11-12 家族槽组结算) 多重匹配槽分组: key=匹配集合(同一配方里同一家族
+        // 的多个槽位共享), value=该组总需求(槽位数 × 合成重复数)。
+        java.util.LinkedHashMap<List<Item>, Integer> multiMatchSlotNeeded = new java.util.LinkedHashMap<>();
 
         for (RecipeTarget target : _targets) {
             // Ignore this recipe if we have its item.
@@ -106,22 +111,16 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                     int numberOfRepeats = (int) Math.floor(-0.1 + (double) weNeed / target.getRecipe().outputCount()) + 1;
                     if (!slot.isCatalogueItem()) {
                         if (slot.getMatches().length != 1) {
-                            // (2026-08-27 卡死修复) 多重匹配槽(如炉子: 圆石/黑石/
-                            // 深板岩圆石, 任一都能填) 旧逻辑只打 warning 不收集 →
-                            // 材料没齐却不触发去拿, isFinished 反复重置 → 无限卡死
-                            // ("没有材料怎么不去获取", 用户实测)。任选一个可收集的
-                            // 匹配项去收集: 优先选已有进度的, 否则取第一个(炉子即
-                            // 圆石)。
-                            // 变体选择用真实背包计数, 优先选手上已有的变体(如深板岩圆石),
-                            // 而非走缓存(可能把所有变体都判成 0)。
-                            Item pick = slot.getMatches()[0];
-                            for (Item m : slot.getMatches()) {
-                                if (mod.getItemStorage().getItemCountReal(m) > 0) {
-                                    pick = m;
-                                    break;
-                                }
-                            }
-                            itemCount.put(pick, itemCount.getOrDefault(pick, 0) + numberOfRepeats);
+                            // (2026-11-12 家族槽组结算) 多重匹配槽不再逐槽挑变体, 改为
+                            // 按"匹配集合"分组、合成后再统一结算 (见下方 multiMatchSlotNeeded
+                            // 循环)。旧实现 (2026-08-27) 逐槽独立挑"第一个有真实数量的变体"并
+                            // 按该变体单独计数 → 20261112-183557 场次实锤: 背包深板岩圆石
+                            // x43+黑石x1 做石镐, 三个家族槽逐槽都挑中黑石 x1 → 派
+                            // MineAndCollect(blackstone x3) → 挖黑石需要镐 → 嵌套
+                            // SatisfyMiningReq 又偏好石镐 → 任务树 depth=128 递归爆炸,
+                            // 43 个深板岩圆石全程无人使用。
+                            List<Item> familyKey = java.util.Arrays.asList(slot.getMatches());
+                            multiMatchSlotNeeded.merge(familyKey, numberOfRepeats, Integer::sum);
                         } else {
                             Item item = slot.getMatches()[0];
                             itemCount.put(item, itemCount.getOrDefault(item, 0) + numberOfRepeats);
@@ -135,6 +134,34 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
             }
         }
 
+
+        // (2026-11-12 家族槽组结算) 多重匹配槽统一结算: 同组槽位共享家族总量 —
+        // 需求 = 组内槽位数 × 重复数, 持有 = 家族全部变体的真实背包+2x2 格合计。
+        // 家族总量够 → 不派收集, 直接合成 (台格填充本就支持混填, 2026-08-25 熔炉
+        // 先例); 不够 → 挑真实持有量最大的变体 (43 深板岩圆石不会被黑石 x1 抢走,
+        // 全零时取匹配序第一个 = 0827"炉子即圆石"语义), 只补差额。
+        for (Map.Entry<List<Item>, Integer> group : multiMatchSlotNeeded.entrySet()) {
+            List<Item> matches = group.getKey();
+            int needed = group.getValue();
+            int haveTotal = 0;
+            for (Item m : matches) {
+                haveTotal += mod.getItemStorage().getItemCountReal(m) + StorageHelper.countItemsInCraftGrid(mod, m);
+            }
+            if (haveTotal >= needed) continue;
+            Item pick = matches.get(0);
+            int pickHave = -1;
+            for (Item m : matches) {
+                int c = mod.getItemStorage().getItemCountReal(m) + StorageHelper.countItemsInCraftGrid(mod, m);
+                if (c > pickHave) {
+                    pickHave = c;
+                    pick = m;
+                }
+            }
+            // 目标口径 = 挑中变体最终应持有 needed-(其他变体已有量); 下方通用检查
+            // (real+grid < count) 会按此派收集任务补差额, 家族总量达标即停。
+            int targetForPick = needed - haveTotal + pickHave;
+            itemCount.put(pick, itemCount.getOrDefault(pick, 0) + targetForPick);
+        }
 
         // (Cache this with the above stuff!!)
         // Grab materials
