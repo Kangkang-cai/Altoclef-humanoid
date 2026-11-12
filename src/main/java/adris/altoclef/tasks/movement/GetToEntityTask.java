@@ -42,6 +42,11 @@ public class GetToEntityTask extends Task implements ITaskRequiresGrounded {
         this(entity, 1);
     }
 
+    /** (2026-11-12) 缓存复用判参用: 上层 (击杀链) 按"实体+距离"判缓存命中。 */
+    public double getCloseEnoughDistance() {
+        return _closeEnoughDistance;
+    }
+
     @Override
     protected void onStart(AltoClef mod) {
         mod.getClientBaritone().getCustomGoalProcess().onLostControl();

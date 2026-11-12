@@ -92,13 +92,15 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             long now = WorldHelper.getTicks();
             _losTimersByTarget.entrySet().removeIf(en -> {
                 long[] v = en.getValue();
-                long newest = Math.max(v[0], v[1]);
+                // (2026-11-12 扩 4 槽) hold 耐心/粘滞计时 (idx 2/3) 也纳入自净。
+                long newest = Math.max(Math.max(v[0], v[1]), Math.max(v[2], v[3]));
                 return newest != Long.MIN_VALUE && now - newest > RecoveryTuning.LOS_TIMER_STALE_TICKS;
             });
         }
-        long[] a = _losTimersByTarget.computeIfAbsent(id, k -> new long[]{Long.MIN_VALUE, Long.MIN_VALUE});
+        long[] a = _losTimersByTarget.computeIfAbsent(id, k -> new long[]{Long.MIN_VALUE, Long.MIN_VALUE, Long.MIN_VALUE, Long.MIN_VALUE});
         a[idx] = value;
-        if (a[0] == Long.MIN_VALUE && a[1] == Long.MIN_VALUE) {
+        if (a[0] == Long.MIN_VALUE && a[1] == Long.MIN_VALUE
+                && a[2] == Long.MIN_VALUE && a[3] == Long.MIN_VALUE) {
             _losTimersByTarget.remove(id);
         }
     }
@@ -299,6 +301,41 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
                 // 交互 (交易/剪羊毛) 被墙挡住时仍需走出去看目标, 保持原绕位行为。
                 boolean holdClose = !pointBlank && _withinInteract
                         && holdPositionWhenBlockedInInteract(mod, entity);
+                // (2026-11-12 统一可达判据收口, 用户拍板"必中判据对, 走位/重建判据都对",
+                // 现场 20261112-150714: 高台打崖下小白 dist=4.7 踩在迟滞圈上沿,
+                // HoldClose "no reposition" 钉死 28s 站桩挨射 —— hold 的"不再走位"
+                // 必须以必中判据的距离分量 (sqDist <= reach²) 成立为前提:
+                //   · 距离分量成立 (真贴脸, 只差视线) → hold 无限合法 (0922 语义不变);
+                //   · 距离分量不成立 (打不着, 如高低差假贴脸) → hold 只许维持
+                //     OBSTRUCTION_PERSIST_SECONDS (2s) 耐心窗口 (覆盖 0927 C 的
+                //     "末影人瞬移一拍跳变"语义), 超时解除走绕位, 解除粘滞到
+                //     "距离回到 reach 内或退出交互圈"才复位 (防逐 tick 翻面乒乓)。
+                if (holdClose) {
+                    java.util.UUID holdId = entity.getUuid();
+                    long holdNow = WorldHelper.getTicks();
+                    if (sqDist <= playerReach * playerReach) {
+                        losTimerSet(holdId, 2, Long.MIN_VALUE);
+                        losTimerSet(holdId, 3, Long.MIN_VALUE);
+                    } else if (losTimerGet(holdId, 3) != Long.MIN_VALUE) {
+                        // 已因超时解除且粘滞中: 保持解除 (否则下一拍又 hold 回来)。
+                        holdClose = false;
+                    } else {
+                        long heldSince = losTimerGet(holdId, 2);
+                        if (heldSince == Long.MIN_VALUE
+                                || holdNow - heldSince > RecoveryTuning.LOS_TIMER_STALE_TICKS) {
+                            losTimerSet(holdId, 2, holdNow);
+                        } else if (holdNow - heldSince
+                                > (long) (OBSTRUCTION_PERSIST_SECONDS * 20)) {
+                            holdClose = false;
+                            losTimerSet(holdId, 3, holdNow);
+                            losTimerSet(holdId, 2, Long.MIN_VALUE);
+                            Debug.logToFile("altoclef_diag.log", "[COMBAT-FIX]\t[HoldLift]\tmandatory-strike"
+                                    + " distance unmet for " + (int) OBSTRUCTION_PERSIST_SECONDS
+                                    + "s (dist=" + String.format("%.1f", Math.sqrt(sqDist))
+                                    + " > reach " + playerReach + "), lifting hold -> reposition");
+                        }
+                    }
+                }
                 if (holdClose) {
                     long holdNow = WorldHelper.getTicks();
                     if (_lastHoldCloseLogTick == Long.MIN_VALUE
@@ -392,6 +429,10 @@ public abstract class AbstractDoToEntityTask extends Task implements ITaskRequir
             return onEntityInteract(mod, entity);
         } else {
             _withinInteract = false;
+            // (2026-11-12 统一可达判据收口) 退出交互圈 = 重新接近 = hold 耐心/
+            // 粘滞计时整体复位 (粘滞标记不清理会让下一场交战的 hold 被残留压制)。
+            losTimerSet(entity.getUuid(), 2, Long.MIN_VALUE);
+            losTimerSet(entity.getUuid(), 3, Long.MIN_VALUE);
             setDebugState("Approaching target");
 
             // [EndermanProvoke] 接近途中每 tick 回调 (2026-08-23): 子类可

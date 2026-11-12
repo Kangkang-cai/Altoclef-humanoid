@@ -248,6 +248,41 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     private static final java.util.Map<java.util.UUID, Long> _meleeEngageAnchor = new java.util.HashMap<>();
     private static long _lastFullyCloseLogMs = 0;
 
+    // (2026-11-12 高低差死角修复, 用户拍板"重建判据挂统一可达判据") 无盾近战
+    // 与盾战两个分支原先每 tick new GetToEntityTask —— MobDefenseChain 每秒重建
+    // <Killing entity.X> 实例时子树整棵 STOP/START, GetToEntityTask.onStart 的
+    // customGoalProcess.onLostControl() 把 Baritone 执行进度洗回 0 (现场
+    // 20261112-150714 实锤: MovementDownward PREPPING 28s 永远停在 0/4,
+    // MovementProgressChecker 5s 无进展的 wander 自救也永远凑不满 → NAV-STUCK
+    // 计时同步被清零, 脱困兜底失效)。改 static map 按 UUID 缓存: 引用稳定 =
+    // runner 复用不重启; 距离参数实际变化 (FULLY-CLOSE 3.0→1.0) 才换新 ——
+    // 即"重建判据挂在统一可达判据的变化上"。目标死亡/条目超限自净。
+    private static final java.util.Map<java.util.UUID, GetToEntityTask> _moveTaskCache = new java.util.HashMap<>();
+
+    private static Task getOrBuildMoveTask(Entity entity, double closeEnoughDistance) {
+        java.util.UUID id = entity.getUuid();
+        GetToEntityTask cached = _moveTaskCache.get(id);
+        if (cached != null) {
+            if (!entity.isAlive()) {
+                _moveTaskCache.remove(id);
+            } else if (Math.abs(cached.getCloseEnoughDistance() - closeEnoughDistance) < 0.1) {
+                return cached;
+            } else {
+                // 距离参数变了 (drought 兜底切换) → 换新实例 (旧的由 runner 收尾)。
+                _moveTaskCache.remove(id);
+            }
+        }
+        GetToEntityTask fresh = new GetToEntityTask(entity, closeEnoughDistance);
+        // 自净: GetToEntityTask 不暴露目标引用, 无法逐条判 isAlive —— 条目超限
+        // 直接全清 (战斗目标数个位数, 代价仅为一次重建, 与 _meleeEngageAnchor
+        // 的 60s 清理同量级)。
+        if (_moveTaskCache.size() > 16) {
+            _moveTaskCache.clear();
+        }
+        _moveTaskCache.put(id, fresh);
+        return fresh;
+    }
+
     private static final Item[] WEAPON_ITEMS = new Item[]{
             Items.DIAMOND_SWORD,
             Items.IRON_SWORD,
@@ -600,7 +635,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // "GetToEntityTask(0.8)", 与实际值 (approachDistance 或 FULLY_CLOSE) 无关,
         // 现场会误读成"bot 在往 0.8 格挤"。
         double approachDist = approachDistance(mod, entity);
-        Task move = new GetToEntityTask(entity, approachDist);
+        // (2026-11-12) 缓存复用取代每 tick new —— 见 _moveTaskCache 注释。
+        Task move = getOrBuildMoveTask(entity, approachDist);
         // (2026-09-26 完全靠近兜底, 用户) 交战中 2s 没对本目标出过一刀 (距离
         // 停靠点在 reach 外干站 / 藤蔓吃准心 swing DECLINED) → 贴近距离临时
         // 换成 1 格, 逼到贴脸让准心落回目标身上; 出一刀后 isMeleeSwingDrought
@@ -608,7 +644,7 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
         // 格挡节奏 (波内只格挡最多 4s) 本来就合法不出刀, 不适用。
         if (!sweepGuarded && isMeleeSwingDrought(mod, entity)) {
             approachDist = FULLY_CLOSE_DISTANCE;
-            move = new GetToEntityTask(entity, approachDist);
+            move = getOrBuildMoveTask(entity, approachDist);
             long nowMs = System.currentTimeMillis();
             if (nowMs - _lastFullyCloseLogMs > 3000) {
                 _lastFullyCloseLogMs = nowMs;
@@ -870,7 +906,8 @@ public abstract class AbstractKillEntityTask extends AbstractDoToEntityTask {
     // 杀怪父任务; 盾的 hold / 挥剑作为侧写叠加在移动之上跨 tick 生效。这样小白
     // 后退时 bot 始终粘着贴, 不会停原地眼睁睁掉距。
     // (2026-09-09 凋零骷髅) 盾战逼近同样按类型区分: 凋零骷髅=射程即停不贴身。
-    Task move = new GetToEntityTask(entity, approachDistance(mod, entity));
+    // (2026-11-12) 盾战逼近同样走缓存复用 (见 _moveTaskCache 注释)。
+    Task move = getOrBuildMoveTask(entity, approachDistance(mod, entity));
 
     if (!inReach) {
         _counterHitsLeft = 0;
