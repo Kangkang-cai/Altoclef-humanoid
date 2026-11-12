@@ -123,8 +123,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // ① 转正判据 = 距锚点半径破纪录, 但绕崖走是绕锚点的圆弧, 半径不变 → 永远
     //   无法转正; ② 换边乒乓 (+60 → -75 → +90 → -90), 大障碍前左右横跳;
     // ③ 试探步长 48 格, 沿崖根走不够绕过。修订:
-    //   触发 = 停滞 STALL_MS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_MS
-    //   且失败 ≥1); 升级 = 同侧加档 +60 → +75 → +90, 同侧到顶才换边; 试探方向
+    //   触发 = 停滞 STALL_MS 且 (失败 ≥PROBE_AFTER_FAILS 或 停滞 ≥2×STALL_MS);
+    //   (20261112 A) 停滞 ≥2×STALL_MS 不再要求"失败≥1" —— 沿岩浆边乒乓时
+    //   progress 检查器从不判失败, 带失败前提 = probe 永久锁死; 且调用方从
+    //   "两条失败路径"扩到"每 tick 周期调用" (升级间隔 2×STALL_MS 节流);
+    //   升级 = 同侧加档 +60 → +75 → +90, 同侧到顶才换边; 试探方向
     //   步长 ×2 (沿崖要走长步); 转正 = 半径破纪录 或 距试探起点净位移 > EXPLORE_STEP
     //   (绕崖横向走出一个整步程 = 真的绕出去了)。
     // (2026-09-14 大转弯修订, 用户"策略太严, 大范围内可以允许大转弯"): 大片岩浆
@@ -217,6 +220,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     // (2026-09-26 试探解冻) 停滞基线改存【墙钟毫秒】—— 旧版存实例内 _tickId,
     // 跨实例比对必然为负 (见 STALL_MS 注释)。毫秒基准跨实例连续。
     private static final java.util.Map<String, Long> _lastProgressMsByKey = new java.util.HashMap<>();
+    // (20261112 A·试探周期化) 上次 probe 升级时刻: probe 的调用方从"两条失败路径"
+    // 扩到"每 tick 周期调用"后, 必须自带升级节流, 否则停滞期每 tick 加一档,
+    // ±150° 五档一秒扫完变成方向乱转。节流 = 两次升级至少隔 2×STALL_MS,
+    // 保住"同侧加档 10s 一档"的原节奏。
+    private static final java.util.Map<String, Long> _lastProbeEscalateMsByKey = new java.util.HashMap<>();
 
     // (2026-09-16 记忆中心直航) "亲眼看见过的要塞中心"直接导航的最大距离。
     // 下界 8:1, 1024 下界格 ≈ 8192 主世界格, 覆盖一次远征的合理范围 ——
@@ -268,6 +276,25 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<BlockPos, Long> _centerCooldownUntil = new java.util.HashMap<>();
     private int _memoryFailStreak = 0;
     private boolean _currentMemoryIsCenter = false;
+
+    // =========================================================================
+    // (20261112 B·记忆追逐停滞冷却) 20261112-204350 实锤: 记忆中心 (220,60,-649)
+    // 20:57:24 已查讫, 但 getCandidateAreas 围绕它 ±48 的候选云每次【随机重生成】,
+    // 存活者 (查讫圈外) 恒在岩浆海对岸 —— bot 沿岸乒乓 7 分钟 (radius 663~699
+    // 往复, max=707 冻结), clue=memory 全程绑架选点。既有出口全部失效:
+    // ① progress 失败通道 —— baritone 沿岸永远给得出可行路径, "outside step
+    //    failed" 全场 0 条, _memoryFailStreak 永远凑不齐 3 次;
+    // ② 查讫/冷却 —— 要求真走到目标 32 格内, 被岩浆拦住永远到不了。
+    // 修法: 非 failure 通道 —— 同一"追逐锚中心"连续 MEMORY_CHASE_COOLDOWN_MS
+    // 且期间无新最远半径、无一次查讫 → 该中心冷却 3 分钟 (复用 _centerCooldownUntil:
+    // 中心分支跳过冷却中心 + 候选分支剔除冷却中心 64 格内候选), probe/锁定方向接管。
+    // 追逐锚 = bot 最近的记忆中心 (候选逐点记账会被随机重生成洗掉, 按中心聚合)。
+    // 计时重置: 线索切走 / 锚中心换人 / radius 破纪录 / markMemoryChecked(真进度)。
+    // =========================================================================
+    private static final long MEMORY_CHASE_COOLDOWN_MS = 90_000;
+    private static final java.util.Map<String, BlockPos> _chaseAnchorByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Long> _chaseSinceMsByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Double> _chaseStartMaxByKey = new java.util.HashMap<>();
 
     // =========================================================================
     // (2026-09-19 垫脚方块断供兜底) 20260918-231551 实锤: 背包没有可放置方块
@@ -625,6 +652,11 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _probeStartPosByKey.clear();
         _lastProgressMsByKey.clear();
         _checkedMemoryByKey.clear();
+        // (20261112) A·probe 升级节流 + B·记忆追逐停滞: 与上方同批 static 同生命周期。
+        _lastProbeEscalateMsByKey.clear();
+        _chaseAnchorByKey.clear();
+        _chaseSinceMsByKey.clear();
+        _chaseStartMaxByKey.clear();
     }
 
     private static java.nio.file.Path fortressVisitedFile() {
@@ -1209,10 +1241,18 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         long stallLastMs = _lastProgressMsByKey.getOrDefault(key, stallNowMs);
         long stalledMs = stallNowMs - stallLastMs;
         if (stalledMs < STALL_MS) return; // 停滞不够久, 可能只是普通寻路失败
-        // (P2.1) 触发提速: 失败够 2 次即升级; 或 10s 停滞 + 至少 1 次失败 ——
-        // 进度检查器超时慢 (日志实锤 fails 10s 只涨到 1), 苦等第二次太迟钝。
+        // (20261112 A) 升级节流: 调用方扩到"每 tick 周期调用"后, 两次升级至少隔
+        // 2×STALL_MS —— 保住"同侧加档 10s 一档"的原节奏, 不因周期调用变成连扫。
+        Long lastEscalateMs = _lastProbeEscalateMsByKey.get(key);
+        if (lastEscalateMs != null && stallNowMs - lastEscalateMs < STALL_MS * 2) return;
+        // (P2.1) 触发提速: 失败够 2 次即升级; 或停滞 ≥2×STALL_MS。
+        // (20261112 A) 去掉 longStall 的"失败≥1"前提: 沿岩浆边"走得到但绕不出"的
+        // 乒乓里 baritone 永远给得出可行路径, progress 检查器不判失败,
+        // "outside step failed"/冻结看门狗全场 0 条 → fails 恒 0 → probe 被锁死
+        // (20261112-204350 实锤: max=707 冻结 7 分钟+, 全程 probe=+0 fails=0)。
+        // 停滞本身 (10s 无新最远点) 就是换向信号。
         boolean enoughFails = _failCounter >= PROBE_AFTER_FAILS;
-        boolean longStall = _failCounter >= 1 && stalledMs >= STALL_MS * 2;
+        boolean longStall = stalledMs >= STALL_MS * 2;
         if (!enoughFails && !longStall) return;
         double cur = _probeOffsetByKey.getOrDefault(key, 0.0);
         double next;
@@ -1229,10 +1269,76 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _probeOffsetByKey.put(key, next);
         _probeStartMaxByKey.put(key, _maxRadiusByKey.getOrDefault(key, 0.0));
         _probeStartPosByKey.put(key, mod.getPlayer().getBlockPos());
+        _lastProbeEscalateMsByKey.put(key, stallNowMs);
         _failCounter = 0; // 给试探方向重新计失败
         Debug.logMessage(String.format(java.util.Locale.ROOT,
                 "[Expedition] stalled (no new max for %ds), probing %+.0f° (cap ±%.0f°, long step x2)",
                 stalledMs / 1000, Math.toDegrees(next), MAX_PROBE_DEG));
+    }
+
+    /**
+     * (20261112 B·记忆追逐停滞冷却) 非 failure 通道: progress 失败路径在"沿岸
+     * 乒乓"里永远不触发 (baritone 一直有路), 查讫/冷却又要求真走到目标 32 格内
+     * (被岩浆拦住到不了) —— 假记忆中心的候选云就能无限期绑架选点。本方法按
+     * "追逐锚中心"聚合追逐时长: 连续 {@link #MEMORY_CHASE_COOLDOWN_MS} 锚未换、
+     * radius 无新最远、无一次查讫 → 冷却该中心 3 分钟 (复用 _centerCooldownUntil:
+     * 中心分支跳过 + 候选分支剔除其 64 格内候选), probe/锁定方向接管。
+     * 每 tick 由 {@link #maybeLogExpedition} 调用 (仅野外模式)。
+     */
+    private void maybeChaseStallCooldown(AltoClef mod, Vec3d pos, String key) {
+        boolean chasing = "memory".equals(_lastClue) || "memory-center".equals(_lastClue);
+        BlockPos nearest = null;
+        if (chasing) {
+            // 追逐锚 = 最近记忆中心。候选区围绕中心 ±48 随机重生成, 逐候选记账
+            // 会被重生成洗掉, 按中心聚合才能跨重选累积。
+            List<BlockPos> centers = NamedLandmarks.recallClueCenters(mod,
+                    KnowledgeMemory.StructureType.NETHER_FORTRESS, pos, REMEMBERED_CENTER_MAX_DISTANCE);
+            double bestSq = Double.POSITIVE_INFINITY;
+            for (BlockPos c : centers) {
+                double sq = c.getSquaredDistance(pos);
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    nearest = c;
+                }
+            }
+        }
+        if (!chasing || nearest == null) {
+            // 线索切走 (声音/砖/随机方向) 或没有中心: 记忆没在拽, 清钟重来。
+            if (_chaseAnchorByKey.remove(key) != null) {
+                _chaseSinceMsByKey.remove(key);
+                _chaseStartMaxByKey.remove(key);
+            }
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!nearest.equals(_chaseAnchorByKey.get(key))) {
+            // 锚中心换人 (或首拍): 重启计时。
+            _chaseAnchorByKey.put(key, nearest.toImmutable());
+            _chaseSinceMsByKey.put(key, now);
+            _chaseStartMaxByKey.put(key, _maxRadiusByKey.getOrDefault(key, 0.0));
+            return;
+        }
+        // 追逐期间有真进度 (radius 破纪录) → 方向没错, 重启计时。
+        double maxNow = _maxRadiusByKey.getOrDefault(key, 0.0);
+        Double startMax = _chaseStartMaxByKey.get(key);
+        if (startMax != null && maxNow > startMax + 1.0) {
+            _chaseSinceMsByKey.put(key, now);
+            _chaseStartMaxByKey.put(key, maxNow);
+            return;
+        }
+        Long since = _chaseSinceMsByKey.get(key);
+        if (since == null || now - since < MEMORY_CHASE_COOLDOWN_MS) return;
+        _chaseAnchorByKey.remove(key);
+        _chaseSinceMsByKey.remove(key);
+        _chaseStartMaxByKey.remove(key);
+        _centerCooldownUntil.put(nearest.toImmutable(), now + CENTER_COOLDOWN_MS);
+        // 同步压制 memory-center 分支 30s: 剩余中心若仍锚在同一象限, 换向等于没换
+        // (与远处中心 3 次失败冷却的同款处置, 见 tickOutside 失败分级)。
+        _memoryCenterSuppressUntilTick = _tickId + MEMORY_CENTER_SUPPRESS_TICKS;
+        Debug.logMessage(String.format(java.util.Locale.ROOT,
+                "[Expedition] memory chase stalled %.0fs without new max or checked area, "
+                        + "cooling center %s for 3min (its candidates within 64 blocks dropped)",
+                (now - since) / 1000.0, nearest.toShortString()));
     }
 
     // ------------------------------------------------------------------ //
@@ -1255,8 +1361,13 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
 
     private void markMemoryChecked(BlockPos target) {
         if (target == null) return;
+        // (20261112 B) 查讫 = 记忆系统真进度 (走到过、扑空登记), 追逐停滞钟重启
+        // —— 否则"合法清候选云但 radius 不涨"的场景会被误判成追逐停滞。
+        String key = expeditionKey();
+        _chaseSinceMsByKey.put(key, System.currentTimeMillis());
+        _chaseStartMaxByKey.put(key, _maxRadiusByKey.getOrDefault(key, 0.0));
         java.util.Set<BlockPos> checked = _checkedMemoryByKey
-                .computeIfAbsent(expeditionKey(), k -> new java.util.HashSet<>());
+                .computeIfAbsent(key, k -> new java.util.HashSet<>());
         if (checked.size() >= MAX_CHECKED_MEMORY) return;
         if (checked.add(target.toImmutable())) {
             Debug.logMessage("[Expedition] memory area checked-empty at " + target.toShortString()
@@ -1294,6 +1405,17 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         Vec3d now = mod.getPlayer().getPos();
         BlockPos p = mod.getPlayer().getBlockPos();
         String key = expeditionKey();
+        // (20261112 A+B) 周期自检只在野外模式: 走廊模式没有"远征停滞"语义。
+        // ① A·probe 周期调用 —— 旧版 probe 只在 progress 失败 (:1043) 与冻结
+        //    看门狗 (:934) 两条路径被调, "沿岸乒乓"里 bot 一直在动、baritone
+        //    一直有路, 两条路全都不来 → probe 死锁。每 tick 进来, 方法内部自带
+        //    STALL_MS 停滞闸 + 2×STALL_MS 升级节流, 不改原节奏。
+        // ② B·记忆追逐停滞 —— clue=memory/-center 连续绑架选点且无任何真进度
+        //    时, 把追逐锚中心冷却 3 分钟 (见 MEMORY_CHASE_COOLDOWN_MS 注释)。
+        if (!_corridorMode) {
+            maybeEscalateProbe(mod);
+            maybeChaseStallCooldown(mod, now, key);
+        }
         BlockPos anchor = _anchorByKey.computeIfAbsent(key, k -> p);
         double radius = Math.hypot(p.getX() - anchor.getX(), p.getZ() - anchor.getZ());
         double prevMax = _maxRadiusByKey.getOrDefault(key, 0.0);
