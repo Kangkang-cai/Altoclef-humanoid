@@ -297,6 +297,21 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private static final java.util.Map<String, Double> _chaseStartMaxByKey = new java.util.HashMap<>();
 
     // =========================================================================
+    // (20261113 精确直达兜底, 用户点名"不要因为找法错误主动放弃辛苦找到的堡垒")
+    // 追逐停滞触发时【先直达、后冷却】: 真实中心是亲眼见过的地标, "走近没看到"
+    // ≠扑空 —— 要塞可能半埋 (砖 y=36~60 而 bot 在 y~95 地表走 GoalXZ 不看高度)
+    // 或隔岩浆, 20261112-204350 实锤 32 格查讫把真中心 (220,60,-649) 错标扑空。
+    // 兜底 = 3D GoalNear 直接导航到记录点 (baritone 会下到堡垒高度带), 粘住
+    // PRECISE_APPROACH_MS; 到达即交走廊扫描接手; 超时才降级冷却 (临时, 3min
+    // 后允许从别的方向再来 —— 永不永久埋葬真实地标)。
+    // y 守卫: 目标在 bot 头顶上方 >8 格不直达 (0913 教训: 3D 目标在上方逼
+    // baritone 搭柱子上天), 这种场景维持冷却路径。
+    // =========================================================================
+    private static final long PRECISE_APPROACH_MS = 90_000;
+    private static final java.util.Map<String, BlockPos> _preciseTargetByKey = new java.util.HashMap<>();
+    private static final java.util.Map<String, Long> _preciseUntilMsByKey = new java.util.HashMap<>();
+
+    // =========================================================================
     // (2026-09-19 垫脚方块断供兜底) 20260918-231551 实锤: 背包没有可放置方块
     // (手里是 nether_brick 冶炼物品放不出), 对着需要垫柱的地形原地跳 36s+。
     // 外围步失败且可放置方块数为 0 → 先补一组地狱岩再继续探索 (灵魂沙算垫脚,
@@ -657,6 +672,9 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _chaseAnchorByKey.clear();
         _chaseSinceMsByKey.clear();
         _chaseStartMaxByKey.clear();
+        // (20261113) 精确直达兜底状态。
+        _preciseTargetByKey.clear();
+        _preciseUntilMsByKey.clear();
     }
 
     private static java.nio.file.Path fortressVisitedFile() {
@@ -942,6 +960,41 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
     private Task tickOutside(AltoClef mod) {
         Vec3d pos = mod.getPlayer().getPos();
 
+        // (20261113 精确直达兜底) 挂在最前: 粘住直达目标, 期间不吃正常重选
+        // (到达 → 清状态交走廊扫描; 超时 → 降级冷却后回常规选点)。
+        String key = expeditionKey();
+        BlockPos preciseTarget = _preciseTargetByKey.get(key);
+        if (preciseTarget != null) {
+            Long until = _preciseUntilMsByKey.get(key);
+            long now = System.currentTimeMillis();
+            if (mod.getPlayer().getBlockPos().isWithinDistance(preciseTarget, 6)) {
+                Debug.logMessage("[Expedition] precise approach arrived at " + preciseTarget.toShortString()
+                        + " — handing to corridor scan (real landmark NOT marked checked)");
+                _preciseTargetByKey.remove(key);
+                _preciseUntilMsByKey.remove(key);
+                _currentTarget = null;
+                _progress.reset();
+                return null;
+            }
+            if (until != null && now < until) {
+                if (!mod.getClientBaritone().getCustomGoalProcess().isActive()) {
+                    mod.getClientBaritone().getCustomGoalProcess()
+                            .setGoalAndPath(new GoalNear(preciseTarget, 6));
+                }
+                setDebugState("Precise approach to remembered fortress " + preciseTarget.toShortString());
+                return null;
+            }
+            Debug.logMessage("[Expedition] precise approach timed out at " + preciseTarget.toShortString()
+                    + " -> cooling down 3min (temporary; will retry from another angle later)");
+            _preciseTargetByKey.remove(key);
+            _preciseUntilMsByKey.remove(key);
+            _centerCooldownUntil.put(preciseTarget, now + CENTER_COOLDOWN_MS);
+            _memoryCenterSuppressUntilTick = _tickId + MEMORY_CENTER_SUPPRESS_TICKS;
+            _currentTarget = null;
+            _progress.reset();
+            return null;
+        }
+
         // (2026-09-29 冻结自愈) 墙钟净位移看门狗: 停滞超阈值 + baritone 此刻
         // 不在规划 (排除 ~4s 正常规划等待) ⇒ 强制走一次失败路径换向/换目标。
         // 详细机制见字段区 EXPLORE_STALL_GIVEUP_MS 注释 (20260929-134354 冻结 408s)。
@@ -992,7 +1045,15 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             // 32 格内"判定; 中间点到达而中心还远时照常继续逐段推进。
             if (_currentMemoryTarget != null
                     && _currentMemoryTarget.isWithinDistance(mod.getPlayer().getBlockPos(), MEMORY_CHECK_RADIUS)) {
-                markMemoryChecked(_currentMemoryTarget);
+                // (20261113) 真实中心 (亲眼见过的地标) 不查讫: 走近没看到 ≠ 扑空 ——
+                // 要塞可能半埋/隔岩浆, 20261112-204350 实锤 32 格查讫把 (220,60,-649)
+                // 错标扑空。中心只走临时冷却 (B 兜底/失败分级), 永不进 checked 表。
+                if (_currentMemoryIsCenter) {
+                    Debug.logMessage("[Expedition] reached near remembered center "
+                            + _currentMemoryTarget.toShortString() + " (no fortress seen yet — NOT checked)");
+                } else {
+                    markMemoryChecked(_currentMemoryTarget);
+                }
                 _currentMemoryTarget = null;
                 _memoryFailStreak = 0;
             }
@@ -1028,8 +1089,10 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
             // 代码 → 同一记忆中心 6s 一轮无限重选 (20260918-231551 实锤 36s+)。
             if (_currentMemoryTarget != null) {
                 if (_currentMemoryTarget.isWithinDistance(mod.getPlayer().getPos(), MEMORY_CHECK_RADIUS)) {
-                    // 真的走到中心附近才"查讫" (到达扑空语义)。
-                    markMemoryChecked(_currentMemoryTarget);
+                    // 真的走到目标附近 (20261113: 真实中心不查讫, 只清 streak —— 走近≠扑空)。
+                    if (!_currentMemoryIsCenter) {
+                        markMemoryChecked(_currentMemoryTarget);
+                    }
                     _memoryFailStreak = 0;
                 } else if (++_memoryFailStreak >= MEMORY_TARGET_GIVEUP_FAILS) {
                     if (_currentMemoryIsCenter) {
@@ -1286,6 +1349,8 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
      * 每 tick 由 {@link #maybeLogExpedition} 调用 (仅野外模式)。
      */
     private void maybeChaseStallCooldown(AltoClef mod, Vec3d pos, String key) {
+        // (20261113) 精确直达进行中: 不计时不触发, 免得每 tick 刷新直达窗口。
+        if (_preciseTargetByKey.containsKey(key)) return;
         boolean chasing = "memory".equals(_lastClue) || "memory-center".equals(_lastClue);
         BlockPos nearest = null;
         if (chasing) {
@@ -1331,6 +1396,18 @@ public class FortressExploreTask extends Task implements ITaskRequiresGrounded {
         _chaseAnchorByKey.remove(key);
         _chaseSinceMsByKey.remove(key);
         _chaseStartMaxByKey.remove(key);
+        // (20261113 精确直达兜底) 触发时【先直达、后冷却】: 中心是亲眼见过的
+        // 真实地标, 冷却=暂时放弃, 必须先给 3D 直达一次机会 (用户点名"记忆中有
+        // 就该兜底直接前往精确目标")。y 守卫: 目标在头顶上方 >8 格不直达
+        // (0913 教训: 上方 3D 目标逼 baritone 搭柱子上天), 维持冷却路径。
+        if (nearest.getY() <= mod.getPlayer().getBlockPos().getY() + 8) {
+            _preciseTargetByKey.put(key, nearest.toImmutable());
+            _preciseUntilMsByKey.put(key, now + PRECISE_APPROACH_MS);
+            Debug.logMessage("[Expedition] memory chase stalled " + (now - since) / 1000
+                    + "s without progress -> PRECISE approach to " + nearest.toShortString()
+                    + " for " + PRECISE_APPROACH_MS / 1000 + "s (real landmark, descend to its height)");
+            return;
+        }
         _centerCooldownUntil.put(nearest.toImmutable(), now + CENTER_COOLDOWN_MS);
         // 同步压制 memory-center 分支 30s: 剩余中心若仍锚在同一象限, 换向等于没换
         // (与远处中心 3 次失败冷却的同款处置, 见 tickOutside 失败分级)。
