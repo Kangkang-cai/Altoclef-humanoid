@@ -696,6 +696,59 @@ public class ItemHelper {
         return have <= mod.getModSettings().getReservedBuildingBlockCount();
     }
 
+    // =========================================================================
+    // (20261113 维度可获得性) 家族/变体挑选拦截"异维度专属物" —— 黑石只在下界
+    // 生成、圆石家族只在主世界。两次同款事故的根:
+    //  ① 20261112-183557: 背包黑石x1 抢走 43 深板岩圆石 (递归爆炸的一半);
+    //  ② 20261113-113440: 主世界持有黑石x1 → 石镐家族槽挑黑石 →
+    //     MineAndCollect(blackstone x3) 主世界物理死路 → 死亡恢复链挂 13m36s
+    //     "craft does NOT have RECIPE MATERIALS"。
+    // 口径: 曲线表 (物品 → 唯一可获维度), 表外物品放行 (permissive 默认,
+    // 不误伤未知配方); 调用方用本表换选本维度变体, 不挡配方本身。
+    // =========================================================================
+    private static final Map<Item, String> _dimensionOnlyItems = Map.ofEntries(
+            // 下界专属 (矿/石/植物)
+            Map.entry(Items.BLACKSTONE, "minecraft:the_nether"),
+            Map.entry(Items.NETHERRACK, "minecraft:the_nether"),
+            Map.entry(Items.SOUL_SAND, "minecraft:the_nether"),
+            Map.entry(Items.SOUL_SOIL, "minecraft:the_nether"),
+            Map.entry(Items.BASALT, "minecraft:the_nether"),
+            Map.entry(Items.GLOWSTONE, "minecraft:the_nether"),
+            Map.entry(Items.NETHER_QUARTZ_ORE, "minecraft:the_nether"),
+            Map.entry(Items.NETHER_GOLD_ORE, "minecraft:the_nether"),
+            Map.entry(Items.ANCIENT_DEBRIS, "minecraft:the_nether"),
+            Map.entry(Items.NETHER_BRICK, "minecraft:the_nether"),
+            Map.entry(Items.QUARTZ, "minecraft:the_nether"),
+            Map.entry(Items.WARPED_STEM, "minecraft:the_nether"),
+            Map.entry(Items.CRIMSON_STEM, "minecraft:the_nether"),
+            // 主世界专属 (圆石家族 / 石头家族)
+            Map.entry(Items.COBBLESTONE, "minecraft:overworld"),
+            Map.entry(Items.COBBLED_DEEPSLATE, "minecraft:overworld"),
+            Map.entry(Items.DEEPSLATE, "minecraft:overworld"),
+            Map.entry(Items.STONE, "minecraft:overworld"),
+            Map.entry(Items.GRANITE, "minecraft:overworld"),
+            Map.entry(Items.DIORITE, "minecraft:overworld"),
+            Map.entry(Items.ANDESITE, "minecraft:overworld"),
+            // 末地专属
+            Map.entry(Items.END_STONE, "minecraft:the_end")
+    );
+
+    /** 当前维度 id ("minecraft:overworld" / "minecraft:the_nether" / "minecraft:the_end")。 */
+    public static String currentDimensionId(AltoClef mod) {
+        if (mod.getWorld() == null) return "minecraft:overworld";
+        return mod.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    /**
+     * (20261113) 该物品在 bot 当前维度是否可获得 (可挖/可生成)。
+     * 表外物品恒 true —— 只拦"确知跨维度不可得"的, 不做白名单 (防误伤)。
+     * 供家族变体挑选拒绝异维度专属物使用。
+     */
+    public static boolean isItemObtainableInCurrentDimension(AltoClef mod, Item item) {
+        String only = _dimensionOnlyItems.get(item);
+        return only == null || only.equals(currentDimensionId(mod));
+    }
+
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     public static boolean canStackTogether(ItemStack from, ItemStack to) {
         if (to.isEmpty() && from.getCount() <= from.getMaxCount())

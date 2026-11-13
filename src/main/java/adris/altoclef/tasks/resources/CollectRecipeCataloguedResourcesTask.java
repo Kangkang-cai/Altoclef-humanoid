@@ -7,6 +7,7 @@ import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.CraftingRecipe;
 import adris.altoclef.util.ItemTarget;
 import adris.altoclef.util.RecipeTarget;
+import adris.altoclef.util.helpers.ItemHelper;
 import adris.altoclef.util.helpers.StorageHelper;
 import net.minecraft.item.Item;
 import org.apache.commons.lang3.ArrayUtils;
@@ -148,9 +149,20 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 haveTotal += mod.getItemStorage().getItemCountReal(m) + StorageHelper.countItemsInCraftGrid(mod, m);
             }
             if (haveTotal >= needed) continue;
-            Item pick = matches.get(0);
-            int pickHave = -1;
+            // (20261113 维度可获得性过滤) 挑变体的池子先滤"本维度可获得": 黑石只在
+            // 下界生成, 主世界持有黑石 x1 时旧口径挑它派 MineAndCollect(blackstone)
+            // → 主世界物理上挖不到 → 死亡恢复链挂 13m36s "does NOT have RECIPE
+            // MATERIALS" (1113-113440 实锤; 与 1112 "黑石x1 抢走 43 深板岩圆石"
+            // 同一根)。本维度变体全空才退回全变体 (不挡配方本身, 异维度差额由
+            // 上层失败出口/跨维度旅行兜底)。
+            List<Item> pool = new java.util.ArrayList<>(matches.size());
             for (Item m : matches) {
+                if (ItemHelper.isItemObtainableInCurrentDimension(mod, m)) pool.add(m);
+            }
+            if (pool.isEmpty()) pool = matches;
+            Item pick = pool.get(0);
+            int pickHave = -1;
+            for (Item m : pool) {
                 int c = mod.getItemStorage().getItemCountReal(m) + StorageHelper.countItemsInCraftGrid(mod, m);
                 if (c > pickHave) {
                     pickHave = c;

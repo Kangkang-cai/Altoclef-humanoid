@@ -8,6 +8,7 @@ import adris.altoclef.tasks.ResourceTask;
 import adris.altoclef.tasks.construction.DestroyBlockTask;
 import adris.altoclef.tasks.movement.BiasedExploreTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
+import adris.altoclef.tasks.movement.GoToSurfaceTask;
 import adris.altoclef.tasks.movement.MineDownExploreTask;
 import adris.altoclef.tasks.movement.NetherExpeditionTask;
 import adris.altoclef.tasks.movement.NetherGoldExpeditionTask;
@@ -225,6 +226,24 @@ public class MineAndCollectTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+
+        // (20261113 通用回地表前置) 木头 = 地表资源 (GoToSurfaceTask 头注释的用户
+        // 原则), 但该前置此前只在食物 (CollectFoodTask:780) / 羊毛
+        // (CollectWoolTask:229) 任务里实现, 木头链一直缺失 → 重生在地下基地
+        // (y≈-18) 时 BiasedExplore 在洞穴里随机游走永远遇不到树
+        // (1113-113440 实锤: Stockpiling wood 0/25 挂 50 分钟, bot 停在 y=-16)。
+        // 口径与食物/羊毛任务同款: WorldHelper.isDeepUnderground (5 点投票+5s
+        // 驻留去抖) → GoToSurfaceTask (挖一垫一+水爬升+放弃冷却自带, 每 tick new
+        // 因 isEqual 不重启)。限主世界: WOOD_LOG_BLOCKS 全是主世界原木。
+        if (_subtask.isTargetingWood()
+                && mod.getWorld() != null
+                && mod.getWorld().getRegistryKey() == net.minecraft.world.World.OVERWORLD
+                && WorldHelper.isDeepUnderground(mod)) {
+            setDebugState("Underground: returning to surface before chopping wood");
+            Debug.logToFile("altoclef_diag.log", "[WOOD-SURFACE]\tdeep underground while collecting logs (y="
+                    + (mod.getPlayer() != null ? mod.getPlayer().getBlockPos().getY() : "?") + ") -> GoToSurfaceTask first");
+            return new GoToSurfaceTask();
+        }
 
         if (!StorageHelper.miningRequirementMet(mod, _requirement)) {
             // (2026-09-16 修复递归嵌套/每tick重建) 旧代码每 tick new SatisfyMiningRequirementTask
