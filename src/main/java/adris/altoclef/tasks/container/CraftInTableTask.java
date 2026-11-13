@@ -97,6 +97,11 @@ public class CraftInTableTask extends ResourceTask {
         // 判定, 哨兵值下恒 false; 只让 DoCraftInTableTask._craftCount 置位不足以结束
         // 外层任务。_craftTask.isFinished 置位后仍会走 onResourceStop 关屏(3x3 残留
         // 由 vanilla 退料回背包)。
+        // (20261113 铁律②出口·层3 传播) 内层合成以"放弃"结束 (连续收集循环材料仍
+        // 不就绪) 时, 外层包装任务必须跟着结束 —— 否则内层已弃用、外层 isFinished
+        // 恒 false, 包装任务继续 tick 一个已弃用的子树 (20260929 弃用子任务空转
+        // 同款)。上层 (SatisfyMiningReq/BeatMinecraft) 读 hasAbandoned 重规划。
+        if (_craftTask.hasAbandoned()) return true;
         if (!_craftTask.isCollecting() && !StorageHelper.hasMaterialsForOneCraft(mod, _targets)) {
             return true;
         }
@@ -146,6 +151,18 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
     // [2026-10-01 埋点] "材料够却做不出成品"(用户点名镐子类, 对所有台前合成生效)诊断:
     // 同内容签名只发一次; 任务重启(新实例)后签名清空 → 必发首条。
     private String _lastCraftDiagSig = null;
+    // (20261113 铁律②出口·层3) "收集子任务结束但材料仍未就绪"连续轮数与上限:
+    // 真缺料场景收集器总有东西可派 (不会进本计数), 计数上涨 = 收集器已无牌可打
+    // 而材料仍缺 = 死路, 给合成任务一个"放弃且已完成"的出口。isFinished 的合并
+    // 入口见下方既有覆写。
+    private int _noMaterialCollectCycles = 0;
+    private static final int MAX_NO_MATERIAL_CYCLES = 3;
+    private boolean _abandoned = false;
+
+    @Override
+    public boolean hasAbandoned() {
+        return _abandoned;
+    }
 
     public DoCraftInTableTask(RecipeTarget[] targets, boolean collect, boolean ignoreUncataloguedSlots, boolean detached) {
         super(Blocks.CRAFTING_TABLE, new ItemTarget("crafting_table"));
@@ -163,6 +180,9 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
         super.onStart(mod);
         _craftCount = 0;
         _receiveTask = null;
+        // (20261113 层3) 新生命周期 = 新机会, 放弃标记与循环计数复位。
+        _abandoned = false;
+        _noMaterialCollectCycles = 0;
         StorageHelper.closeScreen();
         mod.getBehaviour().push();
         mod.getBehaviour().addProtectedItems(getMaterialsArray());
@@ -347,6 +367,19 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
             if (!materialsReady) {
                 if (_collectTask.isFinished(mod)) {
                     _collectTask.reset();
+                    // (20261113 铁律②出口·层3) "收集子任务结束但材料仍未就绪"计轮:
+                    // 这只可能是死路 (收集器已无东西可派 — 材料被层2跳过/判据口径
+                    // 分裂/配方本维度不可合成)。连续 MAX 轮 → abandon 本合成任务
+                    // (hasAbandoned + isFinished=true), 上层重规划, 不再无限 reset 循环。
+                    // materialsReady 变真即清零 (正常收集到位/合成在飞)。
+                    _noMaterialCollectCycles++;
+                    if (_noMaterialCollectCycles >= MAX_NO_MATERIAL_CYCLES) {
+                        Debug.logWarning("[CraftTable] 连续 " + _noMaterialCollectCycles
+                                + " 轮收集结束材料仍未就绪 (配方疑似当前维度不可合成/判据分裂) -> abandon craft, 上层重规划: "
+                                + Arrays.toString(_targets));
+                        _abandoned = true;
+                        return null;
+                    }
                     Debug.logMessage("[CraftTable] 材料被同链步骤消费(收集闩锁过期), 重新盘点: "
                             + Arrays.toString(_targets));
                 }
@@ -355,6 +388,8 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
                 setDebugState("craft does NOT have RECIPE MATERIALS: " + Arrays.toString(_targets));
                 return _collectTask;
             }
+            // (20261113 层3) 材料就绪 (含合成在飞放行) → 循环计数清零。
+            _noMaterialCollectCycles = 0;
         }
 
         if (!isContainerOpen(mod)) {
@@ -554,6 +589,8 @@ class DoCraftInTableTask extends DoStuffInContainerTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (20261113 层3) 放弃语义优先 (连续收集循环材料仍不就绪 → 上层重规划)。
+        if (_abandoned) return true;
         return _craftCount >= _targets.length;//_crafted;
     }
 

@@ -216,6 +216,37 @@ public class MineAndCollectTask extends ResourceTask {
         _satisfyTask = null;
         // (2026-09-17) 本实例若曾是斧链发起者, 重开时释放护栏(只释放自己持有的)。
         releaseAxeChainGuard();
+        // (20261113 层1) 重开 = 新机会 (维度可能已换), 放弃标记复位。
+        _abandoned = false;
+    }
+
+    // (20261113 铁律②出口·层1) 放弃语义: 本实例已确认"全目标本维度不可得",
+    // 对外表现为已完成 (Task.hasAbandoned 语义, 熔炉 giveUp 先例), 供框架的
+    // 弃用子任务强制替换与上游 previousGaveUp 判定消费。isFinished 的合并入口
+    // 见下方既有覆写。
+    private boolean _abandoned = false;
+
+    @Override
+    public boolean hasAbandoned() {
+        return _abandoned;
+    }
+
+    /** (20261113 层1) 所有非空目标的全部变体在当前维度都不可获得。空目标集不放弃。 */
+    private boolean _allTargetsUnobtainableInDimension(AltoClef mod) {
+        boolean anyTarget = false;
+        for (ItemTarget t : _itemTargets) {
+            if (t == null || t.isEmpty()) continue;
+            anyTarget = true;
+            boolean anyObtainable = false;
+            for (Item i : t.getMatches()) {
+                if (ItemHelper.isItemObtainableInCurrentDimension(mod, i)) {
+                    anyObtainable = true;
+                    break;
+                }
+            }
+            if (anyObtainable) return false;
+        }
+        return anyTarget;
     }
 
     @Override
@@ -226,6 +257,20 @@ public class MineAndCollectTask extends ResourceTask {
 
     @Override
     protected Task onResourceTick(AltoClef mod) {
+
+        // (20261113 铁律②出口·层1) 全目标物品在当前维度均不可获得 → fail-fast
+        // abandon (放弃且 isFinished=true, 上游 CollectRecipeCataloguedResourcesTask
+        // 的 previousGaveUp/detached 重试链与 CraftInTableTask 层3 出口据此换道)。
+        // 旧版零出口: 目标维度不存在时 BiasedExplore 无限游走静默磨死
+        // (1113-113440 实锤: MineAndCollect(blackstone x3) 在主世界挂 13m36s)。
+        // 口径复用 ItemHelper 维度曲线表 (表外物品放行), 与家族槽维度过滤同一判据源;
+        // 只拦"全部目标都不可得", 混合目标 (任一可得) 照常。
+        if (!_abandoned && _allTargetsUnobtainableInDimension(mod)) {
+            _abandoned = true;
+            Debug.logWarning("[MineCollect] 全目标在本维度均不可获得 (dim=" + ItemHelper.currentDimensionId(mod)
+                    + ", targets=" + java.util.Arrays.toString(_itemTargets) + ") -> abandon, 上层换道重规划");
+            return null;
+        }
 
         // (20261113 通用回地表前置) 木头 = 地表资源 (GoToSurfaceTask 头注释的用户
         // 原则), 但该前置此前只在食物 (CollectFoodTask:780) / 羊毛
@@ -516,6 +561,8 @@ public class MineAndCollectTask extends ResourceTask {
 
     @Override
     public boolean isFinished(AltoClef mod) {
+        // (20261113 层1) 放弃语义优先: 短路放行, 上层据此换道。
+        if (_abandoned) return true;
         // (2026-09-22 批次开局判死保护) 见 GREEDY_BATCH_GRACE_MS 注释: 第一 tick
         // 前三条挂住路径全失效, 100ms 内一律不算完成。
         if (_greedy && System.currentTimeMillis() - _createdMs < GREEDY_BATCH_GRACE_MS) {

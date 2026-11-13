@@ -31,6 +31,13 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
     // 日志, 而不是像 20260929-192036 场次那样零日志静默空转 4305s。
     private int _consecutiveGiveUps = 0;
     private static final int MAX_CONSECUTIVE_GIVEUPS = 3;
+    // (20261113 铁律②出口·层2) 本生命周期内"连续放弃达上限"的材料 → 跳过不派发。
+    // key = 材料名/item.toString(), value = 放弃时的维度 id; 咨询时按当前维度校验,
+    // 换维度后旧条目自动失效 (材料可重试)。刻意不在 onStart 清空: CraftInTableTask
+    // 的 reset() 会重跑 onStart, 清空会让"死材料跳过"被无限重置。
+    private final java.util.Map<String, String> _giveUpMaterials = new java.util.HashMap<>();
+    // 当前派发材料的 key (层2 归因用): 派发时记录, 放弃时据此除名。
+    private String _activeCollectMaterialKey = null;
     // (2026-08-31 材料收集粘滞) 缓存"当前正在收集的某个材料子任务"实例。
     // 一旦派发了 getItemTask(某材料) 且未完成, 就持续返回同一实例, 不因每 tick
     // 重扫材料表而换个材料叉开 —— 否则做熔炉时"采石→造台→(下一tick)又切采石",
@@ -73,8 +80,20 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
         if (previousGaveUp) {
             _consecutiveGiveUps++;
             if (_consecutiveGiveUps >= MAX_CONSECUTIVE_GIVEUPS) {
-                Debug.logWarning("[CraftMaterials] 材料子任务连续 " + _consecutiveGiveUps
-                        + " 轮以放弃结束, 仍在换新实例重试 (上游疑似卡死, 见 detail/25)");
+                // (20261113 铁律②出口·层2) 同一材料连续 MAX 轮以放弃结束 → 本生命周期
+                // 不再派发该材料 (维度校验: 换维度自动失效恢复), 放行去收集其余材料。
+                // 层1 (MineAndCollectTask 维度不可得 abandon) 之后若继续派发同一死材料,
+                // 会"3 轮放弃一循环"无限打转 —— 必须在收集器层给死材料一个除名出口。
+                String failedKey = _activeCollectMaterialKey;
+                if (failedKey != null) {
+                    _giveUpMaterials.put(failedKey, ItemHelper.currentDimensionId(mod));
+                    Debug.logWarning("[CraftMaterials] 材料 '" + failedKey + "' 连续 " + _consecutiveGiveUps
+                            + " 轮以放弃结束 -> 本生命周期跳过该材料 (dim=" + ItemHelper.currentDimensionId(mod)
+                            + "; 换维度自动恢复重试)");
+                } else {
+                    Debug.logWarning("[CraftMaterials] 材料子任务连续 " + _consecutiveGiveUps
+                            + " 轮以放弃结束 (派发来源未记录, 见 detail/25)");
+                }
                 _consecutiveGiveUps = 0;
             }
         } else {
@@ -188,11 +207,17 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 // (2026-09-01 合成格并入: 材料放进行 2x2 格等待合成时也算"已有",
                 // 否则背包计数不含合成格 → 材料一进合成格就"变没" → 反复收集喂光)
                 if (!StorageHelper.itemTargetOwnedIncludingCraftGrid(mod, StorageHelper.Ownership.POSSESS, itemTarget)) {
+                    // (20261113 层2) 本生命周期已判"连续放弃达上限"的材料跳过 (维度校验)。
+                    String curDim = ItemHelper.currentDimensionId(mod);
+                    if (curDim.equals(_giveUpMaterials.get(catalogueMaterialName))) {
+                        continue;
+                    }
                     setDebugState("Getting " + itemTarget);
                     // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
                     _activeCollectTask = (_detached || previousGaveUp)
                             ? TaskCatalogue.newDetachedItemTask(catalogueMaterialName, count)
                             : TaskCatalogue.getItemTask(catalogueMaterialName, count);
+                    _activeCollectMaterialKey = catalogueMaterialName;
                     Debug.logTrace("craft-material", "派发收集材料 " + catalogueMaterialName + " x" + count
                             + ", 真实持有(±合成格)=" + StorageHelper.countItemsInInventoryRealIncludingCraftGrid(mod, itemTarget.getMatches())
                             + ", 目标=" + itemTarget.toString());
@@ -206,11 +231,17 @@ public class CollectRecipeCataloguedResourcesTask extends Task {
                 // (2026-09-01 合成格并入, 见上) 非 catalogue 材料同样把 2x2 合成格中的
                 // 计入"已有", 避免材料进合成格后被误判缺失反复收集。
                 if (mod.getItemStorage().getItemCountReal(item) + StorageHelper.countItemsInCraftGrid(mod, item) < count) {
+                    // (20261113 层2) 同上, 非 catalogue 材料的跳过口径。
+                    String curDim = ItemHelper.currentDimensionId(mod);
+                    if (curDim.equals(_giveUpMaterials.get(item.toString()))) {
+                        continue;
+                    }
                     setDebugState("Getting " + item.getTranslationKey());
                     // (2026-09-24) detached: 独立实例, 不命中共享活实例槽。
                     _activeCollectTask = (_detached || previousGaveUp)
                             ? TaskCatalogue.newDetachedItemTask(item, count)
                             : TaskCatalogue.getItemTask(item, count);
+                    _activeCollectMaterialKey = item.toString();
                     return _activeCollectTask;
                 }
             }
