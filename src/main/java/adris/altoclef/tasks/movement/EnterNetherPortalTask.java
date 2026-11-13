@@ -130,18 +130,20 @@ public class EnterNetherPortalTask extends Task {
     private BlockPos _rerouteColumn = null;
     private BlockPos _reroutePortal = null;
 
-    /** 门顶框向上连续水柱 ≥ 12 格 = 深水正下方的门 (海洋底部沉门场景)。 */
+    /**
+     * 门深藏海平面以下 + 正上方海面是水 = 水柱下方的门。
+     * (2213 修正) 不再数"从门顶向上的连续水柱"——追踪到的门块常是门的底部块,
+     * 向上扫一格就撞上门顶黑曜石框 → break → water=0 → 永远漏判 (20261113-214004
+     * 实锤: 门 (-3337,18,56) 上方 43 格海, bot 水漂 5.4 分钟判定仍 false)。
+     * 改判据: 门够深 (y≤48) + 同列海面层 (y=62) 与浅层 (y=55) 均为水,
+     * 同时覆盖开放水柱与浅埋海床 (门框/埋藏石不再影响判定)。
+     */
     private boolean isDeepUnderwaterPortal(AltoClef mod, BlockPos portal) {
-        int water = 0;
-        for (int y = portal.getY() + 1; y <= 63; y++) {
-            BlockState s = mod.getWorld().getBlockState(new BlockPos(portal.getX(), y, portal.getZ()));
-            if (s.getBlock() == Blocks.WATER) {
-                water++;
-            } else if (s.getBlock() != Blocks.NETHER_PORTAL) {
-                break; // 非水非门 = 水柱到顶
-            }
-        }
-        return water >= 12;
+        if (portal.getY() > 48) return false;
+        BlockState surface = mod.getWorld().getBlockState(new BlockPos(portal.getX(), 62, portal.getZ()));
+        if (surface.getBlock() != Blocks.WATER) return false;
+        BlockState shallow = mod.getWorld().getBlockState(new BlockPos(portal.getX(), 55, portal.getZ()));
+        return shallow.getBlock() == Blocks.WATER;
     }
 
     /**
@@ -169,7 +171,10 @@ public class EnterNetherPortalTask extends Task {
                     top = y;
                     break;
                 }
-                if (top < 0) continue;
+                // (2213 修正) 只认海面以上的陆地列 (top≥61): 海床砂砾顶 (y≈19) 也是
+                // "非水实心", 原实现会把海底列当陆地列 → GetToBlockTask 又去潜水,
+                // 改道形同虚设。海底列一律跳过。
+                if (top < 61) continue;
                 BlockPos ground = new BlockPos(x, top, z);
                 if (!WorldHelper.isSolid(mod, ground)) continue;
                 double sq = center.squaredDistanceTo(Vec3d.ofCenter(ground));
@@ -194,6 +199,9 @@ public class EnterNetherPortalTask extends Task {
         }
         if (_rerouteColumn == null) {
             // 64 格内无可用陆地列 → 回退原直扑路径 (交给既有看门狗)。
+            // (2213 补) 回退必须留痕: 静默回退 = 触发了改道但表现与没改一样, 无法诊断。
+            Debug.logMessage("[PortalApproach] 改道激活但门 64 格内无海面以上陆地列, 回退直扑 "
+                    + portal.toShortString());
             return new DoToClosestBlockTask(blockPos -> new GetToBlockTask(blockPos, false),
                     standablePortal, Blocks.NETHER_PORTAL);
         }
