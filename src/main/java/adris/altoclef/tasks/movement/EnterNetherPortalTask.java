@@ -1,15 +1,20 @@
 package adris.altoclef.tasks.movement;
 
 import adris.altoclef.AltoClef;
+import adris.altoclef.Debug;
 import adris.altoclef.tasks.DoToClosestBlockTask;
 import adris.altoclef.tasksystem.Task;
 import adris.altoclef.util.Dimension;
 import adris.altoclef.util.time.TimerGame;
 import adris.altoclef.util.helpers.WorldHelper;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.LeavesBlock;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Predicate;
 
 public class EnterNetherPortalTask extends Task {
@@ -86,6 +91,19 @@ public class EnterNetherPortalTask extends Task {
 
         if (mod.getBlockTracker().anyFound(standablePortal, Blocks.NETHER_PORTAL)) {
             setDebugState("Going to found portal");
+            // (20261113 深水门改道) 门在深水柱正下方 → 不潜水直扑: baritone 水中寻路
+            // 打不穿 43 格水柱 → water-bob 原地浮动 78 分钟 (20261113-190755 实锤,
+            // SwimDiveChain 的 DEEP_WATER_NO_FOOTING 是 0927/0930 刻意不接管, 此场景
+            // 无任何看门狗能救)。改道: 找门附近"陆地列顶高于门"的列 → 先走到列顶 →
+            // 再 GetToBlockTask(门) 让 baritone 从陆地直挖下去 (用户现场给的策略)。
+            Optional<BlockPos> portalOpt = mod.getBlockTracker()
+                    .getNearestTracking(standablePortal, Blocks.NETHER_PORTAL);
+            if (portalOpt.isPresent()) {
+                BlockPos portal = portalOpt.get();
+                if (isDeepUnderwaterPortal(mod, portal)) {
+                    return deepWaterDigDownApproach(mod, portal, standablePortal);
+                }
+            }
             return new DoToClosestBlockTask(blockPos -> new GetToBlockTask(blockPos, false), standablePortal, Blocks.NETHER_PORTAL);
         }
         setDebugState("Getting our portal");
@@ -100,6 +118,94 @@ public class EnterNetherPortalTask extends Task {
     @Override
     public boolean isFinished(AltoClef mod) {
         return WorldHelper.getCurrentDimension() == _targetDimension;
+    }
+
+    // =========================================================================
+    // (20261113 深水门改道) 用户现场: "传送门上面是很大一片海, 只有几十格外有
+    // 陆地可以直挖下去"。直扑水柱下方的门 = water-bob 卡死, 78 分钟零位移
+    // (20261113-190755, NAV-STUCK mode=water-bob dur=4685s)。
+    // =========================================================================
+
+    // 改道落点 (陆地列顶) 与其对应的门; 门换了就重算。跨 onStart 保留 (sticky)。
+    private BlockPos _rerouteColumn = null;
+    private BlockPos _reroutePortal = null;
+
+    /** 门顶框向上连续水柱 ≥ 12 格 = 深水正下方的门 (海洋底部沉门场景)。 */
+    private boolean isDeepUnderwaterPortal(AltoClef mod, BlockPos portal) {
+        int water = 0;
+        for (int y = portal.getY() + 1; y <= 63; y++) {
+            BlockState s = mod.getWorld().getBlockState(new BlockPos(portal.getX(), y, portal.getZ()));
+            if (s.getBlock() == Blocks.WATER) {
+                water++;
+            } else if (s.getBlock() != Blocks.NETHER_PORTAL) {
+                break; // 非水非门 = 水柱到顶
+            }
+        }
+        return water >= 12;
+    }
+
+    /**
+     * 门附近 (水平 64 格内) 找"陆地列顶高于门"的最近列: 从海平面上方向下扫,
+     * 第一个非空气/非水/非树叶方块即陆地表面 (高于门深 = 直挖可达)。
+     * 只在改道首次触发时算一次并缓存 (一次全量扫描 ~数千次方块读, 不能每 tick 来)。
+     */
+    private BlockPos findDigDownColumn(AltoClef mod, BlockPos portal) {
+        final int RADIUS = 64;
+        final int SCAN_TOP = 72;
+        final int STRIDE = 2;
+        Vec3d center = Vec3d.ofCenter(portal);
+        BlockPos best = null;
+        double bestSq = Double.POSITIVE_INFINITY;
+        for (int dx = -RADIUS; dx <= RADIUS; dx += STRIDE) {
+            for (int dz = -RADIUS; dz <= RADIUS; dz += STRIDE) {
+                int x = portal.getX() + dx;
+                int z = portal.getZ() + dz;
+                BlockPos chunkProbe = new BlockPos(x, 40, z);
+                if (!mod.getChunkTracker().isChunkLoaded(chunkProbe)) continue;
+                int top = -1;
+                for (int y = SCAN_TOP; y > portal.getY(); y--) {
+                    BlockState s = mod.getWorld().getBlockState(new BlockPos(x, y, z));
+                    if (s.isAir() || s.getBlock() == Blocks.WATER || s.getBlock() instanceof LeavesBlock) continue;
+                    top = y;
+                    break;
+                }
+                if (top < 0) continue;
+                BlockPos ground = new BlockPos(x, top, z);
+                if (!WorldHelper.isSolid(mod, ground)) continue;
+                double sq = center.squaredDistanceTo(Vec3d.ofCenter(ground));
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    best = ground;
+                }
+            }
+        }
+        return best;
+    }
+
+    private Task deepWaterDigDownApproach(AltoClef mod, BlockPos portal, Predicate<BlockPos> standablePortal) {
+        if (_rerouteColumn == null || !portal.equals(_reroutePortal)) {
+            _reroutePortal = portal.toImmutable();
+            _rerouteColumn = findDigDownColumn(mod, portal);
+            if (_rerouteColumn != null) {
+                Debug.logMessage("[PortalApproach] 门在深水柱正下方 (y=" + portal.getY()
+                        + ", 上方连续水柱≥12) -> 改道: 先到陆地列 " + _rerouteColumn.toShortString()
+                        + " 再直挖下潜 (water-bob 卡死规避)");
+            }
+        }
+        if (_rerouteColumn == null) {
+            // 64 格内无可用陆地列 → 回退原直扑路径 (交给既有看门狗)。
+            return new DoToClosestBlockTask(blockPos -> new GetToBlockTask(blockPos, false),
+                    standablePortal, Blocks.NETHER_PORTAL);
+        }
+        BlockPos bot = mod.getPlayer().getBlockPos();
+        boolean atColumn = Math.abs(bot.getX() - _rerouteColumn.getX()) <= 1
+                && Math.abs(bot.getZ() - _rerouteColumn.getZ()) <= 1;
+        if (atColumn) {
+            setDebugState("On land column, digging down to underwater portal");
+            return new GetToBlockTask(portal, false);
+        }
+        setDebugState("Deep-water portal: heading to land column " + _rerouteColumn.toShortString());
+        return new GetToBlockTask(_rerouteColumn.up(), false);
     }
 
     @Override
