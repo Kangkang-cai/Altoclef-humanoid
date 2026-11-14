@@ -6,6 +6,8 @@
 
 **目标版本：** Minecraft **1.18.2**（Fabric，客户端 mod）
 
+**相关链接：** [Modrinth](https://modrinth.com/mod/altoclef-humanoid) · [知乎介绍文章](https://zhuanlan.zhihu.com/p/2104170161095828482) · [CSDN 介绍文章](https://blog.csdn.net/2401_87579346/article/details/170602519)
+
 ## 这是什么？
 
 [AltoClef](https://github.com/gaucho-matrero/altoclef) 是 2021 年 5 月[第一个完全自主通关 Minecraft 的机器人](https://youtu.be/baAa6s8tahA)。但和大多数 Minecraft 机器人一样，它在感知上是作弊的：它能"知道"墙后和整个加载范围内的一切。本分支的主线工作就是拿掉这份不公平优势，让 bot 真正**像人一样玩游戏**——并沉淀了数百项来自真实长时间无人值守游玩的健壮性修复。

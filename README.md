@@ -6,6 +6,8 @@ A **human-like Minecraft bot** that autonomously plays and beats the game — an
 
 **Target:** Minecraft **1.18.2** (Fabric, client-side mod)
 
+**Links:** [Modrinth](https://modrinth.com/mod/altoclef-humanoid) · [Intro article (Chinese)](https://zhuanlan.zhihu.com/p/2104170161095828482) · [CSDN (Chinese)](https://blog.csdn.net/2401_87579346/article/details/170602519)
+
 ## What is this?
 
 [AltoClef](https://github.com/gaucho-matrero/altoclef) became [the first bot to beat Minecraft fully autonomously](https://youtu.be/baAa6s8tahA) (May 2021). Like most Minecraft bots, though, it cheats on perception: it "knows" what is behind walls and everywhere in the loaded world. This fork's main line of work is removing that unfair advantage and making the bot actually play **like a human** — plus hundreds of robustness fixes accumulated from real, long-running unattended play sessions.
