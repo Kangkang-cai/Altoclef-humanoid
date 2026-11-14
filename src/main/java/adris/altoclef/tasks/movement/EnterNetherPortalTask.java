@@ -57,7 +57,8 @@ public class EnterNetherPortalTask extends Task {
 
         // (20261114 三段导航) 重入复位: 同一实例 stop/start 后相位与缓存任务
         // 可能残留 (如停在 TUNNEL 而 bot 已被拉回地表), 一律回到 SURFACE 重新
-        // 推进; bot 若已在列附近, 升相位判据秒级成立, 无代价。
+        // 推进; 深度快速升相位保证: bot 若已在门高度层, 首个 tick 直接升
+        // DESCENT/TUNNEL, 不会被派回地表列顶重新下挖。
         invalidateApproachTasks();
     }
 
@@ -246,6 +247,19 @@ public class EnterNetherPortalTask extends Task {
         BlockPos bot = mod.getPlayer().getBlockPos();
         BlockPos descentTarget = new BlockPos(_rerouteColumn.getX(), portal.getY(), _rerouteColumn.getZ());
 
+        // (20261114 二修·用户点名) 已在地层深处 (y≤门+6) 时绝不派回地表:
+        // 实例被抢占重派/onStart 复位后相位回 SURFACE, 若不按深度快速升相位,
+        // 深挖中的 bot 会被派回列顶 (y=62) 再重新下挖, 无限往返
+        // (20261114-120225 实锤: 列顶快照 47 次 vs 地下 26 次, y=42→52 爬回中)。
+        // 距门水平≤10 直接 TUNNEL; 否则 DESCENT (地下自由导航到列下方同高点)。
+        if (_approachPhase == ApproachPhase.SURFACE && bot.getY() <= portal.getY() + 6) {
+            boolean nearPortal = Math.abs(bot.getX() - portal.getX()) <= 10
+                    && Math.abs(bot.getZ() - portal.getZ()) <= 10;
+            _approachPhase = nearPortal ? ApproachPhase.TUNNEL : ApproachPhase.DESCENT;
+            Debug.logMessage("[PortalApproach] [PHASE] SURFACE -> " + _approachPhase
+                    + " (已在门高度层, 不派回地表)");
+        }
+
         // 相位只前进不回退: 升相位 = 到达判据成立 (一次性事件), 之后不再复核。
         if (_approachPhase == ApproachPhase.SURFACE
                 && Math.abs(bot.getX() - _rerouteColumn.getX()) <= 2
@@ -258,6 +272,14 @@ public class EnterNetherPortalTask extends Task {
                 && bot.isWithinDistance(descentTarget, 3)) {
             _approachPhase = ApproachPhase.TUNNEL;
             Debug.logMessage("[PortalApproach] [PHASE] DESCENT -> TUNNEL: 已到门同高层, 横向隧道至门 "
+                    + portal.toShortString());
+        } else if (_approachPhase == ApproachPhase.DESCENT
+                && bot.getY() <= portal.getY() + 6
+                && Math.abs(bot.getX() - portal.getX()) <= 10
+                && Math.abs(bot.getZ() - portal.getZ()) <= 10) {
+            // 下挖途中已到门同高层且水平邻近门: 直接隧道, 不再绕回列下方中间点。
+            _approachPhase = ApproachPhase.TUNNEL;
+            Debug.logMessage("[PortalApproach] [PHASE] DESCENT -> TUNNEL (邻近门): 横向隧道至门 "
                     + portal.toShortString());
         }
 

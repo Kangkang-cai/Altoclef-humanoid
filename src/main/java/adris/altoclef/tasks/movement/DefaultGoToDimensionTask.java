@@ -29,6 +29,14 @@ public class DefaultGoToDimensionTask extends Task {
     // Cached to keep build properties alive if this task pauses/resumes.
     private final Task _cachedNetherBucketConstructionTask = new ConstructNetherPortalBucketTask();
 
+    // (20261114) 进门任务实例缓存: 每次重派 new 会把 EnterNetherPortalTask 的
+    // 三段导航相位与改道列 sticky 全部清零 —— 贪婪采矿抢占 → 挖矿 → 重派 →
+    // 相位回 SURFACE → 深挖中的 bot 被反复派回地表列顶重新下挖
+    // (20261114-120225 实锤: 被抢占 2 次即两轮全量重算, 列顶目标快照 47 次 vs
+    // 地下 26 次, y=42→52 正在爬回去)。父任务实例本身是 BeatMinecraft2Task
+    // 的 final 字段, 本缓存跨抢占周期有效。
+    private Task _cachedEnterNetherPortalTask = null;
+
     // (2026-09-20 搭了两块就跑去翻旧门) 下界回家"直接造门"的粘滞闩。
     // canBuildPortalHome 是**瞬时**判据 (背包黑曜石 ≥ 10), 而搭门本身会消耗黑曜石;
     // 内层 ConstructNetherPortalObsidianTask 用的是另一个口径 (还需要 10 - 已就位),
@@ -194,7 +202,10 @@ public class DefaultGoToDimensionTask extends Task {
 
         if (netherPortalIsClose(mod)) {
             setDebugState("Going to nether portal");
-            return new EnterNetherPortalTask(Dimension.NETHER);
+            if (_cachedEnterNetherPortalTask == null) {
+                _cachedEnterNetherPortalTask = new EnterNetherPortalTask(Dimension.NETHER);
+            }
+            return _cachedEnterNetherPortalTask;
         }
 
         // (2026-10-11) 熄灭门到场重燃: 必须在 getLastUsedNetherPortal 之前 ——
@@ -236,7 +247,10 @@ public class DefaultGoToDimensionTask extends Task {
 
         if (netherPortalIsClose(mod)) {
             setDebugState("Going to nether portal");
-            return new EnterNetherPortalTask(Dimension.NETHER);
+            if (_cachedEnterNetherPortalTask == null) {
+                _cachedEnterNetherPortalTask = new EnterNetherPortalTask(Dimension.NETHER);
+            }
+            return _cachedEnterNetherPortalTask;
         }
 
         // (2026-10-11) 熄灭门到场重燃, 同 goToOverworldFromNetherTask 口径 (对称方向)。
