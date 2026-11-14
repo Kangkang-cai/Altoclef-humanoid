@@ -2363,10 +2363,16 @@ public class BeatMinecraft2Task extends Task {
             return new PickupDroppedItemTask(Items.ENDER_EYE, demandEyes);
         }
 
-        int eyeCount = mod.getItemStorage().getItemCount(Items.ENDER_EYE);
-
-        int blazePowderCount = mod.getItemStorage().getItemCount(Items.BLAZE_POWDER);
-        int blazeRodCount = mod.getItemStorage().getItemCount(Items.BLAZE_ROD);
+        // (20261114 用户"都有粉了就不用再收防火药水") 关键资源一律以【真实背包】
+        // 为准, 不走 500ms 缓存 (ItemStorageTracker.getItemCountReal 注释: 缓存
+        // 刻意排除部分槽位, 跨维度/死亡重生后滞后 → 16 粉被读成 0 → needsBlazeRods
+        // 误判 true → 又去挖金/交易猪灵收防火药水)。20261114-132230 实锤:
+        // diag inv 快照全程 blaze_powderx16, 13:47:15 仍派发
+        // "Collecting 2 fire resistance potions", [Diag-flow] 与
+        // [PEARL-NEAR] pearls=0/18 blazePriority=true 同步抖动。
+        int eyeCount = mod.getItemStorage().getItemCountReal(Items.ENDER_EYE);
+        int blazePowderCount = mod.getItemStorage().getItemCountReal(Items.BLAZE_POWDER);
+        int blazeRodCount = mod.getItemStorage().getItemCountReal(Items.BLAZE_ROD);
         // (2026-09-19 22:59 用户"固定满额 8 根, 不再扣已有眼/粉") 棒目标只按
         // targetEyes 折算: ceil(16/2) = 8。旧口径会扣掉背包里已有的末影之眼 /
         // 烈焰粉 —— 手里有 2 个眼 (等价 2 粉) 就只收 7 根 (223931 会话
@@ -2418,7 +2424,15 @@ public class BeatMinecraft2Task extends Task {
             needsBlazePowder = eyeCount + blazePowderCount < demandEyes;
             needsBlazeRods = needsBlazePowder && blazePowderEquivalent < demandEyes;
         }
-        boolean needsEnderPearls = mod.getItemStorage().getItemCount(Items.ENDER_PEARL) < enderPearlTarget;
+        // (20261114 用户口径) 防火药水是为【打烈焰人取粉】服务的, 粉当量已达标
+        // (眼 + 粉 ≥ 目标眼数) 就整条烈焰棒/收药分支都不该进 —— 直接落到珍珠阶段。
+        // 显式短路而非只靠上面计数: 防未来判据口径再漂移 (缓存/状态残留瞬时翻真)。
+        // 份额模式 (rodQuota != null) 不动: 对端显式指派"我负责 N 根棒"时按份额走。
+        if (rodQuota == null && eyeCount + blazePowderCount >= demandEyes) {
+            needsBlazePowder = false;
+            needsBlazeRods = false;
+        }
+        boolean needsEnderPearls = mod.getItemStorage().getItemCountReal(Items.ENDER_PEARL) < enderPearlTarget;
         // (2026-09-20 用户) 还差的烈焰棒 ≤ 3 → 药水需求降为 1 瓶; 缺口大 → 2 瓶。
         // 写 static 镜像每 tick 刷新, 供 CollectBlazeRodsTask 断药转收药时取同一口径。
         int blazeRodDeficit = Math.max(0, blazeRodTarget - blazeRodCount);
