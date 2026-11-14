@@ -2,6 +2,7 @@ package adris.altoclef.chains;
 
 import adris.altoclef.AltoClef;
 import adris.altoclef.Debug;
+import adris.altoclef.tasks.movement.EnterNetherPortalTask;
 import adris.altoclef.tasks.movement.GetToBlockTask;
 import adris.altoclef.tasksystem.TaskRunner;
 import adris.altoclef.util.helpers.SurfaceExitGuide;
@@ -178,6 +179,11 @@ public class SurfaceExitChain extends SingleTaskChain {
      */
     private boolean eligible(AltoClef mod) {
         if (!AltoClef.inGame() || mod.getPlayer() == null || mod.getWorld() == null) return false;
+        // (20261114) 深水门三段导航 DESCENT/TUNNEL 进行中 → 让位: bot 在【主动下挖】
+        // 自己挖的露天竖井, 高度图把井底当地表 → isBelowSurfaceDebounced=false 不触发
+        // "在地下"豁免, 本链会把它当"需要引导出洞"反复抢占, 与下挖形成 ~5s 周期
+        // 拉上/拉下死循环 (20261114-131021 实锤: 20 次抢占, y=48↔58 弹跳零净位移)。
+        if (EnterNetherPortalTask.isDeepApproachActive()) return false;
         if (!SurfaceExitGuide.isArmed(mod)) return false;
         if (SurfaceHelper.isBelowSurfaceDebounced(mod)) return false;
         if (mod.getPlayer().isTouchingWater()) return false;

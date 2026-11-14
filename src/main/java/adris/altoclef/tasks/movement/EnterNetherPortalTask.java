@@ -119,6 +119,8 @@ public class EnterNetherPortalTask extends Task {
     @Override
     protected void onStop(AltoClef mod, Task interruptTask) {
         mod.getBlockTracker().stopTracking(Blocks.NETHER_PORTAL);
+        // (20261114) 深挖让位标志随任务停止清除, 防残留挡死 SurfaceExitChain。
+        _deepApproachActive = false;
     }
 
     @Override
@@ -131,6 +133,23 @@ public class EnterNetherPortalTask extends Task {
     // 陆地可以直挖下去"。直扑水柱下方的门 = water-bob 卡死, 78 分钟零位移
     // (20261113-190755, NAV-STUCK mode=water-bob dur=4685s)。
     // =========================================================================
+
+    /**
+     * (20261114) 深水门三段导航 DESCENT/TUNNEL 进行中标志 (静态, 供跨链查询)。
+     *
+     * <p>存在的理由: DESCENT 是【主动下挖竖井】, 而 SurfaceExitChain 会把
+     * "bot 站在 1 格宽露天竖井底部"当成需要引导出洞的场景反复抢占 —— 竖井
+     * 露天直通天空, 高度图把井底当地表, isBelowSurfaceDebounced=false 不触发
+     * "在地下"豁免; 且每次被拉出井口翻面都会重新武装配额, 死循环自续
+     * (20261114-131021 实锤: Surface Exit Chain 20 次抢占, User Tasks ↔
+     * Surface Exit Chain 每 ~5s 互换, y=48↔58 弹跳零净位移)。
+     * 本标志置位期间, SurfaceExitChain 必须 {让位}。
+     */
+    private static boolean _deepApproachActive = false;
+
+    public static boolean isDeepApproachActive() {
+        return _deepApproachActive;
+    }
 
     // 改道落点 (陆地列顶) 与其对应的门; 门换了就重算。跨 onStart 保留 (sticky)。
     private BlockPos _rerouteColumn = null;
@@ -240,6 +259,7 @@ public class EnterNetherPortalTask extends Task {
             // 回退必须留痕: 静默回退 = 触发了改道但表现与没改一样, 无法诊断。
             Debug.logMessage("[PortalApproach] 改道激活但门 64 格内无海面以上陆地列, 回退直扑 "
                     + portal.toShortString());
+            _deepApproachActive = false; // 直扑路径不压制 SurfaceExitChain。
             return new DoToClosestBlockTask(blockPos -> new GetToBlockTask(blockPos, false),
                     standablePortal, Blocks.NETHER_PORTAL);
         }
@@ -287,15 +307,18 @@ public class EnterNetherPortalTask extends Task {
             case DESCENT:
                 if (_cachedDescentTask == null) _cachedDescentTask = new GetToBlockTask(descentTarget, false);
                 setDebugState("Digging down to portal-height point " + descentTarget.toShortString());
+                _deepApproachActive = true;
                 return _cachedDescentTask;
             case TUNNEL:
                 if (_cachedTunnelTask == null) _cachedTunnelTask = new GetToBlockTask(portal, false);
                 setDebugState("Tunneling to underwater portal " + portal.toShortString());
+                _deepApproachActive = true;
                 return _cachedTunnelTask;
             case SURFACE:
             default:
                 if (_cachedSurfaceTask == null) _cachedSurfaceTask = new GetToBlockTask(_rerouteColumn.up(), false);
                 setDebugState("Heading to land column " + _rerouteColumn.toShortString());
+                _deepApproachActive = false; // 地表段不压制 SurfaceExitChain (bot 在地表属正常出洞场景)。
                 return _cachedSurfaceTask;
         }
     }
