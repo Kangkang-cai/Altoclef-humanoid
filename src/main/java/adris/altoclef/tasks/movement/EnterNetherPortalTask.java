@@ -54,6 +54,11 @@ public class EnterNetherPortalTask extends Task {
         _portalTimeout.reset();
 
         _wanderTask.resetWander();
+
+        // (20261114 三段导航) 重入复位: 同一实例 stop/start 后相位与缓存任务
+        // 可能残留 (如停在 TUNNEL 而 bot 已被拉回地表), 一律回到 SURFACE 重新
+        // 推进; bot 若已在列附近, 升相位判据秒级成立, 无代价。
+        invalidateApproachTasks();
     }
 
     @Override
@@ -187,33 +192,90 @@ public class EnterNetherPortalTask extends Task {
         return best;
     }
 
+    // =========================================================================
+    // (20261114 三段导航·用户设计) 深水门改道的交接协议:
+    //   SURFACE  先到干燥陆地列顶 (地表, baritone 正常走位);
+    //   DESCENT  导航到【陆地列正下方、与门同高】的地下点 —— baritone 自由挖掘
+    //            下潜到门的高度层 (竖直下挖 ~40 格, 干燥地层, 无水柱问题);
+    //   TUNNEL   再导航到门 —— 同一高度层横向隧道, baritone 自由挖过去。
+    // 中间多一次"目标修正"的意义: 直扑门的路径会横跨海面+水柱 (water-bob),
+    // 把目标先降到门的高度层, TUNNEL 段就是纯干燥同层隧道。
+    // 派发异常三防:
+    //   ① 相位前向单向 (只升不降, 到达判据只用于升相位) — 治 11:02 实锤的
+    //      ±1 驻留条件被位置抖动打穿 → 两个 GetToBlockTask 每 2s 互换洗进度;
+    //   ② 任务实例缓存复用 (1112 HoldClose 教训: 每 tick new → onStart 重启
+    //      baritone 路径) — 目标不变不重建, 门换位/列重算才整体失效;
+    //   ③ Mob Defense 抢占 SUSPEND/RESUME 不重建实例, 相位保留; 整链被
+    //      watchdog 重建时相位回 SURFACE, bot 已在列附近秒级重推进。
+    // =========================================================================
+
+    private enum ApproachPhase { SURFACE, DESCENT, TUNNEL }
+
+    private ApproachPhase _approachPhase = ApproachPhase.SURFACE;
+    private GetToBlockTask _cachedSurfaceTask = null;
+    private GetToBlockTask _cachedDescentTask = null;
+    private GetToBlockTask _cachedTunnelTask = null;
+
+    private void invalidateApproachTasks() {
+        _approachPhase = ApproachPhase.SURFACE;
+        _cachedSurfaceTask = null;
+        _cachedDescentTask = null;
+        _cachedTunnelTask = null;
+    }
+
     private Task deepWaterDigDownApproach(AltoClef mod, BlockPos portal, Predicate<BlockPos> standablePortal) {
         if (_rerouteColumn == null || !portal.equals(_reroutePortal)) {
             _reroutePortal = portal.toImmutable();
             _rerouteColumn = findDigDownColumn(mod, portal);
+            invalidateApproachTasks();
             if (_rerouteColumn != null) {
                 Debug.logMessage("[PortalApproach] 门在深水柱正下方 (y=" + portal.getY()
-                        + ", 上方连续水柱≥12) -> 改道: 先到陆地列 " + _rerouteColumn.toShortString()
-                        + " 再直挖下潜 (water-bob 卡死规避)");
+                        + ", 海面是水) -> 三段导航: 陆地列 " + _rerouteColumn.toShortString()
+                        + " → 列下方同门高层 → 横向隧道至门 (water-bob 卡死规避)");
             }
         }
         if (_rerouteColumn == null) {
             // 64 格内无可用陆地列 → 回退原直扑路径 (交给既有看门狗)。
-            // (2213 补) 回退必须留痕: 静默回退 = 触发了改道但表现与没改一样, 无法诊断。
+            // 回退必须留痕: 静默回退 = 触发了改道但表现与没改一样, 无法诊断。
             Debug.logMessage("[PortalApproach] 改道激活但门 64 格内无海面以上陆地列, 回退直扑 "
                     + portal.toShortString());
             return new DoToClosestBlockTask(blockPos -> new GetToBlockTask(blockPos, false),
                     standablePortal, Blocks.NETHER_PORTAL);
         }
+
         BlockPos bot = mod.getPlayer().getBlockPos();
-        boolean atColumn = Math.abs(bot.getX() - _rerouteColumn.getX()) <= 1
-                && Math.abs(bot.getZ() - _rerouteColumn.getZ()) <= 1;
-        if (atColumn) {
-            setDebugState("On land column, digging down to underwater portal");
-            return new GetToBlockTask(portal, false);
+        BlockPos descentTarget = new BlockPos(_rerouteColumn.getX(), portal.getY(), _rerouteColumn.getZ());
+
+        // 相位只前进不回退: 升相位 = 到达判据成立 (一次性事件), 之后不再复核。
+        if (_approachPhase == ApproachPhase.SURFACE
+                && Math.abs(bot.getX() - _rerouteColumn.getX()) <= 2
+                && Math.abs(bot.getZ() - _rerouteColumn.getZ()) <= 2
+                && Math.abs(bot.getY() - _rerouteColumn.getY()) <= 3) {
+            _approachPhase = ApproachPhase.DESCENT;
+            Debug.logMessage("[PortalApproach] [PHASE] SURFACE -> DESCENT: 已到列顶, 下挖到门同高层 "
+                    + descentTarget.toShortString());
+        } else if (_approachPhase == ApproachPhase.DESCENT
+                && bot.isWithinDistance(descentTarget, 3)) {
+            _approachPhase = ApproachPhase.TUNNEL;
+            Debug.logMessage("[PortalApproach] [PHASE] DESCENT -> TUNNEL: 已到门同高层, 横向隧道至门 "
+                    + portal.toShortString());
         }
-        setDebugState("Deep-water portal: heading to land column " + _rerouteColumn.toShortString());
-        return new GetToBlockTask(_rerouteColumn.up(), false);
+
+        switch (_approachPhase) {
+            case DESCENT:
+                if (_cachedDescentTask == null) _cachedDescentTask = new GetToBlockTask(descentTarget, false);
+                setDebugState("Digging down to portal-height point " + descentTarget.toShortString());
+                return _cachedDescentTask;
+            case TUNNEL:
+                if (_cachedTunnelTask == null) _cachedTunnelTask = new GetToBlockTask(portal, false);
+                setDebugState("Tunneling to underwater portal " + portal.toShortString());
+                return _cachedTunnelTask;
+            case SURFACE:
+            default:
+                if (_cachedSurfaceTask == null) _cachedSurfaceTask = new GetToBlockTask(_rerouteColumn.up(), false);
+                setDebugState("Heading to land column " + _rerouteColumn.toShortString());
+                return _cachedSurfaceTask;
+        }
     }
 
     @Override
